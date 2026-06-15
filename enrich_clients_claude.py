@@ -458,6 +458,21 @@ META_FIELDS = [
     "serper_snippets",
     "raw_evidence_summary",
     "evidence_source_urls",
+    # Raw Google evidence (full detail for webapp / Lovable handoff)
+    "raw_google_evidence_count",
+    "raw_google_evidence_urls",
+    "raw_google_evidence_combined",
+    "raw_google_evidence_json",
+    "raw_google_evidence_json_01",
+    "raw_google_evidence_json_02",
+    "raw_google_evidence_json_03",
+    "raw_google_evidence_json_parts",
+    "raw_google_evidence_truncated",
+    *[
+        f"google_snippet_{i:02d}_{field}"
+        for i in range(1, 11)
+        for field in ("query_type", "query", "rank", "title", "url", "source_domain", "text")
+    ],
 ]
 
 # Real Lusha API enrichment fields (prefix "lusha_api_")
@@ -2876,6 +2891,115 @@ def _classify_serper_source(link: str, title: str) -> str:
     return "company_site"
 
 
+def build_raw_google_evidence(
+    query_groups: list,
+    query_strings: list | None = None,
+) -> list[dict]:
+    """Flatten (label, hits) query_groups into per-result evidence records.
+
+    Each record contains: query_type, query, rank, title, url, display_url,
+    source_domain, snippet, date, sitelinks.
+    """
+    records: list[dict] = []
+    for i, (label, hits) in enumerate(query_groups):
+        q_str = query_strings[i] if query_strings and i < len(query_strings) else ""
+        for rank, hit in enumerate(hits, 1):
+            link = str(hit.get("link", "") or "")
+            domain = re.sub(r"^https?://(www\.)?", "", link).split("/")[0].split("?")[0]
+            records.append({
+                "query_type":    label,
+                "query":         q_str,
+                "rank":          rank,
+                "title":         str(hit.get("title", "") or ""),
+                "url":           link,
+                "display_url":   str(hit.get("displayLink", "") or ""),
+                "source_domain": domain,
+                "snippet":       str(hit.get("snippet", "") or ""),
+                "date":          str(hit.get("date", "") or ""),
+                "sitelinks":     json.dumps(hit["sitelinks"]) if hit.get("sitelinks") else "",
+            })
+    return records
+
+
+def _pack_raw_evidence_fields(
+    raw_records: list[dict],
+) -> dict:
+    """Convert raw evidence records into the set of handoff fields for Excel/export.
+
+    Splits oversized JSON across up to 3 part columns to avoid Excel cell limits.
+    """
+    _MAX_CELL = 32_000
+
+    # Unique URLs in encounter order
+    seen_urls: set[str] = set()
+    unique_urls: list[str] = []
+    for r in raw_records:
+        u = r.get("url", "")
+        if u and u not in seen_urls:
+            seen_urls.add(u)
+            unique_urls.append(u)
+
+    # Human-readable combined text
+    lines: list[str] = []
+    for r in raw_records:
+        lines.append(f"[{r['query_type']}] {r['title']}")
+        if r["url"]:
+            lines.append(r["url"])
+        if r["snippet"]:
+            lines.append(r["snippet"])
+        lines.append("")
+    combined = "\n".join(lines).strip()
+
+    # JSON: try single cell first, then split over parts
+    full_json = json.dumps(raw_records, ensure_ascii=False)
+    if len(full_json) <= _MAX_CELL:
+        json_parts = [full_json, "", ""]
+        truncated = False
+    else:
+        # Split records into at most 3 chunks that fit within _MAX_CELL each
+        chunks: list[list] = [[], [], []]
+        ci = 0
+        for rec in raw_records:
+            rec_str = json.dumps([rec], ensure_ascii=False)
+            # Try to add to current chunk; advance chunk index if it won't fit
+            while ci < 3:
+                candidate = json.dumps(chunks[ci] + [rec], ensure_ascii=False)
+                if len(candidate) <= _MAX_CELL:
+                    chunks[ci].append(rec)
+                    break
+                ci += 1
+        truncated = any(rec not in chunks[0] + chunks[1] + chunks[2] for rec in raw_records)
+        json_parts = [
+            json.dumps(c, ensure_ascii=False) if c else ""
+            for c in chunks
+        ]
+
+    # Per-snippet flat columns (first 10 results)
+    snippet_fields: dict = {}
+    for si, rec in enumerate(raw_records[:10], 1):
+        pfx = f"google_snippet_{si:02d}"
+        snippet_fields[f"{pfx}_query_type"]    = rec.get("query_type", "")
+        snippet_fields[f"{pfx}_query"]         = rec.get("query", "")
+        snippet_fields[f"{pfx}_rank"]          = rec.get("rank", "")
+        snippet_fields[f"{pfx}_title"]         = rec.get("title", "")
+        snippet_fields[f"{pfx}_url"]           = rec.get("url", "")
+        snippet_fields[f"{pfx}_source_domain"] = rec.get("source_domain", "")
+        snippet_fields[f"{pfx}_text"]          = rec.get("snippet", "")
+
+    return {
+        "raw_google_evidence_count":    len(raw_records),
+        "raw_google_evidence_urls":     "\n".join(unique_urls),
+        "raw_google_evidence_combined": combined[:_MAX_CELL],
+        "raw_google_evidence_json":     json_parts[0],
+        "raw_google_evidence_json_01":  json_parts[0],
+        "raw_google_evidence_json_02":  json_parts[1],
+        "raw_google_evidence_json_03":  json_parts[2],
+        "raw_google_evidence_json_parts": sum(1 for p in json_parts if p),
+        "raw_google_evidence_truncated": truncated,
+        **snippet_fields,
+    }
+
+
 def _format_serper_results(query_groups: list) -> str:
     """Format per-query Serper results as compact annotated text for Claude.
 
@@ -3067,6 +3191,10 @@ def run_step2_serper(
         "raw_evidence_summary":   f"{total_hits} Serper results across {len(query_groups)} queries",
         "evidence_source_urls":   " | ".join(_s_urls[:8]),
     }
+
+    # ── Raw Google evidence expansion (full detail for webapp handoff) ────────
+    _raw_records = build_raw_google_evidence(query_groups, queries)
+    _serper_evidence_handoff.update(_pack_raw_evidence_fields(_raw_records))
 
     # ── Build Claude prompt ────────────────────────────────────────────────────
     results_text = _format_serper_results(query_groups)
@@ -6899,6 +7027,21 @@ def _xl_write_opportunity_input(
         ("input_type",                     ["input_type"]),
         ("company_number_canonical",       ["company_number", "native_company_number",
                                             "register_nummer", "source_row_id"]),
+        # ── Raw Google evidence (full detail for webapp / Lovable handoff) ────
+        ("raw_google_evidence_count",      ["raw_google_evidence_count"]),
+        ("raw_google_evidence_urls",       ["raw_google_evidence_urls"]),
+        ("raw_google_evidence_combined",   ["raw_google_evidence_combined"]),
+        ("raw_google_evidence_json",       ["raw_google_evidence_json"]),
+        ("raw_google_evidence_json_01",    ["raw_google_evidence_json_01"]),
+        ("raw_google_evidence_json_02",    ["raw_google_evidence_json_02"]),
+        ("raw_google_evidence_json_03",    ["raw_google_evidence_json_03"]),
+        ("raw_google_evidence_json_parts", ["raw_google_evidence_json_parts"]),
+        ("raw_google_evidence_truncated",  ["raw_google_evidence_truncated"]),
+        *[
+            (f"google_snippet_{i:02d}_{field}", [f"google_snippet_{i:02d}_{field}"])
+            for i in range(1, 11)
+            for field in ("query_type", "query", "rank", "title", "url", "source_domain", "text")
+        ],
     ]
 
     # Columns that should be written as real numeric values (float/int).
@@ -6936,6 +7079,16 @@ def _xl_write_opportunity_input(
         # Canonical identity
         "canonical_company_name", "canonical_company_domain", "input_type",
         "company_number_canonical",
+        # Raw Google evidence
+        "raw_google_evidence_urls", "raw_google_evidence_combined",
+        "raw_google_evidence_json", "raw_google_evidence_json_01",
+        "raw_google_evidence_json_02", "raw_google_evidence_json_03",
+        "raw_google_evidence_truncated",
+        *[
+            f"google_snippet_{i:02d}_{field}"
+            for i in range(1, 11)
+            for field in ("query_type", "query", "title", "url", "source_domain", "text")
+        ],
     }
 
     def _is_numeric_col(col_name: str) -> bool:
@@ -9302,6 +9455,31 @@ def run_cli() -> None:
         sys.exit(2)
 
     _total_runtime = _time.monotonic() - _start_ts
+
+    # ── Evidence QA summary ───────────────────────────────────────────────────
+    _ev_with    = sum(1 for r in results if r.get("raw_google_evidence_count", 0))
+    _ev_without = len(results) - _ev_with
+    _ev_total   = sum(int(r.get("raw_google_evidence_count", 0) or 0) for r in results)
+    _url_total  = sum(
+        len([u for u in str(r.get("raw_google_evidence_urls", "") or "").split("\n") if u])
+        for r in results
+    )
+    _new_cols = [
+        "raw_google_evidence_count", "raw_google_evidence_urls",
+        "raw_google_evidence_combined", "raw_google_evidence_json",
+        "raw_google_evidence_json_01", "raw_google_evidence_json_02",
+        "raw_google_evidence_json_03", "raw_google_evidence_json_parts",
+        "raw_google_evidence_truncated",
+        "google_snippet_01_title", "google_snippet_01_url",
+    ]
+    print(f"[QA] Output Excel:           {xl_path}", flush=True)
+    print(f"[QA] Sheet with evidence:    Opportunity Input", flush=True)
+    print(f"[QA] Companies with evidence:{_ev_with}", flush=True)
+    print(f"[QA] Companies without:      {_ev_without}", flush=True)
+    print(f"[QA] Total snippet records:  {_ev_total}", flush=True)
+    print(f"[QA] Total URLs written:     {_url_total}", flush=True)
+    print(f"[QA] New evidence columns:   {_new_cols}", flush=True)
+
     print(
         f"[enricher] BATCH COMPLETE | "
         f"companies={total} | "
