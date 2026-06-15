@@ -3,46 +3,67 @@ merge_enricher_outputs.py
 =========================
 Merge multiple Client Enricher batch-output Excel files into one combined workbook.
 
+Tabular sheets are merged row-by-row (union of columns).
+Non-tabular layout sheets (Company Profiles, Scoring Settings, Run Settings)
+are handled separately — see --include-company-profiles.
+
 Usage:
     python merge_enricher_outputs.py \\
         --input-dir "C:/Users/.../Italy200/02_lead_prioritized" \\
         --output "Italy200_merged_20260615_1400.xlsx" \\
-        [--pattern "*.xlsx"]
+        [--pattern "*.xlsx"] \\
+        [--include-company-profiles]
 
-Sheet order in output mirrors input sheet order (union of all encountered sheets).
-Opportunity Input sheet is always written first if present.
-A "Merge QA" sheet is appended last.
+Sheet order in output:
+  1. Tabular sheets in priority order (Opportunity Input first)
+  2. Company Profiles (only if --include-company-profiles)
+  3. Merge QA (always last)
 """
 
 import argparse
-import fnmatch
-import json
 import re
 import sys
 from datetime import datetime
 from pathlib import Path
 
 import pandas as pd
-from openpyxl import Workbook
+from openpyxl import Workbook, load_workbook
 from openpyxl.styles import Alignment, Font, PatternFill
 from openpyxl.utils import get_column_letter
 
-# ── Sheet priority order ──────────────────────────────────────────────────────
-# Sheets listed here are written first (in this order) if present.
-# All other sheets follow in the order they were first encountered.
-_PRIORITY_SHEETS = [
+# ── Sheet classification ──────────────────────────────────────────────────────
+
+# Sheets that are merged row-by-row as normal tables (first row = header).
+TABULAR_SHEETS: list[str] = [
     "Opportunity Input",
     "Lead Scores",
-    "Company Profiles",
     "Enriched",
     "Advanced Evidence",
-    "qa_evidence",
-    "model_features",
     "Input",
+    "model_features",
+    "qa_evidence",
 ]
 
-# Columns that must be written as plain text (no numeric coercion).
-_TEXT_COLUMNS = {
+# Sheets that are NOT normal tables — merged cells, card layout, or settings blocks.
+NON_TABULAR_SHEETS: list[str] = [
+    "Company Profiles",
+    "Scoring Settings",
+    "Run Settings",
+]
+
+# Priority order for tabular sheets in the output workbook.
+TABULAR_PRIORITY: list[str] = [
+    "Opportunity Input",
+    "Lead Scores",
+    "Enriched",
+    "Advanced Evidence",
+    "Input",
+    "model_features",
+    "qa_evidence",
+]
+
+# Evidence/JSON columns that must always be written as plain text.
+TEXT_COLUMNS: set[str] = {
     "raw_google_evidence_json",
     "raw_google_evidence_json_01",
     "raw_google_evidence_json_02",
@@ -50,14 +71,21 @@ _TEXT_COLUMNS = {
     "raw_google_evidence_combined",
     "raw_google_evidence_urls",
     "raw_google_evidence_truncated",
+    "serper_query_summary",
+    "serper_source_urls",
+    "serper_result_titles",
+    "serper_snippets",
+    "raw_evidence_summary",
+    "evidence_source_urls",
     "source_file",
     "source_batch",
 }
 
-# Columns with long text content that should wrap in Excel.
-_WRAP_COLUMNS = {
+# Long-text columns that should wrap in Excel.
+WRAP_COLUMNS: set[str] = {
     "raw_google_evidence_combined",
     "raw_google_evidence_urls",
+    "serper_snippets",
     "icp_evidence",
     "icp_why_relevant",
     "icp_buying_signals",
@@ -67,46 +95,14 @@ _WRAP_COLUMNS = {
     "business_output_reason",
 }
 
-# Duplicate-check columns in Opportunity Input
-_DUP_COL_NUMBER = "company_number"
-_DUP_COL_DOMAIN = "canonical_company_domain"
+# Duplicate-check columns in Opportunity Input.
+DUP_COL_NUMBER = "company_number"
+DUP_COL_DOMAIN = "canonical_company_domain"
 
 
 # =============================================================================
-# HELPER FUNCTIONS
+# FORMATTING HELPERS
 # =============================================================================
-
-def _derive_batch_label(filename: str) -> str:
-    """
-    Derive a short batch label from the filename.
-
-    Italy200_02_R0501_1000_lead_prioritized_20260615_1142.xlsx
-    -> Italy200_02_R0501_1000
-    """
-    stem = Path(filename).stem
-    # Strip trailing _lead_prioritized_YYYYMMDD_HHMM or _enrichedResults_YYYYMMDD_HHMM
-    cleaned = re.sub(
-        r"_(lead_prioritized|enrichedResults|enriched_results)_\d{8}_?\d{4,6}$",
-        "",
-        stem,
-        flags=re.IGNORECASE,
-    )
-    return cleaned if cleaned != stem else stem
-
-
-def _col_width(col_name: str, max_val_len: int = 20) -> int:
-    """Compute a sensible column width."""
-    base = max(len(str(col_name)) + 2, min(max_val_len + 2, 30))
-    if col_name in _WRAP_COLUMNS:
-        return 40
-    if "json" in col_name.lower():
-        return 20
-    if "snippet" in col_name.lower() or "evidence" in col_name.lower():
-        return 36
-    if "url" in col_name.lower():
-        return 32
-    return min(base, 48)
-
 
 def _header_fill() -> PatternFill:
     return PatternFill(start_color="1F497D", end_color="1F497D", fill_type="solid")
@@ -116,13 +112,24 @@ def _header_font() -> Font:
     return Font(bold=True, color="FFFFFF", size=10)
 
 
+def _col_width(col_name: str) -> int:
+    if col_name in WRAP_COLUMNS:
+        return 40
+    if "json" in col_name.lower():
+        return 20
+    if "snippet" in col_name.lower() or "evidence" in col_name.lower():
+        return 36
+    if "url" in col_name.lower():
+        return 32
+    return min(max(len(str(col_name)) + 2, 12), 48)
+
+
 def _write_df_to_sheet(ws, df: pd.DataFrame) -> None:
-    """Write a DataFrame to an openpyxl worksheet with formatting."""
+    """Write a DataFrame to an openpyxl worksheet with standard formatting."""
     hfill = _header_fill()
     hfont = _header_font()
     cols = list(df.columns)
 
-    # Header row
     for ci, col in enumerate(cols, 1):
         cell = ws.cell(row=1, column=ci, value=str(col))
         cell.fill = hfill
@@ -130,18 +137,15 @@ def _write_df_to_sheet(ws, df: pd.DataFrame) -> None:
         cell.alignment = Alignment(horizontal="left", vertical="center")
         ws.column_dimensions[get_column_letter(ci)].width = _col_width(col)
 
-    # Data rows
     for ri, (_, row) in enumerate(df.iterrows(), 2):
         for ci, col in enumerate(cols, 1):
             val = row[col]
-            # NaN → empty string
             if isinstance(val, float) and val != val:
                 val = ""
-            # Force text for designated columns
-            if col in _TEXT_COLUMNS:
-                val = str(val) if val != "" else ""
+            if col in TEXT_COLUMNS:
+                val = str(val) if val not in ("", None) else ""
             cell = ws.cell(row=ri, column=ci, value=val)
-            if col in _WRAP_COLUMNS:
+            if col in WRAP_COLUMNS:
                 cell.alignment = Alignment(wrap_text=True, vertical="top")
             else:
                 cell.alignment = Alignment(vertical="top")
@@ -153,95 +157,130 @@ def _write_df_to_sheet(ws, df: pd.DataFrame) -> None:
 
 
 def _write_qa_sheet(ws, qa: dict) -> None:
-    """Write the Merge QA sheet."""
     hfill = _header_fill()
     hfont = _header_font()
+    bold  = Font(bold=True)
 
     ws.column_dimensions["A"].width = 36
     ws.column_dimensions["B"].width = 80
 
-    # Title row
-    c = ws.cell(row=1, column=1, value="Metric")
-    c.fill = hfill; c.font = hfont
-    c = ws.cell(row=1, column=2, value="Value")
-    c.fill = hfill; c.font = hfont
+    for ci, val in enumerate(["Metric", "Value"], 1):
+        c = ws.cell(row=1, column=ci, value=val)
+        c.fill = hfill
+        c.font = hfont
     ws.freeze_panes = "A2"
 
-    rows = [
+    rows: list[tuple[str, str]] = [
         ("Merge timestamp",    qa["timestamp"]),
         ("Input folder",       qa["input_dir"]),
         ("Output file",        qa["output_file"]),
-        ("Input files found",  qa["n_files"]),
+        ("Input files found",  str(qa["n_files"])),
         ("", ""),
+        ("Input files", ""),
     ]
-    # Per-file rows
-    for fname, n_rows in qa.get("rows_per_file", {}).items():
-        rows.append((f"  {fname}", f"{n_rows} rows"))
+    for fname in qa.get("input_files", []):
+        rows.append((f"  {fname}", ""))
     rows.append(("", ""))
-    # Per-sheet rows
-    rows.append(("Rows per output sheet", ""))
-    for sname, n_rows in qa.get("rows_per_sheet", {}).items():
-        rows.append((f"  {sname}", str(n_rows)))
+
+    rows.append(("Sheets merged", ""))
+    for sname, nrows in qa.get("rows_per_sheet", {}).items():
+        rows.append((f"  {sname}", f"{nrows} rows"))
     rows.append(("", ""))
-    # Warnings
+
+    rows.append(("Sheets skipped", ""))
+    for s in qa.get("sheets_skipped", []):
+        rows.append((f"  {s}", ""))
+    rows.append(("", ""))
+
+    rows.append(("Rows per input file", ""))
+    for fname, n in qa.get("rows_per_file", {}).items():
+        rows.append((f"  {fname}", f"{n} rows"))
+    rows.append(("", ""))
+
     rows.append(("Warnings / notes", ""))
-    for w in qa.get("warnings", []):
+    warnings = qa.get("warnings", [])
+    for w in warnings:
         rows.append(("  ⚠", w))
-    if not qa.get("warnings"):
+    if not warnings:
         rows.append(("  —", "No warnings"))
 
-    bold_font = Font(bold=True)
     for ri, (k, v) in enumerate(rows, 2):
         ck = ws.cell(row=ri, column=1, value=str(k))
         cv = ws.cell(row=ri, column=2, value=str(v))
-        if k and not k.startswith(" "):
-            ck.font = bold_font
+        if k and not k.startswith(" ") and k not in ("", " "):
+            ck.font = bold
         cv.alignment = Alignment(wrap_text=True, vertical="top")
 
     ws.auto_filter.ref = "A1:B1"
 
 
 # =============================================================================
-# MAIN MERGE LOGIC
+# FILE HELPERS
 # =============================================================================
 
+def _derive_batch_label(filename: str) -> str:
+    stem = Path(filename).stem
+    cleaned = re.sub(
+        r"_(lead_prioritized|enrichedResults|enriched_results)_\d{8}_?\d{4,6}$",
+        "",
+        stem,
+        flags=re.IGNORECASE,
+    )
+    return cleaned if cleaned != stem else stem
+
+
 def collect_files(input_dir: Path, pattern: str) -> list[Path]:
-    """Return sorted list of matching xlsx files, skipping lock files."""
-    files = sorted(
+    return sorted(
         p for p in input_dir.glob(pattern)
         if p.is_file() and not p.name.startswith("~$")
     )
-    return files
 
 
-def read_all_sheets(xlsx_path: Path) -> dict[str, pd.DataFrame]:
-    """Read all sheets from an Excel file as DataFrames (all values as object dtype)."""
+def classify_sheet(sheet_name: str) -> str:
+    """Return 'tabular', 'non_tabular', or 'unknown'."""
+    if sheet_name in TABULAR_SHEETS:
+        return "tabular"
+    if sheet_name in NON_TABULAR_SHEETS:
+        return "non_tabular"
+    # Unknown sheets: treat as tabular by default (safe fallback).
+    return "tabular"
+
+
+def read_tabular_sheet(xlsx_path: Path, sheet_name: str) -> pd.DataFrame | None:
+    """Read a tabular sheet as a DataFrame (all values as str)."""
     try:
-        xf = pd.ExcelFile(xlsx_path, engine="openpyxl")
-        result = {}
-        for name in xf.sheet_names:
-            try:
-                df = xf.parse(name, dtype=str)
-                # Replace literal 'nan' strings from dtype=str coercion
-                df = df.fillna("").replace("nan", "").replace("NaN", "")
-                result[name] = df
-            except Exception as e:
-                print(f"  [warn] Could not read sheet '{name}' in {xlsx_path.name}: {e}")
-        return result
+        df = pd.read_excel(xlsx_path, sheet_name=sheet_name, dtype=str, engine="openpyxl")
+        df = df.fillna("").replace("nan", "").replace("NaN", "")
+        return df
     except Exception as e:
-        print(f"  [error] Could not open {xlsx_path.name}: {e}")
-        return {}
+        print(f"  [warn] Could not read sheet '{sheet_name}' in {xlsx_path.name}: {e}")
+        return None
 
 
-def merge_sheet_frames(
+def read_raw_sheet_values(xlsx_path: Path, sheet_name: str) -> list[list] | None:
+    """Read a non-tabular sheet as a raw list-of-rows (values only)."""
+    try:
+        wb = load_workbook(xlsx_path, read_only=True, data_only=True)
+        if sheet_name not in wb.sheetnames:
+            return None
+        ws = wb[sheet_name]
+        rows = []
+        for row in ws.iter_rows(values_only=True):
+            rows.append(list(row))
+        return rows
+    except Exception as e:
+        print(f"  [warn] Could not read raw sheet '{sheet_name}' in {xlsx_path.name}: {e}")
+        return None
+
+
+# =============================================================================
+# MERGE HELPERS
+# =============================================================================
+
+def merge_tabular_frames(
     frames: list[tuple[str, str, pd.DataFrame]],
 ) -> pd.DataFrame:
-    """
-    Merge a list of (source_file, source_batch, df) tuples into one DataFrame.
-
-    - Union of all columns; missing cells filled with "".
-    - Prepends source_file, source_batch, source_row columns.
-    """
+    """Merge (source_file, source_batch, df) list into one DataFrame (union columns)."""
     if not frames:
         return pd.DataFrame()
 
@@ -265,15 +304,14 @@ def merge_sheet_frames(
 
 
 def add_duplicate_flags(df: pd.DataFrame, warnings: list[str]) -> pd.DataFrame:
-    """Add possible_duplicate_* columns to Opportunity Input if key columns exist."""
     for col, flag_col in [
-        (_DUP_COL_NUMBER, "possible_duplicate_company_number"),
-        (_DUP_COL_DOMAIN, "possible_duplicate_domain"),
+        (DUP_COL_NUMBER, "possible_duplicate_company_number"),
+        (DUP_COL_DOMAIN, "possible_duplicate_domain"),
     ]:
         if col in df.columns:
             vals = df[col].astype(str).str.strip()
             counts = vals.map(vals.value_counts())
-            df[flag_col] = (counts > 1) & (vals != "") & (vals != "nan")
+            df[flag_col] = (counts > 1) & (vals != "") & (vals.str.lower() != "nan")
             df[flag_col] = df[flag_col].map({True: "YES", False: ""})
         else:
             warnings.append(
@@ -282,16 +320,53 @@ def add_duplicate_flags(df: pd.DataFrame, warnings: list[str]) -> pd.DataFrame:
     return df
 
 
+def write_company_profiles_sheet(
+    ws,
+    raw_blocks: list[tuple[str, list[list]]],
+) -> None:
+    """
+    Append Company Profiles blocks from each file below each other.
+    Inserts a separator row with the source filename between batches.
+    No merged cells — values only.
+    """
+    sep_font = Font(bold=True, color="FFFFFF")
+    sep_fill = PatternFill(start_color="2E4057", end_color="2E4057", fill_type="solid")
+    ri = 1
+    for source_file, rows in raw_blocks:
+        # Separator row
+        sep_cell = ws.cell(row=ri, column=1, value=f"── {source_file} ──")
+        sep_cell.font = sep_font
+        sep_cell.fill = sep_fill
+        ri += 1
+        # Data rows
+        for row in rows:
+            for ci, val in enumerate(row, 1):
+                if val is not None:
+                    ws.cell(row=ri, column=ci, value=val)
+            ri += 1
+        ri += 1  # blank separator line
+
+    # Reasonable default column widths
+    for ci in range(1, 6):
+        ws.column_dimensions[get_column_letter(ci)].width = 32
+
+
+# =============================================================================
+# MAIN MERGE LOGIC
+# =============================================================================
+
 def run_merge(
     input_dir: Path,
     output_path: Path,
     pattern: str = "*.xlsx",
+    include_company_profiles: bool = False,
 ) -> None:
     ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    print(f"[merge] Start: {ts}")
+    print(f"[merge] Start:      {ts}")
     print(f"[merge] Input dir:  {input_dir}")
     print(f"[merge] Output:     {output_path}")
     print(f"[merge] Pattern:    {pattern}")
+    print(f"[merge] Company Profiles: {'included' if include_company_profiles else 'skipped'}")
 
     files = collect_files(input_dir, pattern)
     if not files:
@@ -302,51 +377,95 @@ def run_merge(
     for f in files:
         print(f"  {f.name}")
 
-    # ── Read all files ────────────────────────────────────────────────────────
+    # ── Discover sheets in all files ─────────────────────────────────────────
+    all_sheet_names: list[str] = []
+    seen_sheet_set: set[str] = set()
+    for xlsx_path in files:
+        try:
+            xf = pd.ExcelFile(xlsx_path, engine="openpyxl")
+            for s in xf.sheet_names:
+                if s not in seen_sheet_set:
+                    all_sheet_names.append(s)
+                    seen_sheet_set.add(s)
+        except Exception as e:
+            print(f"  [warn] Could not open {xlsx_path.name} for sheet discovery: {e}")
+
+    tabular_found    = [s for s in all_sheet_names if classify_sheet(s) == "tabular"]
+    non_tabular_found = [s for s in all_sheet_names if classify_sheet(s) == "non_tabular"]
+    print(f"[merge] Tabular sheets detected:     {tabular_found}")
+    print(f"[merge] Non-tabular sheets detected: {non_tabular_found}")
+
+    # ── Read all tabular sheets ───────────────────────────────────────────────
     # sheet_name -> list of (source_file, source_batch, df)
-    sheet_data: dict[str, list[tuple[str, str, pd.DataFrame]]] = {}
-    # sheet encounter order
-    sheet_order: list[str] = []
-    seen_sheets: set[str] = set()
+    tabular_data: dict[str, list[tuple[str, str, pd.DataFrame]]] = {}
     rows_per_file: dict[str, int] = {}
     warnings: list[str] = []
 
     for xlsx_path in files:
         label = xlsx_path.name
         batch = _derive_batch_label(xlsx_path.name)
-        sheets = read_all_sheets(xlsx_path)
-        if not sheets:
-            warnings.append(f"No sheets read from {label} — file skipped.")
+        file_rows = 0
+
+        try:
+            xf = pd.ExcelFile(xlsx_path, engine="openpyxl")
+            available = set(xf.sheet_names)
+        except Exception as e:
+            warnings.append(f"Could not open {label}: {e}")
             continue
-        file_row_count = 0
-        for sname, df in sheets.items():
-            if sname not in seen_sheets:
-                sheet_order.append(sname)
-                seen_sheets.add(sname)
-            sheet_data.setdefault(sname, []).append((label, batch, df))
-            file_row_count += len(df)
-        rows_per_file[label] = file_row_count
 
-    if not sheet_data:
-        print("[merge] ERROR: no usable sheet data found.")
-        sys.exit(1)
+        for sname in tabular_found:
+            if sname not in available:
+                continue
+            df = read_tabular_sheet(xlsx_path, sname)
+            if df is None:
+                continue
+            tabular_data.setdefault(sname, []).append((label, batch, df))
+            file_rows += len(df)
 
-    # ── Determine output sheet order ─────────────────────────────────────────
-    priority = [s for s in _PRIORITY_SHEETS if s in seen_sheets]
-    rest = [s for s in sheet_order if s not in set(_PRIORITY_SHEETS)]
-    ordered_sheets = priority + rest
+        rows_per_file[label] = file_rows
 
-    # ── Merge each sheet ─────────────────────────────────────────────────────
+    # ── Read Company Profiles (raw values) ───────────────────────────────────
+    cp_blocks: list[tuple[str, list[list]]] = []
+    if include_company_profiles and "Company Profiles" in seen_sheet_set:
+        for xlsx_path in files:
+            rows = read_raw_sheet_values(xlsx_path, "Company Profiles")
+            if rows:
+                cp_blocks.append((xlsx_path.name, rows))
+    elif "Company Profiles" in seen_sheet_set:
+        warnings.append(
+            "Company Profiles skipped because it is a formatted card-layout sheet, "
+            "not a tabular sheet. Use --include-company-profiles to append raw values."
+        )
+
+    # Note Scoring Settings / Run Settings
+    for s in ("Scoring Settings", "Run Settings"):
+        if s in seen_sheet_set:
+            warnings.append(
+                f"'{s}' is a settings/layout sheet and was not merged. "
+                "Check the first input file for settings context."
+            )
+
+    # ── Merge tabular sheets ──────────────────────────────────────────────────
     merged: dict[str, pd.DataFrame] = {}
     rows_per_sheet: dict[str, int] = {}
+    sheets_merged: list[str] = []
+    sheets_skipped: list[str] = list(non_tabular_found)
+    if include_company_profiles and "Company Profiles" in sheets_skipped:
+        sheets_skipped.remove("Company Profiles")
 
-    for sname in ordered_sheets:
-        frames = sheet_data.get(sname, [])
-        df_merged = merge_sheet_frames(frames)
-        # Duplicate flags on Opportunity Input
-        if sname == "Opportunity Input" and not df_merged.empty:
-            df_merged = add_duplicate_flags(df_merged, warnings)
-        # Column-count warning
+    # Build output sheet order: priority first, then remaining tabular
+    priority_present = [s for s in TABULAR_PRIORITY if s in seen_sheet_set]
+    rest_tabular = [s for s in tabular_found if s not in set(TABULAR_PRIORITY)]
+    ordered_tabular = priority_present + rest_tabular
+
+    for sname in ordered_tabular:
+        frames = tabular_data.get(sname, [])
+        if not frames:
+            warnings.append(f"Sheet '{sname}' found in file list but no rows read — skipped.")
+            continue
+        df_merged = merge_tabular_frames(frames)
+
+        # Column-uniformity warning
         col_sets = [set(df.columns) for _, _, df in frames]
         if len(col_sets) > 1:
             union_cols = set.union(*col_sets)
@@ -354,27 +473,32 @@ def run_merge(
                 missing = union_cols - cs
                 if missing:
                     fname = frames[i][0]
+                    sample = ", ".join(sorted(missing)[:4])
+                    more   = f" (+{len(missing)-4} more)" if len(missing) > 4 else ""
                     warnings.append(
-                        f"Sheet '{sname}' in {fname} is missing "
-                        f"{len(missing)} column(s) vs union: "
-                        + ", ".join(sorted(missing)[:5])
-                        + ("…" if len(missing) > 5 else "")
+                        f"Sheet '{sname}' in {fname} missing {len(missing)} col(s): {sample}{more}"
                     )
+
+        if sname == "Opportunity Input" and not df_merged.empty:
+            df_merged = add_duplicate_flags(df_merged, warnings)
+
         merged[sname] = df_merged
         rows_per_sheet[sname] = len(df_merged)
-        print(f"[merge] Sheet '{sname}': {len(df_merged)} rows merged from {len(frames)} file(s)")
+        sheets_merged.append(sname)
+        print(f"[merge] '{sname}': {len(df_merged)} rows from {len(frames)} file(s)")
 
-    # Check expected sheets not found
-    for expected in _PRIORITY_SHEETS:
-        if expected not in seen_sheets:
-            warnings.append(f"Expected sheet '{expected}' not found in any input file.")
+    if not merged:
+        print("[merge] ERROR: no tabular data was merged — nothing to write.")
+        sys.exit(1)
 
     # ── Write output workbook ─────────────────────────────────────────────────
-    print(f"[merge] Writing output: {output_path}")
+    print(f"[merge] Writing: {output_path}")
     wb = Workbook()
-    wb.remove(wb.active)  # remove default empty sheet
+    wb.remove(wb.active)
 
-    for sname in ordered_sheets:
+    for sname in ordered_tabular:
+        if sname not in merged:
+            continue
         ws = wb.create_sheet(sname)
         df = merged[sname]
         if df.empty:
@@ -382,30 +506,37 @@ def run_merge(
         else:
             _write_df_to_sheet(ws, df)
 
-    # Merge QA sheet — always last
+    if include_company_profiles and cp_blocks:
+        ws_cp = wb.create_sheet("Company Profiles")
+        write_company_profiles_sheet(ws_cp, cp_blocks)
+        sheets_merged.append("Company Profiles")
+        rows_per_sheet["Company Profiles"] = sum(len(rows) for _, rows in cp_blocks)
+        print(f"[merge] 'Company Profiles': raw values from {len(cp_blocks)} file(s)")
+
+    # Merge QA — always last
     ws_qa = wb.create_sheet("Merge QA")
-    qa_data = {
+    _write_qa_sheet(ws_qa, {
         "timestamp":      ts,
         "input_dir":      str(input_dir),
         "output_file":    str(output_path),
         "n_files":        len(files),
+        "input_files":    [f.name for f in files],
         "rows_per_file":  rows_per_file,
         "rows_per_sheet": rows_per_sheet,
+        "sheets_merged":  sheets_merged,
+        "sheets_skipped": sheets_skipped,
         "warnings":       warnings,
-    }
-    _write_qa_sheet(ws_qa, qa_data)
+    })
 
     output_path.parent.mkdir(parents=True, exist_ok=True)
     wb.save(output_path)
     print(f"[merge] Saved: {output_path}")
 
-    # ── Console QA summary ────────────────────────────────────────────────────
+    # ── Console QA ───────────────────────────────────────────────────────────
     print()
-    print("[QA] Merge complete")
-    print(f"[QA] Output:          {output_path}")
-    print(f"[QA] Input files:     {len(files)}")
-    print(f"[QA] Sheets written:  {list(ordered_sheets) + ['Merge QA']}")
-    print(f"[QA] Rows per sheet:  {rows_per_sheet}")
+    print(f"[QA] Sheets merged:  {sheets_merged}")
+    print(f"[QA] Sheets skipped: {sheets_skipped}")
+    print(f"[QA] Rows per sheet: {rows_per_sheet}")
     if warnings:
         print(f"[QA] Warnings ({len(warnings)}):")
         for w in warnings:
@@ -415,12 +546,12 @@ def run_merge(
 
 
 # =============================================================================
-# CLI ENTRY POINT
+# CLI
 # =============================================================================
 
 def main() -> None:
     parser = argparse.ArgumentParser(
-        description="Merge multiple Client Enricher output Excel files into one workbook.",
+        description="Merge Client Enricher batch-output Excel files into one workbook.",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
@@ -431,34 +562,34 @@ Examples:
   python merge_enricher_outputs.py \\
       --input-dir ./outputs \\
       --output merged.xlsx \\
-      --pattern "Italy200_*_lead_prioritized_*.xlsx"
+      --pattern "Italy200_*_lead_prioritized_*.xlsx" \\
+      --include-company-profiles
 """,
     )
+    parser.add_argument("--input-dir",  required=True,  help="Directory with enricher .xlsx files")
+    parser.add_argument("--output",     required=True,  help="Path for the merged output .xlsx")
+    parser.add_argument("--pattern",    default="*.xlsx", help="Glob pattern (default: *.xlsx)")
     parser.add_argument(
-        "--input-dir", required=True,
-        help="Directory containing enricher output .xlsx files",
-    )
-    parser.add_argument(
-        "--output", required=True,
-        help="Path for the merged output .xlsx file",
-    )
-    parser.add_argument(
-        "--pattern", default="*.xlsx",
-        help="Glob pattern to select input files (default: *.xlsx)",
+        "--include-company-profiles",
+        action="store_true",
+        default=False,
+        help="Append raw Company Profiles values from each file (layout not preserved)",
     )
     args = parser.parse_args()
 
     input_dir   = Path(args.input_dir).resolve()
     output_path = Path(args.output).resolve()
 
-    if not input_dir.exists():
-        print(f"ERROR: --input-dir does not exist: {input_dir}", file=sys.stderr)
-        sys.exit(1)
-    if not input_dir.is_dir():
-        print(f"ERROR: --input-dir is not a directory: {input_dir}", file=sys.stderr)
+    if not input_dir.exists() or not input_dir.is_dir():
+        print(f"ERROR: --input-dir not found or not a directory: {input_dir}", file=sys.stderr)
         sys.exit(1)
 
-    run_merge(input_dir, output_path, pattern=args.pattern)
+    run_merge(
+        input_dir,
+        output_path,
+        pattern=args.pattern,
+        include_company_profiles=args.include_company_profiles,
+    )
 
 
 if __name__ == "__main__":
