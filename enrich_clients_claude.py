@@ -8771,6 +8771,29 @@ def estimate_cli_eta(
     }
 
 
+def build_cli_output_filename(input_path: str, suffix: str = "lead_prioritized") -> str:
+    """
+    Derive CLI output filename from input filename.
+
+    Italy200_02_R0501_1000_cleaned_20260612_1905.xlsx
+    -> Italy200_02_R0501_1000_lead_prioritized_YYYYMMDD_HHMM.xlsx
+
+    If input stem does not contain '_cleaned_', falls back to:
+    {stem}_{suffix}_{YYYYMMDD_HHMM}.xlsx
+    """
+    import re as _re
+    from datetime import datetime as _dt
+
+    stem = Path(input_path).stem
+    now  = _dt.now().strftime("%Y%m%d_%H%M")
+
+    # Strip trailing _cleaned_YYYYMMDD_HHMM (or _cleaned_YYYYMMDDHHMMSS etc.)
+    cleaned = _re.sub(r"_cleaned_\d{8}_?\d{4,6}$", "", stem, flags=_re.IGNORECASE)
+    if cleaned != stem:
+        return f"{cleaned}_{suffix}_{now}.xlsx"
+    return f"{stem}_{suffix}_{now}.xlsx"
+
+
 def run_cli() -> None:
     """Non-Streamlit batch entry point."""
     import argparse
@@ -9243,11 +9266,13 @@ def run_cli() -> None:
         print(f"[enricher] ICP override skipped: {_ov_exc}", flush=True)
 
     # ── Write output ──────────────────────────────────────────────────────────
-    stamp   = ts()
     if args.output_name:
-        xl_path = out_dir / f"{args.output_name}.xlsx"
+        _out_fname = f"{args.output_name}.xlsx"
     else:
-        xl_path = out_dir / f"enrichedResults_{stamp}.xlsx"
+        _out_fname = build_cli_output_filename(str(input_path))
+    xl_path = out_dir / _out_fname
+    print(f"[enricher] Output filename:  {_out_fname}", flush=True)
+    print(f"[enricher] Output path:      {xl_path}", flush=True)
 
     _export_start = _time.monotonic()
     try:
