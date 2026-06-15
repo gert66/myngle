@@ -1,0 +1,350 @@
+# DATA_INDEX
+
+Gegenereerd: 2026-06-15 11:46 UTC  
+Machine: gmeijer4@PC063448  
+
+## Data root: `C:/Users/gmeijer4/Nextcloud/Myngle`
+
+- `Export_Contacts_2026-05-05 (2).csv` - 379 KB - 2026-05-05 16:39
+- `From Raw Lists to Call-Ready Leads — mYngle.pdf` - 963 KB - 2026-06-10 22:16
+- `germany_step1_seed_filter_OLD_DO_NOT_RUN.py` - 7 KB - 2026-06-13 13:05
+- `inspect_germany_db.py` - 1 KB - 2026-06-13 12:48
+- `Results1.xlsx` - 880 KB - 2026-06-14 06:49
+  - Sheet **Sheet1**: 433 rijen - kolommen: cat, Company Name, Website URL, lusha_api_company_name, lusha_api_domain, lusha_api_description, lusha_api_founded_year, lusha_api_employee_range, lusha_api_revenue_range, lusha_api_industry
+  - Sheet **PU Analysis**: 119 rijen - kolommen: PU Learning Analysis — Positive-Unlabeled Model (Elkan-Noto)
+  - Sheet **PU README**: 40 rijen - kolommen: PU Prospect Model — Documentation
+  - Sheet **Comm. Score Threshold Analysis**: 19 rijen - kolommen: Commercial Score Threshold Analysis — mYngle Lead Prioritisation
+  - Sheet **Scoring Parameters**: 107 rijen - kolommen: Scoring Parameters — Tweak Model Weights & Thresholds
+  - Sheet **Score Distribution**: 34 rijen - kolommen: Final Score — Frequency Distribution  |  ICP Clients (cat=1) vs Cold Prospects (cat=0)
+  - Sheet **Model Prob. Threshold Analysis**: 21 rijen - kolommen: Model Probability Threshold Analysis — mYngle Lead Prioritisation
+  - Sheet **Analysis**: 80 rijen - kolommen: ICP Predictive Model — Feature Analysis
+  - Sheet **ROC Curve**: 33 rijen - kolommen: ROC Curve Analysis — ICP Predictive Model
+  - Sheet **Feature Importance**: 43 rijen - kolommen: Feature Importance — sig_* and ti_* Signal Features
+  - Sheet **Score Distributions**: 100 rijen - kolommen: Score Distributions — sig_* and ti_* by ICP Label (cat=1 vs cat=0)
+  - Sheet **Bootstrap Results**: 30 rijen - kolommen: Bootstrap Stability Analysis — B=500 Iterations  |  sig_* + ti_* (15 features)
+  - Sheet **Lean Model**: 55 rijen - kolommen: Lean Predictive Model — 7 Features  |  AUC=0.772  |  CV AUC=0.755±0.050  |  Boot 95% CI [0.754 – 0.773]
+  - Sheet **Final Scored Prospects**: 433 rijen - kolommen: Company Name, Domain, Country, Employee Range, Model Probability, ICP Similarity Score, Company Size Score, Company Size Missing, Final Commercial Fit Score, Commercial Tier
+  - Sheet **Score Methodology**: 37 rijen - kolommen: Commercial Fit Scoring — Methodology
+  - Sheet **Lean Coefficients**: 15 rijen - kolommen: Feature, Coefficient, Sheet1 Col, Normalization, Direction, Business Meaning
+  - Sheet **Validation**: 34 rijen - kolommen: Commercial Fit Score — Validation
+  - Sheet **K-Factor Optimisation**: 60 rijen - kolommen: 1.72
+- `run_cleaner.bat` - 6 KB - 2026-06-12 18:36
+- `run_cleaner1.bat` - 8 KB - 2026-06-12 18:52
+- `run_cleaner_queue.bat` - 10 KB - 2026-06-12 21:21
+- `run_cleaner_queue_generic.bat` - 10 KB - 2026-06-13 15:31
+- `run_cleaner_queue_generic_v3.bat` - 13 KB - 2026-06-13 15:54
+- `run_enricher.bat` - 9 KB - 2026-06-12 20:29
+- **enrich_prospects/**
+  - `start_enriching.bat` - 3 KB - 2026-05-26 15:45
+  - **app/**
+    - `enrich_clients_claude.py` - 323 KB - 2026-05-26 16:45
+    - `Mynglelogofinal_fixed.png` - 82 KB - 2026-05-25 23:23
+    - `requirements.txt` - 180 B - 2026-05-24 12:32
+    - **.streamlit/**
+      - `config.toml` - 141 B - 2026-05-25 10:55
+- **Germany/**
+  - **00_raw/**
+    - `Germany_10_R4501_5000.xlsx` - 74 KB - 2026-06-13 14:29
+      - Sheet **Sheet1**: 501 rijen - kolommen: source, source_row_id, company_number, current_status, jurisdiction_code, company_name_raw, company_name_clean, legal_form_detected, registered_address, city_or_registered_office
+    - `Germany_11_R5001_5500.xlsx` - 74 KB - 2026-06-13 14:29
+      - Sheet **Sheet1**: 501 rijen - kolommen: source, source_row_id, company_number, current_status, jurisdiction_code, company_name_raw, company_name_clean, legal_form_detected, registered_address, city_or_registered_office
+    - `Germany_12_R5501_6000.xlsx` - 74 KB - 2026-06-13 14:29
+      - Sheet **Sheet1**: 501 rijen - kolommen: source, source_row_id, company_number, current_status, jurisdiction_code, company_name_raw, company_name_clean, legal_form_detected, registered_address, city_or_registered_office
+    - `Germany_13_R6001_6500.xlsx` - 74 KB - 2026-06-13 14:29
+    - `Germany_14_R6501_7000.xlsx` - 73 KB - 2026-06-13 14:29
+    - `Germany_15_R7001_7251.xlsx` - 40 KB - 2026-06-13 14:29
+    - `Germany_1_R0001_0500.xlsx` - 76 KB - 2026-06-13 14:29
+    - `Germany_2_R0501_1000.xlsx` - 75 KB - 2026-06-13 14:29
+    - `Germany_3_R1001_1500.xlsx` - 75 KB - 2026-06-13 14:29
+    - `Germany_4_R1501_2000.xlsx` - 76 KB - 2026-06-13 14:29
+    - `Germany_5_R2001_2500.xlsx` - 75 KB - 2026-06-13 14:29
+    - `Germany_6_R2501_3000.xlsx` - 75 KB - 2026-06-13 14:29
+    - *... en nog 4 bestand(en)*
+  - **01_cleaned_domains/**
+    - `Germany_1_R0001_0500_cleaned_20260613_1613.xlsx` - 34 KB - 2026-06-13 16:13
+      - Sheet **Best Guess Input**: 6 rijen - kolommen: company_name, website_url, email, city, province, phone, final_selected_domain, final_domain_is_business_output, final_decision_source, final_confidence
+      - Sheet **Cleaned Register Input**: 6 rijen - kolommen: source, source_row_id, company_number, current_status, jurisdiction_code, company_name_raw, company_name_clean, legal_form_detected, registered_address, city_or_registered_office
+      - Sheet **Review Needed**: 6 rijen - kolommen: source, source_row_id, company_number, current_status, jurisdiction_code, company_name_raw, company_name_clean, legal_form_detected, registered_address, city_or_registered_office
+      - Sheet **Original Input**: 6 rijen - kolommen: source, source_row_id, company_number, current_status, jurisdiction_code, company_name_raw, company_name_clean, legal_form_detected, registered_address, city_or_registered_office
+      - Sheet **Raw Search Evidence**: 1 rijen - kolommen: company_name, city, province, search_query_used, serper_top_title, serper_top_url, serper_top_domain, validated_domain, domain_source, domain_action
+      - Sheet **Python vs Haiku Comparison**: 1 rijen - kolommen: Haiku review was not used in this run.
+      - Sheet **Candidate Rank Diagnostics**: 2 rijen - kolommen: company_name, final_selected_domain, final_confidence, selected_domain_first_seen_query, selected_domain_query_index, selected_domain_first_seen_rank, selected_domain_best_score, selected_domain_best_title, selected_domain_best_url, top_serper_domain
+      - Sheet **Candidate Discovery Debug**: 6 rijen - kolommen: company_name, row_number, search_query, result_rank, title, snippet, url, extracted_domain, candidate_url, candidate_type
+      - Sheet **Manual Review Queue**: 6 rijen - kolommen: final_selected_domain, final_confidence, final_decision_source, domain_action, domain_confidence, manual_review_needed, verification_needed, verification_reason, verifier_decision, verifier_reason
+      - Sheet **Website Verification Debug**: 1 rijen - kolommen: Verifier ran but no debug rows were collected.
+      - Sheet **Validation Diagnostics**: 10 rijen - kolommen: Metric, Value
+      - Sheet **Commercial Input**: 1 rijen - kolommen: No rows in this category.
+      - Sheet **Maybe Review**: 6 rijen - kolommen: organization_type, myngle_target_eligibility, pre_filter_decision, pre_filter_reason, cleaned_company_name, normalized_input_website, email_domain, domain_action, final_selected_domain, final_confidence
+      - Sheet **Excluded Organizations**: 1 rijen - kolommen: No rows in this category.
+      - Sheet **Pre-filter Summary**: 2 rijen - kolommen: organization_type, eligibility, pre_filter_decision, count, most_common_reason
+      - Sheet **Firecrawl Audit**: 19 rijen - kolommen: Field, Value, Description
+      - Sheet **API Usage Summary**: 30 rijen - kolommen: Metric, Value
+      - Sheet **Run Summary**: 54 rijen - kolommen: Field, Value
+    - `Germany_1_R0001_0500_cleaned_20260613_1619.xlsx` - 34 KB - 2026-06-13 16:19
+      - Sheet **Best Guess Input**: 6 rijen - kolommen: company_name, website_url, email, city, province, phone, final_selected_domain, final_domain_is_business_output, final_decision_source, final_confidence
+      - Sheet **Cleaned Register Input**: 6 rijen - kolommen: source, source_row_id, company_number, current_status, jurisdiction_code, company_name_raw, company_name_clean, legal_form_detected, registered_address, city_or_registered_office
+      - Sheet **Review Needed**: 6 rijen - kolommen: source, source_row_id, company_number, current_status, jurisdiction_code, company_name_raw, company_name_clean, legal_form_detected, registered_address, city_or_registered_office
+      - Sheet **Original Input**: 6 rijen - kolommen: source, source_row_id, company_number, current_status, jurisdiction_code, company_name_raw, company_name_clean, legal_form_detected, registered_address, city_or_registered_office
+      - Sheet **Raw Search Evidence**: 1 rijen - kolommen: company_name, city, province, search_query_used, serper_top_title, serper_top_url, serper_top_domain, validated_domain, domain_source, domain_action
+      - Sheet **Python vs Haiku Comparison**: 1 rijen - kolommen: Haiku review was not used in this run.
+      - Sheet **Candidate Rank Diagnostics**: 2 rijen - kolommen: company_name, final_selected_domain, final_confidence, selected_domain_first_seen_query, selected_domain_query_index, selected_domain_first_seen_rank, selected_domain_best_score, selected_domain_best_title, selected_domain_best_url, top_serper_domain
+      - Sheet **Candidate Discovery Debug**: 6 rijen - kolommen: company_name, row_number, search_query, result_rank, title, snippet, url, extracted_domain, candidate_url, candidate_type
+      - Sheet **Manual Review Queue**: 6 rijen - kolommen: final_selected_domain, final_confidence, final_decision_source, domain_action, domain_confidence, manual_review_needed, verification_needed, verification_reason, verifier_decision, verifier_reason
+      - Sheet **Website Verification Debug**: 1 rijen - kolommen: Verifier ran but no debug rows were collected.
+      - Sheet **Validation Diagnostics**: 10 rijen - kolommen: Metric, Value
+      - Sheet **Commercial Input**: 1 rijen - kolommen: No rows in this category.
+      - Sheet **Maybe Review**: 6 rijen - kolommen: organization_type, myngle_target_eligibility, pre_filter_decision, pre_filter_reason, cleaned_company_name, normalized_input_website, email_domain, domain_action, final_selected_domain, final_confidence
+      - Sheet **Excluded Organizations**: 1 rijen - kolommen: No rows in this category.
+      - Sheet **Pre-filter Summary**: 2 rijen - kolommen: organization_type, eligibility, pre_filter_decision, count, most_common_reason
+      - Sheet **Firecrawl Audit**: 19 rijen - kolommen: Field, Value, Description
+      - Sheet **API Usage Summary**: 30 rijen - kolommen: Metric, Value
+      - Sheet **Run Summary**: 54 rijen - kolommen: Field, Value
+  - **01_seed/**
+    - `germany_step1_all_working_set.csv` - 15 MB - 2026-06-13 14:25
+    - `germany_step1_all_working_set.xlsx` - 6 MB - 2026-06-13 14:25
+      - Sheet **Sheet1**: 53299 rijen - kolommen: source, source_row_id, company_number, current_status, jurisdiction_code, company_name_raw, company_name_clean, legal_form_detected, registered_address, city_or_registered_office
+    - `germany_step1_counts.csv` - 589 B - 2026-06-13 14:25
+    - `germany_step1_PRE_EXCLUDE_audit.xlsx` - 435 KB - 2026-06-13 14:26
+      - Sheet **Sheet1**: 3299 rijen - kolommen: source, source_row_id, company_number, current_status, jurisdiction_code, company_name_raw, company_name_clean, legal_form_detected, registered_address, city_or_registered_office
+    - `germany_step1_PRE_KEEP_for_serper.csv` - 2 MB - 2026-06-13 14:25
+    - `germany_step1_PRE_KEEP_for_serper.xlsx` - 954 KB - 2026-06-13 14:25
+      - Sheet **Sheet1**: 7252 rijen - kolommen: source, source_row_id, company_number, current_status, jurisdiction_code, company_name_raw, company_name_clean, legal_form_detected, registered_address, city_or_registered_office
+    - `germany_step1_PRE_KEEP_top500_pilot.csv` - 173 KB - 2026-06-13 14:25
+    - `germany_step1_PRE_KEEP_top500_pilot.xlsx` - 74 KB - 2026-06-13 14:25
+    - `germany_step1_PRE_MAYBE_reserve.csv` - 12 MB - 2026-06-13 14:26
+    - `germany_step1_PRE_MAYBE_reserve.xlsx` - 5 MB - 2026-06-13 14:26
+    - `germany_step1_review_sample.xlsx` - 47 KB - 2026-06-13 14:25
+    - `germany_step1_seed_filtered.csv` - 15 MB - 2026-06-13 14:25
+    - *... en nog 1 bestand(en)*
+- **Italy100/**
+  - `Italy100-200_raw.xlsx` - 516 KB - 2026-06-12 16:59
+    - Sheet **1320879860**: 3022 rijen - kolommen: Serial Number, Registered Office, Website, Email address, Company Name, Toponym Code, Toponym, Street Name, Street Number, Street MapCode
+    - Sheet **Batch001_r0001_0500**: 501 rijen - kolommen: Serial Number, Registered Office, Website, Email address, Company Name, Toponym Code, Toponym, Street Name, Street Number, Street MapCode
+    - Sheet **Batch002_r0501_1000**: 501 rijen - kolommen: Serial Number, Registered Office, Website, Email address, Company Name, Toponym Code, Toponym, Street Name, Street Number, Street MapCode
+    - Sheet **Batch003_r1001_1500**: 501 rijen - kolommen: Serial Number, Registered Office, Website, Email address, Company Name, Toponym Code, Toponym, Street Name, Street Number, Street MapCode
+    - Sheet **Batch004_r1501_2000**: 501 rijen - kolommen: Serial Number, Registered Office, Website, Email address, Company Name, Toponym Code, Toponym, Street Name, Street Number, Street MapCode
+    - Sheet **Batch005_r2001_2500**: 501 rijen - kolommen: Serial Number, Registered Office, Website, Email address, Company Name, Toponym Code, Toponym, Street Name, Street Number, Street MapCode
+    - Sheet **Batch006_r2501_3021**: 522 rijen - kolommen: Serial Number, Registered Office, Website, Email address, Company Name, Toponym Code, Toponym, Street Name, Street Number, Street MapCode
+  - **00_raw/**
+    - `Italy100_1_R0001_0500.xlsx` - 58 KB - 2026-06-12 17:31
+      - Sheet **Batch001_r0001_0500**: 501 rijen - kolommen: Serial Number, Registered Office, Website, Email address, Company Name, Toponym Code, Toponym, Street Name, Street Number, Street MapCode
+    - `Italy100_2_R0501_1000.xlsx` - 60 KB - 2026-06-12 17:31
+      - Sheet **Batch002_r0501_1000**: 501 rijen - kolommen: Serial Number, Registered Office, Website, Email address, Company Name, Toponym Code, Toponym, Street Name, Street Number, Street MapCode
+    - `Italy100_3_R1001_1500.xlsx` - 53 KB - 2026-06-12 17:31
+      - Sheet **Batch003_r1001_1500**: 501 rijen - kolommen: Serial Number, Registered Office, Website, Email address, Company Name, Toponym Code, Toponym, Street Name, Street Number, Street MapCode
+    - `Italy100_4_R1501_2000.xlsx` - 59 KB - 2026-06-12 17:31
+    - `Italy100_5_R2001_2500.xlsx` - 57 KB - 2026-06-12 17:31
+    - `Italy100_6_R2501_3021.xlsx` - 60 KB - 2026-06-12 17:31
+  - **01_cleaned_domains/**
+    - `Italy100_1_R0001_0500_cleaned_20260612_1836.xlsx` - 1 MB - 2026-06-12 21:21
+      - Sheet **Best Guess Input**: 501 rijen - kolommen: company_name, website_url, email, city, province, phone, final_selected_domain, final_domain_is_business_output, final_decision_source, final_confidence
+      - Sheet **Cleaned Register Input**: 501 rijen - kolommen: Serial Number, Registered Office, Website, Email address, Company Name, Toponym Code, Toponym, Street Name, Street Number, Street MapCode
+      - Sheet **Review Needed**: 173 rijen - kolommen: Serial Number, Registered Office, Website, Email address, Company Name, Toponym Code, Toponym, Street Name, Street Number, Street MapCode
+      - Sheet **Original Input**: 501 rijen - kolommen: Serial Number, Registered Office, Website, Email address, Company Name, Toponym Code, Toponym, Street Name, Street Number, Street MapCode
+      - Sheet **Raw Search Evidence**: 486 rijen - kolommen: company_name, city, province, search_query_used, serper_top_title, serper_top_url, serper_top_domain, validated_domain, domain_source, domain_action
+      - Sheet **Python vs Haiku Comparison**: 501 rijen - kolommen: Company Name, validated_domain, domain_confidence, domain_action, haiku_used, haiku_decision, haiku_domain, haiku_confidence, haiku_reason, haiku_risk_flags
+      - Sheet **Candidate Rank Diagnostics**: 1 rijen - kolommen: No debug rows collected (debug mode was off).
+      - Sheet **Manual Review Queue**: 173 rijen - kolommen: Company Name, City, National statistical institute Province, Website, final_selected_domain, final_confidence, final_decision_source, domain_action, domain_confidence, manual_review_needed
+      - Sheet **Website Verification Debug**: 1010 rijen - kolommen: company_name, candidate_domain, candidate_url, candidate_type, candidate_source, candidate_path, original_candidate_url, page_url, page_type, redirect_final_url
+      - Sheet **Validation Diagnostics**: 10 rijen - kolommen: Metric, Value
+      - Sheet **Commercial Input**: 498 rijen - kolommen: organization_type, myngle_target_eligibility, pre_filter_decision, pre_filter_reason, cleaned_company_name, normalized_input_website, email_domain, domain_action, final_selected_domain, final_confidence
+      - Sheet **Maybe Review**: 3 rijen - kolommen: organization_type, myngle_target_eligibility, pre_filter_decision, pre_filter_reason, cleaned_company_name, normalized_input_website, email_domain, domain_action, final_selected_domain, final_confidence
+      - Sheet **Excluded Organizations**: 2 rijen - kolommen: organization_type, myngle_target_eligibility, pre_filter_decision, pre_filter_reason, cleaned_company_name, normalized_input_website, email_domain, domain_action, final_selected_domain, final_confidence
+      - Sheet **Pre-filter Summary**: 4 rijen - kolommen: organization_type, eligibility, pre_filter_decision, count, most_common_reason
+      - Sheet **Run Summary**: 42 rijen - kolommen: Field, Value
+    - `Italy100_2_R0501_1000_cleaned_20260613_1259.xlsx` - 1015 KB - 2026-06-13 14:46
+      - Sheet **Best Guess Input**: 501 rijen - kolommen: company_name, website_url, email, city, province, phone, final_selected_domain, final_domain_is_business_output, final_decision_source, final_confidence
+      - Sheet **Cleaned Register Input**: 501 rijen - kolommen: Serial Number, Registered Office, Website, Email address, Company Name, Toponym Code, Toponym, Street Name, Street Number, Street MapCode
+      - Sheet **Review Needed**: 139 rijen - kolommen: Serial Number, Registered Office, Website, Email address, Company Name, Toponym Code, Toponym, Street Name, Street Number, Street MapCode
+      - Sheet **Original Input**: 501 rijen - kolommen: Serial Number, Registered Office, Website, Email address, Company Name, Toponym Code, Toponym, Street Name, Street Number, Street MapCode
+      - Sheet **Raw Search Evidence**: 462 rijen - kolommen: company_name, city, province, search_query_used, serper_top_title, serper_top_url, serper_top_domain, validated_domain, domain_source, domain_action
+      - Sheet **Python vs Haiku Comparison**: 501 rijen - kolommen: Company Name, validated_domain, domain_confidence, domain_action, haiku_used, haiku_decision, haiku_domain, haiku_confidence, haiku_reason, haiku_risk_flags
+      - Sheet **Candidate Rank Diagnostics**: 1 rijen - kolommen: No debug rows collected (debug mode was off).
+      - Sheet **Manual Review Queue**: 139 rijen - kolommen: Company Name, City, National statistical institute Province, Website, final_selected_domain, final_confidence, final_decision_source, domain_action, domain_confidence, manual_review_needed
+      - Sheet **Website Verification Debug**: 894 rijen - kolommen: company_name, candidate_domain, candidate_url, candidate_type, candidate_source, candidate_path, original_candidate_url, page_url, page_type, redirect_final_url
+      - Sheet **Validation Diagnostics**: 10 rijen - kolommen: Metric, Value
+      - Sheet **Commercial Input**: 493 rijen - kolommen: organization_type, myngle_target_eligibility, pre_filter_decision, pre_filter_reason, cleaned_company_name, normalized_input_website, email_domain, domain_action, final_selected_domain, final_confidence
+      - Sheet **Maybe Review**: 8 rijen - kolommen: organization_type, myngle_target_eligibility, pre_filter_decision, pre_filter_reason, cleaned_company_name, normalized_input_website, email_domain, domain_action, final_selected_domain, final_confidence
+      - Sheet **Excluded Organizations**: 2 rijen - kolommen: organization_type, myngle_target_eligibility, pre_filter_decision, pre_filter_reason, cleaned_company_name, normalized_input_website, email_domain, domain_action, final_selected_domain, final_confidence
+      - Sheet **Pre-filter Summary**: 5 rijen - kolommen: organization_type, eligibility, pre_filter_decision, count, most_common_reason
+      - Sheet **Firecrawl Audit**: 19 rijen - kolommen: Field, Value, Description
+      - Sheet **API Usage Summary**: 30 rijen - kolommen: Metric, Value
+      - Sheet **Run Summary**: 54 rijen - kolommen: Field, Value
+    - `Italy100_3_R1001_1500_cleaned_20260613_1447.xlsx` - 1 MB - 2026-06-13 17:17
+      - Sheet **Best Guess Input**: 501 rijen - kolommen: company_name, website_url, email, city, province, phone, final_selected_domain, final_domain_is_business_output, final_decision_source, final_confidence
+      - Sheet **Cleaned Register Input**: 501 rijen - kolommen: Serial Number, Registered Office, Website, Email address, Company Name, Toponym Code, Toponym, Street Name, Street Number, Street MapCode
+      - Sheet **Review Needed**: 159 rijen - kolommen: Serial Number, Registered Office, Website, Email address, Company Name, Toponym Code, Toponym, Street Name, Street Number, Street MapCode
+      - Sheet **Original Input**: 501 rijen - kolommen: Serial Number, Registered Office, Website, Email address, Company Name, Toponym Code, Toponym, Street Name, Street Number, Street MapCode
+      - Sheet **Raw Search Evidence**: 478 rijen - kolommen: company_name, city, province, search_query_used, serper_top_title, serper_top_url, serper_top_domain, validated_domain, domain_source, domain_action
+      - Sheet **Python vs Haiku Comparison**: 501 rijen - kolommen: Company Name, validated_domain, domain_confidence, domain_action, haiku_used, haiku_decision, haiku_domain, haiku_confidence, haiku_reason, haiku_risk_flags
+      - Sheet **Candidate Rank Diagnostics**: 1 rijen - kolommen: No debug rows collected (debug mode was off).
+      - Sheet **Manual Review Queue**: 159 rijen - kolommen: Company Name, City, National statistical institute Province, Website, final_selected_domain, final_confidence, final_decision_source, domain_action, domain_confidence, manual_review_needed
+      - Sheet **Website Verification Debug**: 980 rijen - kolommen: company_name, candidate_domain, candidate_url, candidate_type, candidate_source, candidate_path, original_candidate_url, page_url, page_type, redirect_final_url
+      - Sheet **Validation Diagnostics**: 10 rijen - kolommen: Metric, Value
+      - Sheet **Commercial Input**: 497 rijen - kolommen: organization_type, myngle_target_eligibility, pre_filter_decision, pre_filter_reason, cleaned_company_name, normalized_input_website, email_domain, domain_action, final_selected_domain, final_confidence
+      - Sheet **Maybe Review**: 2 rijen - kolommen: organization_type, myngle_target_eligibility, pre_filter_decision, pre_filter_reason, cleaned_company_name, normalized_input_website, email_domain, domain_action, final_selected_domain, final_confidence
+      - Sheet **Excluded Organizations**: 4 rijen - kolommen: organization_type, myngle_target_eligibility, pre_filter_decision, pre_filter_reason, cleaned_company_name, normalized_input_website, email_domain, domain_action, final_selected_domain, final_confidence
+      - Sheet **Pre-filter Summary**: 7 rijen - kolommen: organization_type, eligibility, pre_filter_decision, count, most_common_reason
+      - Sheet **Firecrawl Audit**: 19 rijen - kolommen: Field, Value, Description
+      - Sheet **API Usage Summary**: 30 rijen - kolommen: Metric, Value
+      - Sheet **Run Summary**: 54 rijen - kolommen: Field, Value
+    - `Italy100_4_R1501_2000_cleaned_20260613_1717.xlsx` - 1 MB - 2026-06-13 19:45
+    - `Italy100_5_R2001_2500_cleaned_20260613_1946.xlsx` - 1022 KB - 2026-06-13 22:13
+    - `Italy100_6_R2501_3021_cleaned_20260613_2213.xlsx` - 1 MB - 2026-06-14 01:11
+  - **02_lead_prioritized/**
+    - `enrichedResults_20260614_173742.xlsx` - 4 MB - 2026-06-14 19:37
+      - Sheet **Lead Scores**: 501 rijen - kolommen: Company Name, Company Domain / URL, Domain Check, Mismatch?, Final Commercial Fit Score, Commercial Tier, Outreach Readiness, Open Profile
+      - Sheet **Company Profiles**: 4999 rijen - kolommen: FERRARI - S.P.A.  [🥉 Cool]  —  ferrari.com
+      - Sheet **Opportunity Input**: 501 rijen - kolommen: company_name, domain, input_domain, validated_domain, domain_used_for_enrichment, domain_match_confidence, possible_domain_mismatch, suggested_domain, domain_check_reason, domain_source
+      - Sheet **Input**: 501 rijen - kolommen: company_name, website_url, email, city, province, phone, final_selected_domain, final_domain_is_business_output, final_decision_source, final_confidence
+      - Sheet **Advanced Evidence**: 9501 rijen - kolommen: Company Name, Company Domain / URL, Final Score, Commercial Tier, Signal Category, Signal Name, Signal Score, Signal Strength, Evidence, Caller Angle
+      - Sheet **Scoring Settings**: 40 rijen - kolommen: Scoring Settings
+      - Sheet **Run Settings**: 16 rijen - kolommen: Run Settings
+      - Sheet **Enriched**: 501 rijen - kolommen: company_name, website_url, email, city, province, phone, final_selected_domain, final_domain_is_business_output, final_decision_source, final_confidence
+      - Sheet **model_features**: 501 rijen - kolommen: company_name, website_url, email, city, province, phone, final_selected_domain, final_domain_is_business_output, final_decision_source, final_confidence
+      - Sheet **qa_evidence**: 501 rijen - kolommen: company_name, website_url, email, icp_evidence, sig_intl_footprint_evidence, sig_foreign_hq_evidence, sig_explicit_lnd_evidence, sig_multicultural_evidence, sig_employer_branding_evidence, sig_rapid_growth_evidence
+    - `enrichedResults_20260615_023218.xlsx` - 4 MB - 2026-06-15 04:32
+      - Sheet **Lead Scores**: 501 rijen - kolommen: Company Name, Company Domain / URL, Domain Check, Mismatch?, Final Commercial Fit Score, Commercial Tier, Outreach Readiness, Open Profile
+      - Sheet **Company Profiles**: 4999 rijen - kolommen: 4 EMME SERVICE S.P.A.  [🥉 Cool]  —  4emme.it
+      - Sheet **Opportunity Input**: 501 rijen - kolommen: company_name, domain, input_domain, validated_domain, domain_used_for_enrichment, domain_match_confidence, possible_domain_mismatch, suggested_domain, domain_check_reason, domain_source
+      - Sheet **Input**: 501 rijen - kolommen: company_name, website_url, email, city, province, phone, final_selected_domain, final_domain_is_business_output, final_decision_source, final_confidence
+      - Sheet **Advanced Evidence**: 9501 rijen - kolommen: Company Name, Company Domain / URL, Final Score, Commercial Tier, Signal Category, Signal Name, Signal Score, Signal Strength, Evidence, Caller Angle
+      - Sheet **Scoring Settings**: 40 rijen - kolommen: Scoring Settings
+      - Sheet **Run Settings**: 16 rijen - kolommen: Run Settings
+      - Sheet **Enriched**: 501 rijen - kolommen: company_name, website_url, email, city, province, phone, final_selected_domain, final_domain_is_business_output, final_decision_source, final_confidence
+      - Sheet **model_features**: 501 rijen - kolommen: company_name, website_url, email, city, province, phone, final_selected_domain, final_domain_is_business_output, final_decision_source, final_confidence
+      - Sheet **qa_evidence**: 501 rijen - kolommen: company_name, website_url, email, icp_evidence, sig_intl_footprint_evidence, sig_foreign_hq_evidence, sig_explicit_lnd_evidence, sig_multicultural_evidence, sig_employer_branding_evidence, sig_rapid_growth_evidence
+    - `enrichedResults_20260615_092218.xlsx` - 4 MB - 2026-06-15 11:22
+      - Sheet **Lead Scores**: 501 rijen - kolommen: Company Name, Company Domain / URL, Domain Check, Mismatch?, Final Commercial Fit Score, Commercial Tier, Outreach Readiness, Open Profile
+      - Sheet **Company Profiles**: 4999 rijen - kolommen: MAR MARKET S.P.A.  [❄️ Pass]  —  complianceconcourse.willkie.com
+      - Sheet **Opportunity Input**: 501 rijen - kolommen: company_name, domain, input_domain, validated_domain, domain_used_for_enrichment, domain_match_confidence, possible_domain_mismatch, suggested_domain, domain_check_reason, domain_source
+      - Sheet **Input**: 501 rijen - kolommen: company_name, website_url, email, city, province, phone, final_selected_domain, final_domain_is_business_output, final_decision_source, final_confidence
+      - Sheet **Advanced Evidence**: 9501 rijen - kolommen: Company Name, Company Domain / URL, Final Score, Commercial Tier, Signal Category, Signal Name, Signal Score, Signal Strength, Evidence, Caller Angle
+      - Sheet **Scoring Settings**: 40 rijen - kolommen: Scoring Settings
+      - Sheet **Run Settings**: 16 rijen - kolommen: Run Settings
+      - Sheet **Enriched**: 501 rijen - kolommen: company_name, website_url, email, city, province, phone, final_selected_domain, final_domain_is_business_output, final_decision_source, final_confidence
+      - Sheet **model_features**: 501 rijen - kolommen: company_name, website_url, email, city, province, phone, final_selected_domain, final_domain_is_business_output, final_decision_source, final_confidence
+      - Sheet **qa_evidence**: 501 rijen - kolommen: company_name, website_url, email, icp_evidence, sig_intl_footprint_evidence, sig_foreign_hq_evidence, sig_explicit_lnd_evidence, sig_multicultural_evidence, sig_employer_branding_evidence, sig_rapid_growth_evidence
+  - **03_opportunity_radar/**
+  - **04_caller_briefs/**
+  - **_archive/**
+- **Italy200/**
+  - **00_raw/**
+    - `Italy200_01_R0001_0500.xlsx` - 57 KB - 2026-06-12 17:59
+      - Sheet **Batch001_R0001_0500**: 501 rijen - kolommen: Serial Number, Registered Office, Website, Email address, Company Name, Toponym Code, Toponym, Street Name, Street Number, Street MapCode
+    - `Italy200_02_R0501_1000.xlsx` - 57 KB - 2026-06-12 17:59
+      - Sheet **Batch002_R0501_1000**: 501 rijen - kolommen: Serial Number, Registered Office, Website, Email address, Company Name, Toponym Code, Toponym, Street Name, Street Number, Street MapCode
+    - `Italy200_03_R1001_1500.xlsx` - 58 KB - 2026-06-12 17:59
+      - Sheet **Batch003_R1001_1500**: 501 rijen - kolommen: Serial Number, Registered Office, Website, Email address, Company Name, Toponym Code, Toponym, Street Name, Street Number, Street MapCode
+    - `Italy200_04_R1501_2000.xlsx` - 59 KB - 2026-06-12 17:59
+    - `Italy200_05_R2001_2500.xlsx` - 57 KB - 2026-06-12 17:59
+    - `Italy200_06_R2501_3000.xlsx` - 52 KB - 2026-06-12 17:59
+    - `Italy200_07_R3001_3500.xlsx` - 50 KB - 2026-06-12 17:59
+    - `Italy200_08_R3501_4000.xlsx` - 55 KB - 2026-06-12 17:59
+    - `Italy200_09_R4001_4500.xlsx` - 57 KB - 2026-06-12 17:59
+    - `Italy200_10_R4501_5000.xlsx` - 58 KB - 2026-06-12 17:59
+    - `Italy200_11_R5001_5500.xlsx` - 50 KB - 2026-06-12 17:59
+    - `Italy200_12_R5501_6000.xlsx` - 57 KB - 2026-06-12 17:59
+    - *... en nog 3 bestand(en)*
+  - **01_cleaned_domains/**
+    - `Italy200_01_R0001_0500_cleaned_20260613_1301.xlsx` - 1 MB - 2026-06-13 15:06
+      - Sheet **Best Guess Input**: 501 rijen - kolommen: company_name, website_url, email, city, province, phone, final_selected_domain, final_domain_is_business_output, final_decision_source, final_confidence
+      - Sheet **Cleaned Register Input**: 501 rijen - kolommen: Serial Number, Registered Office, Website, Email address, Company Name, Toponym Code, Toponym, Street Name, Street Number, Street MapCode
+      - Sheet **Review Needed**: 201 rijen - kolommen: Serial Number, Registered Office, Website, Email address, Company Name, Toponym Code, Toponym, Street Name, Street Number, Street MapCode
+      - Sheet **Original Input**: 501 rijen - kolommen: Serial Number, Registered Office, Website, Email address, Company Name, Toponym Code, Toponym, Street Name, Street Number, Street MapCode
+      - Sheet **Raw Search Evidence**: 487 rijen - kolommen: company_name, city, province, search_query_used, serper_top_title, serper_top_url, serper_top_domain, validated_domain, domain_source, domain_action
+      - Sheet **Python vs Haiku Comparison**: 501 rijen - kolommen: Company Name, validated_domain, domain_confidence, domain_action, haiku_used, haiku_decision, haiku_domain, haiku_confidence, haiku_reason, haiku_risk_flags
+      - Sheet **Candidate Rank Diagnostics**: 1 rijen - kolommen: No debug rows collected (debug mode was off).
+      - Sheet **Manual Review Queue**: 201 rijen - kolommen: Company Name, City, National statistical institute Province, Website, final_selected_domain, final_confidence, final_decision_source, domain_action, domain_confidence, manual_review_needed
+      - Sheet **Website Verification Debug**: 1023 rijen - kolommen: company_name, candidate_domain, candidate_url, candidate_type, candidate_source, candidate_path, original_candidate_url, page_url, page_type, redirect_final_url
+      - Sheet **Validation Diagnostics**: 10 rijen - kolommen: Metric, Value
+      - Sheet **Commercial Input**: 403 rijen - kolommen: organization_type, myngle_target_eligibility, pre_filter_decision, pre_filter_reason, cleaned_company_name, normalized_input_website, email_domain, domain_action, final_selected_domain, final_confidence
+      - Sheet **Maybe Review**: 80 rijen - kolommen: organization_type, myngle_target_eligibility, pre_filter_decision, pre_filter_reason, cleaned_company_name, normalized_input_website, email_domain, domain_action, final_selected_domain, final_confidence
+      - Sheet **Excluded Organizations**: 20 rijen - kolommen: organization_type, myngle_target_eligibility, pre_filter_decision, pre_filter_reason, cleaned_company_name, normalized_input_website, email_domain, domain_action, final_selected_domain, final_confidence
+      - Sheet **Pre-filter Summary**: 11 rijen - kolommen: organization_type, eligibility, pre_filter_decision, count, most_common_reason
+      - Sheet **Firecrawl Audit**: 19 rijen - kolommen: Field, Value, Description
+      - Sheet **API Usage Summary**: 30 rijen - kolommen: Metric, Value
+      - Sheet **Run Summary**: 54 rijen - kolommen: Field, Value
+    - `Italy200_02_R0501_1000_cleaned_20260612_1905.xlsx` - 1022 KB - 2026-06-12 21:29
+      - Sheet **Best Guess Input**: 501 rijen - kolommen: company_name, website_url, email, city, province, phone, final_selected_domain, final_domain_is_business_output, final_decision_source, final_confidence
+      - Sheet **Cleaned Register Input**: 501 rijen - kolommen: Serial Number, Registered Office, Website, Email address, Company Name, Toponym Code, Toponym, Street Name, Street Number, Street MapCode
+      - Sheet **Review Needed**: 172 rijen - kolommen: Serial Number, Registered Office, Website, Email address, Company Name, Toponym Code, Toponym, Street Name, Street Number, Street MapCode
+      - Sheet **Original Input**: 501 rijen - kolommen: Serial Number, Registered Office, Website, Email address, Company Name, Toponym Code, Toponym, Street Name, Street Number, Street MapCode
+      - Sheet **Raw Search Evidence**: 476 rijen - kolommen: company_name, city, province, search_query_used, serper_top_title, serper_top_url, serper_top_domain, validated_domain, domain_source, domain_action
+      - Sheet **Python vs Haiku Comparison**: 501 rijen - kolommen: Company Name, validated_domain, domain_confidence, domain_action, haiku_used, haiku_decision, haiku_domain, haiku_confidence, haiku_reason, haiku_risk_flags
+      - Sheet **Candidate Rank Diagnostics**: 1 rijen - kolommen: No debug rows collected (debug mode was off).
+      - Sheet **Manual Review Queue**: 172 rijen - kolommen: Company Name, City, National statistical institute Province, Website, final_selected_domain, final_confidence, final_decision_source, domain_action, domain_confidence, manual_review_needed
+      - Sheet **Website Verification Debug**: 939 rijen - kolommen: company_name, candidate_domain, candidate_url, candidate_type, candidate_source, candidate_path, original_candidate_url, page_url, page_type, redirect_final_url
+      - Sheet **Validation Diagnostics**: 10 rijen - kolommen: Metric, Value
+      - Sheet **Commercial Input**: 387 rijen - kolommen: organization_type, myngle_target_eligibility, pre_filter_decision, pre_filter_reason, cleaned_company_name, normalized_input_website, email_domain, domain_action, final_selected_domain, final_confidence
+      - Sheet **Maybe Review**: 86 rijen - kolommen: organization_type, myngle_target_eligibility, pre_filter_decision, pre_filter_reason, cleaned_company_name, normalized_input_website, email_domain, domain_action, final_selected_domain, final_confidence
+      - Sheet **Excluded Organizations**: 30 rijen - kolommen: organization_type, myngle_target_eligibility, pre_filter_decision, pre_filter_reason, cleaned_company_name, normalized_input_website, email_domain, domain_action, final_selected_domain, final_confidence
+      - Sheet **Pre-filter Summary**: 10 rijen - kolommen: organization_type, eligibility, pre_filter_decision, count, most_common_reason
+      - Sheet **Run Summary**: 42 rijen - kolommen: Field, Value
+    - `Italy200_03_R1001_1500_cleaned_20260612_1906.xlsx` - 1 MB - 2026-06-12 21:35
+      - Sheet **Best Guess Input**: 501 rijen - kolommen: company_name, website_url, email, city, province, phone, final_selected_domain, final_domain_is_business_output, final_decision_source, final_confidence
+      - Sheet **Cleaned Register Input**: 501 rijen - kolommen: Serial Number, Registered Office, Website, Email address, Company Name, Toponym Code, Toponym, Street Name, Street Number, Street MapCode
+      - Sheet **Review Needed**: 198 rijen - kolommen: Serial Number, Registered Office, Website, Email address, Company Name, Toponym Code, Toponym, Street Name, Street Number, Street MapCode
+      - Sheet **Original Input**: 501 rijen - kolommen: Serial Number, Registered Office, Website, Email address, Company Name, Toponym Code, Toponym, Street Name, Street Number, Street MapCode
+      - Sheet **Raw Search Evidence**: 446 rijen - kolommen: company_name, city, province, search_query_used, serper_top_title, serper_top_url, serper_top_domain, validated_domain, domain_source, domain_action
+      - Sheet **Python vs Haiku Comparison**: 501 rijen - kolommen: Company Name, validated_domain, domain_confidence, domain_action, haiku_used, haiku_decision, haiku_domain, haiku_confidence, haiku_reason, haiku_risk_flags
+      - Sheet **Candidate Rank Diagnostics**: 1 rijen - kolommen: No debug rows collected (debug mode was off).
+      - Sheet **Manual Review Queue**: 198 rijen - kolommen: Company Name, City, National statistical institute Province, Website, final_selected_domain, final_confidence, final_decision_source, domain_action, domain_confidence, manual_review_needed
+      - Sheet **Website Verification Debug**: 1078 rijen - kolommen: company_name, candidate_domain, candidate_url, candidate_type, candidate_source, candidate_path, original_candidate_url, page_url, page_type, redirect_final_url
+      - Sheet **Validation Diagnostics**: 10 rijen - kolommen: Metric, Value
+      - Sheet **Commercial Input**: 377 rijen - kolommen: organization_type, myngle_target_eligibility, pre_filter_decision, pre_filter_reason, cleaned_company_name, normalized_input_website, email_domain, domain_action, final_selected_domain, final_confidence
+      - Sheet **Maybe Review**: 98 rijen - kolommen: organization_type, myngle_target_eligibility, pre_filter_decision, pre_filter_reason, cleaned_company_name, normalized_input_website, email_domain, domain_action, final_selected_domain, final_confidence
+      - Sheet **Excluded Organizations**: 28 rijen - kolommen: organization_type, myngle_target_eligibility, pre_filter_decision, pre_filter_reason, cleaned_company_name, normalized_input_website, email_domain, domain_action, final_selected_domain, final_confidence
+      - Sheet **Pre-filter Summary**: 10 rijen - kolommen: organization_type, eligibility, pre_filter_decision, count, most_common_reason
+      - Sheet **Run Summary**: 42 rijen - kolommen: Field, Value
+    - `Italy200_04_R1501_2000_cleaned_20260613_1507.xlsx` - 1 MB - 2026-06-13 17:27
+    - `Italy200_05_R2001_2500_cleaned_20260613_1727.xlsx` - 1 MB - 2026-06-13 20:08
+    - `Italy200_06_R2501_3000_cleaned_20260613_2009.xlsx` - 1 MB - 2026-06-13 23:04
+    - `Italy200_07_R3001_3500_cleaned_20260613_2304.xlsx` - 1 MB - 2026-06-14 02:04
+    - `Italy200_08_R3501_4000_cleaned_20260614_0205.xlsx` - 1 MB - 2026-06-14 05:10
+    - `Italy200_09_R4001_4500_cleaned_20260613_1303.xlsx` - 1 MB - 2026-06-13 15:24
+    - `Italy200_10_R4501_5000_cleaned_20260612_1905.xlsx` - 1 MB - 2026-06-12 21:50
+    - `Italy200_11_R5001_5500_cleaned_20260613_1525.xlsx` - 1 MB - 2026-06-13 17:38
+    - `Italy200_12_R5501_6000_cleaned_20260613_1048.xlsx` - 1 MB - 2026-06-13 12:48
+    - *... en nog 3 bestand(en)*
+  - **02_lead_prioritized/**
+    - `enrichedResults_20260615_020605.xlsx` - 3 MB - 2026-06-15 04:06
+      - Sheet **Lead Scores**: 501 rijen - kolommen: Company Name, Company Domain / URL, Domain Check, Mismatch?, Final Commercial Fit Score, Commercial Tier, Outreach Readiness, Open Profile
+      - Sheet **Company Profiles**: 4999 rijen - kolommen: ANAS - SOCIETA' PER AZIONI  [❄️ Pass]  —  stradeanas.it
+      - Sheet **Opportunity Input**: 501 rijen - kolommen: company_name, domain, input_domain, validated_domain, domain_used_for_enrichment, domain_match_confidence, possible_domain_mismatch, suggested_domain, domain_check_reason, domain_source
+      - Sheet **Input**: 501 rijen - kolommen: company_name, website_url, email, city, province, phone, final_selected_domain, final_domain_is_business_output, final_decision_source, final_confidence
+      - Sheet **Advanced Evidence**: 9501 rijen - kolommen: Company Name, Company Domain / URL, Final Score, Commercial Tier, Signal Category, Signal Name, Signal Score, Signal Strength, Evidence, Caller Angle
+      - Sheet **Scoring Settings**: 40 rijen - kolommen: Scoring Settings
+      - Sheet **Run Settings**: 16 rijen - kolommen: Run Settings
+      - Sheet **Enriched**: 501 rijen - kolommen: company_name, website_url, email, city, province, phone, final_selected_domain, final_domain_is_business_output, final_decision_source, final_confidence
+      - Sheet **model_features**: 501 rijen - kolommen: company_name, website_url, email, city, province, phone, final_selected_domain, final_domain_is_business_output, final_decision_source, final_confidence
+      - Sheet **qa_evidence**: 501 rijen - kolommen: company_name, website_url, email, icp_evidence, sig_intl_footprint_evidence, sig_foreign_hq_evidence, sig_explicit_lnd_evidence, sig_multicultural_evidence, sig_employer_branding_evidence, sig_rapid_growth_evidence
+    - `enrichedResults_20260615_021340.xlsx` - 4 MB - 2026-06-15 04:13
+      - Sheet **Lead Scores**: 501 rijen - kolommen: Company Name, Company Domain / URL, Domain Check, Mismatch?, Final Commercial Fit Score, Commercial Tier, Outreach Readiness, Open Profile
+      - Sheet **Company Profiles**: 4999 rijen - kolommen: AZIENDE AGRICOLE PLANETA SOCIETA' SEMPLICE  [🥇 Hot]
+      - Sheet **Opportunity Input**: 501 rijen - kolommen: company_name, domain, input_domain, validated_domain, domain_used_for_enrichment, domain_match_confidence, possible_domain_mismatch, suggested_domain, domain_check_reason, domain_source
+      - Sheet **Input**: 501 rijen - kolommen: company_name, website_url, email, city, province, phone, final_selected_domain, final_domain_is_business_output, final_decision_source, final_confidence
+      - Sheet **Advanced Evidence**: 9501 rijen - kolommen: Company Name, Company Domain / URL, Final Score, Commercial Tier, Signal Category, Signal Name, Signal Score, Signal Strength, Evidence, Caller Angle
+      - Sheet **Scoring Settings**: 40 rijen - kolommen: Scoring Settings
+      - Sheet **Run Settings**: 16 rijen - kolommen: Run Settings
+      - Sheet **Enriched**: 501 rijen - kolommen: company_name, website_url, email, city, province, phone, final_selected_domain, final_domain_is_business_output, final_decision_source, final_confidence
+      - Sheet **model_features**: 501 rijen - kolommen: company_name, website_url, email, city, province, phone, final_selected_domain, final_domain_is_business_output, final_decision_source, final_confidence
+      - Sheet **qa_evidence**: 501 rijen - kolommen: company_name, website_url, email, icp_evidence, sig_intl_footprint_evidence, sig_foreign_hq_evidence, sig_explicit_lnd_evidence, sig_multicultural_evidence, sig_employer_branding_evidence, sig_rapid_growth_evidence
+    - `enrichedResults_20260615_022620.xlsx` - 4 MB - 2026-06-15 04:26
+      - Sheet **Lead Scores**: 501 rijen - kolommen: Company Name, Company Domain / URL, Domain Check, Mismatch?, Final Commercial Fit Score, Commercial Tier, Outreach Readiness, Open Profile
+      - Sheet **Company Profiles**: 4999 rijen - kolommen: GENS AUREA S.P.A.  [🥉 Cool]  —  gens-aurea.it
+      - Sheet **Opportunity Input**: 501 rijen - kolommen: company_name, domain, input_domain, validated_domain, domain_used_for_enrichment, domain_match_confidence, possible_domain_mismatch, suggested_domain, domain_check_reason, domain_source
+      - Sheet **Input**: 501 rijen - kolommen: company_name, website_url, email, city, province, phone, final_selected_domain, final_domain_is_business_output, final_decision_source, final_confidence
+      - Sheet **Advanced Evidence**: 9501 rijen - kolommen: Company Name, Company Domain / URL, Final Score, Commercial Tier, Signal Category, Signal Name, Signal Score, Signal Strength, Evidence, Caller Angle
+      - Sheet **Scoring Settings**: 40 rijen - kolommen: Scoring Settings
+      - Sheet **Run Settings**: 16 rijen - kolommen: Run Settings
+      - Sheet **Enriched**: 501 rijen - kolommen: company_name, website_url, email, city, province, phone, final_selected_domain, final_domain_is_business_output, final_decision_source, final_confidence
+      - Sheet **model_features**: 501 rijen - kolommen: company_name, website_url, email, city, province, phone, final_selected_domain, final_domain_is_business_output, final_decision_source, final_confidence
+      - Sheet **qa_evidence**: 501 rijen - kolommen: company_name, website_url, email, icp_evidence, sig_intl_footprint_evidence, sig_foreign_hq_evidence, sig_explicit_lnd_evidence, sig_multicultural_evidence, sig_employer_branding_evidence, sig_rapid_growth_evidence
+    - `enrichedResults_20260615_081127.xlsx` - 4 MB - 2026-06-15 10:11
+    - `enrichedResults_20260615_084256.xlsx` - 4 MB - 2026-06-15 10:43
+    - `enrichedResults_20260615_085926.xlsx` - 4 MB - 2026-06-15 10:59
+    - `~$enrichedResults_20260615_084256.xlsx` - 165 B - 2026-06-15 11:34
+  - **03_opportunity_radar/**
+  - **04_caller_briefs/**
+  - **_archive/**
