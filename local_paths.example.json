@@ -16,5 +16,13 @@
     "claude_json_cache",
     "radar_cache",
     "autosave"
+  ],
+  "skip_files": [
+    "secrets.toml",
+    ".env",
+    ".env.*",
+    "*.key",
+    "*.pem",
+    "*.p12"
   ]
 }
