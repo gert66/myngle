@@ -17,3 +17,4 @@ company_enrichment_runs/
 venv/
 autosave/
 .claude/
+local_paths.json

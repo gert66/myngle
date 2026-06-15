@@ -1,0 +1,20 @@
+{
+  "data_roots": [
+    "C:/Users/gmeijer4/Nextcloud/Myngle"
+  ],
+  "output_file": "DATA_INDEX.md",
+  "max_depth": 4,
+  "max_files_per_folder": 20,
+  "excel_metadata": true,
+  "excel_max_files_per_folder": 5,
+  "skip_dirs": [
+    ".git",
+    "__pycache__",
+    ".venv",
+    "venv",
+    "logs",
+    "claude_json_cache",
+    "radar_cache",
+    "autosave"
+  ]
+}
