@@ -7446,14 +7446,27 @@ def _build_best_guess_df(
         else:
             _reason = ""
 
+        _cname = _sv_first(*_company_fallbacks)
+        _curl  = url
+        _cdom  = re.sub(r"^https?://(www\.)?", "", url).split("/")[0].strip() if url else ""
+
         rows.append({
             # ── Business-facing (lead prioritiser input) ──────────────────────
-            "company_name":                      _sv_first(*_company_fallbacks),
-            "website_url":                       url,
+            "company_name":                      _cname,
+            "website_url":                       _curl,
             "email":                             _sv(email_col),
             "city":                              _sv_first(*_city_fallbacks),
             "province":                          _sv_first(*_province_fallbacks),
             "phone":                             _sv(phone_col),
+            # ── Downstream-required canonical aliases ─────────────────────────
+            # buyer_contact_finder / opportunity_radar detect these by name;
+            # canonical_company_url is in _DOMAIN_CANDIDATES so it wins over website_url.
+            "canonical_company_name":            _cname,
+            "canonical_company_url":             _curl,
+            "canonical_company_domain":          _cdom,
+            "source_contact_count":              "",
+            "input_type":                        "enriched_export",
+            # ── Remaining business columns ────────────────────────────────────
             "final_selected_domain":             final,
             "final_domain_is_business_output":   _final_is_output,
             "final_decision_source":             dec_src,
@@ -7854,13 +7867,38 @@ def build_excel(
 
     wb = openpyxl.Workbook()
 
+    # Pre-compute eligibility masks so Commercial Input can go in position 2
+    _pf_col     = "myngle_target_eligibility"
+    _keep_mask  = enriched_df.get(_pf_col, pd.Series("", index=enriched_df.index)).astype(str) == _ELI_KEEP
+    _maybe_mask = enriched_df.get(_pf_col, pd.Series("", index=enriched_df.index)).astype(str) == _ELI_MAYBE
+    _excl_mask  = enriched_df.get(_pf_col, pd.Series("", index=enriched_df.index)).astype(str) == _ELI_EXCLUDE
+
+    _pf_key_cols = [
+        "organization_type", "myngle_target_eligibility",
+        "pre_filter_decision", "pre_filter_reason",
+        "cleaned_company_name", "normalized_input_website",
+        "email_domain", "domain_action", "final_selected_domain",
+        "final_confidence", "final_decision_source",
+    ]
+
+    def _make_pf_sheet(ws, df_subset):
+        if df_subset.empty:
+            ws.cell(row=1, column=1, value="No rows in this category.")
+            return
+        out_cols = [c for c in _pf_key_cols if c in df_subset.columns]
+        _write_sheet(ws, df_subset[out_cols])
+
     # Sheet 1: Best Guess Input
     ws0 = wb.active
     ws0.title = "Best Guess Input"
     bg_df = _build_best_guess_df(enriched_df, cols)
     _write_best_guess_sheet(ws0, bg_df, enriched_df)
 
-    # Sheet 2: Cleaned Register Input
+    # Sheet 2: Commercial Input (eligibility keep — needed early for Lead Prioritizer)
+    ws_comm = wb.create_sheet("Commercial Input")
+    _make_pf_sheet(ws_comm, enriched_df[_keep_mask])
+
+    # Sheet 3: Cleaned Register Input
     ws1 = wb.create_sheet("Cleaned Register Input")
     _write_sheet(ws1, enriched_df)
 
@@ -8025,29 +8063,7 @@ def build_excel(
     ws_val.freeze_panes = "A2"
 
     # ── Organization eligibility pre-filter sheets ───────────────────────────
-    _pf_col = "myngle_target_eligibility"
-    _pf_key_cols = [
-        "organization_type", "myngle_target_eligibility",
-        "pre_filter_decision", "pre_filter_reason",
-        "cleaned_company_name", "normalized_input_website",
-        "email_domain", "domain_action", "final_selected_domain",
-        "final_confidence", "final_decision_source",
-    ]
-
-    def _make_pf_sheet(ws, df_subset):
-        if df_subset.empty:
-            ws.cell(row=1, column=1, value="No rows in this category.")
-            return
-        out_cols = [c for c in _pf_key_cols if c in df_subset.columns]
-        _write_sheet(ws, df_subset[out_cols])
-
-    _keep_mask  = enriched_df.get(_pf_col, pd.Series("", index=enriched_df.index)).astype(str) == _ELI_KEEP
-    _maybe_mask = enriched_df.get(_pf_col, pd.Series("", index=enriched_df.index)).astype(str) == _ELI_MAYBE
-    _excl_mask  = enriched_df.get(_pf_col, pd.Series("", index=enriched_df.index)).astype(str) == _ELI_EXCLUDE
-
-    ws_comm = wb.create_sheet("Commercial Input")
-    _make_pf_sheet(ws_comm, enriched_df[_keep_mask])
-
+    # Commercial Input already written at sheet 2 above; write Maybe / Excluded here.
     ws_maybe_sheet = wb.create_sheet("Maybe Review")
     _make_pf_sheet(ws_maybe_sheet, enriched_df[_maybe_mask])
 
@@ -8092,6 +8108,22 @@ def build_excel(
         _write_run_summary_sheet(ws_summary, run_meta)
     else:
         ws_summary.cell(row=1, column=1, value="Run metadata not available.")
+
+    # ── QA print ──────────────────────────────────────────────────────────────
+    _qa_sheets = wb.sheetnames
+    _qa_first_cols = list(bg_df.columns[:10]) if not bg_df.empty else []
+    _required_downstream = [
+        "canonical_company_name", "canonical_company_url",
+        "canonical_company_domain", "source_contact_count", "input_type",
+    ]
+    _bg_col_set = set(bg_df.columns)
+    _present    = [c for c in _required_downstream if c in _bg_col_set]
+    _missing    = [c for c in _required_downstream if c not in _bg_col_set]
+    print("[QA] Sheet names:          ", _qa_sheets)
+    print("[QA] Best Guess row count: ", len(bg_df))
+    print("[QA] First 10 columns:     ", _qa_first_cols)
+    print("[QA] Required cols present:", _present)
+    print("[QA] Required cols missing:", _missing)
 
     buf = io.BytesIO()
     wb.save(buf)
