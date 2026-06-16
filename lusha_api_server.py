@@ -7,19 +7,24 @@ mYngle Caller Prep React frontend (Lovable).
 One company at a time only — batch enrichment is NOT supported here.
 Raw Lusha responses are never forwarded to the frontend.
 
-Start:
+Start (production-like, explicit origins):
     uvicorn lusha_api_server:app --host 127.0.0.1 --port 8008 --reload
+
+Start (local Lovable preview — allow-all CORS):
+    $env:LUSHA_CORS_ALLOW_ALL = "1"
+    python -m uvicorn lusha_api_server:app --host 127.0.0.1 --port 8008 --log-level debug
 
 Environment variables:
     LUSHA_API_KEY          — required for live calls
     LUSHA_ALLOWED_ORIGINS  — comma-separated CORS origins
                              default: http://localhost:5173,http://127.0.0.1:5173
+    LUSHA_CORS_ALLOW_ALL   — set to "1" to allow all origins (local dev only)
 """
 
 import os
 from typing import Optional
 
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, model_validator
 
@@ -27,29 +32,44 @@ import lusha_client as lc
 import lusha_ranker  as lr
 
 # ---------------------------------------------------------------------------
-# CORS
+# CORS — two modes
+#
+# LUSHA_CORS_ALLOW_ALL=1  →  allow-all via origin regex.
+#   Use ONLY for local development with Lovable browser preview.
+#   Never set this in production or on a public host.
+#
+# Default  →  explicit origin allowlist from LUSHA_ALLOWED_ORIGINS.
 # ---------------------------------------------------------------------------
 
 _DEFAULT_ORIGINS = "http://localhost:5173,http://127.0.0.1:5173"
-_allowed_origins = [
-    o.strip()
-    for o in os.environ.get("LUSHA_ALLOWED_ORIGINS", _DEFAULT_ORIGINS).split(",")
-    if o.strip()
-]
-
-# ---------------------------------------------------------------------------
-# App
-# ---------------------------------------------------------------------------
+_cors_allow_all  = os.environ.get("LUSHA_CORS_ALLOW_ALL", "").strip() == "1"
 
 app = FastAPI(title="mYngle Lusha Contact API", version="1.0.0")
 
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=_allowed_origins,
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
+if _cors_allow_all:
+    # allow_origin_regex=".*" + allow_credentials=False avoids the
+    # browser preflight 400 that occurs when Lovable's preview origin
+    # is not in the explicit allowlist.
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origin_regex=".*",
+        allow_credentials=False,
+        allow_methods=["*"],
+        allow_headers=["*"],
+    )
+else:
+    _allowed_origins = [
+        o.strip()
+        for o in os.environ.get("LUSHA_ALLOWED_ORIGINS", _DEFAULT_ORIGINS).split(",")
+        if o.strip()
+    ]
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origins=_allowed_origins,
+        allow_credentials=True,
+        allow_methods=["*"],
+        allow_headers=["*"],
+    )
 
 # ---------------------------------------------------------------------------
 # Models
@@ -100,7 +120,6 @@ def get_contacts(req: ContactRequest) -> ContactResponse:
             country=req.country,
         )
     except RuntimeError as exc:
-        # Convert internal error to safe user-facing message
         return ContactResponse(
             status="error",
             contacts=[],
