@@ -712,19 +712,49 @@ def _load_uploaded(uploaded) -> pd.DataFrame | None:
 
 
 def _normalise_columns(df: pd.DataFrame) -> pd.DataFrame:
-    """Lowercase and strip column names; map common variants."""
+    """
+    Lowercase/strip column names, map common variants, and ensure company_url exists.
+
+    URL aliases (in priority order): company_domain, company_url, website_url,
+    company_website, website, url, domain.
+    The first match is renamed to company_url; others are left as-is.
+    Values without a scheme get https:// prepended.
+    """
     df = df.copy()
     df.columns = [c.strip().lower().replace(" ", "_") for c in df.columns]
-    rename = {
-        "company": "company_name",
-        "name": "company_name",
-        "url": "company_url",
-        "website": "company_url",
-        "domain": "company_url",
-        "linkedin": "linkedin_url",
-        "notes": "linkedin_notes",
-    }
-    df.rename(columns={k: v for k, v in rename.items() if k in df.columns}, inplace=True)
+
+    # Name aliases
+    for alias in ("company", "name"):
+        if alias in df.columns and "company_name" not in df.columns:
+            df.rename(columns={alias: "company_name"}, inplace=True)
+            break
+
+    # URL aliases — priority order; first found wins
+    url_aliases = [
+        "company_domain", "company_url", "website_url",
+        "company_website", "website", "url", "domain",
+    ]
+    if "company_url" not in df.columns:
+        for alias in url_aliases:
+            if alias in df.columns:
+                df.rename(columns={alias: "company_url"}, inplace=True)
+                break
+
+    # LinkedIn / notes aliases
+    if "linkedin_url" not in df.columns and "linkedin" in df.columns:
+        df.rename(columns={"linkedin": "linkedin_url"}, inplace=True)
+    if "linkedin_notes" not in df.columns and "notes" in df.columns:
+        df.rename(columns={"notes": "linkedin_notes"}, inplace=True)
+
+    # Prepend https:// to bare domains / paths
+    if "company_url" in df.columns:
+        def _ensure_scheme(val: str) -> str:
+            val = str(val or "").strip()
+            if val and not re.match(r"https?://", val, re.IGNORECASE):
+                val = "https://" + val
+            return val
+        df["company_url"] = df["company_url"].apply(_ensure_scheme)
+
     return df
 
 
@@ -810,8 +840,14 @@ def main() -> None:
         st.error("Geen bedrijven opgegeven.")
         return
 
-    if "company_name" not in df_input.columns or "company_url" not in df_input.columns:
-        st.error("Verplichte kolommen `company_name` en `company_url` ontbreken.")
+    missing = [c for c in ("company_name", "company_url") if c not in df_input.columns]
+    if missing:
+        st.error(
+            f"Verplichte kolom(men) ontbreken: **{', '.join(missing)}**. "
+            f"Aanwezige kolommen: {', '.join(df_input.columns.tolist())}. "
+            f"Geaccepteerde aliassen voor company_url: "
+            f"company_domain, website_url, company_website, website, url, domain."
+        )
         return
 
     rows = df_input.to_dict("records")[: int(max_rows)]
