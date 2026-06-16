@@ -14,14 +14,20 @@ Secrets (.streamlit/secrets.toml):
 Lusha V3 base URL: https://api.lusha.com
 Auth header: api_key: <key>
 
-NOTE: Endpoint payload shapes are based on the Lusha V3 OpenAPI schema.
-      If the schema changes, review the payload dicts marked with:
-      # [LUSHA SCHEMA] - verify against current OpenAPI spec
+Endpoints used:
+  GET  /v3/account/usage                  — account/key health check
+  POST /v3/companies/search               — search company by name/domain
+  POST /v3/companies/search-and-enrich    — search + enrich (may consume credits)
+  POST /v3/companies/enrich               — enrich company by Lusha ID
+  POST /v3/contacts/decision-makers       — free contact previews for a company
+  POST /v3/contacts/enrich                — reveal email/phone by contact ID (costs credits)
+
+NOTE: Payload shapes are based on the Lusha V3 OpenAPI schema (June 2026).
+      Lines marked [LUSHA SCHEMA] should be re-verified if the schema changes.
 """
 
 import json
 import re
-import io
 import urllib.parse
 
 import pandas as pd
@@ -33,6 +39,7 @@ import streamlit as st
 # ---------------------------------------------------------------------------
 
 LUSHA_BASE_URL = "https://api.lusha.com"
+
 RATE_LIMIT_HEADERS = [
     "x-rate-limit-daily",
     "x-daily-requests-left",
@@ -46,12 +53,22 @@ RATE_LIMIT_HEADERS = [
 ]
 
 ERROR_MESSAGES = {
-    401: "401 — API-sleutel ontbreekt of is ongeldig.",
-    402: "402 — Onvoldoende credits of betaling vereist.",
-    403: "403 — Account inactief of toegang verboden.",
-    429: "429 — Rate limit overschreden. Probeer later opnieuw.",
+    401: "401 — API key missing or invalid.",
+    402: "402 — Insufficient credits / payment required.",
+    403: "403 — Account inactive or forbidden.",
+    404: "404 — Endpoint bestaat niet. Controleer of de app het juiste Lusha V3 endpoint gebruikt.",
+    429: "429 — Rate limit exceeded. Probeer later opnieuw.",
     451: "451 — Juridische of AVG/GDPR-beperking op dit record.",
 }
+
+# Reveal fields available for /v3/companies/enrich
+COMPANY_REVEAL_FIELDS = [
+    "employeesByLocation",
+    "employeesByDepartment",
+    "employeesBySeniority",
+    "competitors",
+    "intent",
+]
 
 # ---------------------------------------------------------------------------
 # Helper functions
@@ -60,21 +77,18 @@ ERROR_MESSAGES = {
 
 def normalize_domain(raw: str) -> str:
     """
-    Convert any URL or domain string to a bare domain suitable for API calls.
-    Examples:
-        https://www.example.com/path  -> example.com
-        www.example.com               -> example.com
-        example.com                   -> example.com
+    Convert any URL or domain string to a bare domain for API calls.
+      https://www.example.com/path  ->  example.com
+      www.example.com               ->  example.com
+      example.com                   ->  example.com
     """
     raw = raw.strip()
     if not raw:
         return ""
-    # Add scheme so urlparse works reliably
     if not re.match(r"https?://", raw, re.IGNORECASE):
         raw = "https://" + raw
     parsed = urllib.parse.urlparse(raw)
     host = parsed.hostname or ""
-    # Strip leading www.
     if host.startswith("www."):
         host = host[4:]
     return host.lower()
@@ -92,7 +106,7 @@ def lusha_request(
 
     Returns:
         (status_code, response_json, response_headers)
-        response_json is {} on network / decode errors (error key added).
+        On network/decode errors status_code is 0 and response_json contains 'error'.
     """
     url = f"{LUSHA_BASE_URL}{endpoint}"
     headers = {
@@ -121,14 +135,13 @@ def lusha_request(
 
 
 def flatten_dict(d: dict, parent_key: str = "", sep: str = ".") -> dict:
-    """Recursively flatten a nested dict to a single-level dict with dotted keys."""
+    """Recursively flatten a nested dict to single-level with dotted keys."""
     items: list = []
     for k, v in d.items():
         new_key = f"{parent_key}{sep}{k}" if parent_key else k
         if isinstance(v, dict):
             items.extend(flatten_dict(v, new_key, sep).items())
         elif isinstance(v, list):
-            # Serialize lists as JSON strings to keep dataframe cells readable
             items.append((new_key, json.dumps(v, ensure_ascii=False)))
         else:
             items.append((new_key, v))
@@ -136,17 +149,28 @@ def flatten_dict(d: dict, parent_key: str = "", sep: str = ".") -> dict:
 
 
 def extract_rate_limit_headers(headers: dict) -> dict:
-    """Return only the Lusha rate-limit headers (case-insensitive lookup)."""
+    """Return only Lusha rate-limit headers (case-insensitive)."""
     lower = {k.lower(): v for k, v in headers.items()}
     return {h: lower[h] for h in RATE_LIMIT_HEADERS if h in lower}
 
 
 def response_to_dataframe(records: list[dict]) -> pd.DataFrame:
-    """Flatten a list of dicts and return a DataFrame."""
     if not records:
         return pd.DataFrame()
-    flat = [flatten_dict(r) for r in records]
-    return pd.DataFrame(flat)
+    return pd.DataFrame([flatten_dict(r) for r in records])
+
+
+def csv_bytes(df: pd.DataFrame) -> bytes:
+    return df.to_csv(index=False).encode("utf-8")
+
+
+def json_bytes(data: dict | list) -> bytes:
+    return json.dumps(data, indent=2, ensure_ascii=False).encode("utf-8")
+
+
+# ---------------------------------------------------------------------------
+# UI output helpers
+# ---------------------------------------------------------------------------
 
 
 def show_rate_limits(headers: dict) -> None:
@@ -162,138 +186,16 @@ def show_status(status_code: int, data: dict) -> None:
         return
     if status_code >= 500:
         st.error(f"{status_code} — Server-fout bij Lusha. Probeer later opnieuw.")
-    elif status_code in ERROR_MESSAGES:
-        msg = ERROR_MESSAGES[status_code]
+        return
+    api_msg = ""
+    if isinstance(data, dict):
         api_msg = data.get("message") or data.get("error") or ""
-        st.error(f"{msg}{(' — ' + api_msg) if api_msg else ''}")
+    if status_code in ERROR_MESSAGES:
+        st.error(f"{ERROR_MESSAGES[status_code]}{(' — ' + str(api_msg)) if api_msg else ''}")
     elif status_code in (200, 201):
         st.success(f"HTTP {status_code} — Verzoek geslaagd.")
     else:
-        st.warning(f"HTTP {status_code}")
-
-
-def csv_bytes(df: pd.DataFrame) -> bytes:
-    return df.to_csv(index=False).encode("utf-8")
-
-
-def json_bytes(data: dict | list) -> bytes:
-    return json.dumps(data, indent=2, ensure_ascii=False).encode("utf-8")
-
-
-# ---------------------------------------------------------------------------
-# API call wrappers
-# ---------------------------------------------------------------------------
-
-
-def call_account_status(api_key: str):
-    """
-    Check account/plan status.
-    # [LUSHA SCHEMA] - Lusha V3 does not document a dedicated account endpoint;
-    # using /v3/company/search with an empty-ish payload as a key health check.
-    # Replace with a proper /account or /usage endpoint if Lusha adds one.
-    """
-    # Minimal search to verify the key works without consuming credits
-    payload = {"company": {"name": "Lusha"}, "reveal": {}}  # [LUSHA SCHEMA]
-    return lusha_request("POST", "/v3/company/search", api_key, payload=payload)
-
-
-def call_search_company(api_key: str, name: str, domain: str, country: str):
-    """
-    Search company by name and/or domain.
-    # [LUSHA SCHEMA] - POST /v3/company/search
-    """
-    company: dict = {}
-    if name:
-        company["name"] = name
-    if domain:
-        company["website"] = domain  # [LUSHA SCHEMA] field name may be 'domain' or 'website'
-    if country:
-        company["country"] = country
-    payload = {"company": company}  # no reveal block → no credits consumed
-    return lusha_request("POST", "/v3/company/search", api_key, payload=payload)
-
-
-def call_search_enrich_company(
-    api_key: str,
-    name: str,
-    domain: str,
-    country: str,
-    reveal_company: bool,
-):
-    """
-    Search and enrich company.
-    # [LUSHA SCHEMA] - POST /v3/company/search with reveal block
-    The 'reveal' field controls which paid fields are returned.
-    """
-    company: dict = {}
-    if name:
-        company["name"] = name
-    if domain:
-        company["website"] = domain  # [LUSHA SCHEMA]
-    if country:
-        company["country"] = country
-    reveal: dict = {}
-    if reveal_company:
-        reveal["company"] = True  # [LUSHA SCHEMA] - check exact key name in OpenAPI
-    payload = {"company": company, "reveal": reveal}
-    return lusha_request("POST", "/v3/company/search", api_key, payload=payload)
-
-
-def call_decision_makers(
-    api_key: str,
-    name: str,
-    domain: str,
-    country: str,
-    max_contacts: int,
-    reveal_email: bool,
-    reveal_phone: bool,
-):
-    """
-    Find decision makers for a company.
-    # [LUSHA SCHEMA] - POST /v3/company/contacts  (or /v3/contacts/search)
-    The reveal block controls whether email/phone are returned (costs credits).
-    """
-    company: dict = {}
-    if name:
-        company["name"] = name
-    if domain:
-        company["website"] = domain  # [LUSHA SCHEMA]
-    if country:
-        company["country"] = country
-    reveal: dict = {}
-    if reveal_email:
-        reveal["email"] = True  # [LUSHA SCHEMA]
-    if reveal_phone:
-        reveal["phone"] = True  # [LUSHA SCHEMA]
-    payload = {
-        "company": company,
-        "contacts": {"limit": max_contacts},  # [LUSHA SCHEMA] - field name may differ
-        "reveal": reveal,
-    }
-    # [LUSHA SCHEMA] - endpoint path may be /v3/company/contacts or /v3/contacts/search
-    return lusha_request("POST", "/v3/company/contacts", api_key, payload=payload)
-
-
-def call_enrich_contact(api_key: str, contact_id: str, reveal_email: bool, reveal_phone: bool):
-    """
-    Enrich a single contact by ID.
-    # [LUSHA SCHEMA] - POST /v3/contacts/enrich
-    """
-    reveal: dict = {}
-    if reveal_email:
-        reveal["email"] = True  # [LUSHA SCHEMA]
-    if reveal_phone:
-        reveal["phone"] = True  # [LUSHA SCHEMA]
-    payload = {
-        "contacts": [{"id": contact_id}],  # [LUSHA SCHEMA]
-        "reveal": reveal,
-    }
-    return lusha_request("POST", "/v3/contacts/enrich", api_key, payload=payload)
-
-
-# ---------------------------------------------------------------------------
-# UI sections
-# ---------------------------------------------------------------------------
+        st.warning(f"HTTP {status_code}{(' — ' + str(api_msg)) if api_msg else ''}")
 
 
 def section_raw_output(status_code: int, data: dict | list, headers: dict) -> None:
@@ -306,24 +208,40 @@ def section_raw_output(status_code: int, data: dict | list, headers: dict) -> No
         data=json_bytes(data),
         file_name="lusha_response.json",
         mime="application/json",
+        key=f"dl_json_{id(data)}",
     )
 
 
 def section_company_table(data: dict) -> None:
-    """Extract and display company record(s) from response."""
-    # [LUSHA SCHEMA] - response key may be 'company', 'companies', or 'data'
-    companies = []
-    for key in ("company", "companies", "data", "result"):
-        val = data.get(key)
-        if isinstance(val, dict):
-            companies = [val]
-            break
-        if isinstance(val, list):
-            companies = val
-            break
+    """
+    Extract company records from a Lusha V3 response and display as table.
+    Lusha V3 returns records under 'results'; older keys kept as fallback.
+    Each result object may have a 'data' sub-key with the actual company dict.
+    """
+    companies: list[dict] = []
+
+    # Primary: V3 results array — each item may wrap company data in 'data'
+    results = data.get("results")
+    if isinstance(results, list):
+        for item in results:
+            if isinstance(item, dict):
+                company_data = item.get("data") or item
+                if isinstance(company_data, dict):
+                    companies.append(company_data)
+
+    # Fallbacks for other response shapes
+    if not companies:
+        for key in ("company", "companies", "data", "result"):
+            val = data.get(key)
+            if isinstance(val, dict):
+                companies = [val]
+                break
+            if isinstance(val, list) and val and isinstance(val[0], dict):
+                companies = val
+                break
 
     if not companies:
-        st.info("Geen bedrijfsdata in response gevonden.")
+        st.info("Geen bedrijfsdata in response gevonden (keys: " + ", ".join(data.keys()) + ").")
         return
 
     df = response_to_dataframe(companies)
@@ -334,44 +252,64 @@ def section_company_table(data: dict) -> None:
         data=csv_bytes(df),
         file_name="lusha_companies.csv",
         mime="text/csv",
+        key=f"dl_comp_{id(df)}",
     )
 
 
 def section_contact_table(data: dict) -> None:
-    """Extract and display contact records from response."""
-    # [LUSHA SCHEMA] - response key may be 'contacts', 'decisionMakers', 'data'
-    contacts = []
-    for key in ("contacts", "decisionMakers", "decision_makers", "data", "result"):
-        val = data.get(key)
-        if isinstance(val, list):
-            contacts = val
-            break
-        if isinstance(val, dict):
-            contacts = [val]
-            break
+    """
+    Extract contact/decision-maker records from a Lusha V3 response.
+    Lusha V3 returns contacts under 'results'; per-result errors also surfaced.
+    """
+    contacts: list[dict] = []
+    errors_per_result: list[str] = []
+
+    results = data.get("results")
+    if isinstance(results, list):
+        for item in results:
+            if isinstance(item, dict):
+                if item.get("error"):
+                    errors_per_result.append(str(item["error"]))
+                contact_data = item.get("data") or item
+                if isinstance(contact_data, dict) and contact_data:
+                    contacts.append(contact_data)
+
+    # Fallbacks
+    if not contacts:
+        for key in ("contacts", "decisionMakers", "decision_makers", "data", "result"):
+            val = data.get(key)
+            if isinstance(val, list) and val:
+                contacts = val
+                break
+            if isinstance(val, dict) and val:
+                contacts = [val]
+                break
+
+    if errors_per_result:
+        st.warning("Fouten in resultaten: " + " | ".join(errors_per_result))
 
     if not contacts:
         st.info("Geen contactdata in response gevonden.")
         return
 
-    # Surface which fields were returned vs available-but-not-revealed
     revealed: list[dict] = []
-    not_revealed: list[str] = []
+    not_revealed_fields: list[str] = []
     for c in contacts:
         flat = flatten_dict(c)
         revealed.append(flat)
-        for field in ("email", "phone", "phoneNumbers", "emailAddresses"):
+        # Surface null fields that indicate available-but-not-revealed data
+        for field in ("emails", "phones", "email", "phone", "phoneNumbers", "emailAddresses"):
             if field in c and c[field] is None:
-                not_revealed.append(field)
+                not_revealed_fields.append(field)
 
     df = pd.DataFrame(revealed)
     st.subheader("Contacten / Decision Makers")
     st.dataframe(df, use_container_width=True)
 
-    if not_revealed:
+    if not_revealed_fields:
         st.warning(
-            f"Velden beschikbaar maar niet onthuld (vereisen reveal + credits): "
-            f"{', '.join(set(not_revealed))}"
+            "Velden beschikbaar maar niet onthuld (vereisen reveal + credits): "
+            + ", ".join(sorted(set(not_revealed_fields)))
         )
 
     st.download_button(
@@ -379,11 +317,106 @@ def section_contact_table(data: dict) -> None:
         data=csv_bytes(df),
         file_name="lusha_contacts.csv",
         mime="text/csv",
+        key=f"dl_cont_{id(df)}",
     )
 
 
 # ---------------------------------------------------------------------------
-# Main app
+# API call wrappers — all endpoints verified against Lusha V3 OpenAPI (June 2026)
+# ---------------------------------------------------------------------------
+
+
+def call_account_status(api_key: str):
+    """GET /v3/account/usage — account health / key validation, no credits."""
+    return lusha_request("GET", "/v3/account/usage", api_key)
+
+
+def call_search_company(api_key: str, name: str, domain: str):
+    """
+    POST /v3/companies/search
+    Search only — no enrichment, no credits consumed.
+    [LUSHA SCHEMA] companies array with name/domain; country not in V3 schema for this endpoint.
+    """
+    company: dict = {"clientReferenceId": "manual-test-1"}
+    if name:
+        company["name"] = name
+    if domain:
+        company["domain"] = domain  # [LUSHA SCHEMA] field is 'domain', not 'website'
+    payload = {
+        "companies": [company],
+        "options": {"includePartialProfiles": True},  # [LUSHA SCHEMA]
+    }
+    return lusha_request("POST", "/v3/companies/search", api_key, payload=payload)
+
+
+def call_search_enrich_company(api_key: str, name: str, domain: str):
+    """
+    POST /v3/companies/search-and-enrich
+    Combines search + enrich in one call. May consume credits.
+    [LUSHA SCHEMA] no separate 'reveal' block; enrichment is implicit.
+    """
+    company: dict = {"clientReferenceId": "manual-test-1"}
+    if name:
+        company["name"] = name
+    if domain:
+        company["domain"] = domain  # [LUSHA SCHEMA]
+    payload = {
+        "companies": [company],
+        "options": {"includePartialProfiles": True},  # [LUSHA SCHEMA]
+    }
+    return lusha_request("POST", "/v3/companies/search-and-enrich", api_key, payload=payload)
+
+
+def call_enrich_companies_by_id(api_key: str, company_ids: list[str], reveal_fields: list[str]):
+    """
+    POST /v3/companies/enrich
+    Enrich known company IDs; reveal_fields controls optional paid data.
+    [LUSHA SCHEMA] 'ids' array + 'reveal' list of field names.
+    """
+    payload: dict = {"ids": company_ids}
+    if reveal_fields:
+        payload["reveal"] = reveal_fields  # [LUSHA SCHEMA]
+    return lusha_request("POST", "/v3/companies/enrich", api_key, payload=payload)
+
+
+def call_decision_makers(api_key: str, domain: str, company_lusha_id: str, max_contacts: int):
+    """
+    POST /v3/contacts/decision-makers
+    Returns free contact previews (no email/phone reveal, no credits).
+    Identify the company by domain OR Lusha company ID.
+    [LUSHA SCHEMA] supply either 'domain' or 'companyId' (not both required).
+    """
+    company: dict = {}
+    if company_lusha_id:
+        company["id"] = company_lusha_id  # [LUSHA SCHEMA]
+    elif domain:
+        company["domain"] = domain  # [LUSHA SCHEMA]
+    payload = {
+        "company": company,
+        "contacts": {"limit": max_contacts},  # [LUSHA SCHEMA] - field name may differ
+    }
+    return lusha_request("POST", "/v3/contacts/decision-makers", api_key, payload=payload)
+
+
+def call_enrich_contacts(api_key: str, contact_ids: list[str], reveal_email: bool, reveal_phone: bool):
+    """
+    POST /v3/contacts/enrich
+    Reveal emails and/or phones for known contact IDs. Costs credits.
+    [LUSHA SCHEMA] 'ids' array + 'reveal' list: 'emails' | 'phones'.
+    """
+    reveal: list[str] = []
+    if reveal_email:
+        reveal.append("emails")   # [LUSHA SCHEMA]
+    if reveal_phone:
+        reveal.append("phones")   # [LUSHA SCHEMA]
+    payload: dict = {"ids": contact_ids}
+    if reveal:
+        payload["reveal"] = reveal
+    return lusha_request("POST", "/v3/contacts/enrich", api_key, payload=payload)
+
+
+# ---------------------------------------------------------------------------
+# Main Streamlit app
 # ---------------------------------------------------------------------------
 
 
@@ -395,7 +428,7 @@ def main() -> None:
         "Gebruik uitsluitend voor handmatige API-tests."
     )
 
-    # --- API key -----------------------------------------------------------
+    # ── API key ──────────────────────────────────────────────────────────────
     api_key = ""
     try:
         api_key = st.secrets["LUSHA_API_KEY"]
@@ -416,33 +449,39 @@ def main() -> None:
 
     st.sidebar.markdown("---")
 
-    # --- Input fields ------------------------------------------------------
+    # ── Input fields ─────────────────────────────────────────────────────────
     st.sidebar.header("Zoekparameters")
     company_name = st.sidebar.text_input("Bedrijfsnaam", placeholder="bijv. Acme Corp")
     company_url_raw = st.sidebar.text_input(
         "Bedrijfs-URL of domein", placeholder="bijv. https://www.acme.com"
     )
-    country = st.sidebar.text_input("Land (optioneel)", placeholder="bijv. NL of Netherlands")
+    st.sidebar.caption(
+        "Land wordt niet ondersteund door de V3 company search/enrich endpoints "
+        "en is daarom niet opgenomen in de payload."
+    )
     max_contacts = st.sidebar.number_input(
         "Max. decision makers / contacten", min_value=1, max_value=25, value=5
+    )
+    company_lusha_id = st.sidebar.text_input(
+        "Lusha company ID (optioneel, voor decision makers)",
+        placeholder="bijv. 16303253",
     )
 
     domain = normalize_domain(company_url_raw) if company_url_raw else ""
     if domain:
         st.sidebar.caption(f"Genormaliseerd domein: `{domain}`")
 
-    # --- Reveal checkboxes -------------------------------------------------
+    # ── Reveal checkboxes ────────────────────────────────────────────────────
     st.sidebar.markdown("---")
     st.sidebar.header("Reveal-instellingen (credits!)")
     st.sidebar.warning(
         "⚠️ Reveal-opties kunnen Lusha-credits verbruiken. "
         "Zet alleen aan als je dit bewust wilt."
     )
-    reveal_company = st.sidebar.checkbox("Reveal bedrijfsdata", value=True)
-    reveal_email = st.sidebar.checkbox("Reveal e-mailadressen", value=False)
-    reveal_phone = st.sidebar.checkbox("Reveal telefoonnummers", value=False)
+    reveal_email = st.sidebar.checkbox("Reveal e-mailadressen (contact enrich)", value=False)
+    reveal_phone = st.sidebar.checkbox("Reveal telefoonnummers (contact enrich)", value=False)
 
-    # --- Buttons -----------------------------------------------------------
+    # ── Action buttons ────────────────────────────────────────────────────────
     st.markdown("### Acties")
 
     if not api_key:
@@ -450,107 +489,136 @@ def main() -> None:
         return
 
     col1, col2, col3, col4 = st.columns(4)
-
     run_account = col1.button("🔑 Test sleutel / account")
-    run_search = col2.button("🔎 Zoek bedrijf")
-    run_enrich = col3.button("🏢 Zoek + verrijk bedrijf")
-    run_dm = col4.button("👥 Decision makers")
+    run_search  = col2.button("🔎 Zoek bedrijf")
+    run_enrich  = col3.button("🏢 Zoek + verrijk bedrijf")
+    run_dm      = col4.button("👥 Decision makers")
 
-    # --- Contact enrich (optional follow-up) ------------------------------
+    # ── Company enrich by ID (follow-up after search) ─────────────────────────
     st.markdown("---")
-    with st.expander("Contact-ID's verrijken (optioneel follow-up)", expanded=False):
+    with st.expander("Company-ID's verrijken (optioneel follow-up na zoekresultaat)", expanded=False):
+        st.info(
+            "Kopieer Lusha company-ID's uit de zoekresultaten hierboven. "
+            "Dit endpoint verrijkt met extra bedrijfsdata."
+        )
+        company_ids_raw = st.text_area(
+            "Company-ID's (één per regel)",
+            placeholder="16303253\n12790225",
+            height=80,
+        )
+        st.markdown("**Optionele reveal-velden (standaard UIT — verbruiken mogelijk credits):**")
+        reveal_choices = {f: st.checkbox(f, value=False, key=f"rev_{f}") for f in COMPANY_REVEAL_FIELDS}
+        selected_reveal = [f for f, checked in reveal_choices.items() if checked]
+        if selected_reveal:
+            st.warning(f"⚠️ Reveal-velden geselecteerd: {', '.join(selected_reveal)} — dit kan credits kosten.")
+        run_enrich_companies = st.button("Verrijk geselecteerde bedrijven")
+
+    # ── Contact enrich by ID (follow-up after decision makers) ───────────────
+    with st.expander("Contact-ID's verrijken (optioneel follow-up na decision makers)", expanded=False):
+        st.info(
+            "Kopieer contact-ID's uit de decision-makers resultaten. "
+            "Zet Reveal e-mail/telefoon AAN in de sidebar om die velden te onthullen."
+        )
         contact_ids_raw = st.text_area(
             "Contact-ID's (één per regel)",
-            placeholder="abc123\ndef456",
-            height=100,
+            placeholder="4389064654\n4389064624",
+            height=80,
         )
-        if reveal_email or reveal_phone:
-            st.warning("⚠️ Reveal e-mail/telefoon staat aan — dit verbruikt credits per contact.")
+        if not reveal_email and not reveal_phone:
+            st.warning("Geen reveal-velden geselecteerd in sidebar — enrich stuurt geen reveal-lijst mee.")
+        else:
+            st.warning(
+                f"⚠️ Reveal staat aan: "
+                f"{'e-mail ' if reveal_email else ''}"
+                f"{'telefoon' if reveal_phone else ''}"
+                f" — dit verbruikt credits per contact."
+            )
         run_enrich_contacts = st.button("Verrijk geselecteerde contacten")
 
     st.markdown("---")
 
-    # --- Execute actions --------------------------------------------------
-
+    # ── Execute: account status ───────────────────────────────────────────────
     if run_account:
-        st.subheader("Sleutel / account status")
+        st.subheader("Sleutel / account status  —  GET /v3/account/usage")
         with st.spinner("Bezig…"):
             status, data, headers = call_account_status(api_key)
         section_raw_output(status, data, headers)
-        if isinstance(data, dict):
-            section_company_table(data)
 
+    # ── Execute: search company ───────────────────────────────────────────────
     if run_search:
         if not company_name and not domain:
             st.error("Vul minimaal een bedrijfsnaam of domein in.")
         else:
-            st.subheader("Bedrijf zoeken")
+            st.subheader("Bedrijf zoeken  —  POST /v3/companies/search")
             with st.spinner("Bezig…"):
-                status, data, headers = call_search_company(api_key, company_name, domain, country)
+                status, data, headers = call_search_company(api_key, company_name, domain)
             section_raw_output(status, data, headers)
             if isinstance(data, dict):
                 section_company_table(data)
 
+    # ── Execute: search + enrich company ─────────────────────────────────────
     if run_enrich:
         if not company_name and not domain:
             st.error("Vul minimaal een bedrijfsnaam of domein in.")
         else:
-            if reveal_email or reveal_phone:
-                st.warning("⚠️ Reveal e-mail/telefoon staat aan — dit verbruikt credits.")
-            st.subheader("Bedrijf zoeken + verrijken")
+            st.warning(
+                "⚠️ Search-and-enrich verrijkt automatisch bedrijfsdata "
+                "en kan Lusha-credits verbruiken."
+            )
+            st.subheader("Bedrijf zoeken + verrijken  —  POST /v3/companies/search-and-enrich")
             with st.spinner("Bezig…"):
-                status, data, headers = call_search_enrich_company(
-                    api_key, company_name, domain, country, reveal_company
-                )
+                status, data, headers = call_search_enrich_company(api_key, company_name, domain)
             section_raw_output(status, data, headers)
             if isinstance(data, dict):
                 section_company_table(data)
-                section_contact_table(data)
 
+    # ── Execute: decision makers ──────────────────────────────────────────────
     if run_dm:
-        if not company_name and not domain:
-            st.error("Vul minimaal een bedrijfsnaam of domein in.")
+        if not domain and not company_lusha_id:
+            st.error("Vul een domein of Lusha company ID in voor decision makers.")
         else:
-            if reveal_email or reveal_phone:
-                st.warning(
-                    "⚠️ Reveal e-mail/telefoon staat aan — dit verbruikt credits per contact."
-                )
-            st.subheader("Decision Makers / Contacten")
+            st.subheader("Decision Makers  —  POST /v3/contacts/decision-makers")
+            st.info("Dit endpoint retourneert gratis contact-previews (geen reveal van e-mail/telefoon).")
             with st.spinner("Bezig…"):
                 status, data, headers = call_decision_makers(
-                    api_key,
-                    company_name,
-                    domain,
-                    country,
-                    int(max_contacts),
-                    reveal_email,
-                    reveal_phone,
+                    api_key, domain, company_lusha_id, int(max_contacts)
                 )
             section_raw_output(status, data, headers)
             if isinstance(data, dict):
-                section_company_table(data)
                 section_contact_table(data)
 
+    # ── Execute: company enrich by ID ─────────────────────────────────────────
+    if run_enrich_companies:
+        ids = [line.strip() for line in company_ids_raw.splitlines() if line.strip()]
+        if not ids:
+            st.error("Voer minimaal één company-ID in.")
+        else:
+            st.subheader(f"Bedrijven verrijken  —  POST /v3/companies/enrich  ({len(ids)} IDs)")
+            with st.spinner("Bezig…"):
+                status, data, headers = call_enrich_companies_by_id(api_key, ids, selected_reveal)
+            section_raw_output(status, data, headers)
+            if isinstance(data, dict):
+                section_company_table(data)
+
+    # ── Execute: contact enrich by ID ─────────────────────────────────────────
     if run_enrich_contacts:
         ids = [line.strip() for line in contact_ids_raw.splitlines() if line.strip()]
         if not ids:
             st.error("Voer minimaal één contact-ID in.")
         else:
-            if reveal_email or reveal_phone:
+            if not reveal_email and not reveal_phone:
                 st.warning(
-                    f"⚠️ Reveal staat aan voor {len(ids)} contact(en) — dit verbruikt credits."
+                    "Geen reveal geselecteerd — de API-call wordt uitgevoerd zonder reveal-lijst. "
+                    "Je ziet alleen metadata, geen e-mail of telefoon."
                 )
-            st.subheader(f"Contacten verrijken ({len(ids)} IDs)")
-            for cid in ids:
-                st.markdown(f"**Contact ID: `{cid}`**")
-                with st.spinner(f"Verrijken {cid}…"):
-                    status, data, headers = call_enrich_contact(
-                        api_key, cid, reveal_email, reveal_phone
-                    )
-                section_raw_output(status, data, headers)
-                if isinstance(data, dict):
-                    section_contact_table(data)
-                st.markdown("---")
+            st.subheader(f"Contacten verrijken  —  POST /v3/contacts/enrich  ({len(ids)} IDs)")
+            with st.spinner("Bezig…"):
+                status, data, headers = call_enrich_contacts(
+                    api_key, ids, reveal_email, reveal_phone
+                )
+            section_raw_output(status, data, headers)
+            if isinstance(data, dict):
+                section_contact_table(data)
 
 
 if __name__ == "__main__":
