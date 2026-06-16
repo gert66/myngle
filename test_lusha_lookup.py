@@ -109,6 +109,44 @@ _MOCK_CONTACTS = [
         "confidence":  0.0,
         "_lushaId":    "mock-007",
     },
+    # Edge cases for ranker validation
+    {
+        "name":        "Emma Schulz",
+        "jobTitle":    "Business Development Executive",
+        "department":  "Business Development",
+        "seniority":   "Non-Manager",
+        "email":       "",
+        "phone":       "",
+        "linkedinUrl": "https://www.linkedin.com/in/emma-schulz",
+        "matchReason": "",
+        "confidence":  0.0,
+        "_lushaId":    "mock-008",
+    },
+    {
+        "name":        "Roberto Conti",
+        "jobTitle":    "Commercial Director",
+        "department":  "Sales",
+        "seniority":   "Director",
+        "email":       "",
+        "phone":       "",
+        "linkedinUrl": "https://www.linkedin.com/in/roberto-conti",
+        "matchReason": "",
+        "confidence":  0.0,
+        "_lushaId":    "mock-009",
+    },
+    # Duplicate of mock-001 — should be removed by dedup logic
+    {
+        "name":        "Sofia Esposito",
+        "jobTitle":    "HR Director",
+        "department":  "Human Resources",
+        "seniority":   "Director",
+        "email":       "",
+        "phone":       "",
+        "linkedinUrl": "https://www.linkedin.com/in/sofia-esposito",
+        "matchReason": "",
+        "confidence":  0.0,
+        "_lushaId":    "mock-001",   # same ID → deduplicated
+    },
 ]
 
 
@@ -159,7 +197,20 @@ def main() -> None:
             sys.exit(1)
     else:
         print("[mock] Using local mock contacts — no Lusha credits consumed.", file=sys.stderr)
-        raw_contacts = _MOCK_CONTACTS
+        # Deduplicate mock contacts the same way lusha_client does for live data
+        seen: set[str] = set()
+        raw_contacts = []
+        for c in _MOCK_CONTACTS:
+            key = c.get("_lushaId") or (
+                f"{c.get('name','').lower().strip()}|"
+                f"{c.get('jobTitle','').lower().strip()}"
+            )
+            if key and key not in seen:
+                seen.add(key)
+                raw_contacts.append(c)
+        print(f"[mock] {len(raw_contacts)} unique contacts after dedup "
+              f"({len(_MOCK_CONTACTS) - len(raw_contacts)} duplicate(s) removed).",
+              file=sys.stderr)
 
     ranked = lr.rank_contacts_for_myngle(raw_contacts, industry=args.industry)
 

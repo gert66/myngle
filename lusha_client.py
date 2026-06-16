@@ -119,28 +119,73 @@ def _extract_linkedin(contact: dict) -> str:
     return ""
 
 
-def _extract_department(contact: dict) -> str:
+def _extract_job_title(raw: dict) -> str:
+    """
+    Extract job title string from a raw Lusha contact dict.
+    Handles both simple string fields and nested jobTitle objects:
+      { "title": "...", "departments": [...], "seniority": "..." }
+    """
+    # Nested object shape (Lusha V3 live responses)
+    for key in ("jobTitle", "title"):
+        val = raw.get(key)
+        if isinstance(val, dict):
+            return str(val.get("title") or val.get("name") or "").strip()
+        if isinstance(val, str) and val:
+            return val.strip()
+    return str(raw.get("job_title") or "").strip()
+
+
+def _extract_job_departments(raw: dict) -> str:
+    """
+    Extract department string from a raw Lusha contact dict.
+    Handles nested jobTitle["departments"] list as well as plain fields.
+    """
+    # Nested shape: jobTitle.departments is a list
+    for key in ("jobTitle", "title"):
+        val = raw.get(key)
+        if isinstance(val, dict):
+            depts = val.get("departments")
+            if isinstance(depts, list) and depts:
+                return str(depts[0]).strip()
+    # Plain department fields
     for key in ("department", "dept", "function", "jobFunction"):
-        val = contact.get(key)
-        if val:
-            return str(val)
+        val = raw.get(key)
+        if val and not isinstance(val, dict):
+            return str(val).strip()
     return ""
 
 
-def _extract_seniority(contact: dict) -> str:
+def _extract_seniority(raw: dict) -> str:
+    """
+    Extract seniority from a raw Lusha contact dict.
+    Handles nested jobTitle["seniority"] and plain seniority fields.
+    """
+    # Nested shape: jobTitle.seniority
+    for key in ("jobTitle", "title"):
+        val = raw.get(key)
+        if isinstance(val, dict):
+            sen = val.get("seniority")
+            if sen:
+                return str(sen).strip()
+    # Plain seniority fields
     for key in ("seniority", "seniorityLevel", "level"):
-        val = contact.get(key)
-        if val:
-            return str(val)
+        val = raw.get(key)
+        if val and not isinstance(val, dict):
+            return str(val).strip()
     return ""
+
+
+def _extract_department(contact: dict) -> str:
+    """Alias kept for backward compatibility — delegates to _extract_job_departments."""
+    return _extract_job_departments(contact)
 
 
 def _normalise_contact(raw: dict) -> dict:
     """Map a raw Lusha contact dict to the mYngle normalised schema."""
     return {
         "name":        _extract_name(raw),
-        "jobTitle":    raw.get("title") or raw.get("jobTitle") or raw.get("job_title") or "",
-        "department":  _extract_department(raw),
+        "jobTitle":    _extract_job_title(raw),
+        "department":  _extract_job_departments(raw),
         "seniority":   _extract_seniority(raw),
         "email":       _extract_email(raw),
         "phone":       _extract_phone(raw),
@@ -216,14 +261,27 @@ def find_contacts(
     try:
         data    = _post(_ENDPOINT_DECISION_MAKERS, payload, key)
         results = data.get("results") or []
-        contacts: list[dict] = []
+        raw_contacts: list[dict] = []
         for result in results:
             if not isinstance(result, dict):
                 continue
             dm_list = result.get("decisionMakers") or []
             for dm in dm_list:
                 if isinstance(dm, dict):
-                    contacts.append(_normalise_contact(dm))
+                    raw_contacts.append(_normalise_contact(dm))
+
+        # Deduplicate: prefer _lushaId; fall back to (name, jobTitle) key
+        seen: set[str] = set()
+        contacts: list[dict] = []
+        for c in raw_contacts:
+            dedup_key = c.get("_lushaId") or (
+                f"{c.get('name','').lower().strip()}|"
+                f"{c.get('jobTitle','').lower().strip()}"
+            )
+            if dedup_key and dedup_key not in seen:
+                seen.add(dedup_key)
+                contacts.append(c)
+
         return contacts
     except requests.HTTPError as exc:
         code = exc.response.status_code

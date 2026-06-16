@@ -26,13 +26,23 @@ from typing import Optional
 # ---------------------------------------------------------------------------
 
 # HR / L&D
+# "development" alone is intentionally excluded — "business development",
+# "software development", "product development" must NOT match HR/L&D.
+# Only compound phrases that clearly mean Learning & Development qualify.
 _HR_ACRONYMS  = {"hr", "hrd", "hro", "chro", "l&d"}
 _HR_PHRASES   = {
-    "human resources", "people", "talent", "learning",
-    "development", "training", "organisational", "organizational",
+    "human resources", "people", "talent",
+    "learning and development", "learning & development",
+    "learning development",   # covers "Head of Learning Development"
+    "training", "organisational", "organizational",
     "wellbeing", "employee experience", "culture", "onboarding",
     "workforce", "chief people",
 }
+
+# Explicit exclusions — these must NOT trigger HR/L&D even if substrings match
+_HR_EXCLUSIONS = {"business development", "sales development", "product development",
+                  "software development", "commercial development", "web development",
+                  "market development", "app development", "application development"}
 
 # Operations
 _OPS_PHRASES  = {
@@ -110,6 +120,9 @@ def _matches_phrases(text: str, phrase_set: set) -> bool:
 
 
 def _matches_hr(text: str) -> bool:
+    # Reject explicit non-HR "development" compound phrases first
+    if _matches_phrases(text, _HR_EXCLUSIONS):
+        return False
     return _matches_acronyms(text, _HR_ACRONYM_RE) or _matches_phrases(text, _HR_PHRASES)
 
 
@@ -204,6 +217,8 @@ def _match_reason(department: str, title: str, industry_is_ops: bool) -> str:
         return "Likely HR or L&D decision maker"
     if department == "Operations" and industry_is_ops:
         return "Operations/site manager relevant for multilingual workforce training"
+    if department == "Operations":
+        return "Operations contact may be relevant if teams work internationally or across sites"
     if department == "Procurement":
         return "Procurement contact may influence training vendor decisions"
     if department == "General Management":
