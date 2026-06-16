@@ -24,8 +24,9 @@ Environment variables:
 import os
 from typing import Optional
 
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import Response
 from pydantic import BaseModel, model_validator
 
 import lusha_client as lc
@@ -34,8 +35,8 @@ import lusha_ranker  as lr
 # ---------------------------------------------------------------------------
 # CORS — two modes
 #
-# LUSHA_CORS_ALLOW_ALL=1  →  allow-all via origin regex.
-#   Use ONLY for local development with Lovable browser preview.
+# LUSHA_CORS_ALLOW_ALL=1  →  allow-all via origin regex + explicit OPTIONS
+#   handler.  Use ONLY for local development with Lovable browser preview.
 #   Never set this in production or on a public host.
 #
 # Default  →  explicit origin allowlist from LUSHA_ALLOWED_ORIGINS.
@@ -47,9 +48,9 @@ _cors_allow_all  = os.environ.get("LUSHA_CORS_ALLOW_ALL", "").strip() == "1"
 app = FastAPI(title="mYngle Lusha Contact API", version="1.0.0")
 
 if _cors_allow_all:
-    # allow_origin_regex=".*" + allow_credentials=False avoids the
-    # browser preflight 400 that occurs when Lovable's preview origin
-    # is not in the explicit allowlist.
+    # CORSMiddleware with regex handles most cases; the explicit OPTIONS route
+    # below catches browsers that send a preflight before the middleware can
+    # respond (e.g. Lovable preview with Access-Control-Request-Private-Network).
     app.add_middleware(
         CORSMiddleware,
         allow_origin_regex=".*",
@@ -70,6 +71,22 @@ else:
         allow_methods=["*"],
         allow_headers=["*"],
     )
+
+if _cors_allow_all:
+    @app.options("/{path:path}")
+    async def preflight_handler(request: Request, path: str) -> Response:
+        # local Lovable preview / browser preflight only
+        origin = request.headers.get("origin", "*")
+        return Response(
+            status_code=200,
+            headers={
+                "Access-Control-Allow-Origin":          origin,
+                "Access-Control-Allow-Methods":         "GET,POST,OPTIONS",
+                "Access-Control-Allow-Headers":         "*",
+                "Access-Control-Allow-Credentials":     "false",
+                "Access-Control-Allow-Private-Network": "true",
+            },
+        )
 
 # ---------------------------------------------------------------------------
 # Models
