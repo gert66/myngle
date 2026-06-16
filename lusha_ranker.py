@@ -13,44 +13,65 @@ from typing import Optional
 
 # ---------------------------------------------------------------------------
 # Keyword sets for department / title matching
+#
+# Two types of entries:
+#   - Short acronyms / abbreviations (2-5 chars, all-caps intent):
+#     matched with word-boundary regex so "COO" does NOT hit "coordinator".
+#   - Multi-word phrases or plain words:
+#     matched as substrings after lowercasing (safe because they are long
+#     enough to avoid false positives).
+#
+# Convention: put acronym-only tokens in _*_ACRONYMS sets;
+#             put phrase/word tokens in _*_PHRASES sets.
 # ---------------------------------------------------------------------------
 
-_HR_LD_KEYWORDS = {
-    "hr", "human resources", "people", "talent", "l&d", "learning",
+# HR / L&D
+_HR_ACRONYMS  = {"hr", "hrd", "hro", "chro", "l&d"}
+_HR_PHRASES   = {
+    "human resources", "people", "talent", "learning",
     "development", "training", "organisational", "organizational",
     "wellbeing", "employee experience", "culture", "onboarding",
-    "workforce", "hrd", "hro", "chro", "chief people",
+    "workforce", "chief people",
 }
 
-_OPS_KEYWORDS = {
-    "operations", "operational", "site", "plant", "facility", "facilities",
-    "safety", "hse", "logistics", "supply chain", "procurement", "warehouse",
-    "warehousing", "terminal", "port", "maritime", "aviation", "transport",
+# Operations
+_OPS_PHRASES  = {
+    "operations", "operational", "site manager", "site director",
+    "plant", "facility", "facilities", "safety", "hse",
+    "logistics", "supply chain", "warehouse", "warehousing",
+    "terminal", "port", "maritime", "aviation", "transport",
     "transportation", "manufacturing", "production", "industrial",
 }
 
-_PROCUREMENT_KEYWORDS = {
+# Procurement
+_PROC_PHRASES = {
     "procurement", "purchasing", "sourcing", "vendor", "category",
     "supply", "contracts",
 }
 
-_MGMT_KEYWORDS = {
-    "ceo", "coo", "managing director", "general manager", "country manager",
+# General Management — acronyms matched with word boundaries
+_MGMT_ACRONYMS = {"ceo", "coo", "cfo", "cto", "cmo"}
+_MGMT_PHRASES  = {
+    "managing director", "general manager", "country manager",
     "regional director", "executive director", "president",
+    "chief executive", "chief operating",
 }
 
-# Seniority boost — titles containing these words score higher
-_SENIOR_KEYWORDS = {
-    "chro", "chief people", "vp", "vice president", "svp", "evp",
-    "director", "head of", "head,", "lead", "manager", "senior manager",
-    "group", "global",
+# Seniority boost
+_SENIOR_ACRONYMS = {"vp", "svp", "evp", "chro"}
+_SENIOR_PHRASES  = {
+    "chief people", "vice president", "director", "head of",
+    "lead", "manager", "senior manager", "group manager",
+    "global manager",
 }
 
-# Titles that signal irrelevance (junior, support, clearly non-buyer)
-_PENALISE_KEYWORDS = {
-    "intern", "trainee", "assistant", "coordinator", "associate",
-    "junior", "jr.", "student", "graduate", "entry",
+# Penalise — plain words; long enough for safe substring match
+_PENALISE_PHRASES = {
+    "intern", "trainee", "assistant", "junior", "jr.", "student",
+    "graduate", "entry level", "entry-level",
 }
+# "coordinator" is penalised separately via exact word match to avoid
+# hitting e.g. "coordinating director" — checked in _penalty().
 
 # ---------------------------------------------------------------------------
 # Industry contexts where Ops/Safety contacts are high priority
@@ -64,28 +85,71 @@ _OPS_PRIORITY_INDUSTRIES = {
 }
 
 
-def _lower_set(text: str) -> set[str]:
-    """Return a set of lowercase words/phrases from a string."""
-    return {text.lower().strip()}
+# ---------------------------------------------------------------------------
+# Matching helpers
+# ---------------------------------------------------------------------------
+
+def _wb(token: str) -> re.Pattern:
+    """Compile a case-insensitive whole-word regex for a short token."""
+    return re.compile(r"(?<![a-z])" + re.escape(token) + r"(?![a-z])", re.IGNORECASE)
 
 
-def _matches_any(text: str, keyword_set: set[str]) -> bool:
-    text_lower = text.lower()
-    return any(kw in text_lower for kw in keyword_set)
+# Pre-compile word-boundary patterns for all acronym sets
+_HR_ACRONYM_RE   = [_wb(a) for a in _HR_ACRONYMS]
+_MGMT_ACRONYM_RE = [_wb(a) for a in _MGMT_ACRONYMS]
+_SENIOR_ACRO_RE  = [_wb(a) for a in _SENIOR_ACRONYMS]
 
+
+def _matches_acronyms(text: str, patterns: list) -> bool:
+    return any(p.search(text) for p in patterns)
+
+
+def _matches_phrases(text: str, phrase_set: set) -> bool:
+    tl = text.lower()
+    return any(ph in tl for ph in phrase_set)
+
+
+def _matches_hr(text: str) -> bool:
+    return _matches_acronyms(text, _HR_ACRONYM_RE) or _matches_phrases(text, _HR_PHRASES)
+
+
+def _matches_ops(text: str) -> bool:
+    return _matches_phrases(text, _OPS_PHRASES)
+
+
+def _matches_proc(text: str) -> bool:
+    return _matches_phrases(text, _PROC_PHRASES)
+
+
+def _matches_mgmt(text: str) -> bool:
+    return _matches_acronyms(text, _MGMT_ACRONYM_RE) or _matches_phrases(text, _MGMT_PHRASES)
+
+
+def _matches_senior(text: str) -> bool:
+    return _matches_acronyms(text, _SENIOR_ACRO_RE) or _matches_phrases(text, _SENIOR_PHRASES)
+
+
+def _is_coordinator(text: str) -> bool:
+    """True only when 'coordinator' appears as a distinct word."""
+    return bool(re.search(r"\bcoordinator\b", text, re.IGNORECASE))
+
+
+# ---------------------------------------------------------------------------
+# Classification and scoring
+# ---------------------------------------------------------------------------
 
 def _classify_department(title: str, dept: str) -> str:
     """Return a human-readable department label."""
-    combined = f"{title} {dept}".lower()
-    # Check HR/L&D first — takes priority over operations keywords
-    if _matches_any(combined, _HR_LD_KEYWORDS):
+    combined = f"{title} {dept}"
+    # Priority order: HR/L&D > Procurement > Operations > Management > Other
+    # (Procurement before Ops to avoid supply-chain overlap.)
+    if _matches_hr(combined):
         return "HR / L&D"
-    # Procurement before Operations to avoid "procurement" → "supply chain" overlap
-    if _matches_any(combined, _PROCUREMENT_KEYWORDS):
+    if _matches_proc(combined):
         return "Procurement"
-    if _matches_any(combined, _OPS_KEYWORDS):
+    if _matches_ops(combined):
         return "Operations"
-    if _matches_any(combined, _MGMT_KEYWORDS):
+    if _matches_mgmt(combined):
         return "General Management"
     return "Other"
 
@@ -100,30 +164,38 @@ def _base_score(department: str, industry_is_ops: bool) -> float:
         return 0.50
     if department == "General Management":
         return 0.45
-    if department == "Operations":  # non-ops industry
+    if department == "Operations":
         return 0.35
     return 0.20  # Other
 
 
 def _seniority_boost(title: str) -> float:
     """Return additional score 0.0–0.25 for seniority signals."""
-    title_lower = title.lower()
-    if any(kw in title_lower for kw in ("chro", "chief people", "vp", "vice president", "svp", "evp")):
+    tl = title.lower()
+    if _matches_acronyms(title, _SENIOR_ACRO_RE) or any(
+        ph in tl for ph in ("chief people", "vice president")
+    ):
         return 0.25
-    if any(kw in title_lower for kw in ("director", "head of", "head,")):
+    if any(ph in tl for ph in ("director", "head of")):
         return 0.18
-    if any(kw in title_lower for kw in ("lead", "manager", "senior manager", "group", "global")):
+    if any(ph in tl for ph in ("lead", "manager", "senior manager", "group", "global")):
         return 0.10
     return 0.0
 
 
 def _penalty(title: str, dept: str) -> float:
     """Return a negative adjustment for clearly irrelevant profiles."""
-    combined = f"{title} {dept}".lower()
-    # Always penalise unless clearly HR/L&D
-    if _matches_any(combined, _PENALISE_KEYWORDS):
-        if not _matches_any(combined, _HR_LD_KEYWORDS):
-            return -0.25
+    combined = f"{title} {dept}"
+    is_hr = _matches_hr(combined)
+
+    # Plain junior/intern/trainee words
+    if _matches_phrases(combined, _PENALISE_PHRASES) and not is_hr:
+        return -0.25
+
+    # "coordinator" as a whole word — penalise unless HR/L&D
+    if _is_coordinator(combined) and not is_hr:
+        return -0.25
+
     return 0.0
 
 
@@ -169,12 +241,12 @@ def rank_contacts_for_myngle(
         title = str(c.get("jobTitle") or "")
         dept  = str(c.get("department") or "")
 
-        department  = _classify_department(title, dept)
-        base        = _base_score(department, industry_is_ops)
-        boost       = _seniority_boost(title)
-        pen         = _penalty(title, dept)
-        score       = min(max(round(base + boost + pen, 2), 0.0), 1.0)
-        reason      = _match_reason(department, title, industry_is_ops)
+        department = _classify_department(title, dept)
+        base       = _base_score(department, industry_is_ops)
+        boost      = _seniority_boost(title)
+        pen        = _penalty(title, dept)
+        score      = min(max(round(base + boost + pen, 2), 0.0), 1.0)
+        reason     = _match_reason(department, title, industry_is_ops)
 
         ranked.append({
             **c,
