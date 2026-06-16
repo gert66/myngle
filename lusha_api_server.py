@@ -28,6 +28,8 @@ from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import Response
 from pydantic import BaseModel, model_validator
+from starlette.middleware.base import BaseHTTPMiddleware
+from starlette.types import ASGIApp
 
 import lusha_client as lc
 import lusha_ranker  as lr
@@ -35,8 +37,8 @@ import lusha_ranker  as lr
 # ---------------------------------------------------------------------------
 # CORS — two modes
 #
-# LUSHA_CORS_ALLOW_ALL=1  →  allow-all via origin regex + explicit OPTIONS
-#   handler.  Use ONLY for local development with Lovable browser preview.
+# LUSHA_CORS_ALLOW_ALL=1  →  custom allow-all middleware bypasses
+#   CORSMiddleware entirely.  For local Lovable browser preview ONLY.
 #   Never set this in production or on a public host.
 #
 # Default  →  explicit origin allowlist from LUSHA_ALLOWED_ORIGINS.
@@ -48,16 +50,29 @@ _cors_allow_all  = os.environ.get("LUSHA_CORS_ALLOW_ALL", "").strip() == "1"
 app = FastAPI(title="mYngle Lusha Contact API", version="1.0.0")
 
 if _cors_allow_all:
-    # CORSMiddleware with regex handles most cases; the explicit OPTIONS route
-    # below catches browsers that send a preflight before the middleware can
-    # respond (e.g. Lovable preview with Access-Control-Request-Private-Network).
-    app.add_middleware(
-        CORSMiddleware,
-        allow_origin_regex=".*",
-        allow_credentials=False,
-        allow_methods=["*"],
-        allow_headers=["*"],
-    )
+    # Local Lovable preview only — do NOT use in production.
+    # A single custom middleware handles all CORS so CORSMiddleware cannot
+    # intercept preflights and return conflicting 400 responses.
+    _CORS_HEADERS = {
+        "Access-Control-Allow-Methods":         "GET,POST,OPTIONS",
+        "Access-Control-Allow-Headers":         "*",
+        "Access-Control-Allow-Credentials":     "false",
+        "Access-Control-Allow-Private-Network": "true",
+    }
+
+    class _AllowAllCORS(BaseHTTPMiddleware):
+        async def dispatch(self, request: Request, call_next):
+            origin = request.headers.get("origin", "*")
+            cors   = {**_CORS_HEADERS, "Access-Control-Allow-Origin": origin}
+            if request.method == "OPTIONS":
+                return Response("OK", status_code=200, headers=cors)
+            response = await call_next(request)
+            for k, v in cors.items():
+                response.headers[k] = v
+            return response
+
+    app.add_middleware(_AllowAllCORS)
+
 else:
     _allowed_origins = [
         o.strip()
@@ -71,22 +86,6 @@ else:
         allow_methods=["*"],
         allow_headers=["*"],
     )
-
-if _cors_allow_all:
-    @app.options("/{path:path}")
-    async def preflight_handler(request: Request, path: str) -> Response:
-        # local Lovable preview / browser preflight only
-        origin = request.headers.get("origin", "*")
-        return Response(
-            status_code=200,
-            headers={
-                "Access-Control-Allow-Origin":          origin,
-                "Access-Control-Allow-Methods":         "GET,POST,OPTIONS",
-                "Access-Control-Allow-Headers":         "*",
-                "Access-Control-Allow-Credentials":     "false",
-                "Access-Control-Allow-Private-Network": "true",
-            },
-        )
 
 # ---------------------------------------------------------------------------
 # Models
