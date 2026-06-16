@@ -45,9 +45,8 @@ DEFAULT_MAX    = 4
 HARD_CAP       = 10
 
 CAREERS_PATHS = [
-    "/careers", "/jobs", "/vacancies", "/career",
-    "/lavora-con-noi", "/lavora-con-noi/",
-    "/posizioni-aperte", "/carriere",
+    "/careers", "/jobs", "/career",
+    "/lavora-con-noi", "/posizioni-aperte",
 ]
 
 SIGNAL_SUMMARY_COLS = [
@@ -217,6 +216,25 @@ def find_linkedin_url_in_results(grouped: dict[str, list[dict]]) -> str:
 # ---------------------------------------------------------------------------
 
 
+# Patterns that indicate a login/auth wall in crawled page text
+_LOGIN_WALL_PATTERNS = [
+    r"please[,\s]+log\s*in",
+    r"user\s*name\s*password",
+    r"the username and/or password you entered is invalid",
+    r"i forgot my password",
+    r"\blogin\b",
+    r"sign\s+in\s+to\s+continue",
+    r"you must be logged in",
+]
+_LOGIN_WALL_RE = re.compile(
+    "|".join(_LOGIN_WALL_PATTERNS), re.IGNORECASE
+)
+
+
+def _is_login_wall(text: str) -> bool:
+    return bool(_LOGIN_WALL_RE.search(text))
+
+
 def firecrawl_scrape(url: str, api_key: str) -> tuple[str, str]:
     """
     Scrape a single URL with Firecrawl.
@@ -242,26 +260,40 @@ def firecrawl_scrape(url: str, api_key: str) -> tuple[str, str]:
         return "", str(exc)
 
 
-def crawl_company_website(company_url: str, firecrawl_key: str) -> list[dict]:
+def crawl_company_website(
+    company_url: str, firecrawl_key: str, homepage_only: bool = False
+) -> list[dict]:
     """
-    Crawl company homepage + standard careers paths.
+    Crawl company homepage + (optionally) standard careers paths.
     Returns list of {url_attempted, status, extracted_text_preview, error}.
+    status is 'ok', 'error', or 'login_wall'.
+    Login-wall pages are flagged and excluded from the evidence text sent to Claude.
     """
     crawls: list[dict] = []
     if not company_url or not firecrawl_key:
         return crawls
 
     urls_to_try = [company_url.rstrip("/")]
-    base = base_url(company_url)
-    for path in CAREERS_PATHS:
-        urls_to_try.append(base + path)
+    if not homepage_only:
+        base = base_url(company_url)
+        for path in CAREERS_PATHS:
+            urls_to_try.append(base + path)
 
     for url in urls_to_try:
         text, err = firecrawl_scrape(url, firecrawl_key)
+        if text and _is_login_wall(text):
+            status = "login_wall"
+            preview = text[:500]
+        elif text:
+            status = "ok"
+            preview = text[:500]
+        else:
+            status = "error"
+            preview = ""
         crawls.append({
             "url_attempted":          url,
-            "status":                 "ok" if text else "error",
-            "extracted_text_preview": text[:500] if text else "",
+            "status":                 status,
+            "extracted_text_preview": preview,
             "error":                  err,
         })
         time.sleep(0.2)
@@ -269,12 +301,19 @@ def crawl_company_website(company_url: str, firecrawl_key: str) -> list[dict]:
 
 
 def crawls_to_text(crawls: list[dict]) -> str:
+    """
+    Serialise crawl results for the Claude prompt.
+    Login-wall pages are noted as blocked — not included as evidence.
+    """
     parts = []
     for c in crawls:
-        parts.append(f"URL: {c['url_attempted']}  [{c['status']}]")
-        if c.get("error"):
+        status = c.get("status", "")
+        parts.append(f"URL: {c['url_attempted']}  [{status}]")
+        if status == "login_wall":
+            parts.append("  [LOGIN WALL — page is gated, not usable as hiring/growth evidence]")
+        elif c.get("error"):
             parts.append(f"  Error: {c['error']}")
-        if c.get("extracted_text_preview"):
+        elif c.get("extracted_text_preview"):
             parts.append(c["extracted_text_preview"])
         parts.append("")
     return "\n".join(parts)
@@ -302,6 +341,14 @@ IMPORTANT RULES:
 - "linkedin_url_found" should be a linkedin.com/company URL from the search results, or "".
 - hiring_signal / growth_signal must be one of: Yes / Weak / No / Unknown
 - confidence must be one of: High / Medium / Low
+- Do NOT treat login-wall pages (marked [LOGIN WALL]) as evidence of hiring or growth.
+- Do NOT infer current hiring from LinkedIn snippets that have no visible date. \
+  If a LinkedIn snippet has no date, note "timing unclear" in the evidence field.
+- Keep confidence LOW when all evidence comes only from search snippets \
+  with no corroborating website text.
+- suggested_call_angle must be phrased as a practical cold-caller opening sentence \
+  (e.g. "I saw you are expanding into Germany — we help teams like yours get up to \
+  speed in Business English quickly."). Do NOT write a general business summary.
 
 TODAY: {today}
 COMPANY NAME: {name}
@@ -414,6 +461,7 @@ def process_company(
     anthropic_key: str,
     firecrawl_key: str,
     force_fresh: bool = False,
+    homepage_only: bool = False,
 ) -> tuple[dict, list[dict], list[dict]]:
     """
     Process one company.  Returns:
@@ -462,7 +510,7 @@ def process_company(
     raw_crawls: list[dict] = []
     website_text = ""
     if firecrawl_key and url:
-        crawls = crawl_company_website(url, firecrawl_key)
+        crawls = crawl_company_website(url, firecrawl_key, homepage_only=homepage_only)
         for c in crawls:
             raw_crawls.append({"company_name": name, **c})
         website_text = crawls_to_text(crawls)
@@ -587,6 +635,11 @@ def build_excel(
 
     # ── Sheet 4: Cold Caller Input ───────────────────────────────────────────
     ws4 = wb.create_sheet("Cold Caller Input")
+
+    def _trim(text: str, max_len: int) -> str:
+        text = str(text or "").strip()
+        return text[:max_len] + "…" if len(text) > max_len else text
+
     cold_rows = []
     for s in signals:
         hiring_ev  = s.get("hiring_evidence", "")
@@ -600,16 +653,16 @@ def build_excel(
             top_signal = f"Growth: {s.get('employee_growth_hint', '')}".strip()
         why_now = s.get("recent_activity_hint", "") or s.get("linkedin_signal_summary", "")
         cold_rows.append({
-            "company_name":      s.get("company_name", ""),
-            "company_url":       s.get("company_url", ""),
-            "top_signal":        top_signal,
-            "why_now":           why_now,
-            "suggested_call_angle": s.get("suggested_call_angle", ""),
-            "evidence_1":        hiring_ev,
-            "evidence_1_url":    hiring_url,
-            "evidence_2":        growth_ev,
-            "evidence_2_url":    growth_url,
-            "confidence":        s.get("confidence", ""),
+            "company_name":         s.get("company_name", ""),
+            "company_url":          s.get("company_url", ""),
+            "top_signal":           _trim(top_signal, 180),
+            "why_now":              _trim(why_now, 300),
+            "suggested_call_angle": _trim(s.get("suggested_call_angle", ""), 350),
+            "evidence_1":           _trim(hiring_ev, 350),
+            "evidence_1_url":       hiring_url,
+            "evidence_2":           _trim(growth_ev, 350),
+            "evidence_2_url":       growth_url,
+            "confidence":           s.get("confidence", ""),
         })
     if cold_rows:
         df4 = pd.DataFrame(cold_rows)[COLD_CALLER_COLS]
@@ -703,8 +756,11 @@ def main() -> None:
         st.sidebar.caption("Firecrawl: niet ingesteld — website crawl overgeslagen.")
 
     st.sidebar.markdown("---")
-    max_rows    = st.sidebar.number_input("Max. rijen", min_value=1, max_value=HARD_CAP, value=DEFAULT_MAX)
-    force_fresh = st.sidebar.checkbox("Cache negeren (force fresh)", value=False)
+    max_rows      = st.sidebar.number_input("Max. rijen", min_value=1, max_value=HARD_CAP, value=DEFAULT_MAX)
+    force_fresh   = st.sidebar.checkbox("Cache negeren (force fresh)", value=False)
+    homepage_only = st.sidebar.checkbox("Alleen hoofdwebsite crawlen", value=False)
+    if homepage_only:
+        st.sidebar.caption("Career-URL varianten worden overgeslagen.")
 
     # ── Input mode ───────────────────────────────────────────────────────────
     st.markdown("### Bedrijfsinput")
@@ -782,6 +838,7 @@ def main() -> None:
                 anthropic_key=anthropic_key,
                 firecrawl_key=firecrawl_key,
                 force_fresh=force_fresh,
+                homepage_only=homepage_only,
             )
             all_signals.append(signal)
             all_search.extend(search_rows)
