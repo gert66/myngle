@@ -9,10 +9,8 @@ numpy
 matplotlib
 plotly
 scikit-learn
-streamlit
-pandas
-numpy
-matplotlib
-scikit-learn
 seaborn
 firecrawl-py
+fastapi
+uvicorn[standard]
+python-dotenv
