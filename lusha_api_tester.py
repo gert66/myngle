@@ -256,10 +256,17 @@ def section_company_table(data: dict) -> None:
     )
 
 
-def section_contact_table(data: dict) -> None:
+def section_contact_table(data: dict, max_contacts: int | None = None) -> None:
     """
     Extract contact/decision-maker records from a Lusha V3 response.
-    Lusha V3 returns contacts under 'results'; per-result errors also surfaced.
+
+    Decision-makers response shape:
+      { "results": [ { "clientReferenceId", "companyId", "domain"?, "decisionMakers": [...] } ] }
+
+    Contacts/enrich response shape:
+      { "results": [ { "data": {...contact...} } ] }
+
+    max_contacts: if set, limits how many contacts are shown per company result (client-side).
     """
     contacts: list[dict] = []
     errors_per_result: list[str] = []
@@ -267,19 +274,43 @@ def section_contact_table(data: dict) -> None:
     results = data.get("results")
     if isinstance(results, list):
         for item in results:
-            if isinstance(item, dict):
-                if item.get("error"):
-                    errors_per_result.append(str(item["error"]))
-                contact_data = item.get("data") or item
-                if isinstance(contact_data, dict) and contact_data:
-                    contacts.append(contact_data)
+            if not isinstance(item, dict):
+                continue
 
-    # Fallbacks
+            # Surface per-result errors
+            if item.get("error"):
+                errors_per_result.append(str(item["error"]))
+
+            # Decision-makers shape: result contains 'decisionMakers' list
+            dm_list = item.get("decisionMakers")
+            if isinstance(dm_list, list):
+                parent_meta = {
+                    k: item[k]
+                    for k in ("clientReferenceId", "companyId", "domain")
+                    if k in item
+                }
+                entries = dm_list[:max_contacts] if max_contacts is not None else dm_list
+                for dm in entries:
+                    if isinstance(dm, dict):
+                        contacts.append({**parent_meta, **dm})
+                continue
+
+            # Contacts/enrich shape: result contains 'data' dict
+            contact_data = item.get("data")
+            if isinstance(contact_data, dict) and contact_data:
+                contacts.append(contact_data)
+                continue
+
+            # Fallback: result itself is the contact record (skip meta-only items)
+            if any(k in item for k in ("firstName", "lastName", "name", "id")):
+                contacts.append(item)
+
+    # Legacy fallback for non-results response shapes
     if not contacts:
         for key in ("contacts", "decisionMakers", "decision_makers", "data", "result"):
             val = data.get(key)
             if isinstance(val, list) and val:
-                contacts = val
+                contacts = val[:max_contacts] if max_contacts is not None else val
                 break
             if isinstance(val, dict) and val:
                 contacts = [val]
@@ -297,10 +328,12 @@ def section_contact_table(data: dict) -> None:
     for c in contacts:
         flat = flatten_dict(c)
         revealed.append(flat)
-        # Surface null fields that indicate available-but-not-revealed data
         for field in ("emails", "phones", "email", "phone", "phoneNumbers", "emailAddresses"):
             if field in c and c[field] is None:
                 not_revealed_fields.append(field)
+
+    if max_contacts is not None:
+        st.caption(f"Max. {max_contacts} contacten per bedrijf toegepast (client-side).")
 
     df = pd.DataFrame(revealed)
     st.subheader("Contacten / Decision Makers")
@@ -383,17 +416,18 @@ def call_decision_makers(api_key: str, domain: str, company_lusha_id: str, max_c
     """
     POST /v3/contacts/decision-makers
     Returns free contact previews (no email/phone reveal, no credits).
-    Identify the company by domain OR Lusha company ID.
-    [LUSHA SCHEMA] supply either 'domain' or 'companyId' (not both required).
+    [LUSHA SCHEMA] top-level key must be 'companies' (array), not 'company'.
+    Each entry contains exactly one identifier: 'id' (Lusha ID) or 'domain'.
+    Lusha V3 decision-makers does not accept top-level 'company' or 'contacts.limit'.
+    max_contacts is applied client-side after the response.
     """
-    company: dict = {}
+    company_entry: dict = {"clientReferenceId": "manual-test-1"}
     if company_lusha_id:
-        company["id"] = company_lusha_id  # [LUSHA SCHEMA]
+        company_entry["id"] = company_lusha_id.strip()  # prefer Lusha ID over domain
     elif domain:
-        company["domain"] = domain  # [LUSHA SCHEMA]
+        company_entry["domain"] = domain.strip()
     payload = {
-        "company": company,
-        "contacts": {"limit": max_contacts},  # [LUSHA SCHEMA] - field name may differ
+        "companies": [company_entry],  # [LUSHA SCHEMA] array, not singular 'company'
     }
     return lusha_request("POST", "/v3/contacts/decision-makers", api_key, payload=payload)
 
@@ -578,14 +612,32 @@ def main() -> None:
             st.error("Vul een domein of Lusha company ID in voor decision makers.")
         else:
             st.subheader("Decision Makers  —  POST /v3/contacts/decision-makers")
-            st.info("Dit endpoint retourneert gratis contact-previews (geen reveal van e-mail/telefoon).")
+            st.info(
+                "Dit endpoint accepteert een companies-array met domain of Lusha company ID. "
+                "Max contacts wordt lokaal toegepast, niet meegestuurd naar Lusha."
+            )
+
+            # Debug: show what will be sent before the call
+            identifier_type = "id" if company_lusha_id else "domain"
+            identifier_value = company_lusha_id if company_lusha_id else domain
+            with st.expander("Debug: payload preview (geen API-sleutel)", expanded=False):
+                st.markdown(f"- Genormaliseerd domein: `{domain or '—'}`")
+                st.markdown(f"- Lusha company ID aanwezig: `{'ja' if company_lusha_id else 'nee'}`")
+                st.markdown(f"- Identifier gebruikt: **{identifier_type}** = `{identifier_value}`")
+                preview_payload = {
+                    "companies": [
+                        {"clientReferenceId": "manual-test-1", identifier_type: identifier_value}
+                    ]
+                }
+                st.json(preview_payload)
+
             with st.spinner("Bezig…"):
                 status, data, headers = call_decision_makers(
                     api_key, domain, company_lusha_id, int(max_contacts)
                 )
             section_raw_output(status, data, headers)
             if isinstance(data, dict):
-                section_contact_table(data)
+                section_contact_table(data, max_contacts=int(max_contacts))
 
     # ── Execute: company enrich by ID ─────────────────────────────────────────
     if run_enrich_companies:
