@@ -5,6 +5,7 @@ rem Generic runner for input_cleaner_register_edition.py
 rem Usage: run_cleaner_queue_generic.bat <queue> "<batches>" <dry|test|full> [max_rows]
 rem Examples:
 rem   run_cleaner_queue_generic.bat Italy50 "1" dry
+rem   run_cleaner_queue_generic.bat Italy50 "01" dry
 rem   run_cleaner_queue_generic.bat Italy50 "1" test 50
 rem   run_cleaner_queue_generic.bat Italy50 "1-7" full
 rem Aliases: 0=Italy50, 1=Italy100, 2=Italy200, 3=Germany
@@ -85,11 +86,31 @@ exit /b %ERRORLEVEL%
 
 :run_batch
 set "N=%~1"
+set "ORIGINAL_N=%N%"
+
+rem Normalize zero-padded batch numbers, so "01" matches files named "_1_R...".
+:trim_leading_zeroes
+if "!N:~0,1!"=="0" (
+  set "N=!N:~1!"
+  if not defined N set "N=0"
+  goto trim_leading_zeroes
+)
+
 set "FOUND="
-for %%F in ("%RAW_DIR%\%QUEUE%_%N%_R*.xlsx") do if exist "%%~fF" set "FOUND=%%~fF"
+for %%F in ("%RAW_DIR%\%QUEUE%_!N!_R*.xlsx") do if exist "%%~fF" set "FOUND=%%~fF"
+
+rem Also support raw files that use two-digit batch numbers.
 if not defined FOUND (
-  echo ERROR: no raw file found for batch %N%
-  echo Expected pattern: %RAW_DIR%\%QUEUE%_%N%_R*.xlsx
+  set "PAD2=!N!"
+  if !N! LSS 10 set "PAD2=0!N!"
+  for %%F in ("%RAW_DIR%\%QUEUE%_!PAD2!_R*.xlsx") do if exist "%%~fF" set "FOUND=%%~fF"
+)
+
+if not defined FOUND (
+  echo ERROR: no raw file found for batch %ORIGINAL_N% ^(normalized: !N!^)
+  echo Tried patterns:
+  echo   %RAW_DIR%\%QUEUE%_!N!_R*.xlsx
+  if defined PAD2 echo   %RAW_DIR%\%QUEUE%_!PAD2!_R*.xlsx
   exit /b 1
 )
 call :run_file "%FOUND%"
@@ -118,6 +139,7 @@ exit /b %RC%
 echo Usage: run_cleaner_queue_generic.bat ^<queue^> "^<batches^>" ^<dry^|test^|full^> [max_rows]
 echo Examples:
 echo   run_cleaner_queue_generic.bat Italy50 "1" dry
+echo   run_cleaner_queue_generic.bat Italy50 "01" dry
 echo   run_cleaner_queue_generic.bat Italy50 "1" test 50
 echo   run_cleaner_queue_generic.bat Italy50 "1-7" full
 echo   run_cleaner_queue_generic.bat 0 "all" full
