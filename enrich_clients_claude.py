@@ -8368,6 +8368,35 @@ def _validate_type1_type2_pipeline() -> None:
         for bad in ("enriched_results", "_sg_", "_hq_", "lusha", "lucia"):
             chk(f"  no '{bad}' in '{prefix}...'", bad not in fname.lower())
 
+    # ── build_enriched_output_filename ──
+    print("\nbuild_enriched_output_filename")
+    _fixed_stamp = "20260617_133905"
+    _fn_cases = [
+        (
+            "Italy200_01_R0001_0500_cleaned_20260613_1301.xlsx",
+            "Italy200_01_R0001_0500_enriched_20260617_133905.xlsx",
+        ),
+        (
+            "Italy200_15_R7001_7270_cleaned_20260613_2309.xlsx",
+            "Italy200_15_R7001_7270_enriched_20260617_133905.xlsx",
+        ),
+        (
+            "Germany_1_R0001_0500_cleaned_20260613_1613.xlsx",
+            "Germany_1_R0001_0500_enriched_20260617_133905.xlsx",
+        ),
+        (
+            "some_input.xlsx",
+            "some_input_enriched_20260617_133905.xlsx",
+        ),
+    ]
+    for _inp, _expected in _fn_cases:
+        _got = build_enriched_output_filename(_inp, run_stamp=_fixed_stamp)
+        chk(
+            f"  {_inp} -> {_expected}",
+            _got == _expected,
+            f"got {_got!r}",
+        )
+
     # ── Input Cleaner output detection regression tests (Part H) ─────────────
     print("\nInput Cleaner output detection")
 
@@ -8947,6 +8976,39 @@ def build_cli_output_filename(input_path: str, suffix: str = "lead_prioritized")
     return f"{stem}_{suffix}_{now}.xlsx"
 
 
+def build_enriched_output_filename(
+    input_path: "str | Path | None",
+    run_stamp: "str | None" = None,
+) -> str:
+    """
+    Derive enricher output filename from the input (cleaned) filename.
+
+    Italy200_01_R0001_0500_cleaned_20260613_1301.xlsx
+    -> Italy200_01_R0001_0500_enriched_<run_stamp>.xlsx
+
+    Rules:
+    - Strip '_cleaned_YYYYMMDD_HHMMSS' (or _HHMM) suffix to get the batch prefix.
+    - Append '_enriched_<run_stamp>.xlsx'.
+    - If input is None/empty or contains no '_cleaned_' tag, fall back to:
+      '<stem>_enriched_<run_stamp>.xlsx'.
+    - run_stamp defaults to current UTC time formatted as YYYYMMDD_HHMMSS.
+    """
+    import re as _re
+    from datetime import datetime as _dt
+
+    if run_stamp is None:
+        run_stamp = _dt.utcnow().strftime("%Y%m%d_%H%M%S")
+
+    if not input_path:
+        return f"enriched_{run_stamp}.xlsx"
+
+    stem = Path(str(input_path)).stem
+    batch_prefix = _re.sub(
+        r"_cleaned_\d{8}_?\d{4,6}$", "", stem, flags=_re.IGNORECASE
+    )
+    return f"{batch_prefix}_enriched_{run_stamp}.xlsx"
+
+
 def run_cli() -> None:
     """Non-Streamlit batch entry point."""
     import argparse
@@ -9422,7 +9484,7 @@ def run_cli() -> None:
     if args.output_name:
         _out_fname = f"{args.output_name}.xlsx"
     else:
-        _out_fname = build_cli_output_filename(str(input_path))
+        _out_fname = build_enriched_output_filename(str(input_path))
     xl_path = out_dir / _out_fname
     print(f"[enricher] Output filename:  {_out_fname}", flush=True)
     print(f"[enricher] Output path:      {xl_path}", flush=True)
@@ -11215,7 +11277,7 @@ def run_streamlit_app() -> None:
             _log_fname    = "elm_fetch_log.csv"
         else:
             _run_tag      = build_run_tag()
-            _fname_prefix = f"enrichedResults_{ts()}"
+            _fname_prefix = Path(build_enriched_output_filename(ss("file_name", ""))).stem
             _log_fname    = f"processing_log_{_run_tag}_{ts()}.csv"
         _xl_help      = (
             "All original columns + keyword counts + normalized scores."
@@ -11543,7 +11605,7 @@ def run_streamlit_app() -> None:
             _fname_dl  = f"elm_results_{ts()}.xlsx"
             _dl_bytes  = df_to_excel_bytes(df_enriched)
         else:
-            _fname_dl  = f"enrichedResults_{ts()}.xlsx"
+            _fname_dl  = build_enriched_output_filename(ss("file_name", ""))
             _dl_bytes  = build_rich_excel_bytes(
                 df_enriched,
                 name_col=ss("_name_col"),
