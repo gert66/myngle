@@ -2285,6 +2285,157 @@ def _score_candidate(
     return round(score, 4)
 
 
+# ---------------------------------------------------------------------------
+# Top Serper Override
+#
+# When the #1 Google/Serper result passes all official-site guardrails and
+# shows a strong name match, we accept it directly — before the multi-
+# candidate scoring chooses a winner.  This prevents the normal scoring from
+# accidentally preferring a lower-ranked result when the answer is obvious.
+#
+# The override is deliberately conservative:
+#   • All existing blacklists are applied first (generic, hosted, blocked).
+#   • Deep profile/directory pages are rejected by URL-path check.
+#   • For ambiguous short brands, location or official signal is required.
+#   • If ANY guardrail fails, override is skipped and normal scoring runs.
+# ---------------------------------------------------------------------------
+
+# Minimum brand overlap to consider a top-hit at all for override.
+_TOPSER_MIN_BRAND_OVERLAP = 0.35
+
+# Path patterns that identify a deep profile / directory / employer page —
+# these disqualify a URL from being accepted as the official company site.
+_TOPSER_DEEP_PATH_RE = re.compile(
+    r"/in/|/company/|/companies/|/aziende?/|/scheda[_-]|/profile[_-]|"
+    r"/profil[eo]/|/employer/|/org/|/bilanci[_-]|/dati[_-]|/register[_-]|"
+    r"/imprese?/|/jobs?/|/lavoro/|/offerte[_-]lavoro|/search\?|/results\?",
+    re.IGNORECASE,
+)
+
+
+def _top_serper_override_candidate(
+    first_result: dict,
+    query: str,
+    name_variants: dict,
+    email_domain: str,
+    city: str,
+    province: str,
+    country_config: "CountryConfig | None" = None,
+) -> tuple[dict | None, str]:
+    """
+    Inspect the first organic Serper result and decide whether it is safe to
+    accept directly as the official company domain, bypassing multi-query scoring.
+
+    Returns:
+        (override_evidence_dict, skip_reason)
+
+        override_evidence_dict — filled when override is approved; None when rejected.
+        skip_reason            — human-readable explanation (empty string on approval).
+
+    Guardrail checklist (all must pass):
+      G1  Domain extractable.
+      G2  Domain not generic / blacklisted.
+      G3  Domain not a free hosted platform (altervista, wixsite, …).
+      G4  Domain not discovery-blocked (media, social, streaming, …).
+      G5  Domain not classified as directory/government/religious/academic.
+      G6  URL is not a deep profile/directory page.
+      G7  Brand overlap ≥ _TOPSER_MIN_BRAND_OVERLAP  OR  email domain matches.
+      G8  For ambiguous brands: must also have location match OR official signal
+          OR preferred TLD (e.g. .it / .de)  OR email domain match.
+    """
+    cfg         = country_config or IT_CONFIG
+    url         = first_result.get("link", "")
+    title       = first_result.get("title", "")
+    snippet     = first_result.get("snippet", "")
+    domain      = _extract_domain(url)
+
+    # G1
+    if not domain:
+        return None, "no_extractable_domain"
+
+    # G2
+    if is_generic(domain, country_config=cfg):
+        return None, f"generic/blacklisted: {domain}"
+
+    # G3
+    if is_hosted_platform(domain):
+        return None, f"hosted_platform: {domain}"
+
+    # G4
+    if is_discovery_blocked(domain):
+        return None, f"discovery_blocked: {domain}"
+
+    # G5
+    cat = classify_domain(domain, title, snippet)
+    if cat:
+        return None, f"category_rejected: {cat}"
+
+    # G6 — deep profile or directory URL
+    if _TOPSER_DEEP_PATH_RE.search(url):
+        return None, f"deep_profile_url: {url[:120]}"
+
+    # G7 — brand overlap
+    b_ov       = brand_overlap_variants(name_variants, domain)
+    email_hit  = bool(email_domain and domain == email_domain)
+    if b_ov < _TOPSER_MIN_BRAND_OVERLAP and not email_hit:
+        return None, (
+            f"brand_overlap_too_low ({b_ov:.2f} < {_TOPSER_MIN_BRAND_OVERLAP})"
+        )
+
+    # G8 — ambiguous brand needs corroboration
+    brand     = name_variants.get("brand", "")
+    ambiguous = _brand_is_ambiguous(brand)
+    if ambiguous:
+        combined  = (title + " " + snippet).lower()
+        loc_ok    = location_in_text(combined, city, province)
+        offic_ok  = has_official_signal(combined)
+        pref_tlds = tuple(cfg.preferred_tlds) if cfg.preferred_tlds else (".it",)
+        tld_ok    = any(domain.endswith(t) for t in pref_tlds)
+        if not (loc_ok or offic_ok or tld_ok or email_hit):
+            return None, (
+                f"ambiguous_brand_no_corroboration "
+                f"(brand={brand!r}, loc={loc_ok}, official={offic_ok}, "
+                f"tld={tld_ok}, email={email_hit})"
+            )
+
+    # All guardrails passed — build confidence
+    combined = (title + " " + snippet).lower()
+    loc_ok   = location_in_text(combined, city, province)
+    offic_ok = has_official_signal(combined)
+
+    if b_ov >= 0.70 and (loc_ok or offic_ok or not ambiguous):
+        confidence      = 0.82
+        confidence_str  = "High"
+    elif b_ov >= 0.50 or email_hit:
+        confidence      = 0.68
+        confidence_str  = "Medium"
+    else:
+        confidence      = 0.55
+        confidence_str  = "Medium"
+
+    ev = {
+        "query":                query,
+        "title":                title[:120],
+        "url":                  url,
+        "snippet":              snippet[:200],
+        "domain":               domain,
+        "score":                round(confidence, 3),
+        "brand_overlap":        round(b_ov, 3),
+        "full_overlap":         round(token_overlap(name_variants["full"], domain), 3),
+        "location_match":       loc_ok,
+        "email_match":          email_hit,
+        "official_signal":      offic_ok,
+        "used":                 True,
+        "candidate_url":        url,
+        "candidate_type":       _classify_candidate_type(url, domain, title, snippet),
+        "candidate_source":     "top_serper_override",
+        "evidence_source_url":  url,
+        # Carry override metadata so downstream diagnostics can explain the decision
+        "_override_confidence_str": confidence_str,
+    }
+    return ev, ""
+
+
 def search_official_domain_register(
     company_name: str,
     city: str,
@@ -2344,6 +2495,64 @@ def search_official_domain_register(
                 "score": "",
             })
             continue
+
+        # ── Top Serper Override — first result of first query only ────────────
+        # Before scoring all candidates normally, check whether the #1 Google
+        # result already passes all official-site guardrails.  If it does, we
+        # accept it directly, record it in evidence, and return early.  This
+        # prevents the scoring algorithm from accidentally preferring a lower-
+        # ranked hit when the answer is obvious (e.g. the company's own homepage
+        # ranks #1 but scores slightly below a directory that happens to contain
+        # the brand name).
+        # Override only runs once: on the very first Serper query.
+        if query == queries[0]:
+            _ov_ev, _ov_skip = _top_serper_override_candidate(
+                results[0], query, name_variants,
+                email_domain, city, province,
+                country_config=cfg,
+            )
+            if _ov_ev is not None:
+                # Guardrails passed — use this domain directly.
+                _ov_domain     = _ov_ev["domain"]
+                _ov_conf_str   = _ov_ev.pop("_override_confidence_str", "High")
+                _ov_conf       = _ov_ev["score"]
+                _ov_reason     = (
+                    f"Top Serper result accepted: passed official-site guardrails "
+                    f"[brand_overlap={_ov_ev['brand_overlap']:.2f}, confidence={_ov_conf_str}]"
+                )
+                evidence.append(_ov_ev)
+                # Also record all remaining results from this query as skipped
+                # so Raw Search Evidence remains complete.
+                for _rank2, _item2 in enumerate(results[1:], start=1):
+                    _u2 = _item2.get("link", "")
+                    _d2 = _extract_domain(_u2)
+                    evidence.append({
+                        "query": query, "title": _item2.get("title", "")[:80],
+                        "url": _u2, "snippet": _item2.get("snippet", "")[:200],
+                        "domain": _d2 or "", "used": False,
+                        "skip_reason": "skipped_after_top_serper_override",
+                        "score": "",
+                    })
+                return (
+                    _ov_domain, _ov_conf, _ov_reason,
+                    evidence, query, name_variants.get("brand", ""),
+                    [_ov_domain],
+                    rejection_counts,
+                )
+            else:
+                # Guardrails failed — record why and continue with normal scoring.
+                _ov_url  = results[0].get("link", "")
+                _ov_dom  = _extract_domain(_ov_url) or ""
+                evidence.append({
+                    "query": query, "title": results[0].get("title", "")[:80],
+                    "url": _ov_url, "snippet": results[0].get("snippet", "")[:200],
+                    "domain": _ov_dom, "used": False,
+                    "skip_reason": f"top_serper_override_rejected: {_ov_skip}",
+                    "rejection_category": "top_serper_override_rejected",
+                    "score": "",
+                })
+        # ── End Top Serper Override ───────────────────────────────────────────
+
         for rank, item in enumerate(results):
             url     = item.get("link", "")
             title   = item.get("title", "")
@@ -2853,7 +3062,11 @@ def validate_register_row(
                     domain_confidence=_conf_label(conf),
                     domain_reason=f"Register website ({norm_website}) is a directory. {reason}",
                     manual_review_needed=(conf < 0.70),
-                    website_discovery_method="serper_found_after_blacklisted_website",
+                    website_discovery_method=(
+                        "top_serper_override"
+                        if "Top Serper result accepted" in reason
+                        else "serper_found_after_blacklisted_website"
+                    ),
                 )
                 return result, _all_raw_evidence
         result.update(
@@ -2952,7 +3165,11 @@ def validate_register_row(
                 domain_confidence=_conf_label(conf),
                 domain_reason=f"Website missing in register. {reason}",
                 manual_review_needed=(conf < 0.70),
-                website_discovery_method="serper_search",
+                website_discovery_method=(
+                    "top_serper_override"
+                    if "Top Serper result accepted" in reason
+                    else "serper_search"
+                ),
             )
         elif suggested and conf >= 0.15:
             # Plausible candidate — output with manual review flag instead of blank
