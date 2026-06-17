@@ -104,6 +104,7 @@ _GENERIC_DOMAINS: frozenset = frozenset({
     "informazione-aziende.it", "aziendit.com",
     "dati-aziende.it", "ufficio-camerale.it",
     "companiesitaly.com", "italianbusinessregister.it",
+    "visura.pro", "abbrevia.it",
     # News aggregators, price comparison, marketplaces
     "corriere.it", "repubblica.it", "ilsole24ore.com", "sole24ore.com",
     "trovaprezzi.it", "idealo.it", "amazon.it",
@@ -117,6 +118,7 @@ _GENERIC_DOMAINS: frozenset = frozenset({
 # Subdomain / path prefix check — any domain that contains these base domains is generic too
 _GENERIC_DOMAIN_BASES: tuple = (
     "linkedin.com", "facebook.com", "twitter.com", "x.com", "instagram.com",
+    "wikipedia.org", "google.com", "bing.com", "youtube.com",
     "registroimprese.it", "infocamere.it", "atoka.io", "kompass.com", "kompass.it",
     "europages.com", "europages.it", "paginegialle.it", "paginebianche.it",
     "cerved.com", "cervedgroup.it", "dnb.com", "zoominfo.com",
@@ -9488,6 +9490,116 @@ def _smoke_test_size_inference() -> None:
     print("[SMOKE TEST] _smoke_test_size_inference: all 5 cases passed.", flush=True)
 
 
+def _add_alias_diagnostic_cols(df: "pd.DataFrame") -> "pd.DataFrame":
+    """
+    Ensure friendly diagnostic column aliases exist in the output dataframe.
+    Maps from existing pipeline columns where possible; leaves blank otherwise.
+    These columns are NEVER overwritten if already present.
+    """
+    aliases = {
+        # Req col name          : source col (first that exists wins) or ""
+        "needs_domain_review":  ["manual_review_needed"],
+        "domain_score":         ["domain_confidence", "best_candidate_score"],
+        "candidate_1_domain":   [],   # derived below from top_3_candidate_domains
+        "candidate_1_score":    ["best_candidate_score"],
+        "candidate_1_reason":   ["domain_reason"],
+        "candidate_2_domain":   [],   # derived below
+        "candidate_2_score":    [],
+        "candidate_2_reason":   [],
+    }
+
+    # Derive candidate_1/2_domain from top_3_candidate_domains (comma-separated)
+    if "top_3_candidate_domains" in df.columns and "candidate_1_domain" not in df.columns:
+        _parts = df["top_3_candidate_domains"].astype(str).str.split(r",\s*", expand=False)
+        df["candidate_1_domain"] = _parts.apply(
+            lambda xs: xs[0].strip() if isinstance(xs, list) and len(xs) >= 1 else ""
+        )
+        df["candidate_2_domain"] = _parts.apply(
+            lambda xs: xs[1].strip() if isinstance(xs, list) and len(xs) >= 2 else ""
+        )
+    else:
+        for col in ("candidate_1_domain", "candidate_2_domain"):
+            if col not in df.columns:
+                df[col] = ""
+
+    for new_col, sources in aliases.items():
+        if new_col in df.columns:
+            continue
+        if new_col in ("candidate_1_domain", "candidate_2_domain"):
+            continue  # already handled above
+        filled = False
+        for src in sources:
+            if src in df.columns:
+                df[new_col] = df[src]
+                filled = True
+                break
+        if not filled:
+            df[new_col] = ""
+
+    return df
+
+
+def _no_overwrite_path(p: Path) -> Path:
+    """
+    Return p unchanged if it does not exist; otherwise return p with _2, _3, … suffix
+    inserted before the extension until a free name is found.
+    """
+    if not p.exists():
+        return p
+    stem   = p.stem
+    suffix = p.suffix
+    parent = p.parent
+    n = 2
+    while True:
+        candidate = parent / f"{stem}_{n}{suffix}"
+        if not candidate.exists():
+            return candidate
+        n += 1
+
+
+def _self_test_domain_quality() -> None:
+    """
+    Quick self-test for domain rejection logic.
+    Verifies that known bad domains are rejected and known good domains are kept.
+    """
+    import sys as _sys
+
+    cases = [
+        # (domain, expect_rejected, label)
+        ("it.linkedin.com",              True,  "it.linkedin.com subdomain"),
+        ("it.wikipedia.org",             True,  "it.wikipedia.org subdomain"),
+        ("it.kompass.com",               True,  "it.kompass.com subdomain"),
+        ("fatturatoitalia.it",           True,  "fatturatoitalia.it exact"),
+        ("visura.pro",                   True,  "visura.pro exact"),
+        ("x.abbrevia.it",               True,  "x.abbrevia.it subdomain"),
+        ("rsuibmsegrate.altervista.org", True,  "rsuibmsegrate.altervista.org subdomain"),
+        ("ibm.com",                      False, "ibm.com (legit)"),
+        ("zf.com",                       False, "zf.com (legit)"),
+        ("q8.it",                        False, "q8.it (legit)"),
+        ("solutions30.com",              False, "solutions30.com (legit)"),
+    ]
+
+    failures: list[str] = []
+    for domain, expect_rejected, label in cases:
+        rejected = is_generic(domain)
+        if rejected != expect_rejected:
+            failures.append(
+                f"  FAIL [{label}] is_generic({domain!r}) = {rejected}; "
+                f"expected {expect_rejected}"
+            )
+
+    if failures:
+        print("[SELF-TEST domain-quality] FAILED:", flush=True)
+        for f in failures:
+            print(f, flush=True)
+        _sys.exit(1)
+    else:
+        print(
+            f"[SELF-TEST domain-quality] All {len(cases)} cases passed.",
+            flush=True,
+        )
+
+
 def cli_batch_run() -> None:
     """
     Non-Streamlit batch entry point.
@@ -9500,7 +9612,7 @@ def cli_batch_run() -> None:
             --max-rows 0
 
     Options:
-        --input           Path to the input .xlsx or .csv file. Required.
+        --input           Path to the input .xlsx or .csv file (or a folder of .xlsx files).
         --project-root    Project root folder (auto-detected from 00_raw/ when omitted).
         --serper-key      Serper API key (falls back to SERPER_API_KEY env var / secrets).
         --max-rows        Process only the first N rows (0 = all). Default 0.
@@ -9514,7 +9626,10 @@ def cli_batch_run() -> None:
         description="Input Cleaner · Register Edition — CLI batch mode",
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
-    parser.add_argument("--input",          required=True,  help="Input .xlsx or .csv path")
+    parser.add_argument("--input",          default=None,
+                        help="Input .xlsx or .csv file, or a folder of .xlsx files")
+    parser.add_argument("--self-test-domain-quality", action="store_true",
+                        help="Run domain-quality self-test and exit")
     parser.add_argument("--project-root",   default=None,   help="Pipeline project root folder")
     parser.add_argument("--serper-key",     default=None,   help="Serper API key")
     parser.add_argument("--anthropic-key",  default=None,   help="Anthropic API key for Haiku")
@@ -9554,18 +9669,50 @@ def cli_batch_run() -> None:
                             "Hard Firecrawl page budget. Processing stops cleanly when "
                             "successful pages reach this limit (0 = no limit)."
                         ))
-    parser.add_argument("--self-test-domain-quality", action="store_true",
-                        help="Run lightweight domain-quality self-tests (no API keys required) and exit.")
     args = parser.parse_args()
 
+    # ── Self-test mode ────────────────────────────────────────────────────────
     if getattr(args, "self_test_domain_quality", False):
         _run_domain_quality_self_test()
         sys.exit(0)
 
-    input_path = Path(args.input).resolve()
-    if not input_path.exists():
-        print(f"ERROR: input file not found: {input_path}", file=sys.stderr)
+    # ── Resolve input: file or folder ─────────────────────────────────────────
+    if not args.input:
+        print("ERROR: --input is required (file or folder of .xlsx files).", file=sys.stderr)
         sys.exit(1)
+
+    _input_raw = Path(args.input).resolve()
+    if not _input_raw.exists():
+        print(f"ERROR: input path not found: {_input_raw}", file=sys.stderr)
+        sys.exit(1)
+
+    if _input_raw.is_dir():
+        _input_files = sorted(_input_raw.glob("*.xlsx"))
+        if not _input_files:
+            print(f"ERROR: no .xlsx files found in folder: {_input_raw}", file=sys.stderr)
+            sys.exit(1)
+        print(
+            f"[cleaner] Folder mode: {len(_input_files)} file(s) in {_input_raw}",
+            flush=True,
+        )
+        for _f in _input_files:
+            print(f"  {_f.name}", flush=True)
+        print(flush=True)
+        import subprocess as _sp
+        _base_argv = [a for a in sys.argv if not a.startswith("--input")]
+        for _input_file in _input_files:
+            print(f"\n[cleaner] ═══ Processing: {_input_file.name} ═══", flush=True)
+            _sub_argv = [sys.executable] + _base_argv + ["--input", str(_input_file)]
+            _proc = _sp.run(_sub_argv)
+            if _proc.returncode != 0:
+                print(
+                    f"[cleaner] WARNING: {_input_file.name} exited with code "
+                    f"{_proc.returncode} — continuing with next file.",
+                    flush=True,
+                )
+        return
+
+    input_path = _input_raw
 
     ts       = datetime.now().strftime("%Y%m%d_%H%M")
     pl_paths = resolve_pipeline_output_paths(str(input_path), args.project_root, ts=ts)
@@ -9900,6 +10047,8 @@ def cli_batch_run() -> None:
             "batch_firecrawl_notes":            _cli_fc_health.get("fail_fast_reason", ""),
         }
 
+    enriched_df = _add_alias_diagnostic_cols(enriched_df)
+
     excel_bytes = build_excel(
         enriched_df, run_df, evidence_rows, cols,
         debug_rows=debug_rows, debug_mode=args.debug,
@@ -9907,7 +10056,7 @@ def cli_batch_run() -> None:
         fc_audit=_fc_audit_dict,
     )
 
-    out_path = Path(pl_paths["output_xlsx"])
+    out_path = _no_overwrite_path(Path(pl_paths["output_xlsx"]))
     _write_pipeline_output(out_path, excel_bytes)
     print(f"[cleaner] Saved:      {out_path}")
 
@@ -11402,11 +11551,8 @@ def _run_domain_quality_self_test() -> None:
 
 
 if __name__ == "__main__":
-    # CLI batch mode when --input is passed; otherwise Streamlit UI (invoked via `streamlit run`).
-    if "--self-test-domain-quality" in sys.argv:
-        _run_domain_quality_self_test()
-        sys.exit(0)
-    elif "--input" in sys.argv:
+    # CLI batch mode when --input (file or folder) or --self-test-domain-quality is passed.
+    if "--input" in sys.argv or "--self-test-domain-quality" in sys.argv:
         cli_batch_run()
     else:
         main()
