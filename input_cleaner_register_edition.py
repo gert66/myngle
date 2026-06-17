@@ -107,6 +107,11 @@ _GENERIC_DOMAINS: frozenset = frozenset({
     # News aggregators, price comparison, marketplaces
     "corriere.it", "repubblica.it", "ilsole24ore.com", "sole24ore.com",
     "trovaprezzi.it", "idealo.it", "amazon.it",
+    # Business-data / profile lookup services
+    "visura.pro", "abbrevia.it",
+    # Free hosted-site platforms — subdomains are never official company sites
+    "altervista.org", "wordpress.com", "blogspot.com",
+    "wixsite.com", "weebly.com", "sites.google.com",
 })
 
 # Subdomain / path prefix check — any domain that contains these base domains is generic too
@@ -122,6 +127,10 @@ _GENERIC_DOMAIN_BASES: tuple = (
     "informazione-aziende.it", "aziendit.com",
     "dati-aziende.it", "ufficio-camerale.it",
     "companiesitaly.com", "italianbusinessregister.it",
+    # Free hosted-site platforms (catches e.g. rsuibmsegrate.altervista.org, x.abbrevia.it)
+    "altervista.org", "blogspot.com", "wordpress.com",
+    "wixsite.com", "weebly.com", "sites.google.com",
+    "visura.pro", "abbrevia.it",
 )
 
 # PEC (Posta Elettronica Certificata) domains — never use as company website
@@ -386,7 +395,17 @@ _RISKY_MARKERS = [
     "archive", "archivio", "wiki", "museum",
     "dealer", "reseller", "shop", "store",
     "directory", "profile",
+    # Hosted-platform subdomains are never official company sites
+    "altervista", "blogspot", "wordpress", "wixsite", "weebly",
 ]
+
+# Hosted-platform base domains whose subdomains must always be rejected.
+# These overlap with _GENERIC_DOMAIN_BASES but are kept separate so that
+# is_hosted_platform() can provide a specific rejection reason.
+_HOSTED_PLATFORM_BASES: tuple = (
+    "altervista.org", "blogspot.com", "wordpress.com",
+    "wixsite.com", "weebly.com", "sites.google.com",
+)
 
 
 def _domain_has_risky_marker(domain: str) -> tuple[bool, str]:
@@ -1749,6 +1768,148 @@ def _conf_label(conf: float) -> str:
     return "Low"
 
 
+def is_hosted_platform(domain: str) -> bool:
+    """Return True if domain is a subdomain of a free hosted-site platform."""
+    dl = (domain or "").lower()
+    return any(dl == base or dl.endswith("." + base) for base in _HOSTED_PLATFORM_BASES)
+
+
+# Weak/generic tokens that alone cannot justify accepting a candidate domain.
+_WEAK_BRAND_TOKENS: frozenset = frozenset({
+    "global", "group", "services", "solutions", "italia", "italy",
+    "industry", "industries", "holding", "holdings", "international",
+    "management", "consulting", "digital", "technology", "technologies",
+    "systems", "system", "enterprise", "enterprises", "partners",
+})
+
+
+def evaluate_domain_candidate(
+    company_name: str,
+    candidate_domain: str,
+    title: str = "",
+    snippet: str = "",
+    url: str = "",
+    email_domain: str = "",
+    city: str = "",
+    province: str = "",
+    variants: "dict | None" = None,
+    country_config: "CountryConfig | None" = None,
+) -> dict:
+    """
+    Structured quality gate for a single domain candidate.
+
+    Returns::
+        {
+          "accepted":     bool,
+          "score":        int,     # 0-100 scale
+          "reason":       str,
+          "source_type":  str,     # e.g. "social", "directory", "hosted_platform", "official"
+          "needs_review": bool,
+        }
+
+    Acceptance thresholds (maps internal 0–3+ float to 0–100):
+      score >= 75 → accepted=True,  needs_review=False
+      50–74       → accepted=True,  needs_review=True  (suggest but flag)
+      < 50        → accepted=False, needs_review=False (reject / leave blank)
+
+    Hard rejections (score=0) override all thresholds.
+    """
+    cfg = country_config or IT_CONFIG
+
+    def _reject(reason: str, source_type: str) -> dict:
+        return {
+            "accepted": False, "score": 0,
+            "reason": reason, "source_type": source_type,
+            "needs_review": False,
+        }
+
+    if not candidate_domain:
+        return _reject("empty domain", "none")
+
+    dl = candidate_domain.lower()
+
+    # ── Hard rejections ────────────────────────────────────────────────────────
+    if is_generic(candidate_domain, country_config=cfg):
+        return _reject(f"blacklisted/generic domain: {candidate_domain}", "directory_or_social")
+
+    if is_url_shortener(candidate_domain):
+        return _reject(f"URL shortener: {candidate_domain}", "shortener")
+
+    if is_discovery_blocked(candidate_domain):
+        return _reject(f"media/streaming/social blocked: {candidate_domain}", "media_blocked")
+
+    if is_hosted_platform(candidate_domain):
+        return _reject(
+            f"free hosted-site platform (not an official company website): {candidate_domain}",
+            "hosted_platform",
+        )
+
+    cat = classify_domain(candidate_domain, title, snippet)
+    if cat:
+        return _reject(f"rejected category: {cat}", cat)
+
+    risky, risky_reason = _domain_has_risky_marker(candidate_domain)
+    if risky:
+        return _reject(f"risky domain marker — {risky_reason}", "risky_marker")
+
+    # ── Compute internal score and map to 0-100 ────────────────────────────────
+    nv = variants or extract_name_variants(company_name)
+    internal_score = _score_candidate(
+        candidate_domain, 0, title, snippet,
+        nv, email_domain, city, province,
+        country_config=cfg,
+    )
+
+    # Internal score is 0–3+; map to 0–100 (cap at 3.0 for ceiling)
+    raw_100 = min(100, int(round(internal_score / 3.0 * 100)))
+
+    # Extra boost for email match (already in internal_score via +0.5, but be explicit)
+    if email_domain and candidate_domain == email_domain:
+        raw_100 = min(100, raw_100 + 15)
+
+    # Penalty: domain has no meaningful brand overlap (only weak/generic tokens)
+    brand = (nv.get("brand") or "").lower().strip()
+    brand_tokens = set(re.split(r"[\W_]+", brand)) - _WEAK_BRAND_TOKENS - _TLDS
+    if brand_tokens:
+        bov = brand_overlap_variants(nv, candidate_domain)
+        if bov < _MIN_BRAND_SIM_TO_SCORE:
+            raw_100 = min(raw_100, 20)
+    else:
+        # Brand reduced entirely to weak/generic tokens — demand exact name in title/snippet
+        combined = (title + " " + snippet).lower()
+        full_name_lower = (nv.get("full") or "").lower()
+        if full_name_lower and full_name_lower not in combined:
+            raw_100 = min(raw_100, 30)
+
+    score = raw_100
+    needs_review = False
+    accepted = False
+
+    if score >= 75:
+        accepted = True
+        needs_review = False
+        reason = f"strong match (score {score})"
+        source_type = "official"
+    elif score >= 50:
+        accepted = True
+        needs_review = True
+        reason = f"plausible match (score {score}) — manual review recommended"
+        source_type = "official_uncertain"
+    else:
+        accepted = False
+        needs_review = False
+        reason = f"weak or no brand match (score {score})"
+        source_type = "low_confidence"
+
+    return {
+        "accepted": accepted,
+        "score": score,
+        "reason": reason,
+        "source_type": source_type,
+        "needs_review": needs_review,
+    }
+
+
 # =============================================================================
 # COLUMN DETECTION
 # =============================================================================
@@ -2099,6 +2260,10 @@ def _score_candidate(
             score -= 0.3
         elif re.search(r"\b(associazione|fondazione|onlus|odv|aps)\b", domain, re.I):
             score -= 0.3
+
+    # 9b. Hosted-platform penalty (any country) — free hosting is never an official site
+    if is_hosted_platform(domain):
+        score -= 2.0
 
     # 10. Germany-specific penalties (whole-token, word-boundary safe)
     if cfg.country_code == "DE":
@@ -9389,7 +9554,13 @@ def cli_batch_run() -> None:
                             "Hard Firecrawl page budget. Processing stops cleanly when "
                             "successful pages reach this limit (0 = no limit)."
                         ))
+    parser.add_argument("--self-test-domain-quality", action="store_true",
+                        help="Run lightweight domain-quality self-tests (no API keys required) and exit.")
     args = parser.parse_args()
+
+    if getattr(args, "self_test_domain_quality", False):
+        _run_domain_quality_self_test()
+        sys.exit(0)
 
     input_path = Path(args.input).resolve()
     if not input_path.exists():
@@ -11113,9 +11284,129 @@ def main():
     )
 
 
+def _run_domain_quality_self_test() -> None:
+    """
+    Lightweight self-test for domain quality logic.
+    No Serper calls, no API keys required.
+    Run via: python input_cleaner_register_edition.py --self-test-domain-quality
+    """
+    import traceback
+
+    CASES_REJECT = [
+        # (domain, description)
+        ("it.linkedin.com",           "LinkedIn country subdomain"),
+        ("it.wikipedia.org",          "Wikipedia country subdomain"),
+        ("it.kompass.com",            "Kompass country subdomain"),
+        ("fatturatoitalia.it",        "Italian financial-data directory"),
+        ("visura.pro",                "Business data lookup service"),
+        ("x.abbrevia.it",            "Abbrevia subdomain profile service"),
+        ("rsuibmsegrate.altervista.org", "Altervista hosted blog"),
+        ("mybrand.blogspot.com",      "Blogspot hosted blog"),
+        ("myfirm.wixsite.com",        "Wix hosted site"),
+        ("myfirm.weebly.com",         "Weebly hosted site"),
+        ("myfirm.wordpress.com",      "WordPress hosted blog"),
+    ]
+
+    CASES_ACCEPT = [
+        # (domain, description) — should NOT be hard-rejected by is_generic/is_hosted_platform/classify_domain
+        ("ibm.com",           "IBM global domain"),
+        ("zf.com",            "ZF global domain"),
+        ("q8.it",             "Q8 Italy"),
+        ("solutions30.com",   "Solutions30 corporate"),
+        ("pirelli.com",       "Pirelli corporate"),
+    ]
+
+    passed = 0
+    failed = 0
+
+    print("=" * 60)
+    print("Domain Quality Self-Test")
+    print("=" * 60)
+
+    print("\n── Should-REJECT cases ──")
+    for domain, desc in CASES_REJECT:
+        try:
+            generic  = is_generic(domain)
+            blocked  = is_discovery_blocked(domain)
+            platform = is_hosted_platform(domain)
+            cat      = classify_domain(domain)
+            rejected = generic or blocked or platform or bool(cat)
+            status = "PASS" if rejected else "FAIL"
+            reason = (
+                "generic" if generic else
+                "media_blocked" if blocked else
+                "hosted_platform" if platform else
+                cat if cat else "not_rejected"
+            )
+            print(f"  [{status}] {domain!s:<40} ({desc}) → {reason}")
+            if rejected:
+                passed += 1
+            else:
+                failed += 1
+        except Exception:
+            print(f"  [ERROR] {domain}: {traceback.format_exc(limit=1)}")
+            failed += 1
+
+    print("\n── Should-ACCEPT cases (must NOT be hard-rejected) ──")
+    for domain, desc in CASES_ACCEPT:
+        try:
+            generic  = is_generic(domain)
+            blocked  = is_discovery_blocked(domain)
+            platform = is_hosted_platform(domain)
+            cat      = classify_domain(domain)
+            hard_rejected = generic or blocked or platform or bool(cat)
+            status = "PASS" if not hard_rejected else "FAIL"
+            reason = (
+                "generic" if generic else
+                "media_blocked" if blocked else
+                "hosted_platform" if platform else
+                cat if cat else "ok"
+            )
+            print(f"  [{status}] {domain!s:<40} ({desc}) → {reason}")
+            if not hard_rejected:
+                passed += 1
+            else:
+                failed += 1
+        except Exception:
+            print(f"  [ERROR] {domain}: {traceback.format_exc(limit=1)}")
+            failed += 1
+
+    print("\n── evaluate_domain_candidate spot-checks ──")
+    spot_checks = [
+        ("it.linkedin.com",  "Rossi SRL", False, "LinkedIn rejected"),
+        ("ibm.com",          "IBM Italia SPA", None, "IBM not hard-rejected"),
+    ]
+    for dom, cname, expected_accepted, label in spot_checks:
+        try:
+            res = evaluate_domain_candidate(cname, dom)
+            ok = (res["accepted"] == expected_accepted) if expected_accepted is not None else (res["score"] > 0 or not res["accepted"])
+            # For IBM: just verify it is NOT hard-rejected with score 0 due to blacklist
+            if expected_accepted is None:
+                ok = res["source_type"] not in ("directory_or_social", "hosted_platform", "media_blocked", "shortener")
+            status = "PASS" if ok else "FAIL"
+            print(f"  [{status}] evaluate({dom!r}, {cname!r}) → accepted={res['accepted']}, score={res['score']}, {res['reason'][:60]}")
+            if ok:
+                passed += 1
+            else:
+                failed += 1
+        except Exception:
+            print(f"  [ERROR] {label}: {traceback.format_exc(limit=1)}")
+            failed += 1
+
+    print(f"\n{'='*60}")
+    print(f"Results: {passed} passed, {failed} failed")
+    print("=" * 60)
+
+    if failed:
+        sys.exit(1)
+
+
 if __name__ == "__main__":
     # CLI batch mode when --input is passed; otherwise Streamlit UI (invoked via `streamlit run`).
-    if "--input" in sys.argv:
+    if "--self-test-domain-quality" in sys.argv:
+        _run_domain_quality_self_test()
+        sys.exit(0)
+    elif "--input" in sys.argv:
         cli_batch_run()
     else:
         main()
