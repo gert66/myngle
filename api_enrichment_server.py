@@ -5,49 +5,92 @@ mYngle · Single-company enrichment API
 Run locally:
     uvicorn api_enrichment_server:app --reload --port 8008
 
-Example request:
+Example requests (both field-name styles accepted):
     curl -X POST http://127.0.0.1:8008/api/enrich/company \
       -H "Content-Type: application/json" \
-      -d '{"company_name":"Example S.p.A.","domain":"example.com","country":"Italy"}'
+      -H "X-Enrichment-Api-Token: <token>" \
+      -d '{"companyName":"Technogym S.p.A.","domain":"technogym.com"}'
 
-Secrets:
-    ANTHROPIC_API_KEY  — required for Step 1 + Step 2 (Claude)
-    SERPER_API_KEY     — required for Step 2 Google search
+    curl -X POST http://127.0.0.1:8008/api/enrich/company \
+      -H "Content-Type: application/json" \
+      -H "X-Enrichment-Api-Token: <token>" \
+      -d '{"company_name":"Technogym S.p.A.","domain":"technogym.com"}'
 
-Never expose these in responses or logs.
+Environment variables:
+    ANTHROPIC_API_KEY        required — Claude Step 1 + Step 2
+    SERPER_API_KEY           required — Google search Step 2
+    ENRICHMENT_API_TOKEN     optional — shared secret for X-Enrichment-Api-Token header
+    ALLOWED_ORIGINS          optional — comma-separated list of allowed CORS origins
+                             default: localhost dev origins only
+
+Correct Lovable integration (do NOT call this server directly from the browser):
+
+    Browser calls Lovable server route:
+        POST /api/enrich/company
+
+    Lovable server-side route calls this Python backend:
+        POST ${process.env.PYTHON_ENRICHMENT_API_URL}/api/enrich/company
+        Header: X-Enrichment-Api-Token: process.env.ENRICHMENT_API_TOKEN
+
+    ENRICHMENT_API_TOKEN must never be exposed to the browser.
+    Do not use VITE_ prefix for this token.
+    Do not call this Python server directly from frontend code.
 """
 
 from __future__ import annotations
 
 import logging
 import os
+import re
 import traceback
 from datetime import datetime, timezone
 from typing import Any
 
 import pandas as pd
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
-from pydantic import BaseModel
+from pydantic import BaseModel, model_validator
 
 # ── Logging (server-side only, no secrets) ────────────────────────────────────
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 log = logging.getLogger("api_enrichment")
 
-# ── FastAPI app ───────────────────────────────────────────────────────────────
-app = FastAPI(title="mYngle Enrichment API", version="0.1.0")
+# ── CORS origins ──────────────────────────────────────────────────────────────
+_DEFAULT_ORIGINS = [
+    "http://localhost:5173",
+    "http://127.0.0.1:5173",
+    "http://localhost:3000",
+    "http://127.0.0.1:3000",
+]
 
-# Allow the future Lovable/React frontend to call this from localhost or
-# a preview URL.  Tighten origins before going to production.
+def _cors_origins() -> list[str]:
+    raw = os.environ.get("ALLOWED_ORIGINS", "").strip()
+    if raw:
+        return [o.strip() for o in raw.split(",") if o.strip()]
+    return _DEFAULT_ORIGINS
+
+# ── FastAPI app ───────────────────────────────────────────────────────────────
+app = FastAPI(title="mYngle Enrichment API", version="0.2.0")
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
-    allow_methods=["POST", "GET"],
+    allow_origins=_cors_origins(),
+    allow_methods=["POST", "GET", "OPTIONS"],
     allow_headers=["*"],
 )
 
-# ── Lazy imports from the enricher (heavy module — load once at first request) ─
+# ── Auth helper ───────────────────────────────────────────────────────────────
+def _check_token(request: Request) -> bool:
+    """Return True if auth passes. Logs a warning when token auth is disabled."""
+    configured = os.environ.get("ENRICHMENT_API_TOKEN", "")
+    if not configured:
+        log.warning("ENRICHMENT_API_TOKEN not set — token auth disabled.")
+        return True
+    provided = request.headers.get("X-Enrichment-Api-Token", "")
+    return provided == configured
+
+# ── Lazy imports from the enricher ───────────────────────────────────────────
 _enricher_loaded = False
 _enrich_one_row = None
 _resolve_employee_range = None
@@ -72,31 +115,60 @@ def _load_enricher() -> None:
         return
 
     import enrich_clients_claude as _ec  # type: ignore
-    _enrich_one_row                    = _ec.enrich_one_row
-    _resolve_employee_range            = _ec.resolve_employee_range
+    _enrich_one_row                     = _ec.enrich_one_row
+    _resolve_employee_range             = _ec.resolve_employee_range
     _resolve_employee_range_from_serper = _ec.resolve_employee_range_from_serper
-    _apply_results_compatible_scoring  = _ec.apply_results_compatible_scoring
-    _apply_competitor_icp_override     = _ec.apply_competitor_icp_override
-    _EMPLOYEE_RANGE_RESOLVER_FIELDS    = _ec.EMPLOYEE_RANGE_RESOLVER_FIELDS
+    _apply_results_compatible_scoring   = _ec.apply_results_compatible_scoring
+    _apply_competitor_icp_override      = _ec.apply_competitor_icp_override
+    _EMPLOYEE_RANGE_RESOLVER_FIELDS     = _ec.EMPLOYEE_RANGE_RESOLVER_FIELDS
     _DEFAULT_EMPLOYEE_RANGE_FOR_SCORING = _ec.DEFAULT_EMPLOYEE_RANGE_FOR_SCORING
-    _ALL_ENRICHMENT_FIELDS             = _ec.ALL_ENRICHMENT_FIELDS
-    _normalize_url                     = _ec.normalize_url
-    _clean_domain                      = _ec.clean_domain
+    _ALL_ENRICHMENT_FIELDS              = _ec.ALL_ENRICHMENT_FIELDS
+    _normalize_url                      = _ec.normalize_url
+    _clean_domain                       = _ec.clean_domain
     _enricher_loaded = True
     log.info("Enricher module loaded.")
 
 
-# ── Request / response models ─────────────────────────────────────────────────
+# ── Domain normaliser ─────────────────────────────────────────────────────────
+_DOMAIN_STRIP = re.compile(r"^https?://(www\.)?", re.IGNORECASE)
+
+def _normalize_domain(raw: str) -> str:
+    """Return hostname only: strip scheme, www, path, query, trailing slash."""
+    if not raw:
+        return ""
+    host = _DOMAIN_STRIP.sub("", raw.strip())
+    host = host.split("/")[0].split("?")[0].split("#")[0].strip().rstrip(".")
+    return host.lower()
+
+
+# ── Request model (accepts both camelCase and snake_case) ─────────────────────
 class EnrichRequest(BaseModel):
-    company_name: str
+    # camelCase (Lovable preferred)
+    companyName: str = ""
+    # snake_case (backward-compat)
+    company_name: str = ""
+
     domain: str = ""
     url: str = ""
     country: str = ""
     notes: str = ""
     scoring_profile: str = "default"
 
+    @model_validator(mode="after")
+    def _resolve_aliases(self) -> "EnrichRequest":
+        # companyName wins; fall back to company_name
+        if not self.companyName and self.company_name:
+            self.companyName = self.company_name
+        elif self.companyName and not self.company_name:
+            self.company_name = self.companyName
+        return self
 
-# ── Priority output fields (always present in response, even if empty) ────────
+    @property
+    def resolved_company_name(self) -> str:
+        return (self.companyName or self.company_name).strip()
+
+
+# ── Priority output fields ────────────────────────────────────────────────────
 _PRIORITY_FIELDS = [
     "company_name",
     "domain",
@@ -133,22 +205,12 @@ _PRIORITY_FIELDS = [
 
 
 def _safe_str(v: Any) -> str:
-    """Convert any value to a JSON-safe string, never None."""
     if v is None or (isinstance(v, float) and str(v) == "nan"):
         return ""
     return str(v)
 
 
-def _build_row_response(
-    raw_row: dict,
-    scoring_profile: str,
-    req: EnrichRequest,
-) -> dict:
-    """
-    Apply employee-range resolution + scoring + competitor-ICP override to the
-    raw dict returned by enrich_one_row, then assemble the flat response dict.
-    """
-    # ── Employee range resolution ──────────────────────────────────────────────
+def _build_row_response(raw_row: dict, scoring_profile: str, req: EnrichRequest) -> dict:
     cname  = str(raw_row.get("lusha_company_name") or raw_row.get("company_name") or "")
     domain = str(raw_row.get("canonical_company_domain") or raw_row.get("domain") or "")
 
@@ -171,7 +233,6 @@ def _build_row_response(
     for col in _EMPLOYEE_RANGE_RESOLVER_FIELDS:
         raw_row[col] = er.get(col, "")
 
-    # ── Back-fill lusha_employee_range when blank ──────────────────────────────
     if (
         not str(raw_row.get("lusha_employee_range", "")).strip()
         and er.get("employee_range_resolved")
@@ -179,7 +240,6 @@ def _build_row_response(
     ):
         raw_row["lusha_employee_range"] = er["employee_range_resolved"]
 
-    # ── Scoring + competitor ICP override ─────────────────────────────────────
     df_single = pd.DataFrame([raw_row])
     try:
         df_single = _apply_results_compatible_scoring(df_single, scoring_profile)  # type: ignore[misc]
@@ -192,12 +252,10 @@ def _build_row_response(
 
     scored = df_single.iloc[0].to_dict()
 
-    # ── Map final_commercial_fit_score → commercial_fit_score ─────────────────
     if "commercial_fit_score" not in scored or scored["commercial_fit_score"] == "":
         scored["commercial_fit_score"] = scored.get("final_commercial_fit_score", "")
 
-    # ── Inject request echo + metadata ────────────────────────────────────────
-    scored["input_company_name"] = req.company_name
+    scored["input_company_name"] = req.resolved_company_name
     scored["input_domain"]       = req.domain
     scored["input_url"]          = req.url
     scored["input_country"]      = req.country
@@ -205,17 +263,14 @@ def _build_row_response(
     scored["enrichment_source"]  = "manual_single"
     scored["enriched_at"]        = datetime.now(timezone.utc).isoformat()
 
-    # ── Build flat output: priority fields first, then remaining enrichment ────
     out: dict[str, Any] = {}
     for f in _PRIORITY_FIELDS:
         out[f] = _safe_str(scored.get(f, ""))
 
-    # Append all other enrichment fields (signal scores, snippet columns, etc.)
     for f in _ALL_ENRICHMENT_FIELDS:
         if f not in out:
             out[f] = _safe_str(scored.get(f, ""))
 
-    # Also carry through any scored columns not in ALL_ENRICHMENT_FIELDS
     for f, v in scored.items():
         if f not in out:
             out[f] = _safe_str(v)
@@ -223,27 +278,34 @@ def _build_row_response(
     return out
 
 
-# ── Route ─────────────────────────────────────────────────────────────────────
+# ── POST /api/enrich/company ──────────────────────────────────────────────────
 @app.post("/api/enrich/company")
-async def enrich_company(req: EnrichRequest) -> JSONResponse:
+async def enrich_company(req: EnrichRequest, request: Request) -> JSONResponse:
     warnings: list[str] = []
 
+    # ── Auth ──────────────────────────────────────────────────────────────────
+    if not _check_token(request):
+        return JSONResponse(
+            status_code=401,
+            content={"status": "error", "error": "Unauthorized", "warnings": []},
+        )
+
     # ── Validation ────────────────────────────────────────────────────────────
-    company_name = req.company_name.strip()
+    company_name = req.resolved_company_name
     if not company_name:
         return JSONResponse(
             status_code=400,
-            content={"status": "error", "error": "company_name is required", "warnings": []},
+            content={"status": "error", "error": "companyName is required", "warnings": []},
         )
 
-    domain = req.domain.strip()
+    # Normalise domain: strip scheme, www, path
+    domain = _normalize_domain(req.domain)
     url    = req.url.strip()
 
-    # Build the raw_url that enrich_one_row expects (prefers url, falls back to domain)
     if url:
         raw_url = url
     elif domain:
-        raw_url = f"https://{domain}" if not domain.startswith("http") else domain
+        raw_url = f"https://{domain}"
     else:
         raw_url = ""
         warnings.append("No domain or URL supplied; enricher will attempt domain discovery.")
@@ -255,14 +317,10 @@ async def enrich_company(req: EnrichRequest) -> JSONResponse:
     if not api_key:
         return JSONResponse(
             status_code=503,
-            content={
-                "status": "error",
-                "error": "ANTHROPIC_API_KEY not configured on server",
-                "warnings": [],
-            },
+            content={"status": "error", "error": "ANTHROPIC_API_KEY not configured on server", "warnings": []},
         )
 
-    # ── Load enricher (once) ─────────────────────────────────────────────────
+    # ── Load enricher ─────────────────────────────────────────────────────────
     try:
         _load_enricher()
     except Exception:
@@ -272,9 +330,9 @@ async def enrich_company(req: EnrichRequest) -> JSONResponse:
             content={"status": "error", "error": "Enricher module failed to load", "warnings": []},
         )
 
-    # ── Enrich ────────────────────────────────────────────────────────────────
-    log.info("Enriching company=%r domain=%r url=%r", company_name, domain, url)
+    log.info("Enriching company=%r domain=%r", company_name, domain)
 
+    # ── Enrich ────────────────────────────────────────────────────────────────
     try:
         raw_row, dbg = _enrich_one_row(  # type: ignore[misc]
             company_name=company_name,
@@ -297,37 +355,43 @@ async def enrich_company(req: EnrichRequest) -> JSONResponse:
         log.error("enrich_one_row failed: %s", traceback.format_exc())
         return JSONResponse(
             status_code=500,
-            content={
-                "status": "error",
-                "error": "Enrichment failed — see server logs for details",
-                "warnings": warnings,
-            },
+            content={"status": "error", "error": "Enrichment failed — see server logs", "warnings": warnings},
         )
 
-    # ── Post-process + build response ─────────────────────────────────────────
+    # ── Post-process ──────────────────────────────────────────────────────────
     try:
         row_out = _build_row_response(raw_row, req.scoring_profile, req)
     except Exception:
         log.error("Post-processing failed: %s", traceback.format_exc())
         return JSONResponse(
             status_code=500,
-            content={
-                "status": "error",
-                "error": "Post-processing failed — see server logs for details",
-                "warnings": warnings,
-            },
+            content={"status": "error", "error": "Post-processing failed — see server logs", "warnings": warnings},
         )
 
-    debug_out = {
-        "step1_status": _safe_str(dbg.get("step1_status", "")),
-        "step2_status": _safe_str(dbg.get("step2_status", "")),
-        "warnings":     warnings,
-    }
+    return JSONResponse(content={
+        "status": "ok",
+        "row":    row_out,
+        "debug":  {
+            "step1_status": _safe_str(dbg.get("step1_status", "")),
+            "step2_status": _safe_str(dbg.get("step2_status", "")),
+            "warnings":     warnings,
+        },
+        "warnings": warnings,
+    })
 
-    return JSONResponse(content={"status": "ok", "row": row_out, "debug": debug_out})
 
-
-# ── Health check ──────────────────────────────────────────────────────────────
+# ── GET /health ───────────────────────────────────────────────────────────────
 @app.get("/health")
 async def health() -> dict:
     return {"status": "ok"}
+
+
+# ── GET /config-check ─────────────────────────────────────────────────────────
+@app.get("/config-check")
+async def config_check() -> dict:
+    return {
+        "anthropic":               bool(os.environ.get("ANTHROPIC_API_KEY")),
+        "serper":                  bool(os.environ.get("SERPER_API_KEY")),
+        "apiTokenConfigured":      bool(os.environ.get("ENRICHMENT_API_TOKEN")),
+        "allowedOriginsConfigured": bool(os.environ.get("ALLOWED_ORIGINS")),
+    }
