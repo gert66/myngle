@@ -70,6 +70,19 @@ def _get_serper_count() -> int:
     return _serper_call_count
 _AUTOSAVE_EVERY = 10   # write checkpoint every N processed rows
 
+# Runtime overrides — set by the Streamlit UI before each run
+_autosave_dir_runtime:   "Path | None" = None
+_autosave_every_runtime: "int | None"  = None
+_autosave_enabled_rt:    bool          = True
+
+def _get_autosave_dir() -> "Path":
+    """Return effective autosave directory (Streamlit override or module default)."""
+    return _autosave_dir_runtime if _autosave_dir_runtime is not None else _AUTOSAVE_DIR
+
+def _get_autosave_every() -> int:
+    """Return effective autosave interval in rows."""
+    return _autosave_every_runtime if _autosave_every_runtime is not None else _AUTOSAVE_EVERY
+
 # Generic / directory / social / database domains to skip (global + Italian-specific)
 _GENERIC_DOMAINS: frozenset = frozenset({
     # Social networks
@@ -7260,7 +7273,7 @@ def _write_pipeline_output(
 
 def _cp_dir(run_id: str, run_label: str = "") -> Path:
     folder = f"{run_label}_{run_id}" if run_label else run_id
-    return _AUTOSAVE_DIR / folder
+    return _get_autosave_dir() / folder
 
 
 def _save_checkpoint(
@@ -7273,36 +7286,62 @@ def _save_checkpoint(
     cols: dict,
     settings: dict,
     run_label: str = "",
+    row_errors: list[dict] | None = None,
 ) -> None:
-    """Persist current progress to autosave/{run_label}_{run_id}/ (or autosave/{run_id}/ if no label)."""
+    """Persist progress to the autosave folder using atomic temp→rename writes."""
     d = _cp_dir(run_id, run_label)
     d.mkdir(parents=True, exist_ok=True)
 
     meta = {
-        "run_id":     run_id,
-        "run_label":  run_label,
+        "run_id":      run_id,
+        "run_label":   run_label,
         "folder_name": d.name,
-        "row_idx":    row_idx,
-        "total_rows": total_rows,
-        "timestamp":  pd.Timestamp.now().isoformat(timespec="seconds"),
-        "cols":       {k: v for k, v in cols.items() if v},
-        "settings":   settings,
-        "complete":   row_idx >= total_rows,
+        "row_idx":     row_idx,
+        "total_rows":  total_rows,
+        "timestamp":   pd.Timestamp.now().isoformat(timespec="seconds"),
+        "cols":        {k: v for k, v in cols.items() if v},
+        "settings":    settings,
+        "complete":    row_idx >= total_rows,
+        "error_count": len(row_errors) if row_errors else 0,
     }
-    (d / "meta.json").write_text(json.dumps(meta, indent=2, default=str), encoding="utf-8")
+
+    def _atomic_text(path: Path, text: str) -> None:
+        tmp = path.with_suffix(path.suffix + ".tmp")
+        tmp.write_text(text, encoding="utf-8")
+        os.replace(tmp, path)
+
+    def _atomic_bytes(path: Path, data: bytes) -> None:
+        tmp = path.with_suffix(path.suffix + ".tmp")
+        tmp.write_bytes(data)
+        os.replace(tmp, path)
+
+    _atomic_text(d / "meta.json", json.dumps(meta, indent=2, default=str))
 
     if all_results:
-        pd.DataFrame(all_results).to_csv(d / "results.csv", index=False)
+        _results_df = pd.DataFrame(all_results)
+        # results.csv (for resume/load)
+        _csv_buf = _results_df.to_csv(index=False).encode("utf-8")
+        _atomic_bytes(d / "results.csv", _csv_buf)
+        # checkpoint_latest.csv (human-readable latest state)
+        _atomic_bytes(d / "checkpoint_latest.csv", _csv_buf)
 
     if all_evidence:
-        (d / "evidence.json").write_text(
-            json.dumps(all_evidence, ensure_ascii=False, default=str), encoding="utf-8"
+        _atomic_text(
+            d / "evidence.json",
+            json.dumps(all_evidence, ensure_ascii=False, default=str),
         )
+
+    if row_errors:
+        _err_csv = pd.DataFrame(row_errors).to_csv(index=False).encode("utf-8")
+        _atomic_bytes(d / "errors.csv", _err_csv)
 
     # Input snapshot — written once; never overwritten (needed for crash-resume)
     input_path = d / "input.csv"
     if not input_path.exists() and input_df is not None:
-        input_df.to_csv(input_path, index=False)
+        try:
+            input_df.to_csv(input_path, index=False)
+        except Exception:
+            pass
 
 
 def _load_checkpoint_from_dir(d: Path) -> dict | None:
@@ -7331,12 +7370,13 @@ def _load_checkpoint(run_id: str) -> dict | None:
     Load checkpoint by run_id.  Tries legacy hash-only folder first, then scans all
     checkpoint directories for a meta.json whose run_id matches.
     """
-    legacy = _AUTOSAVE_DIR / run_id
+    _asd = _get_autosave_dir()
+    legacy = _asd / run_id
     if legacy.is_dir() and (legacy / "meta.json").exists():
         return _load_checkpoint_from_dir(legacy)
     for cp_meta in _list_checkpoints():
         if cp_meta.get("run_id") == run_id:
-            folder = _AUTOSAVE_DIR / cp_meta["_folder"]
+            folder = _asd / cp_meta["_folder"]
             if folder.is_dir():
                 return _load_checkpoint_from_dir(folder)
     return None
@@ -7344,10 +7384,11 @@ def _load_checkpoint(run_id: str) -> dict | None:
 
 def _list_checkpoints() -> list[dict]:
     """Return all checkpoint meta dicts sorted newest-first.  Adds '_folder' key."""
-    if not _AUTOSAVE_DIR.exists():
+    _as_dir = _get_autosave_dir()
+    if not _as_dir.exists():
         return []
     out = []
-    for d in _AUTOSAVE_DIR.iterdir():
+    for d in _as_dir.iterdir():
         if not d.is_dir():
             continue
         mp = d / "meta.json"
@@ -7365,9 +7406,9 @@ def _list_checkpoints() -> list[dict]:
 def _delete_checkpoint(run_id: str) -> None:
     for cp_meta in _list_checkpoints():
         if cp_meta.get("run_id") == run_id:
-            shutil.rmtree(_AUTOSAVE_DIR / cp_meta["_folder"], ignore_errors=True)
+            shutil.rmtree(_get_autosave_dir() / cp_meta["_folder"], ignore_errors=True)
             return
-    shutil.rmtree(_AUTOSAVE_DIR / run_id, ignore_errors=True)
+    shutil.rmtree(_get_autosave_dir() / run_id, ignore_errors=True)
 
 
 def _checkpoint_excel_bytes(run_id: str, cols: dict) -> bytes | None:
@@ -8087,6 +8128,8 @@ def process_dataframe(
     # --- Legacy bool params kept for callers not yet updated ---
     simple_serper_top_domain: bool = False,
     manual_google_like_domain: bool = False,
+    stop_after: int = 0,
+    autosave_enabled: bool = True,
 ) -> tuple[pd.DataFrame, list[dict], list[dict], list[dict]]:
     """
     Process rows resume_from..len(df)-1, prepending prior_results for already-done rows.
@@ -8111,6 +8154,7 @@ def process_dataframe(
     new_evidence:  list[dict] = []
     new_debug:     list[dict] = []
     new_jina_debug: list[dict] = []
+    row_errors:    list[dict] = []
     n = len(df)
     process_dataframe._jina_debug = new_jina_debug  # type: ignore[attr-defined]
     _live_fc_counters: dict = (
@@ -8186,34 +8230,51 @@ def process_dataframe(
         # Advanced mode falls through to validate_register_row() below.
         if domain_mode in (_DM_MANUAL_GOOGLE_LIKE, _DM_SIMPLE_RAW_TOP) and serper_key:
             import time as _time_bypass  # noqa: PLC0415
-            if domain_mode == _DM_SIMPLE_RAW_TOP:
-                _bypass_res = _simple_serper_top_domain_row(
-                    name, city, website, serper_key, country_config=country_config,
-                )
-                _bypass_res.setdefault("domain_mode", _DM_SIMPLE_RAW_TOP)
-                _bypass_res.setdefault("search_query_used", _bypass_res.get("simple_serper_query", ""))
-                _bypass_res.setdefault("serper_top_result_title", _bypass_res.get("simple_serper_top_title", ""))
-                _bypass_res.setdefault("serper_top_result_url",   _bypass_res.get("simple_serper_top_url", ""))
-                _bypass_res.setdefault("serper_top_result_domain", _bypass_res.get("simple_serper_top_domain", ""))
-                _ev = {"query":  _bypass_res.get("simple_serper_query", ""),
-                       "domain": _bypass_res.get("simple_serper_top_domain", ""),
-                       "url":    _bypass_res.get("simple_serper_top_url", ""),
-                       "title":  _bypass_res.get("simple_serper_top_title", ""),
-                       "used": True, "candidate_source": "simple_raw_top"}
-            else:  # _DM_MANUAL_GOOGLE_LIKE
-                _bypass_res = _manual_google_like_domain_row(
-                    name, website, serper_key,
-                )
-                _bypass_res.setdefault("domain_mode", _DM_MANUAL_GOOGLE_LIKE)
-                _bypass_res.setdefault("search_query_used", _bypass_res.get("manual_google_like_query", ""))
-                _bypass_res.setdefault("serper_top_result_title", _bypass_res.get("manual_google_like_selected_title", ""))
-                _bypass_res.setdefault("serper_top_result_url",   _bypass_res.get("manual_google_like_selected_url", ""))
-                _bypass_res.setdefault("serper_top_result_domain", _bypass_res.get("manual_google_like_selected_domain", ""))
-                _ev = {"query":  _bypass_res.get("manual_google_like_query", ""),
-                       "domain": _bypass_res.get("manual_google_like_selected_domain", ""),
-                       "url":    _bypass_res.get("manual_google_like_selected_url", ""),
-                       "title":  _bypass_res.get("manual_google_like_selected_title", ""),
-                       "used": True, "candidate_source": "manual_google_like"}
+            try:
+                if domain_mode == _DM_SIMPLE_RAW_TOP:
+                    _bypass_res = _simple_serper_top_domain_row(
+                        name, city, website, serper_key, country_config=country_config,
+                    )
+                    _bypass_res.setdefault("domain_mode", _DM_SIMPLE_RAW_TOP)
+                    _bypass_res.setdefault("search_query_used", _bypass_res.get("simple_serper_query", ""))
+                    _bypass_res.setdefault("serper_top_result_title", _bypass_res.get("simple_serper_top_title", ""))
+                    _bypass_res.setdefault("serper_top_result_url",   _bypass_res.get("simple_serper_top_url", ""))
+                    _bypass_res.setdefault("serper_top_result_domain", _bypass_res.get("simple_serper_top_domain", ""))
+                    _ev = {"query":  _bypass_res.get("simple_serper_query", ""),
+                           "domain": _bypass_res.get("simple_serper_top_domain", ""),
+                           "url":    _bypass_res.get("simple_serper_top_url", ""),
+                           "title":  _bypass_res.get("simple_serper_top_title", ""),
+                           "used": True, "candidate_source": "simple_raw_top"}
+                else:  # _DM_MANUAL_GOOGLE_LIKE
+                    _bypass_res = _manual_google_like_domain_row(
+                        name, website, serper_key,
+                    )
+                    _bypass_res.setdefault("domain_mode", _DM_MANUAL_GOOGLE_LIKE)
+                    _bypass_res.setdefault("search_query_used", _bypass_res.get("manual_google_like_query", ""))
+                    _bypass_res.setdefault("serper_top_result_title", _bypass_res.get("manual_google_like_selected_title", ""))
+                    _bypass_res.setdefault("serper_top_result_url",   _bypass_res.get("manual_google_like_selected_url", ""))
+                    _bypass_res.setdefault("serper_top_result_domain", _bypass_res.get("manual_google_like_selected_domain", ""))
+                    _ev = {"query":  _bypass_res.get("manual_google_like_query", ""),
+                           "domain": _bypass_res.get("manual_google_like_selected_domain", ""),
+                           "url":    _bypass_res.get("manual_google_like_selected_url", ""),
+                           "title":  _bypass_res.get("manual_google_like_selected_title", ""),
+                           "used": True, "candidate_source": "manual_google_like"}
+            except Exception as _bypass_exc:
+                _bypass_res = {
+                    "cleaned_company_name": name,
+                    "normalized_input_website": website,
+                    "final_selected_domain": "",
+                    "domain_action": "error",
+                    "domain_reason": f"{type(_bypass_exc).__name__}: {str(_bypass_exc)[:200]}",
+                    "manual_review_needed": True,
+                    "row_processing_error": str(_bypass_exc)[:500],
+                    "domain_mode": domain_mode,
+                }
+                _ev = {}
+                row_errors.append({
+                    "row_index": global_i, "company_name": name,
+                    "error": str(_bypass_exc), "error_type": type(_bypass_exc).__name__,
+                })
 
             _bypass_res.setdefault("cleaned_company_name", name)
             _bypass_res.setdefault("normalized_input_website", website)
@@ -8671,16 +8732,21 @@ def process_dataframe(
 
         rows_done = global_i + 1
         # Checkpoint every N rows and on the final row
-        if run_id and (rows_done % _AUTOSAVE_EVERY == 0 or rows_done == n):
+        _eff_every = _get_autosave_every()
+        if autosave_enabled and run_id and (rows_done % _eff_every == 0 or rows_done == n):
             all_r = list(prior_results or []) + new_results
             all_e = list(prior_evidence or []) + new_evidence
             _save_checkpoint(
                 run_id, all_r, all_e, rows_done, n,
                 df, cols, settings or {}, run_label=run_label,
+                row_errors=row_errors,
             )
 
         if progress_cb:
             progress_cb(rows_done, n)
+
+        if stop_after > 0 and rows_done >= stop_after:
+            break
 
     # Merge prior completed rows with newly processed rows
     all_results  = list(prior_results or []) + new_results
@@ -11469,13 +11535,13 @@ def _clear_prepared_checkpoint_downloads() -> None:
 
 
 def _archive_autosave_dir() -> None:
-    """Rename autosave/ to autosave_archive_YYYYMMDD_HHMMSS; recreate empty autosave/."""
+    """Rename the effective autosave dir to autosave_archive_YYYYMMDD_HHMMSS; recreate it empty."""
     from datetime import datetime as _dt
-    src = _AUTOSAVE_DIR
+    src = _get_autosave_dir()
     if src.exists():
-        dst = src.parent / f"autosave_archive_{_dt.now().strftime('%Y%m%d_%H%M%S')}"
+        dst = src.parent / f"{src.name}_archive_{_dt.now().strftime('%Y%m%d_%H%M%S')}"
         src.rename(dst)
-    _AUTOSAVE_DIR.mkdir(parents=True, exist_ok=True)
+    src.mkdir(parents=True, exist_ok=True)
 
 
 def _format_duration(seconds) -> str:
@@ -11958,10 +12024,40 @@ def main():
         ).strip()
 
     st.sidebar.markdown("---")
+    st.sidebar.markdown("**Autosave**")
+    _as_enabled_ui = st.sidebar.checkbox(
+        "Enable autosave checkpoints", value=True, key="reg_as_enabled",
+    )
+    _as_every_ui = st.sidebar.number_input(
+        "Autosave every N rows", min_value=5, max_value=500, value=50, step=5,
+        key="reg_as_every",
+        help="Write a checkpoint after every N processed rows. Lower = safer but slightly slower.",
+    )
+    _as_default_folder = str(Path.cwd() / "_streamlit_autosave")
+    _as_folder_ui = st.sidebar.text_input(
+        "Autosave folder",
+        value=_as_default_folder,
+        key="reg_as_folder",
+        help="Folder where checkpoints are written. Created if it does not exist.",
+    ).strip() or _as_default_folder
+    _as_stop_n_ui = st.sidebar.number_input(
+        "Stop after N rows (autosave test, 0 = off)",
+        min_value=0, max_value=50000, value=0, step=10,
+        key="reg_as_stop_n",
+        help="For testing: stop cleanly after N rows and show checkpoint path. 0 = process all.",
+    )
+
+    # Apply runtime overrides so process_dataframe picks them up
+    global _autosave_dir_runtime, _autosave_every_runtime, _autosave_enabled_rt
+    _autosave_dir_runtime   = Path(_as_folder_ui) if _as_enabled_ui else None
+    _autosave_every_runtime = int(_as_every_ui)
+    _autosave_enabled_rt    = _as_enabled_ui
+
     st.sidebar.caption(
-        f"Autosave every **{_AUTOSAVE_EVERY} rows** → `{_AUTOSAVE_DIR}/`  \n"
-        "If the app crashes or your browser refreshes, reopen the app and use "
-        "**Resume previous run** to continue without reprocessing completed rows."
+        f"Checkpoints → `{_as_folder_ui}/`  \n"
+        "If the app crashes, reopen and use **Resume previous run** to continue."
+        if _as_enabled_ui else
+        "⚠ Autosave is **disabled**. Progress will be lost on crash."
     )
 
     # ── Previous-run panel (lazy — only rendered when checkbox is checked) ────
@@ -12181,6 +12277,8 @@ def main():
                 infer_size=infer_size,
                 country_config=_resume_cfg,
                 domain_mode=domain_mode_ui,
+                stop_after=int(_as_stop_n_ui),
+                autosave_enabled=_as_enabled_ui,
             )
 
             progress_bar.progress(1.0)
@@ -12500,6 +12598,10 @@ def main():
         _fc_live: dict = {}  # live counters written by process_dataframe via _live_fc_counters
 
         _run_t0 = time.time()
+        _last_saved_row: list[int] = [0]  # mutable container for closure
+        autosave_path_text = st.empty()
+        if _as_enabled_ui:
+            autosave_path_text.caption(f"Autosave: `{_as_folder_ui}/`")
 
         def progress_cb(i, total):
             progress_bar.progress(i / total)
@@ -12525,6 +12627,14 @@ def main():
                 )
             else:
                 status_text.caption(f"Processing {i} / {total} · {_elapsed_str} elapsed{_remain_str}")
+            if _as_enabled_ui:
+                _eff_every_cb = int(_as_every_ui)
+                if i > 0 and (i % _eff_every_cb == 0):
+                    _last_saved_row[0] = i
+                if _last_saved_row[0] > 0:
+                    autosave_path_text.caption(
+                        f"Autosave: `{_as_folder_ui}/`  · Last checkpoint: row {_last_saved_row[0]}"
+                    )
 
         enriched_df, evidence_rows, debug_rows, jina_debug_rows = process_dataframe(
             run_df, cols, serper_key, int(max_queries),
@@ -12555,10 +12665,17 @@ def main():
             infer_size=infer_size,
             country_config=_country_cfg,
             domain_mode=domain_mode_ui,
+            stop_after=int(_as_stop_n_ui),
+            autosave_enabled=_as_enabled_ui,
         )
 
         progress_bar.progress(1.0)
         status_text.caption(f"✅ Done — {n} companies processed.")
+        if _as_stop_n_ui > 0:
+            st.warning(
+                f"⏸ Stopped after {int(_as_stop_n_ui)} rows for autosave test.  \n"
+                f"Checkpoint saved at: `{_as_folder_ui}/`"
+            )
 
         # Build run_meta for summary sheet
         _run_meta = _build_run_meta(
