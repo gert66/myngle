@@ -378,6 +378,41 @@ _DM_SIMPLE_RAW_TOP     = "simple_raw_top"
 _DM_DEFAULT            = _DM_MANUAL_GOOGLE_LIKE
 _DM_OPTIONS            = [_DM_MANUAL_GOOGLE_LIKE, _DM_ADVANCED, _DM_SIMPLE_RAW_TOP]
 
+# ---------------------------------------------------------------------------
+# Central default cleaner settings
+#
+# Single source of truth for CLI, batch runner, and Streamlit defaults.
+# Streamlit widgets use these as their initial values; CLI argparse uses them
+# as argument defaults.  Change here to change everywhere simultaneously.
+# ---------------------------------------------------------------------------
+
+def get_default_cleaner_settings() -> dict:
+    """Return the canonical default settings for the Cleaner Register Edition.
+
+    Values here must match the Streamlit sidebar widget defaults exactly.
+    Used by CLI argparse and batch runner so that a command-line run without
+    explicit overrides behaves identically to a fresh Streamlit run.
+    """
+    # Forward references: constants are defined later in this module.
+    # We return strings/booleans/ints so this function can be called any time.
+    return {
+        "domain_mode":             "manual_google_like",   # _DM_MANUAL_GOOGLE_LIKE
+        "max_queries":             5,
+        "haiku_mode":              "Haiku for uncertain rows only",  # _HAIKU_MODE_UNCERTAIN
+        "eligibility_filter_mode": "Commercial + Maybe",   # _PF_MODE_MAYBE
+        "verifier_provider":       "Firecrawl",            # _VP_FIRECRAWL
+        "verifier_mode":           "Uncertain candidates only",  # _VM_UNCERTAIN
+        "fc_speed_mode":           "Fast",                 # _FC_SPEED_FAST
+        "fc_location":             "Auto from detected country",  # _FC_LOC_AUTO
+        "debug_mode":              False,
+        "infer_size":              False,
+        # Serper settings used by manual_google_like mode (Italy files)
+        "serper_gl":               "it",
+        "serper_hl":               "it",
+        "serper_location":         "Italy",
+    }
+
+
 # Claude Haiku review mode constants
 _DEFAULT_HAIKU_MODEL  = "claude-haiku-4-5-20251001"
 _HAIKU_MODE_PYTHON    = "Python only"
@@ -10872,12 +10907,17 @@ def cli_batch_run() -> None:
     parser.add_argument("--serper-key",     default=None,   help="Serper API key")
     parser.add_argument("--anthropic-key",  default=None,   help="Anthropic API key for Haiku")
     parser.add_argument("--firecrawl-key",  default=None,   help="Firecrawl API key")
+    _defaults = get_default_cleaner_settings()
+
     parser.add_argument("--max-rows",       type=int, default=0,  help="Rows to process (0=all)")
-    parser.add_argument("--max-queries",    type=int, default=5,  choices=[3, 5, 8])
-    parser.add_argument("--haiku-mode",     default=_HAIKU_MODE_UNCERTAIN,
+    parser.add_argument("--max-queries",    type=int,
+                        default=_defaults["max_queries"], choices=[3, 5, 8])
+    parser.add_argument("--haiku-mode",     default=_defaults["haiku_mode"],
                         choices=_HAIKU_MODES, help="Haiku review mode")
-    parser.add_argument("--verifier",       default=_VP_OFF,
+    parser.add_argument("--verifier",       default=_defaults["verifier_provider"],
                         choices=_VP_OPTIONS, help="Website verifier provider")
+    parser.add_argument("--verifier-mode",  default=_defaults["verifier_mode"],
+                        choices=_VM_OPTIONS, help="Verification trigger mode")
     parser.add_argument("--debug",          action="store_true", help="Enable debug output sheet")
     parser.add_argument("--dry-run-paths",  action="store_true",
                         help="Print resolved pipeline paths and exit (no processing)")
@@ -10889,12 +10929,18 @@ def cli_batch_run() -> None:
                         help="Country pipeline: auto (default), IT (Italy), DE (Germany)")
     parser.add_argument("--infer-size", action="store_true",
                         help="Infer company size and HR signals using Serper + Firecrawl evidence")
-    # ── Firecrawl speed / budget controls ────────────────────────────────────
+    # ── Firecrawl speed / location / budget controls ──────────────────────────
     parser.add_argument("--fc-speed",
-                        default=_FC_SPEED_FAST, choices=_FC_SPEED_OPTIONS,
+                        default=_defaults["fc_speed_mode"], choices=_FC_SPEED_OPTIONS,
                         help=(
-                            "Firecrawl speed mode (default: Fast). "
+                            f"Firecrawl speed mode (default: {_defaults['fc_speed_mode']}). "
                             "Fast=1 cand/1 page/6s, Balanced=1/2/8s, Thorough=3/3/15s."
+                        ))
+    parser.add_argument("--fc-location",
+                        default=_defaults["fc_location"], choices=_FC_LOC_OPTIONS,
+                        help=(
+                            f"Firecrawl location (default: {_defaults['fc_location']}). "
+                            "Auto=detect from country; Italy/Germany/United States/Default Firecrawl."
                         ))
     parser.add_argument("--fc-max-cands", type=int, default=None,
                         help="Override max candidates per company (default: from --fc-speed).")
@@ -11038,8 +11084,12 @@ def cli_batch_run() -> None:
     run_df, _norm_report = normalize_register_columns_for_cleaner(run_df, cfg)
     cols = _cols_from_normalized(run_df, cfg)
 
-    # Firecrawl location follows resolved country (never silently default to Italy)
-    _fc_loc_payload = cfg.firecrawl_location or {"country": "IT", "languages": ["it", "en"]}
+    # Firecrawl location: honour explicit --fc-location; Auto = fall back to detected country config
+    _fc_loc_arg = getattr(args, "fc_location", _FC_LOC_AUTO)
+    if _fc_loc_arg and _fc_loc_arg != _FC_LOC_AUTO:
+        _fc_loc_payload = _FC_LOC_PAYLOADS.get(_fc_loc_arg, cfg.firecrawl_location)
+    else:
+        _fc_loc_payload = cfg.firecrawl_location or {"country": "IT", "languages": ["it", "en"]}
 
     run_label    = _make_run_label(args.haiku_mode, batch_n, args.max_queries, args.debug, ts=ts)
     run_filename = _make_filename(run_label, file_hash)
@@ -11059,24 +11109,35 @@ def cli_batch_run() -> None:
     if _dm not in _DM_OPTIONS:
         _dm = _DM_DEFAULT
 
-    print(f"[cleaner] Input:            {input_path}", flush=True)
-    print(f"[cleaner] Country:          {cfg.country_name} ({cfg.country_code})", flush=True)
-    print(f"[cleaner] Rows:             {batch_n} / {len(df)}", flush=True)
-    print(f"[cleaner] Output dir:       {pl_paths['output_xlsx']}", flush=True)
-    print(f"[cleaner] Verifier:         {args.verifier}", flush=True)
-    print(f"[cleaner] Firecrawl loc:    country={_fc_loc_country_str} languages=[{_fc_loc_langs_str}]", flush=True)
-    print(f"[cleaner] Haiku mode:       {args.haiku_mode}", flush=True)
-    print(f"[cleaner] Size inference:   {_infer_size_str}", flush=True)
-    print(f"[cleaner] Domain discovery mode: {_dm}", flush=True)
+    _verifier_mode_resolved = getattr(args, "verifier_mode", _VM_UNCERTAIN) or _VM_UNCERTAIN
+    _serper_gl       = getattr(args, "serper_gl",       _defaults.get("serper_gl", "it"))
+    _serper_hl       = getattr(args, "serper_hl",       _defaults.get("serper_hl", "it"))
+    _serper_location = getattr(args, "serper_location", _defaults.get("serper_location", "Italy"))
+
+    print(f"[cleaner] ── Resolved settings ─────────────────────────────────────", flush=True)
+    print(f"[cleaner] Input:                  {input_path}", flush=True)
+    print(f"[cleaner] Country:                {cfg.country_name} ({cfg.country_code})", flush=True)
+    print(f"[cleaner] Rows:                   {batch_n} / {len(df)}", flush=True)
+    print(f"[cleaner] Output dir:             {pl_paths['output_xlsx']}", flush=True)
+    print(f"[cleaner] Domain discovery mode:  {_dm}", flush=True)
     if _dm == _DM_MANUAL_GOOGLE_LIKE:
-        print("[cleaner]   Manual Google-like mode: company-name-only query, "
-              "knowledge/local/organic priority, obvious bad domains skipped", flush=True)
-        print("[cleaner]   Manual Google-like canonicalization: selected URLs are normalized "
-              "to company root domains", flush=True)
+        print("[cleaner]   → Manual Google-like: company-name query, KG/local/organic priority, "
+              "brand-ownership gate, canonicalization", flush=True)
     elif _dm == _DM_SIMPLE_RAW_TOP:
-        print("[cleaner]   Simple raw-top mode: one Serper call, raw top organic result, no filtering",
+        print("[cleaner]   → Simple raw-top: one Serper call, raw top organic result, no filtering",
               flush=True)
-    print(f"[cleaner] Started:          {pd.Timestamp.now().strftime('%Y-%m-%d %H:%M:%S')}", flush=True)
+    elif _dm == _DM_ADVANCED:
+        print("[cleaner]   → Advanced: multi-query Serper with full scoring pipeline", flush=True)
+    print(f"[cleaner] Serper gl/hl/location:  {_serper_gl} / {_serper_hl} / {_serper_location}", flush=True)
+    print(f"[cleaner] Verifier:               {args.verifier}", flush=True)
+    print(f"[cleaner] Verifier mode:          {_verifier_mode_resolved}", flush=True)
+    print(f"[cleaner] Firecrawl speed:        {args.fc_speed}", flush=True)
+    print(f"[cleaner] Firecrawl location:     {_fc_loc_arg}  →  country={_fc_loc_country_str} languages=[{_fc_loc_langs_str}]", flush=True)
+    print(f"[cleaner] Haiku mode:             {args.haiku_mode}", flush=True)
+    print(f"[cleaner] Size inference:         {_infer_size_str}", flush=True)
+    print(f"[cleaner] Max queries (Serper):   {args.max_queries}", flush=True)
+    print(f"[cleaner] Started:                {pd.Timestamp.now().strftime('%Y-%m-%d %H:%M:%S')}", flush=True)
+    print(f"[cleaner] ─────────────────────────────────────────────────────────", flush=True)
 
     # ── Column-map debug output ───────────────────────────────────────────────
     _col_summary = ", ".join(f"{role}={col}" for role, col in cols.items() if col)
@@ -11198,7 +11259,7 @@ def cli_batch_run() -> None:
             haiku_max_rows=0,
             jina_mode=_JINA_MODE_OFF,
             verifier_provider=args.verifier,
-            verifier_mode=_VM_UNCERTAIN,
+            verifier_mode=getattr(args, "verifier_mode", _VM_UNCERTAIN) or _VM_UNCERTAIN,
             fc_key=fc_key_arg,
             fc_location=_fc_loc_payload,
             eligibility_filter_mode=_PF_MODE_MAYBE,
