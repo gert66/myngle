@@ -4786,6 +4786,7 @@ def run_model_signal_extraction(
     model_id: str = MODEL_STEP2,
     include_evidence: bool = True,
     search_provider: str = STEP2_PROVIDER_SERPER,
+    _debug_capture: "dict | None" = None,
 ) -> dict:
     """
     Extract structured model signals from already-fetched enrichment context.
@@ -4828,6 +4829,10 @@ def run_model_signal_extraction(
             getattr(b, "text", "") for b in resp.content
             if getattr(b, "type", "") == "text"
         ).strip()
+        if _debug_capture is not None:
+            _debug_capture["raw_text"] = raw_text
+            _debug_capture["retry"] = False
+            _debug_capture["model_id"] = model_id
 
         try:
             raw_json = _parse_json_response(raw_text)
@@ -4841,6 +4846,10 @@ def run_model_signal_extraction(
                 getattr(b, "text", "") for b in resp2.content
                 if getattr(b, "type", "") == "text"
             ).strip()
+            if _debug_capture is not None:
+                _debug_capture["raw_text"] = raw_text2
+                _debug_capture["raw_text_attempt1"] = raw_text
+                _debug_capture["retry"] = True
             raw_json = _parse_json_response(raw_text2)
 
         signals = _coerce_model_signals(raw_json)

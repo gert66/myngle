@@ -9,9 +9,9 @@ Normal batch behaviour is NOT changed: this script only wraps existing
 pipeline functions; it does not modify scoring, prompts, or enrichment
 logic.
 
-Usage:
-    python debug_enrichment_trace.py --company "IET" --domain "iet.it" --country "Italy"
-    python debug_enrichment_trace.py --company "IET" --domain "iet.it" --out debug_traces/IET.json
+Usage (Italy register / Lovable comparison):
+    python debug_enrichment_trace.py --company "IET" --domain "iet.it" --country "Italy" --profile italy_register_icp_only
+    python debug_enrichment_trace.py --company "IET" --domain "iet.it" --profile italy_register_icp_only --out debug_traces/IET_iet_it_italy_profile.json
 
 Required environment variables (same as normal enrichment):
     ANTHROPIC_API_KEY
@@ -22,7 +22,6 @@ from __future__ import annotations
 
 import argparse
 import json
-import math
 import os
 import sys
 import time
@@ -51,35 +50,6 @@ def _safe_row(row: dict) -> dict:
 
 
 # ---------------------------------------------------------------------------
-# Serper interceptor
-# ---------------------------------------------------------------------------
-
-class _SerperInterceptor:
-    """Wraps _call_serper to record every query + raw results."""
-
-    def __init__(self, serper_key: str):
-        self.serper_key = serper_key
-        self.calls: list[dict] = []
-
-    def __call__(self, query: str, serper_key: str = "", timeout: int = 15):
-        key = serper_key or self.serper_key
-        hits, http_status, raw_json, err_str = _enc._call_serper.__wrapped__(
-            query, key, timeout
-        ) if hasattr(_enc._call_serper, "__wrapped__") else _enc._call_serper(
-            query, key, timeout
-        )
-        self.calls.append({
-            "query": query,
-            "http_status": http_status,
-            "hit_count": len(hits),
-            "error": err_str,
-            "hits": hits,
-            "raw_json_keys": list(raw_json.keys()) if isinstance(raw_json, dict) else None,
-        })
-        return hits, http_status, raw_json, err_str
-
-
-# ---------------------------------------------------------------------------
 # Main trace runner
 # ---------------------------------------------------------------------------
 
@@ -87,14 +57,22 @@ def run_trace(
     company_name: str,
     domain: str,
     country: str = "Italy",
-    out_path: Path | None = None,
+    out_path: "Path | None" = None,
     anthropic_key: str = "",
     serper_key: str = "",
-    scoring_profile: str = "default",
+    scoring_profile: str = "italy_register_icp_only",
 ) -> dict:
 
     ts = datetime.now(timezone.utc).isoformat()
-    trace: dict = {"_trace_version": 1, "timestamp": ts}
+    trace: dict = {"_trace_version": 2, "timestamp": ts}
+
+    # ── 0. API key warnings (written into JSON so the trace is self-documenting) ──
+    api_warnings: list[str] = []
+    if not serper_key:
+        api_warnings.append("SERPER_API_KEY is not set — Serper queries will fail (no web evidence)")
+    if not anthropic_key:
+        api_warnings.append("ANTHROPIC_API_KEY is not set — model signal extraction will be skipped (all signals default to 0)")
+    trace["api_warnings"] = api_warnings
 
     # ── 1. input ─────────────────────────────────────────────────────────────
     trace["input"] = {
@@ -143,10 +121,13 @@ def run_trace(
     print("[trace] Step 2b: executing Serper queries …", flush=True)
     query_groups: list = []
     raw_results_per_query: list[dict] = []
+    serper_errors: list[str] = []
 
     for i, (q, label) in enumerate(zip(queries, labels), 1):
         hits, http_status, raw_json, err_str = _enc._call_serper(q, serper_key)
         query_groups.append((label, hits))
+        if err_str:
+            serper_errors.append(f"[{label}] http={http_status}: {err_str}")
         raw_results_per_query.append({
             "query_index": i,
             "query_label": label,
@@ -168,11 +149,23 @@ def run_trace(
             ],
         })
 
+    # Detect Serper key rejection (403 on first call = key invalid or not set)
+    _first_status = raw_results_per_query[0]["http_status"] if raw_results_per_query else None
+    _serper_ok = not serper_errors and sum(r["hit_count"] for r in raw_results_per_query) > 0
+    if _first_status == 403 and serper_key:
+        api_warnings.append("SERPER_API_KEY was rejected (HTTP 403) — no web evidence in this trace")
+    elif serper_errors and serper_key:
+        api_warnings.append(f"Serper returned errors for {len(serper_errors)} of {len(queries)} queries")
+
     trace["raw_serper_results"] = raw_results_per_query
+    trace["serper_status"] = {
+        "key_present": bool(serper_key),
+        "succeeded": _serper_ok,
+        "total_hits": sum(r["hit_count"] for r in raw_results_per_query),
+        "errors": serper_errors,
+    }
 
     # ── 5. filtered_evidence ─────────────────────────────────────────────────
-    # _format_serper_results builds the text that Claude receives; extract
-    # per-result keep/ignore decisions by inspecting the formatted output.
     results_text = _enc._format_serper_results(query_groups)
     total_hits = sum(len(h) for _, h in query_groups)
 
@@ -218,7 +211,6 @@ def run_trace(
     }
 
     # ── 7. model_signal_prompt ───────────────────────────────────────────────
-    # Build partial Step-2 prompt (same construction as run_step2_serper)
     search_instruction = (
         f"Now analyze this company based on the web search results provided below.\n\n"
         f"Company: {target}\n\n"
@@ -241,8 +233,10 @@ def run_trace(
         "note": "API key values are never included in this trace",
     }
 
-    # ── Run enrich_one_row to get all enriched fields (uses caching) ──────────
-    print("[trace] Step 2c+3: running enrich_one_row for enriched fields …", flush=True)
+    # ── Run enrich_one_row WITHOUT model signal extraction ────────────────────
+    # We run Step 2 (Serper ICP) here. Model signals are extracted separately
+    # below so we can attach _debug_capture and record the raw Anthropic response.
+    print("[trace] Step 2c: running enrich_one_row (extract_model_signals=False) …", flush=True)
     t_start = time.time()
     enriched_row, _debug_rec = _enc.enrich_one_row(
         company_name=company_name,
@@ -253,28 +247,48 @@ def run_trace(
         search_provider=_enc.STEP2_PROVIDER_SERPER,
         serper_key=serper_key,
         dry_run=False,
-        extract_model_signals=True,
+        extract_model_signals=False,   # We call run_model_signal_extraction below
         include_signal_evidence=True,
-        run_step1_enrichment=False,   # Step 1 needs Jina/Lusha; skip for trace
+        run_step1_enrichment=False,    # Step 1 needs Jina/Lusha; skip for trace
         run_step2_enrichment=True,
         scoring_profile=scoring_profile,
     )
+
+    # ── Step 3: model signal extraction with raw response capture ────────────
+    print("[trace] Step 3: model signal extraction (capturing raw response) …", flush=True)
+    _debug_capture: dict = {}
+    ms_fields = _enc.run_model_signal_extraction(
+        company_name=company_name,
+        raw_url=effective_url,
+        enrichment_row=enriched_row,
+        api_key=anthropic_key,
+        model_id=_enc.MODEL_STEP2,
+        include_evidence=True,
+        search_provider=_enc.STEP2_PROVIDER_SERPER,
+        _debug_capture=_debug_capture,
+    )
+    enriched_row.update(ms_fields)
     t_elapsed = time.time() - t_start
 
     # ── 8. model_signal_raw_response ─────────────────────────────────────────
-    # The raw response is captured inside run_model_signal_extraction; we
-    # expose what we can from the enriched row fields.
+    _anthropic_ok = bool(_debug_capture.get("raw_text"))
+    if not anthropic_key:
+        pass  # warning already added before the run
+    elif not _anthropic_ok:
+        _ms_reason = enriched_row.get("model_signal_manual_review_reason", "")
+        api_warnings.append(f"Anthropic call failed or returned no text — {_ms_reason}")
+
     trace["model_signal_raw_response"] = {
-        "note": (
-            "Raw Anthropic response text is not captured outside run_model_signal_extraction. "
-            "The parsed and coerced signal fields below reflect the actual API response. "
-            "If model_signal_search_quality == 'failed' the call was skipped or errored."
-        ),
+        "raw_text": _debug_capture.get("raw_text", None),
+        "retry_was_needed": _debug_capture.get("retry", False),
+        "raw_text_attempt1_if_retry": _debug_capture.get("raw_text_attempt1", None),
+        "model_id": _debug_capture.get("model_id", _enc.MODEL_STEP2),
+        "anthropic_called": _anthropic_ok,
+        "api_key_present": bool(anthropic_key),
         "model_signal_search_quality": enriched_row.get("model_signal_search_quality", ""),
         "model_signal_needs_manual_review": enriched_row.get("model_signal_needs_manual_review", ""),
         "model_signal_manual_review_reason": enriched_row.get("model_signal_manual_review_reason", ""),
         "enrichment_elapsed_seconds": round(t_elapsed, 2),
-        "api_unavailable": not anthropic_key,
     }
 
     # ── 9. model_signal_parsed ───────────────────────────────────────────────
@@ -306,24 +320,23 @@ def run_trace(
     }
 
     # ── 10. model_signal_validated ───────────────────────────────────────────
-    # After _coerce_model_signals, scores are clamped to [0, 3] and defaulted.
     _coerced = {}
     _defaults_used = {}
     for f in _SIGNAL_FIELDS:
         raw_val = enriched_row.get(f, "")
-        coerced_val = _safe(raw_val)
-        _coerced[f] = coerced_val
+        _coerced[f] = _safe(raw_val)
         if raw_val == "" or raw_val is None:
             _defaults_used[f] = "defaulted to 0 (missing)"
         elif isinstance(raw_val, (int, float)):
-            clamped = max(0.0, min(3.0, float(raw_val))) if f.endswith("_score") and f != "model_signal_overall_confidence_score" else raw_val
-            if clamped != float(raw_val):
-                _defaults_used[f] = f"clamped from {raw_val} to {clamped}"
+            if f.endswith("_score") and f != "model_signal_overall_confidence_score":
+                clamped = max(0.0, min(3.0, float(raw_val)))
+                if clamped != float(raw_val):
+                    _defaults_used[f] = f"clamped from {raw_val} to {clamped}"
 
     trace["model_signal_validated"] = {
         "signals": _coerced,
         "defaults_applied": _defaults_used,
-        "note": "Values taken from enriched row after _coerce_model_signals has run inside run_model_signal_extraction",
+        "note": "Values after _coerce_model_signals inside run_model_signal_extraction",
     }
 
     # ── 11. score_inputs ─────────────────────────────────────────────────────
@@ -354,12 +367,11 @@ def run_trace(
     print("[trace] Scoring …", flush=True)
     score_out = _cfs.score_company(enriched_row, params={"scoring_profile": scoring_profile})
 
-    profile = _cfs.SCORING_PROFILES.get(scoring_profile, _cfs.SCORING_PROFILES["default"])
-    _model_w = profile["model_weight"]
-    _size_w  = profile["size_weight"]
-    _sig_k   = profile["sigmoid_k"]
+    profile_cfg = _cfs.SCORING_PROFILES.get(scoring_profile, _cfs.SCORING_PROFILES["default"])
+    _model_w = profile_cfg["model_weight"]
+    _size_w  = profile_cfg["size_weight"]
+    _sig_k   = profile_cfg["sigmoid_k"]
 
-    # Per-signal breakdown
     per_signal = {}
     for field, coeff in _cfs.LEAN_COEFFICIENTS.items():
         raw_val = float(enriched_row.get(field) or 0)
@@ -402,6 +414,9 @@ def run_trace(
     final_row.update(score_out)
     trace["final_output_row"] = _safe_row(final_row)
 
+    # Write api_warnings back (may have grown during run)
+    trace["api_warnings"] = api_warnings
+
     # ── Write output ──────────────────────────────────────────────────────────
     if out_path is None:
         safe_name = "".join(c if c.isalnum() or c in "-_" else "_" for c in company_name)
@@ -409,8 +424,19 @@ def run_trace(
         out_path = Path("debug_traces") / f"{safe_name}_{safe_dom}.json"
 
     out_path.parent.mkdir(parents=True, exist_ok=True)
-    out_path.write_text(json.dumps(trace, indent=2, ensure_ascii=False), encoding="utf-8")
 
+    # Safety: do not write if the trace contains anything that looks like an API key.
+    raw_json_str = json.dumps(trace, indent=2, ensure_ascii=False)
+    for _secret_hint in [anthropic_key, serper_key]:
+        if _secret_hint and len(_secret_hint) > 8 and _secret_hint in raw_json_str:
+            print(
+                f"[trace] SAFETY ABORT: API key found in trace output. "
+                f"File not written. Please report this bug.",
+                file=sys.stderr,
+            )
+            sys.exit(1)
+
+    out_path.write_text(raw_json_str, encoding="utf-8")
     return trace
 
 
@@ -426,17 +452,20 @@ def main():
     parser.add_argument("--domain",  required=True, help="Domain, e.g. 'iet.it'")
     parser.add_argument("--country", default="Italy", help="Country (default: Italy)")
     parser.add_argument("--out",     default=None,   help="Output JSON path")
-    parser.add_argument("--profile", default="default",
-                        help="Scoring profile (default / italy_register_icp_only)")
+    parser.add_argument(
+        "--profile",
+        default="italy_register_icp_only",
+        help="Scoring profile (default: italy_register_icp_only for Lovable comparison)",
+    )
     args = parser.parse_args()
 
     anthropic_key = os.environ.get("ANTHROPIC_API_KEY", "")
     serper_key    = os.environ.get("SERPER_API_KEY", "")
 
     if not serper_key:
-        print("WARNING: SERPER_API_KEY not set — Serper queries will fail.", file=sys.stderr)
+        print("WARNING: SERPER_API_KEY not set — Serper queries will fail (no web evidence).", file=sys.stderr)
     if not anthropic_key:
-        print("WARNING: ANTHROPIC_API_KEY not set — model signal extraction will be skipped.", file=sys.stderr)
+        print("WARNING: ANTHROPIC_API_KEY not set — model signals will default to 0.", file=sys.stderr)
 
     out_path = Path(args.out) if args.out else None
 
@@ -455,26 +484,34 @@ def main():
         scoring_profile=args.profile,
     )
 
-    # Determine actual output path
     if out_path is None:
         safe_name = "".join(c if c.isalnum() or c in "-_" else "_" for c in args.company)
         safe_dom  = "".join(c if c.isalnum() or c in "-_" else "_" for c in args.domain)
         out_path = Path("debug_traces") / f"{safe_name}_{safe_dom}.json"
 
-    sc = trace.get("score_components", {})
+    sc  = trace.get("score_components", {})
+    msr = trace.get("model_signal_raw_response", {})
+    ss  = trace.get("serper_status", {})
+
     print(f"\n[trace] Done.")
-    print(f"[trace] Output saved to : {out_path}")
-    print(f"[trace] Final score     : {sc.get('final_commercial_fit_score', 'n/a')}")
-    print(f"[trace] Tier            : {sc.get('commercial_tier', 'n/a')}")
-    print(f"[trace] ICP similarity  : {sc.get('icp_similarity_score', 'n/a')}")
+    print(f"[trace] Output saved to    : {out_path}")
+    print(f"[trace] Serper succeeded   : {ss.get('succeeded')}  (total hits: {ss.get('total_hits', 0)})")
+    print(f"[trace] Anthropic called   : {msr.get('anthropic_called')}  (raw text captured: {bool(msr.get('raw_text'))})")
+    print(f"[trace] Final score        : {sc.get('final_commercial_fit_score', 'n/a')}")
+    print(f"[trace] Tier               : {sc.get('commercial_tier', 'n/a')}")
+    print(f"[trace] ICP similarity     : {sc.get('icp_similarity_score', 'n/a')}")
+    if trace.get("api_warnings"):
+        print(f"\n[trace] Warnings:")
+        for w in trace["api_warnings"]:
+            print(f"   ! {w}")
     print(f"\n[trace] Pipeline functions reused (unchanged):")
     print(f"   enrich_clients_claude.validate_company_domain()")
     print(f"   enrich_clients_claude._build_serper_queries()")
     print(f"   enrich_clients_claude._call_serper()")
     print(f"   enrich_clients_claude._format_serper_results()")
     print(f"   enrich_clients_claude._classify_serper_source()")
-    print(f"   enrich_clients_claude.enrich_one_row()  (run_step1_enrichment=False)")
-    print(f"   enrich_clients_claude.run_model_signal_extraction()")
+    print(f"   enrich_clients_claude.enrich_one_row()  (extract_model_signals=False, run_step1_enrichment=False)")
+    print(f"   enrich_clients_claude.run_model_signal_extraction()  (_debug_capture=...)")
     print(f"   commercial_fit_scoring.score_company()")
     print(f"\n[trace] Normal batch behaviour is unaffected by this script.")
 
