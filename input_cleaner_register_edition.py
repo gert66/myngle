@@ -11001,6 +11001,8 @@ def cli_batch_run() -> None:
                         help="Print resolved pipeline paths and exit (no processing)")
     parser.add_argument("--skip-firecrawl-preflight", action="store_true",
                         help="Skip the per-key Firecrawl preflight health check before processing")
+    parser.add_argument("--require-firecrawl", action="store_true",
+                        help="Force Firecrawl preflight even for non-advanced domain modes; abort if unavailable")
     parser.add_argument("--no-firecrawl-fail-fast", action="store_true",
                         help="Disable the runtime Firecrawl fail-fast safety check")
     parser.add_argument("--country", default="auto", choices=["auto", "IT", "DE"],
@@ -11113,8 +11115,33 @@ def cli_batch_run() -> None:
     # ── Firecrawl preflight ───────────────────────────────────────────────────
     _fc_preflight: dict = {}
     _fc_fail_fast = not args.no_firecrawl_fail_fast
+
+    # Determine whether Firecrawl will actually be called during this run.
+    # manual_google_like and simple_raw_top bypass the full pipeline (Serper
+    # only); the Firecrawl verifier is only reached in advanced mode or when
+    # --infer-size is requested.  --require-firecrawl overrides this.
+    _pre_dm: str = getattr(args, "domain_mode", _DM_DEFAULT) or _DM_DEFAULT
+    if getattr(args, "simple_serper_top_domain", False):
+        _pre_dm = _DM_SIMPLE_RAW_TOP
+    elif getattr(args, "manual_google_like_domain", False):
+        _pre_dm = _DM_MANUAL_GOOGLE_LIKE
+    if _pre_dm not in _DM_OPTIONS:
+        _pre_dm = _DM_DEFAULT
+    _require_fc = getattr(args, "require_firecrawl", False)
+    _fc_needed_for_run: bool = (
+        _require_fc
+        or _pre_dm == _DM_ADVANCED
+        or getattr(args, "infer_size", False)
+    )
+
     if args.verifier in (_VP_FIRECRAWL, _VP_FC_JINA) and fc_keys_cli:
-        if args.skip_firecrawl_preflight:
+        if not _fc_needed_for_run:
+            print(
+                f"[FC PREFLIGHT] Skipped: Firecrawl not required for domain_mode={_pre_dm}",
+                flush=True,
+            )
+            _fc_preflight = {"preflight_status": "SKIPPED"}
+        elif args.skip_firecrawl_preflight:
             print("[FC PREFLIGHT] Skipped (--skip-firecrawl-preflight).", flush=True)
             _fc_preflight = {"preflight_status": "SKIPPED"}
         else:
@@ -11130,18 +11157,31 @@ def cli_batch_run() -> None:
                 flush=True,
             )
             if _pst == "FAILED":
-                print(
-                    "[FC PREFLIGHT] ERROR: All Firecrawl keys failed preflight. "
-                    "Check API keys and account status. Aborting.",
-                    file=sys.stderr,
-                )
-                sys.exit(2)
-            if _pst == "DEGRADED":
+                if _require_fc:
+                    print(
+                        "[FC PREFLIGHT] ERROR: Firecrawl required (--require-firecrawl) but unavailable. Aborting.",
+                        file=sys.stderr,
+                    )
+                    sys.exit(2)
+                elif _pre_dm == _DM_ADVANCED or getattr(args, "infer_size", False):
+                    print(
+                        "[FC PREFLIGHT] ERROR: Firecrawl required but unavailable. Aborting.",
+                        file=sys.stderr,
+                    )
+                    sys.exit(2)
+                else:
+                    print(
+                        "[FC PREFLIGHT] Warning: Firecrawl unavailable; continuing without Firecrawl verification",
+                        flush=True,
+                    )
+            elif _pst == "DEGRADED":
                 print(
                     "[FC PREFLIGHT] WARNING: Some Firecrawl keys failed — "
                     "will use available working keys.",
                     flush=True,
                 )
+    elif args.verifier not in (_VP_FIRECRAWL, _VP_FC_JINA):
+        pass  # verifier does not use Firecrawl — preflight not applicable
 
     # ── Load input ────────────────────────────────────────────────────────────
     raw_bytes = input_path.read_bytes()
