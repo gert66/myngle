@@ -1,4 +1,7 @@
 @echo off
+chcp 65001 >nul
+set "PYTHONUTF8=1"
+set "PYTHONIOENCODING=utf-8"
 setlocal EnableDelayedExpansion
 
 rem Generic runner for input_cleaner_register_edition.py

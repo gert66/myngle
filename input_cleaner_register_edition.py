@@ -11051,7 +11051,7 @@ def cli_batch_run() -> None:
         import subprocess as _sp
         _base_argv = [a for a in sys.argv if not a.startswith("--input")]
         for _input_file in _input_files:
-            print(f"\n[cleaner] ═══ Processing: {_input_file.name} ═══", flush=True)
+            print(f"\n[cleaner] === Processing: {_input_file.name} ===", flush=True)
             _sub_argv = [sys.executable] + _base_argv + ["--input", str(_input_file)]
             _proc = _sp.run(_sub_argv)
             if _proc.returncode != 0:
@@ -11180,30 +11180,30 @@ def cli_batch_run() -> None:
     _serper_hl       = getattr(args, "serper_hl",       _defaults.get("serper_hl", "it"))
     _serper_location = getattr(args, "serper_location", _defaults.get("serper_location", "Italy"))
 
-    print(f"[cleaner] ── Resolved settings ─────────────────────────────────────", flush=True)
+    print(f"[cleaner] -- Resolved settings ------------------------------------------", flush=True)
     print(f"[cleaner] Input:                  {input_path}", flush=True)
     print(f"[cleaner] Country:                {cfg.country_name} ({cfg.country_code})", flush=True)
     print(f"[cleaner] Rows:                   {batch_n} / {len(df)}", flush=True)
     print(f"[cleaner] Output dir:             {pl_paths['output_xlsx']}", flush=True)
     print(f"[cleaner] Domain discovery mode:  {_dm}", flush=True)
     if _dm == _DM_MANUAL_GOOGLE_LIKE:
-        print("[cleaner]   → Manual Google-like: company-name query, KG/local/organic priority, "
+        print("[cleaner]   -> Manual Google-like: company-name query, KG/local/organic priority, "
               "brand-ownership gate, canonicalization", flush=True)
     elif _dm == _DM_SIMPLE_RAW_TOP:
-        print("[cleaner]   → Simple raw-top: one Serper call, raw top organic result, no filtering",
+        print("[cleaner]   -> Simple raw-top: one Serper call, raw top organic result, no filtering",
               flush=True)
     elif _dm == _DM_ADVANCED:
-        print("[cleaner]   → Advanced: multi-query Serper with full scoring pipeline", flush=True)
+        print("[cleaner]   -> Advanced: multi-query Serper with full scoring pipeline", flush=True)
     print(f"[cleaner] Serper gl/hl/location:  {_serper_gl} / {_serper_hl} / {_serper_location}", flush=True)
     print(f"[cleaner] Verifier:               {args.verifier}", flush=True)
     print(f"[cleaner] Verifier mode:          {_verifier_mode_resolved}", flush=True)
     print(f"[cleaner] Firecrawl speed:        {args.fc_speed}", flush=True)
-    print(f"[cleaner] Firecrawl location:     {_fc_loc_arg}  →  country={_fc_loc_country_str} languages=[{_fc_loc_langs_str}]", flush=True)
+    print(f"[cleaner] Firecrawl location:     {_fc_loc_arg} -> country={_fc_loc_country_str} languages=[{_fc_loc_langs_str}]", flush=True)
     print(f"[cleaner] Haiku mode:             {args.haiku_mode}", flush=True)
     print(f"[cleaner] Size inference:         {_infer_size_str}", flush=True)
     print(f"[cleaner] Max queries (Serper):   {args.max_queries}", flush=True)
     print(f"[cleaner] Started:                {pd.Timestamp.now().strftime('%Y-%m-%d %H:%M:%S')}", flush=True)
-    print(f"[cleaner] ─────────────────────────────────────────────────────────", flush=True)
+    print(f"[cleaner] ---------------------------------------------------------------", flush=True)
 
     # ── Column-map debug output ───────────────────────────────────────────────
     _col_summary = ", ".join(f"{role}={col}" for role, col in cols.items() if col)
@@ -12946,7 +12946,7 @@ def _run_domain_quality_self_test() -> None:
     print("Domain Quality Self-Test")
     print("=" * 60)
 
-    print("\n── Should-REJECT cases ──")
+    print("\n-- Should-REJECT cases --")
     for domain, desc in CASES_REJECT:
         try:
             generic  = is_generic(domain)
@@ -12961,7 +12961,7 @@ def _run_domain_quality_self_test() -> None:
                 "hosted_platform" if platform else
                 cat if cat else "not_rejected"
             )
-            print(f"  [{status}] {domain!s:<40} ({desc}) → {reason}")
+            print(f"  [{status}] {domain!s:<40} ({desc}) -> {reason}")
             if rejected:
                 passed += 1
             else:
@@ -12970,7 +12970,7 @@ def _run_domain_quality_self_test() -> None:
             print(f"  [ERROR] {domain}: {traceback.format_exc(limit=1)}")
             failed += 1
 
-    print("\n── Should-ACCEPT cases (must NOT be hard-rejected) ──")
+    print("\n-- Should-ACCEPT cases (must NOT be hard-rejected) --")
     for domain, desc in CASES_ACCEPT:
         try:
             generic  = is_generic(domain)
@@ -12985,7 +12985,7 @@ def _run_domain_quality_self_test() -> None:
                 "hosted_platform" if platform else
                 cat if cat else "ok"
             )
-            print(f"  [{status}] {domain!s:<40} ({desc}) → {reason}")
+            print(f"  [{status}] {domain!s:<40} ({desc}) -> {reason}")
             if not hard_rejected:
                 passed += 1
             else:
@@ -12994,7 +12994,7 @@ def _run_domain_quality_self_test() -> None:
             print(f"  [ERROR] {domain}: {traceback.format_exc(limit=1)}")
             failed += 1
 
-    print("\n── evaluate_domain_candidate spot-checks ──")
+    print("\n-- evaluate_domain_candidate spot-checks --")
     spot_checks = [
         ("it.linkedin.com",  "Rossi SRL", False, "LinkedIn rejected"),
         ("ibm.com",          "IBM Italia SPA", None, "IBM not hard-rejected"),
@@ -13007,7 +13007,7 @@ def _run_domain_quality_self_test() -> None:
             if expected_accepted is None:
                 ok = res["source_type"] not in ("directory_or_social", "hosted_platform", "media_blocked", "shortener")
             status = "PASS" if ok else "FAIL"
-            print(f"  [{status}] evaluate({dom!r}, {cname!r}) → accepted={res['accepted']}, score={res['score']}, {res['reason'][:60]}")
+            print(f"  [{status}] evaluate({dom!r}, {cname!r}) -> accepted={res['accepted']}, score={res['score']}, {res['reason'][:60]}")
             if ok:
                 passed += 1
             else:
