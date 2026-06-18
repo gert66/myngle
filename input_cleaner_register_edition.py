@@ -2164,31 +2164,42 @@ def _simple_serper_top_domain_row(
 # Mimics a manual Google search: one query = company_name (no quotes, no extras),
 # Serper with gl=it hl=it location=Italy.
 # Result priority: knowledgeGraph website > local/places website > top-5 organic.
-# Simple skip-list for obvious non-company domains.
+# Organic results must pass a brand-ownership gate: the domain itself must
+# contain a brand token extracted from the company name.
 #
-# Use --manual-google-like-domain (CLI) or the Streamlit checkbox to enable.
+# Use --domain-mode manual_google_like (CLI) or the Streamlit selector to enable.
 # ---------------------------------------------------------------------------
 
-# Domains to skip in manual Google-like mode (obvious directories / social / HR).
+# Domains to skip in manual Google-like mode (obvious directories / social / HR /
+# company-registry / industry portals / profile aggregators).
 _MGL_SKIP_DOMAINS: frozenset[str] = frozenset({
+    # Social / communication
     "facebook.com",
     "linkedin.com",
     "instagram.com",
     "twitter.com",
     "x.com",
     "youtube.com",
-    "autoscout24.it",
-    "autoscout24.com",
+    "xing.com",
+    # Job boards / HR
+    "indeed.com",
+    "glassdoor.com",
     "inmatch.com",
-    "zoominfo.com",
+    "infojobs.it",
+    "monster.it",
+    "jobrapido.com",
+    # Company registries / fiscal databases
     "ufficiocamerale.it",
     "registroaziende.it",
     "registroimprese.it",
     "infocamere.it",
-    "europages.com",
-    "europages.it",
     "fatturatoitalia.it",
     "visura.pro",
+    "ateco.info",
+    "codiceateco.it",
+    # Business directories / aggregators
+    "europages.com",
+    "europages.it",
     "kompass.com",
     "kompass.it",
     "paginegialle.it",
@@ -2196,18 +2207,130 @@ _MGL_SKIP_DOMAINS: frozenset[str] = frozenset({
     "informazione-aziende.it",
     "reportaziende.it",
     "companyreports.it",
-    "indeed.com",
-    "glassdoor.com",
+    "bcompanies.it",
+    "companylisting.it",
+    "companywall.it",
     "dnb.com",
     "crunchbase.com",
+    "zoominfo.com",
+    "opencorporates.com",
+    "northdata.com",
+    "northdata.it",
+    "aziende-italia.it",
+    "italiaimprese.it",
+    "imprese.info",
+    "tuttocamere.it",
+    "pagineindustria.it",
+    # Industry portals / product listing / chemistry
+    "industrychemistry.com",
+    "key4biz.it",
+    "machinio.com",
+    "machinesitalia.org",
+    "archiproducts.com",
+    "archilovers.com",
+    "edilportale.com",
+    # Car / vehicle portals
+    "autoscout24.it",
+    "autoscout24.com",
+    "automoto.it",
+    "motori.it",
+    # General search / knowledge
     "wikipedia.org",
     "google.com",
     "bing.com",
-    "trovit.it",
-    "subito.it",
+    "wikidata.org",
+    # News / generic Italian media
     "corriere.it",
     "repubblica.it",
+    "sole24ore.com",
+    "trovit.it",
+    "subito.it",
 })
+
+# Italian legal form suffixes removed when building brand tokens.
+_MGL_LEGAL_SUFFIXES_RE = re.compile(
+    r"\b(s\.?\s*p\.?\s*a\.?|s\.?\s*r\.?\s*l\.?|s\.?\s*n\.?\s*c\.?|"
+    r"s\.?\s*a\.?\s*s\.?|s\.?\s*a\.?\s*r\.?\s*l\.?|"
+    r"s\.?\s*c\.?\s*a\.?\s*r\.?\s*l\.?|"
+    r"scarl|spa|srl|snc|sas|sapa|gmbh|ag|nv|bv|sarl|sa)\b",
+    re.I,
+)
+
+# Generic Italian/international words that carry no brand ownership signal.
+_MGL_GENERIC_WORDS: frozenset[str] = frozenset({
+    "italia", "italy", "italian",
+    "group", "gruppo",
+    "holding",
+    "company", "compagnia",
+    "international", "internazionale",
+    "europe", "europa", "european",
+    "global",
+    "service", "services", "servizi", "servizio",
+    "system", "systems", "sistemi",
+    "solutions", "soluzione", "soluzioni",
+    "management",
+    "consulting", "consulenza",
+    "engineering", "ingegneria",
+    "industria", "industrie", "industrial",
+    "commerciale", "commercio",
+    "logistica", "distribuzione",
+    "siglabile", "siglata", "detto",
+})
+
+
+def _mgl_brand_tokens(company_name: str) -> list[str]:
+    """
+    Extract meaningful brand tokens from an Italian company name.
+    Strips legal suffixes and generic words; returns tokens >= 3 chars.
+    """
+    name = company_name.lower()
+    name = _MGL_LEGAL_SUFFIXES_RE.sub(" ", name)
+    raw = re.split(r"[\s\-–—/.,;:()\[\]\"'&@#!?_]+", name)
+    tokens = []
+    for t in raw:
+        t = t.strip(".")
+        if len(t) < 3:
+            continue
+        if t in _MGL_GENERIC_WORDS:
+            continue
+        tokens.append(t)
+    # De-duplicate while preserving order
+    seen: set[str] = set()
+    result = []
+    for t in tokens:
+        if t not in seen:
+            seen.add(t)
+            result.append(t)
+    return result
+
+
+def _mgl_organic_is_brand_owned(
+    domain: str,
+    title: str,
+    snippet: str,
+    brand_tokens: list[str],
+) -> tuple[bool, str]:
+    """
+    Brand-ownership gate for organic results.
+
+    Accept when at least one brand token appears in the registered domain.
+    The title/snippet are checked as a secondary signal only if the brand is
+    completely absent from ALL organic domains (handled in the caller).
+
+    Returns (accepted: bool, reason: str).
+    """
+    if not brand_tokens:
+        return True, "no brand tokens — short/generic name fallback"
+
+    reg = _mgl_registered_domain(domain)
+    reg_lower = reg.lower()
+    for tok in brand_tokens:
+        if tok in reg_lower:
+            return True, f"brand token '{tok}' in registered domain '{reg}'"
+
+    return False, (
+        f"domain '{reg}' contains none of brand tokens {brand_tokens}"
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -2410,6 +2533,10 @@ def _manual_google_like_domain_row(
         "manual_google_like_selected_raw_domain": "",
         "manual_google_like_selected_domain":     "",
         "manual_google_like_status":              "NOT_MANUAL_GOOGLE_LIKE_MODE",
+        # Selection audit columns
+        "manual_google_like_selected_reason":     "",
+        "manual_google_like_rejected_domains":    "",
+        "manual_google_like_rejection_reasons":   "",
         # Raw result diagnostics
         "manual_google_like_kg_title":         "",
         "manual_google_like_kg_url":           "",
@@ -2498,35 +2625,78 @@ def _manual_google_like_domain_row(
         out[f"manual_google_like_{_slot}_url"]    = _u
         out[f"manual_google_like_{_slot}_domain"] = _d
 
+    # Build brand tokens once — used by organic gate and KG/local overlap check
+    brand_tokens = _mgl_brand_tokens(name)
+
+    # Rejection audit lists (filled as we walk results)
+    _rejected_domains: list[str] = []
+    _rejection_reasons: list[str] = []
+
+    def _reject(domain: str, reason: str) -> None:
+        _rejected_domains.append(domain)
+        _rejection_reasons.append(reason)
+
+    def _write_audit(selected_reason: str) -> None:
+        out["manual_google_like_rejected_domains"]  = " | ".join(_rejected_domains)
+        out["manual_google_like_rejection_reasons"] = " | ".join(_rejection_reasons)
+        out["manual_google_like_selected_reason"]   = selected_reason
+
     # ── Priority A: Knowledge Graph website ──────────────────────────────────
     if kg_site:
         kg_domain = _extract_domain(kg_site)
-        if kg_domain and not _mgl_skip(kg_domain) and _mgl_name_overlap(kg_title, name):
-            return _mgl_accept(out, existing_website, kg_domain, kg_site, kg_title,
-                               "KNOWLEDGE_GRAPH_DOMAIN_USED", "knowledgeGraph")
+        if kg_domain:
+            if _mgl_skip(kg_domain):
+                _reject(kg_domain, "KG domain in skip-list")
+            elif not _mgl_name_overlap(kg_title, name):
+                _reject(kg_domain, f"KG title '{kg_title[:60]}' has no name overlap")
+            else:
+                _write_audit(f"knowledgeGraph website accepted (title='{kg_title[:60]}')")
+                return _mgl_accept(out, existing_website, kg_domain, kg_site, kg_title,
+                                   "KNOWLEDGE_GRAPH_DOMAIN_USED", "knowledgeGraph")
 
     # ── Priority B: First local/places result website ─────────────────────────
-    for _place in places_list:
+    for _place in places_list[:3]:
         _pu = (_place.get("website") or _place.get("website_url") or _place.get("link") or "").strip()
         _pt = (_place.get("title") or _place.get("name") or "").strip()
         if not _pu:
             continue
         _pd = _extract_domain(_pu)
-        if _pd and not _mgl_skip(_pd) and _mgl_name_overlap(_pt, name):
-            return _mgl_accept(out, existing_website, _pd, _pu, _pt,
-                               "LOCAL_RESULT_DOMAIN_USED", "localResult")
-        break  # only try the first local result
+        if not _pd:
+            continue
+        if _mgl_skip(_pd):
+            _reject(_pd, "local result domain in skip-list")
+            break
+        if not _mgl_name_overlap(_pt, name):
+            _reject(_pd, f"local title '{_pt[:60]}' has no name overlap")
+            break
+        _write_audit(f"local result accepted (title='{_pt[:60]}')")
+        return _mgl_accept(out, existing_website, _pd, _pu, _pt,
+                           "LOCAL_RESULT_DOMAIN_USED", "localResult")
 
-    # ── Priority C: First usable organic result (top-5) ───────────────────────
+    # ── Priority C: First brand-owned organic result (top-5) ─────────────────
+    # Each candidate must pass:
+    #   1. not in skip-list
+    #   2. brand-ownership gate: registered domain contains a brand token
     for _org in organic[:5]:
         _u = (_org.get("link") or "").strip()
         _t = (_org.get("title") or "").strip()
+        _s = (_org.get("snippet") or "").strip()
         _d = _extract_domain(_u)
-        if _d and not _mgl_skip(_d):
+        if not _d:
+            continue
+        if _mgl_skip(_d):
+            _reject(_d, "organic domain in skip-list")
+            continue
+        _owned, _own_reason = _mgl_organic_is_brand_owned(_d, _t, _s, brand_tokens)
+        if _owned:
+            _write_audit(f"organic accepted: {_own_reason}")
             return _mgl_accept(out, existing_website, _d, _u, _t,
                                "ORGANIC_DOMAIN_USED", "organic")
+        else:
+            _reject(_d, f"brand-gate rejected: {_own_reason}")
 
     # Nothing usable found
+    _write_audit("no usable result found")
     out.update(
         domain_action="MISSING_DOMAIN",
         domain_confidence="None",
