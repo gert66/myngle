@@ -210,6 +210,114 @@ def _safe_str(v: Any) -> str:
     return str(v)
 
 
+# Labels that look like field names, not real hostnames — reject as domain values.
+_DOMAIN_LABEL_REJECT = frozenset({
+    "original_domain", "suggested_domain", "validated_domain",
+    "none", "unknown", "n/a", "-", "",
+})
+
+def _is_domain_like(value: Any) -> bool:
+    """Return True only when value looks like a real hostname (no scheme, no spaces)."""
+    if not isinstance(value, str):
+        return False
+    v = value.strip().lower()
+    if not v or " " in v:
+        return False
+    if v.startswith("http://") or v.startswith("https://"):
+        return False
+    if v in _DOMAIN_LABEL_REJECT:
+        return False
+    return "." in v
+
+
+def _pick_domain(*candidates: Any) -> str:
+    """Return the first domain-like candidate, normalised, or empty string."""
+    for c in candidates:
+        s = _safe_str(c).strip()
+        if _is_domain_like(s):
+            return _normalize_domain(s)
+    return ""
+
+
+def _pick_nonempty(*candidates: Any) -> str:
+    """Return the first non-empty string candidate."""
+    for c in candidates:
+        s = _safe_str(c).strip()
+        if s:
+            return s
+    return ""
+
+
+def _normalize_row_compatibility(row: dict, req: "EnrichRequest") -> dict:
+    """
+    Fill empty identity fields in the output row using a safe fallback chain.
+    Only overwrites fields that are missing or empty — never replaces good values.
+    """
+    req_domain = _normalize_domain(req.domain)
+    req_name   = req.resolved_company_name
+
+    # 1. company_name
+    row["company_name"] = _pick_nonempty(
+        row.get("company_name"),
+        row.get("canonical_company_name"),
+        row.get("input_company_name"),
+        req_name,
+    )
+
+    # 2. domain
+    row["domain"] = _pick_domain(
+        row.get("domain"),
+        row.get("validated_domain"),
+        row.get("canonical_company_domain"),
+        row.get("input_domain"),
+        req_domain,
+        row.get("domain_used_for_enrichment"),  # last: often a label, not a hostname
+    )
+
+    # 3. validated_domain
+    row["validated_domain"] = _pick_domain(
+        row.get("validated_domain"),
+        row.get("canonical_company_domain"),
+        row.get("domain"),
+    )
+
+    # 4. canonical_company_domain
+    row["canonical_company_domain"] = _pick_domain(
+        row.get("canonical_company_domain"),
+        row.get("validated_domain"),
+        row.get("domain"),
+    )
+
+    # 5. canonical_company_url
+    if not _pick_nonempty(row.get("canonical_company_url")):
+        _cdn = row.get("canonical_company_domain") or row.get("domain") or ""
+        if _cdn:
+            row["canonical_company_url"] = f"https://{_cdn}"
+
+    # 6. input_company_name
+    row["input_company_name"] = _pick_nonempty(
+        row.get("input_company_name"),
+        req_name,
+        row.get("company_name"),
+    )
+
+    # 7. input_domain
+    row["input_domain"] = _pick_domain(
+        row.get("input_domain"),
+        req_domain,
+        row.get("domain"),
+    )
+
+    # 8. commercial_fit_score
+    row["commercial_fit_score"] = _pick_nonempty(
+        row.get("commercial_fit_score"),
+        row.get("final_commercial_fit_score"),
+        row.get("final_commercial_fit_score_75_25_legacy"),
+    )
+
+    return row
+
+
 def _build_row_response(raw_row: dict, scoring_profile: str, req: EnrichRequest) -> dict:
     cname  = str(raw_row.get("lusha_company_name") or raw_row.get("company_name") or "")
     domain = str(raw_row.get("canonical_company_domain") or raw_row.get("domain") or "")
@@ -274,6 +382,8 @@ def _build_row_response(raw_row: dict, scoring_profile: str, req: EnrichRequest)
     for f, v in scored.items():
         if f not in out:
             out[f] = _safe_str(v)
+
+    out = _normalize_row_compatibility(out, req)
 
     return out
 
