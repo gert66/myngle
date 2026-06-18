@@ -85,15 +85,9 @@ echo Output folder:   %QUEUE_DIR%\01_cleaned_domains
 echo Mode:            %MODE%
 echo Batches:         %BATCHES%
 echo Domain mode:     %DOMAIN_MODE_ARG%
-if not "%MAX_ROWS%"=="" (
-  echo Max rows (arg):  %MAX_ROWS%
-) else (
-  if /I "%MODE%"=="test" (
-    echo Max rows:        10 ^(test default, no 4th arg^)
-  ) else if /I "%MODE%"=="full" (
-    echo Max rows:        0 ^(all rows, full mode^)
-  )
-)
+if not "!MAX_ROWS!"=="" echo Max rows arg:      !MAX_ROWS!
+if "!MAX_ROWS!"=="" if /I "%MODE%"=="test" echo Max rows:          10, test default
+if "!MAX_ROWS!"=="" if /I "%MODE%"=="full" echo Max rows:          0 means all rows
 echo.
 
 if /I "%BATCHES%"=="all" (
@@ -165,15 +159,9 @@ set "ROWS=0"
 if /I "%MODE%"=="test" set "ROWS=10"
 if defined MAX_ROWS if not "!MAX_ROWS!"=="" set "ROWS=!MAX_ROWS!"
 
-if "!ROWS!"=="0" (
-  echo Rows argument:     0 ^(all rows will be processed^)
-) else (
-  echo Rows argument:     !ROWS!
-)
-if "!ROWS!"=="1" (
-  echo WARNING: ROWS=1 -- only one row will be processed.
-  echo          Pass no 4th argument for full mode, or use max_rows=0 for all rows.
-)
+if "!ROWS!"=="0" echo Rows: 0 means all rows will be processed
+if not "!ROWS!"=="0" echo Rows: !ROWS!
+if "!ROWS!"=="1" echo WARNING: ROWS=1 -- only one row will be processed. Pass no 4th arg for full mode.
 
 echo.
 echo -- Run details --------------------------------------------------
