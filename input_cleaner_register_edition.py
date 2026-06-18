@@ -371,6 +371,13 @@ SRC_SERPER                = "serper_search"
 SRC_SERPER_EMAIL          = "serper_confirmed_email_domain"
 SRC_NONE                  = ""
 
+# Domain discovery mode constants
+_DM_MANUAL_GOOGLE_LIKE = "manual_google_like"
+_DM_ADVANCED           = "advanced"
+_DM_SIMPLE_RAW_TOP     = "simple_raw_top"
+_DM_DEFAULT            = _DM_MANUAL_GOOGLE_LIKE
+_DM_OPTIONS            = [_DM_MANUAL_GOOGLE_LIKE, _DM_ADVANCED, _DM_SIMPLE_RAW_TOP]
+
 # Claude Haiku review mode constants
 _DEFAULT_HAIKU_MODEL  = "claude-haiku-4-5-20251001"
 _HAIKU_MODE_PYTHON    = "Python only"
@@ -2175,8 +2182,11 @@ _MGL_SKIP_DOMAINS: frozenset[str] = frozenset({
     "inmatch.com",
     "zoominfo.com",
     "ufficiocamerale.it",
+    "registroaziende.it",
     "registroimprese.it",
     "infocamere.it",
+    "europages.com",
+    "europages.it",
     "fatturatoitalia.it",
     "visura.pro",
     "kompass.com",
@@ -2235,6 +2245,15 @@ def _mgl_name_overlap(title: str, company_name: str) -> bool:
     return any(t in title_lower for t in meaningful)
 
 
+# In-run cache: maps (query, gl, hl, location) → full Serper response dict.
+# Reset at the start of each process_dataframe() call via _mgl_cache_reset().
+_mgl_query_cache: dict = {}
+
+
+def _mgl_cache_reset() -> None:
+    _mgl_query_cache.clear()
+
+
 def _manual_google_like_domain_row(
     company_name: str,
     existing_website: str,
@@ -2264,6 +2283,7 @@ def _manual_google_like_domain_row(
         "final_decision_source":    "manual_google_like_domain",
         "final_confidence":         "",
         # Mode / query diagnostics
+        "domain_mode":                         _DM_MANUAL_GOOGLE_LIKE,
         "manual_google_like_mode":             True,
         "manual_google_like_query":            "",
         "manual_google_like_gl":               _GL,
@@ -2307,9 +2327,15 @@ def _manual_google_like_domain_row(
     query = name
     out["manual_google_like_query"] = query
 
-    full_data, err = _call_serper_full(
-        query, serper_key, gl=_GL, hl=_HL, location=_LOCATION,
-    )
+    _cache_key = (query, _GL, _HL, _LOCATION)
+    if _cache_key in _mgl_query_cache:
+        full_data, err = _mgl_query_cache[_cache_key], None
+    else:
+        full_data, err = _call_serper_full(
+            query, serper_key, gl=_GL, hl=_HL, location=_LOCATION,
+        )
+        if not err:
+            _mgl_query_cache[_cache_key] = full_data
     if err:
         out.update(
             domain_action="MISSING_DOMAIN",
@@ -7548,9 +7574,11 @@ def process_dataframe(
     country_config: "CountryConfig | None" = None,
     # Optional size inference
     infer_size: bool = False,
-    # Simple Serper top-domain benchmark mode (bypasses advanced scoring)
+    # Domain discovery mode — one of _DM_MANUAL_GOOGLE_LIKE / _DM_ADVANCED / _DM_SIMPLE_RAW_TOP
+    # Backward-compat aliases still accepted via cli_batch_run() / Streamlit callers.
+    domain_mode: str = _DM_DEFAULT,
+    # --- Legacy bool params kept for callers not yet updated ---
     simple_serper_top_domain: bool = False,
-    # Manual Google-like domain mode (one query = "<name>", gl=it hl=it)
     manual_google_like_domain: bool = False,
 ) -> tuple[pd.DataFrame, list[dict], list[dict], list[dict]]:
     """
@@ -7559,6 +7587,18 @@ def process_dataframe(
 
     Returns (enriched_df_for_all_rows, all_evidence_rows, all_debug_rows, all_jina_debug_rows).
     """
+    # Resolve legacy bool flags → domain_mode (bools take precedence if set)
+    if simple_serper_top_domain:
+        domain_mode = _DM_SIMPLE_RAW_TOP
+    elif manual_google_like_domain:
+        domain_mode = _DM_MANUAL_GOOGLE_LIKE
+    # Normalise / guard
+    if domain_mode not in _DM_OPTIONS:
+        domain_mode = _DM_DEFAULT
+
+    # Reset in-run Serper cache for manual Google-like mode
+    _mgl_cache_reset()
+
     _reset_serper_counter()
     new_results:   list[dict] = []
     new_evidence:  list[dict] = []
@@ -7634,71 +7674,55 @@ def process_dataframe(
                 progress_cb(global_i + 1, n)
             continue
 
-        # ── Simple Serper top-domain benchmark mode ──────────────────────────
-        # When active, replaces the full pipeline with a single Serper call.
-        # Normal scoring, Haiku, Firecrawl, and verifiers are all bypassed.
-        if simple_serper_top_domain and serper_key:
-            _simple_res = _simple_serper_top_domain_row(
-                name, city, website, serper_key, country_config=country_config,
-            )
-            _simple_res.setdefault("cleaned_company_name", name)
-            _simple_res.setdefault("normalized_input_website", website)
-            _simple_res.setdefault("email_domain", "")
-            _simple_res.setdefault("search_query_used", _simple_res.get("simple_serper_query", ""))
-            _simple_res.setdefault("name_variant_used", "")
-            _simple_res.setdefault("serper_top_result_title", _simple_res.get("simple_serper_top_title", ""))
-            _simple_res.setdefault("serper_top_result_url",   _simple_res.get("simple_serper_top_url", ""))
-            _simple_res.setdefault("serper_top_result_domain", _simple_res.get("simple_serper_top_domain", ""))
-            _simple_res["organization_type"]          = org_type
-            _simple_res["myngle_target_eligibility"]  = eligibility
-            _simple_res["pre_filter_decision"]        = pf_decision
-            _simple_res["pre_filter_reason"]          = pf_reason
-            new_results.append(_simple_res)
-            new_evidence.append({"query": _simple_res.get("simple_serper_query", ""),
-                                  "domain": _simple_res.get("simple_serper_top_domain", ""),
-                                  "url": _simple_res.get("simple_serper_top_url", ""),
-                                  "title": _simple_res.get("simple_serper_top_title", ""),
-                                  "used": True,
-                                  "candidate_source": "simple_serper_top_domain"})
-            import time as _time_simple
-            _time_simple.sleep(0.25)
-            if progress_cb:
-                progress_cb(global_i + 1, n)
-            continue
-        # ── End simple mode ───────────────────────────────────────────────────
+        # ── Domain discovery mode bypass (non-advanced modes) ───────────────────
+        # manual_google_like and simple_raw_top both replace the full pipeline.
+        # Advanced mode falls through to validate_register_row() below.
+        if domain_mode in (_DM_MANUAL_GOOGLE_LIKE, _DM_SIMPLE_RAW_TOP) and serper_key:
+            import time as _time_bypass  # noqa: PLC0415
+            if domain_mode == _DM_SIMPLE_RAW_TOP:
+                _bypass_res = _simple_serper_top_domain_row(
+                    name, city, website, serper_key, country_config=country_config,
+                )
+                _bypass_res.setdefault("domain_mode", _DM_SIMPLE_RAW_TOP)
+                _bypass_res.setdefault("search_query_used", _bypass_res.get("simple_serper_query", ""))
+                _bypass_res.setdefault("serper_top_result_title", _bypass_res.get("simple_serper_top_title", ""))
+                _bypass_res.setdefault("serper_top_result_url",   _bypass_res.get("simple_serper_top_url", ""))
+                _bypass_res.setdefault("serper_top_result_domain", _bypass_res.get("simple_serper_top_domain", ""))
+                _ev = {"query":  _bypass_res.get("simple_serper_query", ""),
+                       "domain": _bypass_res.get("simple_serper_top_domain", ""),
+                       "url":    _bypass_res.get("simple_serper_top_url", ""),
+                       "title":  _bypass_res.get("simple_serper_top_title", ""),
+                       "used": True, "candidate_source": "simple_raw_top"}
+            else:  # _DM_MANUAL_GOOGLE_LIKE
+                _bypass_res = _manual_google_like_domain_row(
+                    name, website, serper_key,
+                )
+                _bypass_res.setdefault("domain_mode", _DM_MANUAL_GOOGLE_LIKE)
+                _bypass_res.setdefault("search_query_used", _bypass_res.get("manual_google_like_query", ""))
+                _bypass_res.setdefault("serper_top_result_title", _bypass_res.get("manual_google_like_selected_title", ""))
+                _bypass_res.setdefault("serper_top_result_url",   _bypass_res.get("manual_google_like_selected_url", ""))
+                _bypass_res.setdefault("serper_top_result_domain", _bypass_res.get("manual_google_like_selected_domain", ""))
+                _ev = {"query":  _bypass_res.get("manual_google_like_query", ""),
+                       "domain": _bypass_res.get("manual_google_like_selected_domain", ""),
+                       "url":    _bypass_res.get("manual_google_like_selected_url", ""),
+                       "title":  _bypass_res.get("manual_google_like_selected_title", ""),
+                       "used": True, "candidate_source": "manual_google_like"}
 
-        # ── Manual Google-like domain mode ───────────────────────────────────
-        # One query = "<company_name>", Serper gl=it hl=it location=Italy.
-        # Top organic result domain accepted without scoring or filtering.
-        if manual_google_like_domain and serper_key:
-            _mg_res = _manual_google_like_domain_row(
-                name, website, serper_key,
-            )
-            _mg_res.setdefault("cleaned_company_name", name)
-            _mg_res.setdefault("normalized_input_website", website)
-            _mg_res.setdefault("email_domain", "")
-            _mg_res.setdefault("search_query_used", _mg_res.get("manual_google_like_query", ""))
-            _mg_res.setdefault("name_variant_used", "")
-            _mg_res.setdefault("serper_top_result_title", _mg_res.get("manual_google_like_selected_title", ""))
-            _mg_res.setdefault("serper_top_result_url",   _mg_res.get("manual_google_like_selected_url", ""))
-            _mg_res.setdefault("serper_top_result_domain", _mg_res.get("manual_google_like_selected_domain", ""))
-            _mg_res["organization_type"]         = org_type
-            _mg_res["myngle_target_eligibility"] = eligibility
-            _mg_res["pre_filter_decision"]       = pf_decision
-            _mg_res["pre_filter_reason"]         = pf_reason
-            new_results.append(_mg_res)
-            new_evidence.append({"query": _mg_res.get("manual_google_like_query", ""),
-                                  "domain": _mg_res.get("manual_google_like_selected_domain", ""),
-                                  "url": _mg_res.get("manual_google_like_selected_url", ""),
-                                  "title": _mg_res.get("manual_google_like_selected_title", ""),
-                                  "used": True,
-                                  "candidate_source": "manual_google_like_domain"})
-            import time as _time_mg
-            _time_mg.sleep(0.25)
+            _bypass_res.setdefault("cleaned_company_name", name)
+            _bypass_res.setdefault("normalized_input_website", website)
+            _bypass_res.setdefault("email_domain", "")
+            _bypass_res.setdefault("name_variant_used", "")
+            _bypass_res["organization_type"]         = org_type
+            _bypass_res["myngle_target_eligibility"] = eligibility
+            _bypass_res["pre_filter_decision"]       = pf_decision
+            _bypass_res["pre_filter_reason"]         = pf_reason
+            new_results.append(_bypass_res)
+            new_evidence.append(_ev)
+            _time_bypass.sleep(0.25)
             if progress_cb:
                 progress_cb(global_i + 1, n)
             continue
-        # ── End manual Google-like mode ───────────────────────────────────────
+        # ── End non-advanced bypass ───────────────────────────────────────────
 
         res, raw_ev = validate_register_row(
             name, website, email, city, province, postcode, serper_key, max_queries,
@@ -10358,17 +10382,20 @@ def cli_batch_run() -> None:
                         help="Input .xlsx or .csv file, or a folder of .xlsx files")
     parser.add_argument("--self-test-domain-quality", action="store_true",
                         help="Run domain-quality self-test and exit")
+    parser.add_argument("--domain-mode",
+                        default=_DM_DEFAULT,
+                        choices=_DM_OPTIONS,
+                        help=(
+                            f"Domain discovery mode (default: {_DM_DEFAULT}). "
+                            f"manual_google_like = company-name-only query, KG/local/organic priority; "
+                            f"advanced = full multi-query scoring pipeline; "
+                            f"simple_raw_top = raw top organic result, no filtering."
+                        ))
+    # Legacy flags kept for backward compatibility — they map to --domain-mode
     parser.add_argument("--simple-serper-top-domain", action="store_true",
-                        help=(
-                            "Benchmark mode: one Serper call per company, domain taken "
-                            "from the top organic result — no scoring, no Haiku, no Firecrawl."
-                        ))
+                        help="Legacy: equivalent to --domain-mode simple_raw_top")
     parser.add_argument("--manual-google-like-domain", action="store_true",
-                        help=(
-                            "Manual Google-like mode: one Serper call per company, "
-                            'query = "<company_name>" only (no city/official), '
-                            "gl=it hl=it location=Italy. Top organic result accepted unconditionally."
-                        ))
+                        help="Legacy: equivalent to --domain-mode manual_google_like")
     parser.add_argument("--project-root",   default=None,   help="Pipeline project root folder")
     parser.add_argument("--serper-key",     default=None,   help="Serper API key")
     parser.add_argument("--anthropic-key",  default=None,   help="Anthropic API key for Haiku")
@@ -10551,6 +10578,15 @@ def cli_batch_run() -> None:
     _fc_loc_langs_str   = ", ".join(_fc_loc_payload.get("languages", [])) if _fc_loc_payload else ""
     _infer_size_str     = "enabled" if getattr(args, "infer_size", False) else "disabled"
 
+    # Resolve domain mode from legacy flags → --domain-mode
+    _dm: str = getattr(args, "domain_mode", _DM_DEFAULT) or _DM_DEFAULT
+    if getattr(args, "simple_serper_top_domain", False):
+        _dm = _DM_SIMPLE_RAW_TOP
+    elif getattr(args, "manual_google_like_domain", False):
+        _dm = _DM_MANUAL_GOOGLE_LIKE
+    if _dm not in _DM_OPTIONS:
+        _dm = _DM_DEFAULT
+
     print(f"[cleaner] Input:            {input_path}", flush=True)
     print(f"[cleaner] Country:          {cfg.country_name} ({cfg.country_code})", flush=True)
     print(f"[cleaner] Rows:             {batch_n} / {len(df)}", flush=True)
@@ -10559,19 +10595,13 @@ def cli_batch_run() -> None:
     print(f"[cleaner] Firecrawl loc:    country={_fc_loc_country_str} languages=[{_fc_loc_langs_str}]", flush=True)
     print(f"[cleaner] Haiku mode:       {args.haiku_mode}", flush=True)
     print(f"[cleaner] Size inference:   {_infer_size_str}", flush=True)
-    _simple_mode_flag = getattr(args, "simple_serper_top_domain", False)
-    if _simple_mode_flag:
-        print(
-            "[cleaner] *** SIMPLE SERPER TOP-DOMAIN MODE ACTIVE — "
-            "one Serper call per row, raw top result, no scoring ***",
-            flush=True,
-        )
-    _manual_gl_flag = getattr(args, "manual_google_like_domain", False)
-    if _manual_gl_flag:
-        print("[cleaner] *** MANUAL GOOGLE-LIKE DOMAIN MODE ACTIVE ***", flush=True)
-        print("[cleaner]     Query format: company name only, no quotes", flush=True)
-        print("[cleaner]     Result priority: knowledgeGraph website, local website, organic top 5", flush=True)
-        print("[cleaner]     Serper settings: gl=it  hl=it  location=Italy", flush=True)
+    print(f"[cleaner] Domain discovery mode: {_dm}", flush=True)
+    if _dm == _DM_MANUAL_GOOGLE_LIKE:
+        print("[cleaner]   Manual Google-like mode: company-name-only query, "
+              "knowledge/local/organic priority, obvious bad domains skipped", flush=True)
+    elif _dm == _DM_SIMPLE_RAW_TOP:
+        print("[cleaner]   Simple raw-top mode: one Serper call, raw top organic result, no filtering",
+              flush=True)
     print(f"[cleaner] Started:          {pd.Timestamp.now().strftime('%Y-%m-%d %H:%M:%S')}", flush=True)
 
     # ── Column-map debug output ───────────────────────────────────────────────
@@ -10706,8 +10736,7 @@ def cli_batch_run() -> None:
             max_pages_per_cand=_cli_fc_max_pages,
             page_timeout=_cli_fc_page_timeout,
             fc_speed_mode=_cli_fc_speed,
-            simple_serper_top_domain=getattr(args, "simple_serper_top_domain", False),
-            manual_google_like_domain=getattr(args, "manual_google_like_domain", False),
+            domain_mode=_dm,
         )
     except _FcBudgetExceeded as _bexc:
         _budget_hit = True
@@ -11328,36 +11357,40 @@ def main():
     )
 
     st.sidebar.markdown("---")
-    simple_serper_top_domain_ui = st.sidebar.checkbox(
-        "Use simple Serper top-result domain mode",
-        value=False,
-        key="reg_simple_serper_top_domain",
+    _DM_LABELS = {
+        _DM_MANUAL_GOOGLE_LIKE: "Manual Google-like  (default)",
+        _DM_ADVANCED:           "Advanced cleaner",
+        _DM_SIMPLE_RAW_TOP:     "Simple raw top result  (benchmark)",
+    }
+    _dm_label_to_key = {v: k for k, v in _DM_LABELS.items()}
+    _dm_options_list = list(_DM_LABELS.values())
+    _dm_ui_label = st.sidebar.selectbox(
+        "Domain discovery mode",
+        options=_dm_options_list,
+        index=0,
+        key="reg_domain_mode",
         help=(
-            "Benchmark mode: one search per company, take the domain from the top organic "
-            "result. This bypasses advanced domain scoring, Haiku, and Firecrawl."
+            "**Manual Google-like (default):** one Serper search per company, "
+            "company-name-only query (no city / official / country), Italian Google settings "
+            "(gl=it hl=it location=Italy). Selects knowledge graph website, local website "
+            "or first usable organic result. Obvious bad domains are skipped. "
+            "This is the default because it is cheaper, faster and performed better in Italy tests.  \n"
+            "**Advanced cleaner:** full multi-query scoring pipeline with Haiku and Firecrawl.  \n"
+            "**Simple raw top result:** raw #1 organic result, no filtering (benchmark only)."
         ),
     )
-    if simple_serper_top_domain_ui:
-        st.sidebar.warning(
-            "Simple top-result mode is ON. Domains are taken raw from the #1 Google "
-            "result — no scoring, no blacklist filtering. For benchmarking only."
-        )
-
-    manual_google_like_domain_ui = st.sidebar.checkbox(
-        "Use manual Google-like domain mode",
-        value=False,
-        key="reg_manual_google_like_domain",
-        help=(
-            'One query per company: "<company_name>" only — no city, no official. '
-            "Serper gl=it hl=it location=Italy. Top organic result accepted unconditionally."
-        ),
-    )
-    if manual_google_like_domain_ui:
+    domain_mode_ui: str = _dm_label_to_key.get(_dm_ui_label, _DM_DEFAULT)
+    if domain_mode_ui == _DM_MANUAL_GOOGLE_LIKE:
         st.sidebar.info(
-            "Manual Google-like mode is ON.\n"
-            'Query: "<company_name>" only\n'
-            "Serper: gl=it  hl=it  location=Italy\n"
-            "Top organic result accepted — no scoring."
+            "Manual Google-like mode selected (default).  \n"
+            "Query: company name only, no quotes  \n"
+            "Priority: knowledge graph → local result → organic top 5  \n"
+            "Serper: gl=it  hl=it  location=Italy"
+        )
+    elif domain_mode_ui == _DM_SIMPLE_RAW_TOP:
+        st.sidebar.warning(
+            "Simple raw-top mode: domains taken raw from the #1 organic result — "
+            "no filtering. For benchmarking only."
         )
 
     st.sidebar.markdown("---")
@@ -11612,12 +11645,7 @@ def main():
                 debug_mode=debug_mode,
                 infer_size=infer_size,
                 country_config=_resume_cfg,
-                simple_serper_top_domain=st.session_state.get(
-                    "reg_simple_serper_top_domain", False
-                ),
-                manual_google_like_domain=st.session_state.get(
-                    "reg_manual_google_like_domain", False
-                ),
+                domain_mode=domain_mode_ui,
             )
 
             progress_bar.progress(1.0)
@@ -11991,8 +12019,7 @@ def main():
             debug_mode=debug_mode,
             infer_size=infer_size,
             country_config=_country_cfg,
-            simple_serper_top_domain=simple_serper_top_domain_ui,
-            manual_google_like_domain=manual_google_like_domain_ui,
+            domain_mode=domain_mode_ui,
         )
 
         progress_bar.progress(1.0)
