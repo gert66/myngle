@@ -136,7 +136,7 @@ if not defined FOUND (
 )
 
 if not defined FOUND (
-  echo ERROR: no raw file found for batch %ORIGINAL_N% ^(normalized: !N!^)
+  echo ERROR: no raw file found for batch %ORIGINAL_N% -- normalized: !N!
   echo Tried patterns:
   echo   %RAW_DIR%\%QUEUE%_!N!_R*.xlsx
   if defined PAD2 echo   %RAW_DIR%\%QUEUE%_!PAD2!_R*.xlsx
@@ -171,19 +171,13 @@ echo   Queue:           %QUEUE%
 echo   Mode:            %MODE%
 echo   Domain mode:     %DOMAIN_MODE_ARG%
 echo   Max queries:     %CLEANER_MAX_QUERIES%
-if /I "%MODE%"=="dry" (
-  echo   Python command:  python "%SCRIPT_FILE%" --input "..." --dry-run-paths
-) else (
-  echo   Python command:  python "%SCRIPT_FILE%" --input "..." --max-rows !ROWS! --max-queries %CLEANER_MAX_QUERIES% %DOMAIN_MODE_ARG%
-)
+if /I "%MODE%"=="dry" echo   Python command:  python "%SCRIPT_FILE%" --input "..." --dry-run-paths
+if /I not "%MODE%"=="dry" echo   Python command:  python "%SCRIPT_FILE%" --input "..." --max-rows !ROWS! --max-queries %CLEANER_MAX_QUERIES% %DOMAIN_MODE_ARG%
 echo -----------------------------------------------------------------
 echo.
 
-if /I "%MODE%"=="dry" (
-  python "%SCRIPT_FILE%" --input "%INPUT_FILE%" --project-root "%MYNGLE_DATA_ROOT%" --country auto --dry-run-paths > "%LOG_FILE%" 2>&1
-) else (
-  python "%SCRIPT_FILE%" --input "%INPUT_FILE%" --project-root "%MYNGLE_DATA_ROOT%" --country auto --max-rows !ROWS! --max-queries %CLEANER_MAX_QUERIES% %DOMAIN_MODE_ARG% > "%LOG_FILE%" 2>&1
-)
+if /I "%MODE%"=="dry" python "%SCRIPT_FILE%" --input "%INPUT_FILE%" --project-root "%MYNGLE_DATA_ROOT%" --country auto --dry-run-paths > "%LOG_FILE%" 2>&1
+if /I not "%MODE%"=="dry" python "%SCRIPT_FILE%" --input "%INPUT_FILE%" --project-root "%MYNGLE_DATA_ROOT%" --country auto --max-rows !ROWS! --max-queries %CLEANER_MAX_QUERIES% %DOMAIN_MODE_ARG% > "%LOG_FILE%" 2>&1
 set "RC=%ERRORLEVEL%"
 type "%LOG_FILE%"
 exit /b %RC%
