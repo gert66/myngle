@@ -2,13 +2,16 @@
 setlocal EnableDelayedExpansion
 
 rem Generic runner for input_cleaner_register_edition.py
-rem Usage: run_cleaner_queue_generic.bat <queue> "<batches>" <dry|test|full> [max_rows]
+rem Usage: run_cleaner_queue_generic.bat <queue> "<batches>" <dry|test|full> [max_rows] [simple]
 rem Examples:
 rem   run_cleaner_queue_generic.bat Italy50 "1" dry
 rem   run_cleaner_queue_generic.bat Italy50 "01" dry
 rem   run_cleaner_queue_generic.bat Italy50 "1" test 50
 rem   run_cleaner_queue_generic.bat Italy50 "1-7" full
+rem   run_cleaner_queue_generic.bat Italy50 "1" test 50 simple
+rem   run_cleaner_queue_generic.bat Italy50 "1-7" full 0 simple
 rem Aliases: 0=Italy50, 1=Italy100, 2=Italy200, 3=Germany
+rem 5th arg "simple" enables --simple-serper-top-domain benchmark mode
 
 if "%~1"=="" goto usage
 if "%~2"=="" goto usage
@@ -18,6 +21,7 @@ set "QUEUE=%~1"
 set "BATCHES=%~2"
 set "MODE=%~3"
 set "MAX_ROWS=%~4"
+set "SIMPLE_FLAG=%~5"
 
 if /I "%QUEUE%"=="0" set "QUEUE=Italy50"
 if /I "%QUEUE%"=="1" set "QUEUE=Italy100"
@@ -26,6 +30,9 @@ if /I "%QUEUE%"=="3" set "QUEUE=Germany"
 
 if /I not "%QUEUE%"=="Italy50" if /I not "%QUEUE%"=="Italy100" if /I not "%QUEUE%"=="Italy200" if /I not "%QUEUE%"=="Germany" goto usage
 if /I not "%MODE%"=="dry" if /I not "%MODE%"=="test" if /I not "%MODE%"=="full" goto usage
+
+set "SIMPLE_ARG="
+if /I "%SIMPLE_FLAG%"=="simple" set "SIMPLE_ARG=--simple-serper-top-domain"
 
 set "SCRIPT_DIR=%~dp0"
 set "SCRIPT_FILE=%SCRIPT_DIR%input_cleaner_register_edition.py"
@@ -126,22 +133,26 @@ if not "%MAX_ROWS%"=="" set "ROWS=%MAX_ROWS%"
 
 echo Running cleaner on: %INPUT_FILE%
 echo Log: %LOG_FILE%
+if defined SIMPLE_ARG echo Mode: SIMPLE SERPER TOP-DOMAIN (benchmark)
 if /I "%MODE%"=="dry" (
-  python "%SCRIPT_FILE%" --input "%INPUT_FILE%" --project-root "%MYNGLE_DATA_ROOT%" --country auto --dry-run-paths > "%LOG_FILE%" 2>&1
+  python "%SCRIPT_FILE%" --input "%INPUT_FILE%" --project-root "%MYNGLE_DATA_ROOT%" --country auto --dry-run-paths %SIMPLE_ARG% > "%LOG_FILE%" 2>&1
 ) else (
-  python "%SCRIPT_FILE%" --input "%INPUT_FILE%" --project-root "%MYNGLE_DATA_ROOT%" --country auto --max-rows %ROWS% --max-queries %CLEANER_MAX_QUERIES% > "%LOG_FILE%" 2>&1
+  python "%SCRIPT_FILE%" --input "%INPUT_FILE%" --project-root "%MYNGLE_DATA_ROOT%" --country auto --max-rows %ROWS% --max-queries %CLEANER_MAX_QUERIES% %SIMPLE_ARG% > "%LOG_FILE%" 2>&1
 )
 set "RC=%ERRORLEVEL%"
 type "%LOG_FILE%"
 exit /b %RC%
 
 :usage
-echo Usage: run_cleaner_queue_generic.bat ^<queue^> "^<batches^>" ^<dry^|test^|full^> [max_rows]
+echo Usage: run_cleaner_queue_generic.bat ^<queue^> "^<batches^>" ^<dry^|test^|full^> [max_rows] [simple]
 echo Examples:
 echo   run_cleaner_queue_generic.bat Italy50 "1" dry
 echo   run_cleaner_queue_generic.bat Italy50 "01" dry
 echo   run_cleaner_queue_generic.bat Italy50 "1" test 50
 echo   run_cleaner_queue_generic.bat Italy50 "1-7" full
 echo   run_cleaner_queue_generic.bat 0 "all" full
+echo   run_cleaner_queue_generic.bat Italy50 "1" test 50 simple
+echo   run_cleaner_queue_generic.bat Italy50 "1-7" full 0 simple
 echo Aliases: 0=Italy50, 1=Italy100, 2=Italy200, 3=Germany
+echo 5th arg "simple" enables --simple-serper-top-domain benchmark mode
 exit /b 1

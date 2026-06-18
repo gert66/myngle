@@ -1983,6 +1983,141 @@ def _extract_domain(url: str) -> str:
         return ""
 
 
+# ---------------------------------------------------------------------------
+# Simple Serper Top-Domain Mode
+#
+# Benchmark-only alternative to the full multi-query scoring pipeline.
+# Exactly ONE Serper call per company; the root domain of the first organic
+# result is returned as-is — no blacklist filtering, no scoring, no AI.
+#
+# Use --simple-serper-top-domain (CLI) or the Streamlit checkbox to enable.
+# This mode is OFF by default and does not affect normal pipeline output.
+# ---------------------------------------------------------------------------
+
+def _simple_serper_top_domain_row(
+    company_name: str,
+    city: str,
+    existing_website: str,
+    serper_key: str,
+    country_config: "CountryConfig | None" = None,
+) -> dict:
+    """
+    One Serper call, raw top organic result domain.
+
+    Returns a dict with simple_serper_* diagnostic fields AND enough fields
+    to populate the normal output columns (validated_domain, recommended_domain,
+    domain_action, domain_confidence, domain_reason, final_selected_domain,
+    final_decision_source, final_confidence, website_discovery_method).
+    """
+    cfg = country_config or IT_CONFIG
+
+    out: dict = {
+        # Normal output fields — filled below
+        "validated_domain":      "",
+        "recommended_domain":    "",
+        "domain_source":         SRC_SERPER,
+        "domain_action":         "",
+        "domain_confidence":     "",
+        "domain_reason":         "",
+        "manual_review_needed":  True,
+        "website_discovery_method": "simple_serper_top_domain",
+        "final_selected_domain": "",
+        "final_decision_source": "simple_serper_top_domain",
+        "final_confidence":      "",
+        # Diagnostic columns
+        "simple_serper_top_mode":              True,
+        "simple_serper_query":                 "",
+        "simple_serper_top_title":             "",
+        "simple_serper_top_url":               "",
+        "simple_serper_top_domain":            "",
+        "simple_serper_status":                "NOT_SIMPLE_MODE",
+        "simple_serper_replaced_existing_domain": "",
+    }
+
+    name = (company_name or "").strip()
+    if not name:
+        out.update(
+            domain_action="MISSING_DOMAIN",
+            domain_confidence="None",
+            domain_reason="Company name blank — skipped.",
+            simple_serper_status="NO_COMPANY_NAME",
+        )
+        return out
+
+    # Build exactly one query
+    if city and city.strip():
+        query = f'"{name}" "{city.strip()}" official website'
+    else:
+        query = f'"{name}" official website'
+
+    # Append country name to help narrow results
+    if cfg.country_search_name:
+        query = f"{query} {cfg.country_search_name}"
+
+    out["simple_serper_query"] = query
+
+    organic, err = _call_serper(
+        query, serper_key, gl=cfg.serper_gl, hl=cfg.serper_hl,
+    )
+    if err:
+        out.update(
+            domain_action="MISSING_DOMAIN",
+            domain_confidence="None",
+            domain_reason=f"Serper error: {err}",
+            simple_serper_status="SERPER_ERROR",
+        )
+        return out
+
+    if not organic:
+        out.update(
+            domain_action="MISSING_DOMAIN",
+            domain_confidence="None",
+            domain_reason="Serper returned no organic results.",
+            simple_serper_status="NO_ORGANIC_RESULT",
+        )
+        return out
+
+    top = organic[0]
+    top_url   = top.get("link", "") or ""
+    top_title = top.get("title", "") or ""
+    # Raw domain from URL — www. stripped, path removed; no blacklist applied
+    top_domain = _extract_domain(top_url)
+
+    out["simple_serper_top_title"] = top_title
+    out["simple_serper_top_url"]   = top_url
+
+    if not top_domain:
+        out.update(
+            domain_action="MISSING_DOMAIN",
+            domain_confidence="None",
+            domain_reason="Top Serper result URL did not yield an extractable domain.",
+            simple_serper_status="NO_TOP_RESULT_DOMAIN",
+        )
+        return out
+
+    # Accept unconditionally — this is the benchmark, raw top result
+    out["simple_serper_top_domain"] = top_domain
+    out["simple_serper_status"]     = "TOP_DOMAIN_USED"
+
+    existing_domain = _extract_domain(existing_website or "")
+    out["simple_serper_replaced_existing_domain"] = (
+        "YES" if existing_domain and existing_domain != top_domain
+        else ("NO" if existing_domain else "")
+    )
+
+    out.update(
+        validated_domain=top_domain,
+        recommended_domain=top_domain,
+        domain_action="MISSING_DOMAIN_FIXED" if not existing_domain else "SUGGEST_REPLACE",
+        domain_confidence="Low",
+        domain_reason=f"Simple top-result mode: #{1} organic result accepted without scoring.",
+        manual_review_needed=True,
+        final_selected_domain=top_domain,
+        final_confidence="Low",
+    )
+    return out
+
+
 _URL_IN_TEXT_RE = re.compile(
     r"(?:https?://|www\.)[a-zA-Z0-9\-._~:/?#\[\]@!$&'()*+,;=%]{4,200}", re.I
 )
@@ -7107,6 +7242,8 @@ def process_dataframe(
     country_config: "CountryConfig | None" = None,
     # Optional size inference
     infer_size: bool = False,
+    # Simple Serper top-domain benchmark mode (bypasses advanced scoring)
+    simple_serper_top_domain: bool = False,
 ) -> tuple[pd.DataFrame, list[dict], list[dict], list[dict]]:
     """
     Process rows resume_from..len(df)-1, prepending prior_results for already-done rows.
@@ -7188,6 +7325,39 @@ def process_dataframe(
             if progress_cb:
                 progress_cb(global_i + 1, n)
             continue
+
+        # ── Simple Serper top-domain benchmark mode ──────────────────────────
+        # When active, replaces the full pipeline with a single Serper call.
+        # Normal scoring, Haiku, Firecrawl, and verifiers are all bypassed.
+        if simple_serper_top_domain and serper_key:
+            _simple_res = _simple_serper_top_domain_row(
+                name, city, website, serper_key, country_config=country_config,
+            )
+            _simple_res.setdefault("cleaned_company_name", name)
+            _simple_res.setdefault("normalized_input_website", website)
+            _simple_res.setdefault("email_domain", "")
+            _simple_res.setdefault("search_query_used", _simple_res.get("simple_serper_query", ""))
+            _simple_res.setdefault("name_variant_used", "")
+            _simple_res.setdefault("serper_top_result_title", _simple_res.get("simple_serper_top_title", ""))
+            _simple_res.setdefault("serper_top_result_url",   _simple_res.get("simple_serper_top_url", ""))
+            _simple_res.setdefault("serper_top_result_domain", _simple_res.get("simple_serper_top_domain", ""))
+            _simple_res["organization_type"]          = org_type
+            _simple_res["myngle_target_eligibility"]  = eligibility
+            _simple_res["pre_filter_decision"]        = pf_decision
+            _simple_res["pre_filter_reason"]          = pf_reason
+            new_results.append(_simple_res)
+            new_evidence.append({"query": _simple_res.get("simple_serper_query", ""),
+                                  "domain": _simple_res.get("simple_serper_top_domain", ""),
+                                  "url": _simple_res.get("simple_serper_top_url", ""),
+                                  "title": _simple_res.get("simple_serper_top_title", ""),
+                                  "used": True,
+                                  "candidate_source": "simple_serper_top_domain"})
+            import time as _time_simple
+            _time_simple.sleep(0.25)
+            if progress_cb:
+                progress_cb(global_i + 1, n)
+            continue
+        # ── End simple mode ───────────────────────────────────────────────────
 
         res, raw_ev = validate_register_row(
             name, website, email, city, province, postcode, serper_key, max_queries,
@@ -9847,6 +10017,11 @@ def cli_batch_run() -> None:
                         help="Input .xlsx or .csv file, or a folder of .xlsx files")
     parser.add_argument("--self-test-domain-quality", action="store_true",
                         help="Run domain-quality self-test and exit")
+    parser.add_argument("--simple-serper-top-domain", action="store_true",
+                        help=(
+                            "Benchmark mode: one Serper call per company, domain taken "
+                            "from the top organic result — no scoring, no Haiku, no Firecrawl."
+                        ))
     parser.add_argument("--project-root",   default=None,   help="Pipeline project root folder")
     parser.add_argument("--serper-key",     default=None,   help="Serper API key")
     parser.add_argument("--anthropic-key",  default=None,   help="Anthropic API key for Haiku")
@@ -10037,6 +10212,13 @@ def cli_batch_run() -> None:
     print(f"[cleaner] Firecrawl loc:    country={_fc_loc_country_str} languages=[{_fc_loc_langs_str}]", flush=True)
     print(f"[cleaner] Haiku mode:       {args.haiku_mode}", flush=True)
     print(f"[cleaner] Size inference:   {_infer_size_str}", flush=True)
+    _simple_mode_flag = getattr(args, "simple_serper_top_domain", False)
+    if _simple_mode_flag:
+        print(
+            "[cleaner] *** SIMPLE SERPER TOP-DOMAIN MODE ACTIVE — "
+            "one Serper call per row, raw top result, no scoring ***",
+            flush=True,
+        )
     print(f"[cleaner] Started:          {pd.Timestamp.now().strftime('%Y-%m-%d %H:%M:%S')}", flush=True)
 
     # ── Column-map debug output ───────────────────────────────────────────────
@@ -10171,6 +10353,7 @@ def cli_batch_run() -> None:
             max_pages_per_cand=_cli_fc_max_pages,
             page_timeout=_cli_fc_page_timeout,
             fc_speed_mode=_cli_fc_speed,
+            simple_serper_top_domain=getattr(args, "simple_serper_top_domain", False),
         )
     except _FcBudgetExceeded as _bexc:
         _budget_hit = True
@@ -10791,6 +10974,22 @@ def main():
     )
 
     st.sidebar.markdown("---")
+    simple_serper_top_domain_ui = st.sidebar.checkbox(
+        "Use simple Serper top-result domain mode",
+        value=False,
+        key="reg_simple_serper_top_domain",
+        help=(
+            "Benchmark mode: one search per company, take the domain from the top organic "
+            "result. This bypasses advanced domain scoring, Haiku, and Firecrawl."
+        ),
+    )
+    if simple_serper_top_domain_ui:
+        st.sidebar.warning(
+            "Simple top-result mode is ON. Domains are taken raw from the #1 Google "
+            "result — no scoring, no blacklist filtering. For benchmarking only."
+        )
+
+    st.sidebar.markdown("---")
     st.sidebar.subheader("Pipeline output (optional)")
     st.sidebar.caption(
         "When enabled, the cleaned Excel is automatically written to the standard "
@@ -11042,6 +11241,9 @@ def main():
                 debug_mode=debug_mode,
                 infer_size=infer_size,
                 country_config=_resume_cfg,
+                simple_serper_top_domain=st.session_state.get(
+                    "reg_simple_serper_top_domain", False
+                ),
             )
 
             progress_bar.progress(1.0)
@@ -11415,6 +11617,7 @@ def main():
             debug_mode=debug_mode,
             infer_size=infer_size,
             country_config=_country_cfg,
+            simple_serper_top_domain=simple_serper_top_domain_ui,
         )
 
         progress_bar.progress(1.0)
