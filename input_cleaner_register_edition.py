@@ -1978,6 +1978,35 @@ def _call_serper(
         return [], str(e)
 
 
+def _call_serper_full(
+    query: str,
+    serper_key: str,
+    timeout: int = 12,
+    gl: str = "it",
+    hl: str = "it",
+    location: str | None = None,
+) -> tuple[dict, str | None]:
+    """Like _call_serper but returns the full response dict (not just organic)."""
+    global _serper_call_count
+    _serper_call_count += 1
+    try:
+        payload: dict = {"q": query, "gl": gl, "hl": hl, "num": 5}
+        if location:
+            payload["location"] = location
+        resp = requests.post(
+            SERPER_URL,
+            headers={"X-API-KEY": serper_key, "Content-Type": "application/json"},
+            json=payload,
+            timeout=timeout,
+        )
+        resp.raise_for_status()
+        return resp.json(), None
+    except requests.Timeout:
+        return {}, "Serper timeout"
+    except Exception as e:
+        return {}, str(e)
+
+
 def _extract_domain(url: str) -> str:
     try:
         p = urlparse(url if url.startswith("http") else f"https://{url}")
@@ -2125,12 +2154,86 @@ def _simple_serper_top_domain_row(
 # ---------------------------------------------------------------------------
 # Manual Google-like domain mode
 #
-# Mimics a manual Google search: one query per company, query = "<company_name>"
-# only (quoted, no city/country/official), Serper with gl=it hl=it location=Italy.
-# Top organic result domain is accepted without any filtering.
+# Mimics a manual Google search: one query = company_name (no quotes, no extras),
+# Serper with gl=it hl=it location=Italy.
+# Result priority: knowledgeGraph website > local/places website > top-5 organic.
+# Simple skip-list for obvious non-company domains.
 #
 # Use --manual-google-like-domain (CLI) or the Streamlit checkbox to enable.
 # ---------------------------------------------------------------------------
+
+# Domains to skip in manual Google-like mode (obvious directories / social / HR).
+_MGL_SKIP_DOMAINS: frozenset[str] = frozenset({
+    "facebook.com",
+    "linkedin.com",
+    "instagram.com",
+    "twitter.com",
+    "x.com",
+    "youtube.com",
+    "autoscout24.it",
+    "autoscout24.com",
+    "inmatch.com",
+    "zoominfo.com",
+    "ufficiocamerale.it",
+    "registroimprese.it",
+    "infocamere.it",
+    "fatturatoitalia.it",
+    "visura.pro",
+    "kompass.com",
+    "kompass.it",
+    "paginegialle.it",
+    "paginebianche.it",
+    "informazione-aziende.it",
+    "reportaziende.it",
+    "companyreports.it",
+    "indeed.com",
+    "glassdoor.com",
+    "dnb.com",
+    "crunchbase.com",
+    "wikipedia.org",
+    "google.com",
+    "bing.com",
+    "trovit.it",
+    "subito.it",
+    "corriere.it",
+    "repubblica.it",
+})
+
+
+def _mgl_skip(domain: str) -> bool:
+    """Return True if domain should be skipped in manual Google-like mode."""
+    d = (domain or "").lower().strip()
+    if not d:
+        return True
+    # Exact match
+    if d in _MGL_SKIP_DOMAINS:
+        return True
+    # Subdomain match (e.g. it.wikipedia.org)
+    for bad in _MGL_SKIP_DOMAINS:
+        if d.endswith("." + bad):
+            return True
+    return False
+
+
+def _mgl_name_overlap(title: str, company_name: str) -> bool:
+    """
+    Lightweight name overlap check for KG / local results.
+    Returns True if at least one token of length >= 4 from the company name
+    appears in the title (case-insensitive). Prevents accepting an unrelated KG.
+    """
+    if not title or not company_name:
+        return False
+    title_lower   = title.lower()
+    name_lower    = company_name.lower()
+    # tokenise: split on space and punctuation
+    tokens = re.split(r"[\s\-–—/.,;:()\[\]\"']+", name_lower)
+    meaningful = [t for t in tokens if len(t) >= 4]
+    if not meaningful:
+        # Very short name — just check if any token appears anywhere
+        tokens_short = [t for t in tokens if len(t) >= 2]
+        return any(t in title_lower for t in tokens_short)
+    return any(t in title_lower for t in meaningful)
+
 
 def _manual_google_like_domain_row(
     company_name: str,
@@ -2138,8 +2241,9 @@ def _manual_google_like_domain_row(
     serper_key: str,
 ) -> dict:
     """
-    One Serper call, query = '"<company_name>"', gl=it hl=it location=Italy.
-    Top organic result domain accepted unconditionally.
+    One Serper call, query = company_name (no quotes, no extras).
+    Priority: knowledgeGraph website > local/places website > top-5 organic.
+    Simple skip-list filters obvious non-company domains.
     Returns normal output fields + manual_google_like_* diagnostics.
     """
     _GL       = "it"
@@ -2147,33 +2251,46 @@ def _manual_google_like_domain_row(
     _LOCATION = "Italy"
 
     out: dict = {
-        "validated_domain":      "",
-        "recommended_domain":    "",
-        "domain_source":         SRC_SERPER,
-        "domain_action":         "",
-        "domain_confidence":     "",
-        "domain_reason":         "",
-        "manual_review_needed":  True,
+        # Normal output fields
+        "validated_domain":         "",
+        "recommended_domain":       "",
+        "domain_source":            SRC_SERPER,
+        "domain_action":            "",
+        "domain_confidence":        "",
+        "domain_reason":            "",
+        "manual_review_needed":     True,
         "website_discovery_method": "manual_google_like_domain",
-        "final_selected_domain": "",
-        "final_decision_source": "manual_google_like_domain",
-        "final_confidence":      "",
-        # Diagnostics
-        "manual_google_like_mode":       True,
-        "manual_google_like_query":      "",
-        "manual_google_like_gl":         _GL,
-        "manual_google_like_hl":         _HL,
-        "manual_google_like_location":   _LOCATION,
-        "manual_google_like_top1_title": "",
-        "manual_google_like_top1_url":   "",
-        "manual_google_like_top1_domain": "",
-        "manual_google_like_top2_title": "",
-        "manual_google_like_top2_url":   "",
-        "manual_google_like_top2_domain": "",
-        "manual_google_like_top3_title": "",
-        "manual_google_like_top3_url":   "",
-        "manual_google_like_top3_domain": "",
-        "manual_google_like_status":     "NOT_MANUAL_GOOGLE_LIKE_MODE",
+        "final_selected_domain":    "",
+        "final_decision_source":    "manual_google_like_domain",
+        "final_confidence":         "",
+        # Mode / query diagnostics
+        "manual_google_like_mode":             True,
+        "manual_google_like_query":            "",
+        "manual_google_like_gl":               _GL,
+        "manual_google_like_hl":               _HL,
+        "manual_google_like_location":         _LOCATION,
+        # Selection diagnostics
+        "manual_google_like_selected_source":  "",
+        "manual_google_like_selected_title":   "",
+        "manual_google_like_selected_url":     "",
+        "manual_google_like_selected_domain":  "",
+        "manual_google_like_status":           "NOT_MANUAL_GOOGLE_LIKE_MODE",
+        # Raw result diagnostics
+        "manual_google_like_kg_title":         "",
+        "manual_google_like_kg_url":           "",
+        "manual_google_like_kg_domain":        "",
+        "manual_google_like_local1_title":     "",
+        "manual_google_like_local1_url":       "",
+        "manual_google_like_local1_domain":    "",
+        "manual_google_like_top1_title":       "",
+        "manual_google_like_top1_url":         "",
+        "manual_google_like_top1_domain":      "",
+        "manual_google_like_top2_title":       "",
+        "manual_google_like_top2_url":         "",
+        "manual_google_like_top2_domain":      "",
+        "manual_google_like_top3_title":       "",
+        "manual_google_like_top3_url":         "",
+        "manual_google_like_top3_domain":      "",
     }
 
     name = (company_name or "").strip()
@@ -2186,10 +2303,11 @@ def _manual_google_like_domain_row(
         )
         return out
 
-    query = f'"{name}"'
+    # Query = company name only, no quotes, no additions
+    query = name
     out["manual_google_like_query"] = query
 
-    organic, err = _call_serper(
+    full_data, err = _call_serper_full(
         query, serper_key, gl=_GL, hl=_HL, location=_LOCATION,
     )
     if err:
@@ -2201,50 +2319,107 @@ def _manual_google_like_domain_row(
         )
         return out
 
-    if not organic:
-        out.update(
-            domain_action="MISSING_DOMAIN",
-            domain_confidence="None",
-            domain_reason="Serper returned no organic results.",
-            manual_google_like_status="NO_ORGANIC_RESULT",
-        )
-        return out
+    organic       = full_data.get("organic", []) or []
+    kg            = full_data.get("knowledgeGraph", {}) or {}
+    # Serper may return places under "places" or "localResults"
+    places_list   = full_data.get("places", []) or full_data.get("localResults", []) or []
 
-    # Populate top-3 diagnostics
-    for _idx, _slot in enumerate(("top1", "top2", "top3"), start=0):
+    # ── Populate raw diagnostics ─────────────────────────────────────────────
+
+    # Knowledge Graph
+    kg_site  = (kg.get("website") or kg.get("website_url") or "").strip()
+    kg_title = (kg.get("title") or kg.get("name") or "").strip()
+    if kg_site or kg_title:
+        kg_domain = _extract_domain(kg_site) if kg_site else ""
+        out["manual_google_like_kg_title"]  = kg_title
+        out["manual_google_like_kg_url"]    = kg_site
+        out["manual_google_like_kg_domain"] = kg_domain
+
+    # First local/places result
+    if places_list:
+        _p0  = places_list[0]
+        _pu  = (_p0.get("website") or _p0.get("website_url") or _p0.get("link") or "").strip()
+        _pt  = (_p0.get("title") or _p0.get("name") or "").strip()
+        _pd  = _extract_domain(_pu) if _pu else ""
+        out["manual_google_like_local1_title"]  = _pt
+        out["manual_google_like_local1_url"]    = _pu
+        out["manual_google_like_local1_domain"] = _pd
+
+    # Top-3 organic
+    for _idx, _slot in enumerate(("top1", "top2", "top3")):
         if _idx >= len(organic):
             break
         _r = organic[_idx]
-        _u = _r.get("link", "") or ""
-        _t = _r.get("title", "") or ""
+        _u = (_r.get("link") or "").strip()
+        _t = (_r.get("title") or "").strip()
         _d = _extract_domain(_u)
         out[f"manual_google_like_{_slot}_title"]  = _t
         out[f"manual_google_like_{_slot}_url"]    = _u
         out[f"manual_google_like_{_slot}_domain"] = _d
 
-    top_url    = organic[0].get("link", "") or ""
-    top_domain = _extract_domain(top_url)
+    # ── Priority A: Knowledge Graph website ──────────────────────────────────
+    if kg_site:
+        kg_domain = _extract_domain(kg_site)
+        if kg_domain and not _mgl_skip(kg_domain) and _mgl_name_overlap(kg_title, name):
+            return _mgl_accept(out, existing_website, kg_domain, kg_site, kg_title,
+                               "KNOWLEDGE_GRAPH_DOMAIN_USED", "knowledgeGraph")
 
-    if not top_domain:
-        out.update(
-            domain_action="MISSING_DOMAIN",
-            domain_confidence="None",
-            domain_reason="Top Serper result URL did not yield an extractable domain.",
-            manual_google_like_status="NO_TOP1_DOMAIN",
-        )
-        return out
+    # ── Priority B: First local/places result website ─────────────────────────
+    for _place in places_list:
+        _pu = (_place.get("website") or _place.get("website_url") or _place.get("link") or "").strip()
+        _pt = (_place.get("title") or _place.get("name") or "").strip()
+        if not _pu:
+            continue
+        _pd = _extract_domain(_pu)
+        if _pd and not _mgl_skip(_pd) and _mgl_name_overlap(_pt, name):
+            return _mgl_accept(out, existing_website, _pd, _pu, _pt,
+                               "LOCAL_RESULT_DOMAIN_USED", "localResult")
+        break  # only try the first local result
 
+    # ── Priority C: First usable organic result (top-5) ───────────────────────
+    for _org in organic[:5]:
+        _u = (_org.get("link") or "").strip()
+        _t = (_org.get("title") or "").strip()
+        _d = _extract_domain(_u)
+        if _d and not _mgl_skip(_d):
+            return _mgl_accept(out, existing_website, _d, _u, _t,
+                               "ORGANIC_DOMAIN_USED", "organic")
+
+    # Nothing usable found
+    out.update(
+        domain_action="MISSING_DOMAIN",
+        domain_confidence="None",
+        domain_reason="Manual Google-like mode: no usable domain found in KG, local, or top-5 organic.",
+        manual_google_like_status="NO_USABLE_RESULT",
+    )
+    return out
+
+
+def _mgl_accept(
+    out: dict,
+    existing_website: str,
+    domain: str,
+    url: str,
+    title: str,
+    status: str,
+    source: str,
+) -> dict:
+    """Finalise a manual-Google-like result and return the enriched out dict."""
     existing_domain = _extract_domain(existing_website or "")
     out.update(
-        validated_domain=top_domain,
-        recommended_domain=top_domain,
+        validated_domain=domain,
+        recommended_domain=domain,
         domain_action="MISSING_DOMAIN_FIXED" if not existing_domain else "SUGGEST_REPLACE",
         domain_confidence="Low",
-        domain_reason='Manual Google-like mode: top organic result for "company_name" query accepted.',
+        domain_reason=f"Manual Google-like mode ({source}): {status}.",
         manual_review_needed=True,
-        final_selected_domain=top_domain,
+        final_selected_domain=domain,
         final_confidence="Low",
-        manual_google_like_status="TOP1_DOMAIN_USED",
+        manual_google_like_selected_source=source,
+        manual_google_like_selected_title=title,
+        manual_google_like_selected_url=url,
+        manual_google_like_selected_domain=domain,
+        manual_google_like_status=status,
     )
     return out
 
@@ -7504,18 +7679,18 @@ def process_dataframe(
             _mg_res.setdefault("email_domain", "")
             _mg_res.setdefault("search_query_used", _mg_res.get("manual_google_like_query", ""))
             _mg_res.setdefault("name_variant_used", "")
-            _mg_res.setdefault("serper_top_result_title", _mg_res.get("manual_google_like_top1_title", ""))
-            _mg_res.setdefault("serper_top_result_url",   _mg_res.get("manual_google_like_top1_url", ""))
-            _mg_res.setdefault("serper_top_result_domain", _mg_res.get("manual_google_like_top1_domain", ""))
+            _mg_res.setdefault("serper_top_result_title", _mg_res.get("manual_google_like_selected_title", ""))
+            _mg_res.setdefault("serper_top_result_url",   _mg_res.get("manual_google_like_selected_url", ""))
+            _mg_res.setdefault("serper_top_result_domain", _mg_res.get("manual_google_like_selected_domain", ""))
             _mg_res["organization_type"]         = org_type
             _mg_res["myngle_target_eligibility"] = eligibility
             _mg_res["pre_filter_decision"]       = pf_decision
             _mg_res["pre_filter_reason"]         = pf_reason
             new_results.append(_mg_res)
             new_evidence.append({"query": _mg_res.get("manual_google_like_query", ""),
-                                  "domain": _mg_res.get("manual_google_like_top1_domain", ""),
-                                  "url": _mg_res.get("manual_google_like_top1_url", ""),
-                                  "title": _mg_res.get("manual_google_like_top1_title", ""),
+                                  "domain": _mg_res.get("manual_google_like_selected_domain", ""),
+                                  "url": _mg_res.get("manual_google_like_selected_url", ""),
+                                  "title": _mg_res.get("manual_google_like_selected_title", ""),
                                   "used": True,
                                   "candidate_source": "manual_google_like_domain"})
             import time as _time_mg
@@ -10394,7 +10569,8 @@ def cli_batch_run() -> None:
     _manual_gl_flag = getattr(args, "manual_google_like_domain", False)
     if _manual_gl_flag:
         print("[cleaner] *** MANUAL GOOGLE-LIKE DOMAIN MODE ACTIVE ***", flush=True)
-        print('[cleaner]     Query format: company name only (e.g. "Acme Srl")', flush=True)
+        print("[cleaner]     Query format: company name only, no quotes", flush=True)
+        print("[cleaner]     Result priority: knowledgeGraph website, local website, organic top 5", flush=True)
         print("[cleaner]     Serper settings: gl=it  hl=it  location=Italy", flush=True)
     print(f"[cleaner] Started:          {pd.Timestamp.now().strftime('%Y-%m-%d %H:%M:%S')}", flush=True)
 
