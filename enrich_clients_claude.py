@@ -101,10 +101,87 @@ except ImportError:
     _SCORING_AVAILABLE = False
 
 # ─────────────────────────────────────────────────────────────────────────────
+# Passive debug trace collector  (disabled by default; zero overhead when off)
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _trace_safe(obj):
+    """Recursively convert obj to JSON-serialisable types. Never raises."""
+    if obj is None or isinstance(obj, (bool, int, float, str)):
+        return obj
+    if isinstance(obj, dict):
+        return {str(k): _trace_safe(v) for k, v in obj.items()}
+    if isinstance(obj, (list, tuple)):
+        return [_trace_safe(v) for v in obj]
+    return str(obj)
+
+
+class _EnrichTrace:
+    """
+    Passive, opt-in trace collector for one company enrichment run.
+
+    When enabled=False (the default) every method is a no-op so normal
+    batch behaviour is completely unchanged.  No state is allocated.
+
+    Usage:
+        trace = _EnrichTrace(enabled=True, out_dir="debug_traces")
+        trace.add("section_name", some_dict_or_value)
+        trace.warn("something worth noting")
+        trace.save(company_name="IET", row_index=1)
+    """
+
+    __slots__ = ("enabled", "_out_dir", "_data", "_warnings")
+
+    def __init__(self, enabled: bool = False, out_dir: str = "debug_traces") -> None:
+        self.enabled = enabled
+        if enabled:
+            self._out_dir = Path(out_dir)
+            self._data: dict = {}
+            self._warnings: list = []
+        else:
+            self._out_dir = self._data = self._warnings = None  # type: ignore[assignment]
+
+    def add(self, section: str, value) -> None:
+        if not self.enabled:
+            return
+        try:
+            self._data[section] = _trace_safe(value)
+        except Exception as exc:  # pragma: no cover
+            self._warnings.append(f"trace.add({section!r}) serialisation error: {exc}")
+
+    def warn(self, msg: str) -> None:
+        if self.enabled:
+            self._warnings.append(str(msg))
+
+    def save(self, company_name: str, row_index: "int | None" = None) -> None:
+        if not self.enabled:
+            return
+        try:
+            self._data["warnings"] = list(self._warnings)
+            ts = datetime.utcnow().strftime("%Y%m%d_%H%M%S")
+            safe = "".join(
+                c if c.isalnum() or c in "-_" else "_"
+                for c in (company_name or "unknown")
+            )[:60]
+            prefix = f"{row_index:04d}_" if row_index is not None else ""
+            fname = f"{prefix}{safe}_{ts}.json"
+            self._out_dir.mkdir(parents=True, exist_ok=True)
+            (self._out_dir / fname).write_text(
+                json.dumps(self._data, indent=2, ensure_ascii=False),
+                encoding="utf-8",
+            )
+        except Exception as exc:  # pragma: no cover
+            # Never let trace writing interrupt the enrichment run.
+            try:
+                self._warnings.append(f"trace.save() failed: {exc}")
+            except Exception:
+                pass
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # Constants
 # ─────────────────────────────────────────────────────────────────────────────
 
-JINA_READER_URL  = "https://r.jina.ai/"
+
 JINA_SEARCH_URL  = "https://s.jina.ai/"
 CACHE_DIR        = Path("claude_json_cache")
 DEBUG_LOG_DIR    = Path("debug_logs")
@@ -3037,6 +3114,7 @@ def run_step2_serper(
     model_step2: str = MODEL_STEP2,
     _debug_callback=None,
     dry_run: bool = False,
+    _trace: "_EnrichTrace | None" = None,
 ) -> tuple:
     """
     Step 2 via Serper Google Search + Claude analysis (no web_search tool).
@@ -3066,6 +3144,11 @@ def run_step2_serper(
     # ── Serper searches ───────────────────────────────────────────────────────
     queries = _build_serper_queries(company_name, target)
     _dlog(f"Generating Serper queries for {company_name}")
+    if _trace:
+        _trace.add("serper_queries", [
+            {"index": i + 1, "label": lbl, "query": q}
+            for i, (q, lbl) in enumerate(zip(queries, _SERPER_QUERY_LABELS))
+        ])
 
     # DRY RUN GUARD: do not call Serper or Anthropic in prompt preview mode
     if dry_run:
@@ -3168,6 +3251,25 @@ def run_step2_serper(
 
     total_hits = sum(len(h) for _, h in query_groups)
     _dlog(f"Total Serper results for {company_name}: {total_hits} across {len(query_groups)} queries")
+    if _trace:
+        _trace.add("serper_raw_results", [
+            {
+                "query_index": qi + 1,
+                "query_label": lbl,
+                "query": queries[qi] if qi < len(queries) else "",
+                "hit_count": len(hits),
+                "results": [
+                    {
+                        "title": h.get("title", ""),
+                        "url": h.get("link", ""),
+                        "snippet": h.get("snippet", ""),
+                        "position": j + 1,
+                    }
+                    for j, h in enumerate(hits)
+                ],
+            }
+            for qi, (lbl, hits) in enumerate(query_groups)
+        ])
 
     # ── Build compact Serper evidence handoff for Opportunity Radar / caller brief ──
     _s_labels:   list[str] = []
@@ -3198,6 +3300,12 @@ def run_step2_serper(
 
     # ── Build Claude prompt ────────────────────────────────────────────────────
     results_text = _format_serper_results(query_groups)
+    if _trace:
+        _trace.add("evidence_filtering", {
+            "formatted_evidence_text": results_text,
+            "total_hits": total_hits,
+            "note": "All Serper results are passed to Claude; pipeline does not pre-filter evidence",
+        })
     search_instruction = (
         f"Now analyze this company based on the web search results provided below.\n\n"
         f"Company: {target}\n\n"
@@ -3212,6 +3320,14 @@ def run_step2_serper(
         "- Base your analysis ONLY on the search results above. Do not invent or infer evidence."
     )
     full_prompt = STEP2_STATIC_PREFIX + f"\n\n{search_instruction}"
+    if _trace:
+        _trace.add("anthropic_input_step2", {
+            "full_prompt": full_prompt,
+            "prompt_chars": len(full_prompt),
+            "company": company_name,
+            "target": target,
+            "model": model_step2,
+        })
 
     _dlog(f"Selected model: {model_step2}")
 
@@ -3251,6 +3367,14 @@ def run_step2_serper(
         in_t  = resp.usage.input_tokens
         out_t = resp.usage.output_tokens
         _dlog(f"Received Claude response for {company_name}")
+        if _trace:
+            _trace.add("anthropic_output_step2", {
+                "raw_text": raw_text,
+                "model": model_step2,
+                "tokens_in": in_t,
+                "tokens_out": out_t,
+                "retry": False,
+            })
 
         # Parse (with one retry on failure)
         _icp_raw = None
@@ -3259,6 +3383,8 @@ def run_step2_serper(
             _icp_raw = _parse_json_response(raw_text)
         except (json.JSONDecodeError, ValueError):
             _dlog(f"Parse failed — retrying with strict suffix for {company_name}")
+            if _trace:
+                _trace.warn("Step 2: first parse failed, retrying with strict suffix")
             time.sleep(delay)
             resp2 = client.messages.create(
                 model=model_step2,
@@ -3272,6 +3398,15 @@ def run_step2_serper(
             in_t  += resp2.usage.input_tokens
             out_t += resp2.usage.output_tokens
             _dlog(f"Parsing Step 2 Serper retry response for {company_name}")
+            if _trace:
+                _trace.add("anthropic_output_step2", {
+                    "raw_text": raw_text2,
+                    "model": model_step2,
+                    "tokens_in": in_t,
+                    "tokens_out": out_t,
+                    "retry": True,
+                    "raw_text_attempt1": raw_text,
+                })
             _icp_raw = _parse_json_response(raw_text2)
 
         # Write Claude analysis post-call debug file (after parsing so it includes parsed JSON)
@@ -3303,6 +3438,8 @@ def run_step2_serper(
                    "serper_evidence": _serper_evidence_handoff}
         save_cache(ck, payload)
         _dlog(f"Finished Step 2 (Serper) for {company_name}")
+        if _trace:
+            _trace.add("parsed_icp_signals", _icp_raw)
         _icp_out = _extract_icp_fields(_icp_raw)
         _icp_out.update(_serper_evidence_handoff)
         return (_icp_out, payload, in_t, out_t, "ok", "", 0, 0)
@@ -3328,6 +3465,7 @@ def run_step2(
     search_provider: str = STEP2_PROVIDER_SERPER,
     serper_key: str = "",
     dry_run: bool = False,
+    _trace: "_EnrichTrace | None" = None,
 ) -> tuple:
     """
     Research ICP signals via Serper Google Search + Claude analysis.
@@ -3352,7 +3490,7 @@ def run_step2(
     return run_step2_serper(
         url, company_name, api_key, serper_key, delay,
         model_step2=model_step2, _debug_callback=_debug_callback,
-        dry_run=dry_run,
+        dry_run=dry_run, _trace=_trace,
     )
 
     def _dlog(msg: str) -> None:
@@ -4787,6 +4925,7 @@ def run_model_signal_extraction(
     include_evidence: bool = True,
     search_provider: str = STEP2_PROVIDER_SERPER,
     _debug_capture: "dict | None" = None,
+    _trace: "_EnrichTrace | None" = None,
 ) -> dict:
     """
     Extract structured model signals from already-fetched enrichment context.
@@ -4808,6 +4947,11 @@ def run_model_signal_extraction(
             _delete_cache(cache_key)
 
     context_text = _build_enrichment_context(enrichment_row)
+    if _trace:
+        _trace.add("anthropic_context_step3", {
+            "context_text": context_text,
+            "context_chars": len(context_text),
+        })
 
     prompt = (
         MODEL_SIGNAL_PROMPT_TEMPLATE
@@ -4815,6 +4959,14 @@ def run_model_signal_extraction(
         .replace("__DOMAIN__", domain or "(unknown)")
         .replace("__ENRICHMENT_CONTEXT__", context_text)
     )
+    if _trace:
+        _trace.add("anthropic_input_step3", {
+            "prompt": prompt,
+            "prompt_chars": len(prompt),
+            "model": model_id,
+            "company": company_name,
+            "domain": domain,
+        })
 
     _STRICT_SUFFIX = "\n\nReturn ONLY raw JSON. No markdown, no backticks, no explanation."
 
@@ -4833,6 +4985,12 @@ def run_model_signal_extraction(
             _debug_capture["raw_text"] = raw_text
             _debug_capture["retry"] = False
             _debug_capture["model_id"] = model_id
+        if _trace:
+            _trace.add("anthropic_output_step3", {
+                "raw_text": raw_text,
+                "model": model_id,
+                "retry": False,
+            })
 
         try:
             raw_json = _parse_json_response(raw_text)
@@ -4850,9 +5008,21 @@ def run_model_signal_extraction(
                 _debug_capture["raw_text"] = raw_text2
                 _debug_capture["raw_text_attempt1"] = raw_text
                 _debug_capture["retry"] = True
+            if _trace:
+                _trace.warn("Step 3: first parse failed, retrying with strict suffix")
+                _trace.add("anthropic_output_step3", {
+                    "raw_text": raw_text2,
+                    "model": model_id,
+                    "retry": True,
+                    "raw_text_attempt1": raw_text,
+                })
             raw_json = _parse_json_response(raw_text2)
 
+        if _trace:
+            _trace.add("parsed_signals_step3", raw_json)
         signals = _coerce_model_signals(raw_json)
+        if _trace:
+            _trace.add("validated_signals_step3", signals)
         save_cache(cache_key, {"version": 1, "signals": signals})
 
         if not include_evidence:
@@ -5414,6 +5584,7 @@ def enrich_one_row(
     existing_lusha_data: dict | None = None,
     _cli_verbose: bool = False,
     scoring_profile: str = "default",
+    _trace: "_EnrichTrace | None" = None,
 ) -> tuple:
     """
     Run optional Lusha API enrichment, then Step 1 (Jina + Claude extraction),
@@ -5435,6 +5606,28 @@ def enrich_one_row(
     if _dv.get("domain_used_for_enrichment") == "suggested_domain" and _dv.get("suggested_domain"):
         url = normalize_url(_dv["suggested_domain"])
 
+    if _trace:
+        _trace.add("trace_metadata", {
+            "timestamp": datetime.utcnow().isoformat() + "Z",
+            "company_name": company_name,
+            "domain": url,
+            "scoring_profile": scoring_profile,
+            "debug_mode": True,
+        })
+        _trace.add("input", {
+            "raw_company_name": company_name,
+            "raw_domain": raw_url,
+            "scoring_profile": scoring_profile,
+        })
+        _trace.add("domain_resolution", {
+            "input_domain": raw_url,
+            "validated_domain": _dv.get("validated_domain", ""),
+            "suggested_domain": _dv.get("suggested_domain", ""),
+            "domain_used_for_enrichment": _dv.get("domain_used_for_enrichment", ""),
+            "domain_match_confidence": _dv.get("domain_match_confidence", ""),
+            "domain_validation_notes": _dv.get("match_notes", ""),
+        })
+
     row = {f: "" for f in ALL_ENRICHMENT_FIELDS}
     row.update(_dv)
 
@@ -5443,6 +5636,13 @@ def enrich_one_row(
     row["canonical_company_domain"] = clean_domain(url) if url else ""
     row["canonical_company_url"]    = normalize_url(url) if url else ""
     row["scoring_profile"]          = scoring_profile
+
+    if _trace:
+        _trace.add("normalization", {
+            "canonical_company_name": row["canonical_company_name"],
+            "canonical_company_domain": row["canonical_company_domain"],
+            "canonical_company_url": row["canonical_company_url"],
+        })
 
     # Populate row with any pre-existing Lusha/Lucia data from the input file
     # so downstream steps (Step 2, Step 3) can use it as context.
@@ -5524,7 +5724,7 @@ def enrich_one_row(
             url, company_name, api_key, delay, model_step2=model_step2,
             _debug_callback=_debug_callback,
             search_provider=search_provider, serper_key=serper_key,
-            dry_run=dry_run,
+            dry_run=dry_run, _trace=_trace,
         )
         row.update(s2_fields)
         row["step2_status"]               = s2_status
@@ -5586,6 +5786,7 @@ def enrich_one_row(
                 model_id=model_step2,
                 include_evidence=include_signal_evidence,
                 search_provider=search_provider,
+                _trace=_trace,
             )
             row.update(ms_fields)
         except Exception as _ms_exc:
@@ -5685,6 +5886,55 @@ def enrich_one_row(
         "needs_manual_review":      row["needs_manual_review"],
         "match_notes":              row["match_notes"],
     }
+    if _trace:
+        # Score inputs — exact signal fields passed into commercial_fit_scoring
+        _SIG_KEYS = [
+            "sig_foreign_hq_score", "sig_explicit_lnd_score", "sig_intl_footprint_score",
+            "sig_employer_branding_score", "sig_lnd_onboarding_score", "ti_onboarding_score",
+            "sig_rapid_growth_score",
+        ]
+        _trace.add("score_inputs", {k: row.get(k, "") for k in _SIG_KEYS})
+
+        # Score profile — important for italy_register_icp_only vs default
+        _spr_cfg = {}
+        try:
+            from commercial_fit_scoring import SCORING_PROFILES as _SP
+            _spr_cfg = _SP.get(scoring_profile, _SP.get("default", {}))
+        except Exception:
+            pass
+        _trace.add("score_profile", {
+            "profile": scoring_profile,
+            "model_weight": _spr_cfg.get("model_weight", ""),
+            "size_weight": _spr_cfg.get("size_weight", ""),
+            "sigmoid_k": _spr_cfg.get("sigmoid_k", ""),
+            "size_used_in_final_score": (_spr_cfg.get("size_weight", 1.0) or 0) > 0,
+        })
+
+        # Score components — compute read-only from the finished row
+        try:
+            from commercial_fit_scoring import score_company as _sc_fn
+            _sc_out = _sc_fn(row, params={"scoring_profile": scoring_profile})
+            _trace.add("score_components", {
+                "lr_z_score": _sc_out.get("lr_z_score"),
+                "lean_model_prob": _sc_out.get("lean_model_prob"),
+                "icp_similarity_score": _sc_out.get("icp_similarity_score"),
+                "company_size_score": _sc_out.get("company_size_score"),
+                "weighted_model_component": _sc_out.get("weighted_model_component"),
+                "weighted_size_component": _sc_out.get("weighted_size_component"),
+                "final_commercial_fit_score": _sc_out.get("final_commercial_fit_score"),
+                "commercial_tier": _sc_out.get("commercial_tier"),
+                "top_score_drivers": _sc_out.get("top_score_drivers"),
+                "weak_score_drivers": _sc_out.get("weak_score_drivers"),
+                "data_quality_flag": _sc_out.get("data_quality_flag"),
+                "missing_scoring_fields": _sc_out.get("missing_scoring_fields", []),
+                "note": "sig_rapid_growth_score has a negative coefficient; high value lowers the score",
+            })
+        except Exception as _sc_exc:
+            _trace.warn(f"score_components preview failed: {_sc_exc}")
+
+        _trace.add("final_output", {k: _trace_safe(v) for k, v in row.items()})
+        _trace.save(company_name=company_name)
+
     if is_cli_mode():
         print("[enricher]   Row completed", flush=True)
     return row, dbg
@@ -9041,6 +9291,10 @@ def run_cli() -> None:
                         help="Optional path for self-test results Excel (.xlsx)")
     parser.add_argument("--no-eta",           action="store_true",
                         help="Suppress per-row ETA progress lines")
+    parser.add_argument("--debug-trace",      action="store_true",
+                        help="Write a per-company JSON trace file for pipeline comparison (disabled by default)")
+    parser.add_argument("--debug-trace-dir",  default="debug_traces",
+                        help="Directory for debug trace JSON files (default: debug_traces)")
     args = parser.parse_args()
 
     # ── Self-test mode: run and exit immediately, no API calls ────────────────
@@ -9311,6 +9565,10 @@ def run_cli() -> None:
 
         _row_start = _time.monotonic()
         _row_status = "ok"
+        _row_trace = _EnrichTrace(
+            enabled=args.debug_trace,
+            out_dir=args.debug_trace_dir,
+        )
         try:
             result, _debug_rec = enrich_one_row(
                 company_name=company_name,
@@ -9328,6 +9586,7 @@ def run_cli() -> None:
                 use_playwright=_run_config["use_playwright"],
                 model_step1=_run_config["model_step1"],
                 model_step2=_run_config["model_step2"],
+                _trace=_row_trace,
             )
             debug_records.append(_debug_rec)
             _claude_calls += int(result.get("claude_api_calls", 0) or 0)
