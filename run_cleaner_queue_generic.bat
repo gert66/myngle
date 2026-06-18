@@ -79,11 +79,21 @@ if not exist "%RAW_DIR%" (
 if not exist "%LOG_DIR%" mkdir "%LOG_DIR%"
 if not defined CLEANER_MAX_QUERIES set "CLEANER_MAX_QUERIES=5"
 
-echo Queue: %QUEUE%
-echo Raw folder: %RAW_DIR%
-echo Mode: %MODE%
-echo Batches: %BATCHES%
-echo Domain mode: %DOMAIN_MODE_ARG%
+echo Queue:           %QUEUE%
+echo Raw folder:      %RAW_DIR%
+echo Output folder:   %QUEUE_DIR%\01_cleaned_domains
+echo Mode:            %MODE%
+echo Batches:         %BATCHES%
+echo Domain mode:     %DOMAIN_MODE_ARG%
+if not "%MAX_ROWS%"=="" (
+  echo Max rows (arg):  %MAX_ROWS%
+) else (
+  if /I "%MODE%"=="test" (
+    echo Max rows:        10 ^(test default, no 4th arg^)
+  ) else if /I "%MODE%"=="full" (
+    echo Max rows:        0 ^(all rows, full mode^)
+  )
+)
 echo.
 
 if /I "%BATCHES%"=="all" (
@@ -145,16 +155,46 @@ exit /b %ERRORLEVEL%
 set "INPUT_FILE=%~1"
 for /f %%T in ('python -c "import datetime; print(datetime.datetime.now().strftime('%%Y%%m%%d_%%H%%M%%S'))"') do set "STAMP=%%T"
 set "LOG_FILE=%LOG_DIR%\cleaner_%QUEUE%_%STAMP%.log"
+
+rem -- Resolve rows to process ------------------------------------------
+rem   full + no explicit max_rows  -> ROWS=0 (all rows)
+rem   test + no explicit max_rows  -> ROWS=10
+rem   dry                          -> no row processing (path check only)
+rem   any mode + explicit max_rows -> use that value
 set "ROWS=0"
 if /I "%MODE%"=="test" set "ROWS=10"
-if not "%MAX_ROWS%"=="" set "ROWS=%MAX_ROWS%"
+if defined MAX_ROWS if not "!MAX_ROWS!"=="" set "ROWS=!MAX_ROWS!"
 
-echo Running cleaner on: %INPUT_FILE%
-echo Log: %LOG_FILE%
+if "!ROWS!"=="0" (
+  echo Rows argument:     0 ^(all rows will be processed^)
+) else (
+  echo Rows argument:     !ROWS!
+)
+if "!ROWS!"=="1" (
+  echo WARNING: ROWS=1 -- only one row will be processed.
+  echo          Pass no 4th argument for full mode, or use max_rows=0 for all rows.
+)
+
+echo.
+echo -- Run details --------------------------------------------------
+echo   Input file:      %INPUT_FILE%
+echo   Log file:        %LOG_FILE%
+echo   Queue:           %QUEUE%
+echo   Mode:            %MODE%
+echo   Domain mode:     %DOMAIN_MODE_ARG%
+echo   Max queries:     %CLEANER_MAX_QUERIES%
+if /I "%MODE%"=="dry" (
+  echo   Python command:  python "%SCRIPT_FILE%" --input "..." --dry-run-paths
+) else (
+  echo   Python command:  python "%SCRIPT_FILE%" --input "..." --max-rows !ROWS! --max-queries %CLEANER_MAX_QUERIES% %DOMAIN_MODE_ARG%
+)
+echo -----------------------------------------------------------------
+echo.
+
 if /I "%MODE%"=="dry" (
   python "%SCRIPT_FILE%" --input "%INPUT_FILE%" --project-root "%MYNGLE_DATA_ROOT%" --country auto --dry-run-paths > "%LOG_FILE%" 2>&1
 ) else (
-  python "%SCRIPT_FILE%" --input "%INPUT_FILE%" --project-root "%MYNGLE_DATA_ROOT%" --country auto --max-rows %ROWS% --max-queries %CLEANER_MAX_QUERIES% %DOMAIN_MODE_ARG% > "%LOG_FILE%" 2>&1
+  python "%SCRIPT_FILE%" --input "%INPUT_FILE%" --project-root "%MYNGLE_DATA_ROOT%" --country auto --max-rows !ROWS! --max-queries %CLEANER_MAX_QUERIES% %DOMAIN_MODE_ARG% > "%LOG_FILE%" 2>&1
 )
 set "RC=%ERRORLEVEL%"
 type "%LOG_FILE%"

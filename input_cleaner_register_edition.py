@@ -8167,6 +8167,9 @@ def process_dataframe(
     _live_fc_counters.setdefault("fc_pages_successful", 0)
     _live_fc_counters.setdefault("fc_timeouts", 0)
     _live_fc_counters.setdefault("fc_total_secs", 0.0)
+    _live_fc_counters.setdefault("rows_with_domain", 0)
+    _live_fc_counters.setdefault("rows_without_domain", 0)
+    _live_fc_counters.setdefault("row_errors", 0)
 
     company_col  = cols.get("company") or ""
     website_col  = cols.get("website") or ""
@@ -8731,6 +8734,15 @@ def process_dataframe(
                 })
 
         rows_done = global_i + 1
+        # Update live domain counters so progress_cb can report found/empty
+        _last_res = new_results[-1] if new_results else {}
+        _last_domain = str(_last_res.get("final_selected_domain", "") or "").strip()
+        if _last_domain:
+            _live_fc_counters["rows_with_domain"] = _live_fc_counters.get("rows_with_domain", 0) + 1
+        else:
+            _live_fc_counters["rows_without_domain"] = _live_fc_counters.get("rows_without_domain", 0) + 1
+        if _last_res.get("row_processing_error"):
+            _live_fc_counters["row_errors"] = _live_fc_counters.get("row_errors", 0) + 1
         # Checkpoint every N rows and on the final row
         _eff_every = _get_autosave_every()
         if autosave_enabled and run_id and (rows_done % _eff_every == 0 or rows_done == n):
@@ -11139,7 +11151,14 @@ def cli_batch_run() -> None:
         print(f"ERROR: could not parse input file: {input_path}", file=sys.stderr)
         sys.exit(1)
 
-    batch_n = len(df) if args.max_rows <= 0 else min(args.max_rows, len(df))
+    _total_rows_in_file = len(df)
+    batch_n = _total_rows_in_file if args.max_rows <= 0 else min(args.max_rows, _total_rows_in_file)
+    if args.max_rows == 1:
+        print(
+            f"[cleaner] WARNING: --max-rows 1 — only ONE row will be processed. "
+            f"Pass --max-rows 0 to process all {_total_rows_in_file} rows.",
+            flush=True,
+        )
     run_df  = df.head(batch_n).copy()
 
     # ── Country resolution ───────────────────────────────────────────────────
@@ -11183,7 +11202,9 @@ def cli_batch_run() -> None:
     print(f"[cleaner] -- Resolved settings ------------------------------------------", flush=True)
     print(f"[cleaner] Input:                  {input_path}", flush=True)
     print(f"[cleaner] Country:                {cfg.country_name} ({cfg.country_code})", flush=True)
-    print(f"[cleaner] Rows:                   {batch_n} / {len(df)}", flush=True)
+    print(f"[cleaner] Rows in input file:     {_total_rows_in_file}", flush=True)
+    print(f"[cleaner] --max-rows arg:         {args.max_rows} (0 = all)", flush=True)
+    print(f"[cleaner] Rows to process:        {batch_n} / {_total_rows_in_file}", flush=True)
     print(f"[cleaner] Output dir:             {pl_paths['output_xlsx']}", flush=True)
     print(f"[cleaner] Domain discovery mode:  {_dm}", flush=True)
     if _dm == _DM_MANUAL_GOOGLE_LIKE:
@@ -11445,6 +11466,13 @@ def cli_batch_run() -> None:
     print(f"[cleaner] Saved:      {out_path}")
 
     # Run log
+    import time as _time_mod2
+    _elapsed_total = _time_mod2.time() - _cli_started_at
+    _rows_with_domain = int(
+        enriched_df.get("final_selected_domain", pd.Series(dtype=str))
+        .astype(str).str.strip().replace("", pd.NA).notna().sum()
+    )
+    _rows_failed = _cli_fc_health.get("row_errors", 0) or _cli_fc_health.get("exceptions", 0)
     _pl_log_row = {
         "timestamp":             ts,
         "cohort":                pl_paths["cohort"],
@@ -11452,24 +11480,33 @@ def cli_batch_run() -> None:
         "batch_number":          pl_paths["batch_number"],
         "row_range":             pl_paths["row_range"],
         "input_path":            str(input_path),
-        "output_xlsx":           pl_paths["output_xlsx"],
+        "output_xlsx":           str(out_path),
+        "mode":                  "full" if args.max_rows <= 0 else f"partial_{args.max_rows}",
+        "domain_mode":           _dm,
+        "max_rows_arg":          args.max_rows,
+        "rows_input":            _total_rows_in_file,
+        "rows_to_process":       batch_n,
         "rows_processed":        batch_n,
-        "rows_input":            len(df),
+        "rows_with_domain":      _rows_with_domain,
+        "rows_without_domain":   batch_n - _rows_with_domain,
+        "row_errors":            _rows_failed,
         "coverage_pct":          run_meta.get("coverage_pct", ""),
         "manual_review_count":   run_meta.get("manual_review_count", ""),
         "no_match_count":        run_meta.get("no_confident_match_count", ""),
         "haiku_mode":            args.haiku_mode,
         "verifier_provider":     args.verifier,
-        "serper_queries":        args.max_queries,
+        "serper_max_queries":    args.max_queries,
+        "serper_queries_total":  getattr(process_dataframe, "_last_serper_count", 0),
         "firecrawl_keys_loaded": len(fc_keys_cli),
+        "elapsed_seconds":       round(_elapsed_total, 1),
+        "avg_seconds_per_row":   round(_elapsed_total / max(batch_n, 1), 2),
         "run_id":                file_hash,
         "run_label":             run_label,
+        "run_log_csv":           pl_paths["run_log_csv"],
         "status":                "complete",
         "notes":                 "",
     }
     _append_run_log_csv(Path(pl_paths["run_log_csv"]), _pl_log_row)
-    import time as _time_mod2
-    _elapsed_total = _time_mod2.time() - _cli_started_at
 
     print(f"[cleaner] Run log:    {pl_paths['run_log_csv']}", flush=True)
     _summary_text = f"\n{_fc_usage_console_summary(run_meta)}"
@@ -11479,17 +11516,15 @@ def cli_batch_run() -> None:
         print(_summary_text.encode("ascii", errors="replace").decode("ascii"), flush=True)
 
     # ── End-of-run summary ────────────────────────────────────────────────────
-    _rows_with_domain = int(
-        enriched_df.get("final_selected_domain", pd.Series(dtype=str))
-        .astype(str).str.strip().replace("", pd.NA).notna().sum()
-    )
-    _rows_failed = _cli_fc_health.get("exceptions", 0)
-    _proc_n      = max(batch_n, 1)
+    _proc_n = max(batch_n, 1)
     print(f"\n[cleaner] Summary:", flush=True)
+    print(f"  input_file:                        {input_path.name}", flush=True)
+    print(f"  output_file:                       {out_path}", flush=True)
+    print(f"  rows_in_input:                     {_total_rows_in_file}", flush=True)
     print(f"  rows_processed:                    {batch_n}", flush=True)
     print(f"  rows_with_final_domain:            {_rows_with_domain}", flush=True)
-    print(f"  rows_failed:                       {_rows_failed}", flush=True)
-    print(f"  serper_queries_total:              {getattr(process_dataframe, '_last_serper_count', 0)}", flush=True)
+    print(f"  rows_without_domain:               {batch_n - _rows_with_domain}", flush=True)
+    print(f"  row_errors:                        {_rows_failed}", flush=True)
     print(f"  haiku_calls_total:                 {run_meta.get('rows_reviewed_by_haiku', 0)}", flush=True)
     _tot_att  = run_meta.get("firecrawl_total_requests_attempted", 0)
     _tot_succ = run_meta.get("firecrawl_total_pages_successful_new", 0)
@@ -11507,7 +11542,8 @@ def cli_batch_run() -> None:
     print(f"  firecrawl_total_estimated_credits: {_tot_cred}", flush=True)
     print(f"  firecrawl_avg_credits_per_row:     {_avg_cred}", flush=True)
     print(f"  elapsed:                           {_format_duration(_elapsed_total)}", flush=True)
-    print(f"  output_file:                       {out_path}", flush=True)
+    print(f"  avg_seconds_per_row:               {round(_elapsed_total / _proc_n, 2)}", flush=True)
+    print(f"  run_log_csv:                       {pl_paths['run_log_csv']}", flush=True)
 
     print(f"\n[cleaner] Done.", flush=True)
     if args.infer_size and "employee_size_band" in enriched_df.columns:
@@ -11567,18 +11603,26 @@ def _print_cli_progress(
     started_at: float,
     current_name: str = "",
     counters: dict | None = None,
-    every: int = 10,
+    every: int = 0,
 ) -> None:
-    """
-    Print a CLI progress line if this row warrants one.
-    Prints: first row, last row, every row when total<=5, every 5 when total<=100,
-    every `every` rows otherwise.
+    """Print a CLI progress line at sensible intervals.
+
+    Interval logic (every=0 means auto):
+      total <= 5 or first/last row: always print
+      total <= 100: every 10 rows
+      total <= 500: every 25 rows
+      total > 500:  every 50 rows
     """
     import time as _time
+    if every <= 0:
+        if total <= 100:
+            every = 10
+        elif total <= 500:
+            every = 25
+        else:
+            every = 50
     if total <= 5 or i == 1 or i == total:
         do_print = True
-    elif total <= 100:
-        do_print = (i % 5 == 0)
     else:
         do_print = (i % every == 0)
     if not do_print:
@@ -11586,29 +11630,26 @@ def _print_cli_progress(
 
     elapsed = _time.time() - started_at
     pct = i / total * 100 if total else 0.0
-    if i > 0 and elapsed > 0:
-        eta = elapsed / i * (total - i)
-    else:
-        eta = 0.0
+    eta = elapsed / i * (total - i) if i > 0 and elapsed > 0 else 0.0
 
-    name_part = (current_name[:57] + "...") if len(current_name) > 60 else current_name
+    name_part = (current_name[:55] + "...") if len(current_name) > 58 else current_name
     c = counters or {}
-    serper_n  = c.get("serper_queries", 0)
-    fc_att    = c.get("requests_attempted", 0)
-    fc_succ   = c.get("pages_successful", 0)
-    haiku_n   = c.get("haiku_calls", 0)
-    errors_n  = c.get("errors", 0)
-    skipped_n = c.get("skipped", 0)
+    serper_n   = c.get("serper_queries", 0)
+    found_n    = c.get("rows_with_domain", 0)
+    empty_n    = c.get("rows_without_domain", 0)
+    errors_n   = c.get("row_errors", 0) or c.get("errors", 0)
+    fc_att     = c.get("requests_attempted", 0) or c.get("fc_requests_attempted", 0)
+    fc_succ    = c.get("pages_successful", 0) or c.get("fc_pages_successful", 0)
 
     line = (
         f"{prefix} {i}/{total} ({pct:.1f}%) | "
         f"elapsed {_format_duration(elapsed)} | ETA {_format_duration(eta)} | "
-        f"current: {name_part} | "
-        f"Serper: {serper_n} | FC: {fc_att}req/{fc_succ}ok | "
-        f"Haiku: {haiku_n} | errors: {errors_n}"
+        f"Serper {serper_n} | found {found_n} | empty {empty_n} | errors {errors_n}"
     )
-    if skipped_n:
-        line += f" | skipped: {skipped_n}"
+    if fc_att:
+        line += f" | FC {fc_att}req/{fc_succ}ok"
+    if name_part:
+        line += f" | last: {name_part}"
     print(line, flush=True)
 
 
