@@ -27,6 +27,7 @@ import csv
 import re
 import sys
 import unicodedata
+import zipfile
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -114,6 +115,17 @@ STATUS_SOURCE_EMPTY = "SOURCE_URL_EMPTY"
 STATUS_DUPLICATE_SKIPPED = "DUPLICATE_SOURCE_MATCH_SKIPPED"
 STATUS_TARGET_EMPTY = "TARGET_COMPANY_EMPTY"
 STATUS_OPP_SHEET_MISSING = "OPPORTUNITY_INPUT_SHEET_MISSING"
+STATUS_INVALID_WORKBOOK = "INVALID_WORKBOOK_SKIPPED"
+
+# Folder name fragments that are never safe to read as input
+UNSAFE_PATH_FRAGMENTS = [
+    "_url_patched",
+    "url_patched",
+    "_url_patch_reports",
+    "_logs",
+    "_archive",
+    "__pycache__",
+]
 
 
 # ---------------------------------------------------------------------------
@@ -502,8 +514,26 @@ def process_file(
     """
     Process a single enriched file.
     Returns (report_rows, opportunity_sheet_found).
+    Returns a sentinel INVALID_WORKBOOK_SKIPPED row on load failure.
     """
-    wb = load_workbook(xlsx_path, data_only=False)
+    try:
+        wb = load_workbook(xlsx_path, data_only=False)
+    except (zipfile.BadZipFile, KeyError, OSError, Exception) as exc:
+        print(f"[patch] Skipping invalid workbook: {xlsx_path} | {exc}")
+        return ([{
+            "file": xlsx_path.name,
+            "sheet": "",
+            "row": "",
+            "company_name": "",
+            "status": STATUS_INVALID_WORKBOOK,
+            "old_website_url": "",
+            "new_website_url": "",
+            "old_domain": "",
+            "new_domain": "",
+            "match_key": "",
+            "needs_reenrichment": False,
+            "notes": str(exc),
+        }], False)
     all_report_rows = []
     opportunity_sheet_found = False
 
@@ -633,6 +663,7 @@ def print_summary(
     print(f"  All sheets total rows seen       : {len(report_rows)}")
     print(f"  All sheets rows patched changed  : {status_counts.get(STATUS_PATCHED_CHANGED, 0)}")
     print(f"  All sheets needing re-enrichment : {needs_reenrich_total}")
+    print(f"  Invalid workbooks skipped        : {status_counts.get(STATUS_INVALID_WORKBOOK, 0)}")
     print("=" * 64 + "\n")
 
 
@@ -640,17 +671,30 @@ def print_summary(
 # Queue scanning
 # ---------------------------------------------------------------------------
 
+def _is_safe_input_path(path: Path) -> bool:
+    """Return False if any part of the path looks like a patched output folder."""
+    parts = [p.lower() for p in path.parts]
+    for fragment in UNSAFE_PATH_FRAGMENTS:
+        for part in parts:
+            if fragment in part:
+                return False
+    return True
+
+
 def collect_xlsx_files(queue_dir: Path, subfolders: list[str]) -> list[tuple[Path, str]]:
     """
-    Returns list of (xlsx_path, output_subfolder_name) for all candidate files.
+    Returns list of (xlsx_path, input_subfolder) for safe candidate files.
+    Skips files located inside any patched output folder.
     """
     results = []
     for subfolder in subfolders:
         folder = queue_dir / subfolder
         if not folder.exists():
             continue
+        if not _is_safe_input_path(folder):
+            continue
         for f in sorted(folder.glob("*.xlsx")):
-            if not f.name.startswith("~$"):
+            if not f.name.startswith("~$") and _is_safe_input_path(f):
                 results.append((f, subfolder))
     return results
 
@@ -768,7 +812,16 @@ def main() -> None:
             print(f"\n[WARN] Queue folder not found, skipping: {queue_dir}")
             continue
 
-        # Also check for standalone opportunity input workbooks at queue root
+        # Warn if any output folders already exist (they will not be used as input)
+        for out_sub in ["02_lead_prioritized_url_patched", "03_opportunity_input_url_patched"]:
+            out_folder = queue_dir / out_sub
+            if out_folder.exists():
+                print(
+                    f"  [INFO] Output folder already exists: {out_folder}\n"
+                    f"         Existing files will not be used as input."
+                )
+
+        # Standalone opportunity input workbooks at queue root only (never from output folders)
         standalone_patterns = [
             f"{queue}_ALL_opportunity_input.xlsx",
             f"{queue}_opportunity_input.xlsx",
@@ -776,7 +829,11 @@ def main() -> None:
         standalone_files: list[tuple[Path, str]] = []
         for pat in standalone_patterns:
             candidate = queue_dir / pat
-            if candidate.exists() and not candidate.name.startswith("~$"):
+            if (
+                candidate.exists()
+                and not candidate.name.startswith("~$")
+                and _is_safe_input_path(candidate)
+            ):
                 standalone_files.append((candidate, "03_opportunity_input_url_patched"))
 
         subfolder_files = collect_xlsx_files(queue_dir, INPUT_SUBFOLDERS)
