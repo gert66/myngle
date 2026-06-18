@@ -2333,8 +2333,148 @@ def _mgl_organic_is_brand_owned(
     )
 
 
-# ---------------------------------------------------------------------------
-# MGL domain canonicalization
+# Official-page signals in title/snippet that suggest an organic result is the
+# company's own page (or parent/group page) rather than a third-party profile.
+_MGL_OFFICIAL_SIGNALS: tuple[str, ...] = (
+    "contact", "contatti", "contatto",
+    "chi siamo", "about us", "about",
+    "homepage", "home page",
+    "group company", "gruppo",
+    "sede", "sede legale",
+    "terminal", "porto", "port",
+    "official", "ufficiale",
+    "corporate", "corporate site",
+)
+
+
+def _mgl_derive_acronyms(company_name: str, brand_tokens: list[str]) -> set[str]:
+    """
+    Derive 2–5 letter acronyms from the brand tokens of a company name.
+    Returns a set of lowercase acronym strings.
+
+    Examples:
+    - TERMINAL DARSENA TOSCANA SRL  -> brand_tokens = ['terminal','darsena','toscana']
+      -> acronym 'tdt'
+    - LA SPEZIA CONTAINER TERMINAL S.P.A.
+      -> brand_tokens = ['spezia','container','terminal'] (la < 3 chars, filtered)
+      or ['la','spezia','container','terminal'] if la is short → depends on token min length
+      -> acronym 'lsct' or 'sct'
+    """
+    # Also try with short words (2+ chars) from full cleaned name for acronyms
+    name = company_name.lower()
+    name = _MGL_LEGAL_SUFFIXES_RE.sub(" ", name)
+    all_raw = re.split(r"[\s\-–—/.,;:()\[\]\"'&@#!?_]+", name)
+    all_tokens = [t.strip(".") for t in all_raw if len(t.strip(".")) >= 2 and t.strip(".") not in _MGL_GENERIC_WORDS]
+
+    acronyms: set[str] = set()
+
+    # Acronym from brand_tokens (>= 3 chars each)
+    if 2 <= len(brand_tokens) <= 6:
+        acr = "".join(t[0] for t in brand_tokens)
+        if 2 <= len(acr) <= 5:
+            acronyms.add(acr)
+
+    # Acronym from all_tokens (>= 2 chars, including short function words)
+    if 2 <= len(all_tokens) <= 6:
+        acr2 = "".join(t[0] for t in all_tokens)
+        if 2 <= len(acr2) <= 5:
+            acronyms.add(acr2)
+
+    # Sliding windows of 2–5 consecutive brand tokens for sub-acronyms
+    for window in range(2, min(6, len(brand_tokens) + 1)):
+        for start in range(len(brand_tokens) - window + 1):
+            acr = "".join(t[0] for t in brand_tokens[start:start + window])
+            if 2 <= len(acr) <= 5:
+                acronyms.add(acr)
+
+    return acronyms
+
+
+def _mgl_acronym_matches_domain(
+    domain: str,
+    acronyms: set[str],
+    title: str,
+    snippet: str,
+    brand_tokens: list[str],
+) -> tuple[bool, str]:
+    """
+    Return (True, reason) if the domain stem equals a derived company acronym
+    AND the title/snippet contains at least one brand token (confirming relevance).
+    """
+    if not acronyms:
+        return False, "no acronyms derived"
+    reg = _mgl_registered_domain(domain)
+    # Domain stem = registered domain without TLD
+    stem = reg.split(".")[0].lower()
+    if stem not in acronyms:
+        return False, f"domain stem '{stem}' not in acronyms {sorted(acronyms)}"
+    # Confirm relevance: title or snippet must contain at least one brand token
+    combined = (title + " " + snippet).lower()
+    for tok in brand_tokens:
+        if tok in combined:
+            return True, f"acronym '{stem}' matches + brand token '{tok}' in title/snippet"
+    # Even if no token found in text, an acronym domain is already a strong signal
+    return True, f"acronym '{stem}' matches derived acronym (no title token confirmation)"
+
+
+def _mgl_is_official_parent_page(
+    domain: str,
+    title: str,
+    snippet: str,
+    brand_tokens: list[str],
+) -> tuple[bool, str]:
+    """
+    Accept a domain even without brand token in the domain name, when:
+    1. Domain is NOT in the skip-list (double-checked here as safety net)
+    2. Title has strong company-name overlap (at least 2 brand tokens, or all
+       tokens if there is only 1)
+    3. Title/snippet contains an official-page signal word
+
+    This handles cases like LA SPEZIA CONTAINER TERMINAL -> contshipitalia.com
+    where the organic result title is clearly the company name.
+    """
+    if not brand_tokens:
+        return False, "no brand tokens"
+    # Safety net: skip-list domains are never official parent pages
+    if _mgl_skip(domain):
+        return False, f"domain '{domain}' is in the skip-list"
+
+    title_lower   = title.lower()
+    snippet_lower = (snippet or "").lower()
+    combined      = title_lower + " " + snippet_lower
+
+    # Count how many brand tokens appear in the title
+    tokens_in_title = [t for t in brand_tokens if t in title_lower]
+    # Require at least 2 tokens OR all tokens if there's only 1
+    min_required = min(2, len(brand_tokens))
+    if len(tokens_in_title) < min_required:
+        return False, (
+            f"only {len(tokens_in_title)}/{len(brand_tokens)} brand tokens in title "
+            f"(need {min_required})"
+        )
+
+    # Check for official-page signal
+    for sig in _MGL_OFFICIAL_SIGNALS:
+        if sig in combined:
+            return True, (
+                f"parent/group page: {len(tokens_in_title)} brand tokens in title "
+                f"+ official signal '{sig}'"
+            )
+
+    # If all brand tokens match the title AND title is short (likely exact company name)
+    all_match = len(tokens_in_title) == len(brand_tokens)
+    if all_match and len(brand_tokens) >= 2:
+        return True, (
+            f"parent/group page: all {len(brand_tokens)} brand tokens in title "
+            "(exact company name match)"
+        )
+
+    return False, (
+        f"{len(tokens_in_title)} brand tokens in title but no official-page signal found"
+    )
+
+
+
 #
 # Converts a URL or raw host to the canonical company root domain.
 # Examples:
@@ -2534,9 +2674,12 @@ def _manual_google_like_domain_row(
         "manual_google_like_selected_domain":     "",
         "manual_google_like_status":              "NOT_MANUAL_GOOGLE_LIKE_MODE",
         # Selection audit columns
-        "manual_google_like_selected_reason":     "",
-        "manual_google_like_rejected_domains":    "",
-        "manual_google_like_rejection_reasons":   "",
+        "manual_google_like_selected_reason":           "",
+        "manual_google_like_acronym_candidates":        "",
+        "manual_google_like_domain_stem":               "",
+        "manual_google_like_parent_domain_accepted":    "",
+        "manual_google_like_rejected_domains":          "",
+        "manual_google_like_rejection_reasons":         "",
         # Raw result diagnostics
         "manual_google_like_kg_title":         "",
         "manual_google_like_kg_url":           "",
@@ -2625,8 +2768,12 @@ def _manual_google_like_domain_row(
         out[f"manual_google_like_{_slot}_url"]    = _u
         out[f"manual_google_like_{_slot}_domain"] = _d
 
-    # Build brand tokens once — used by organic gate and KG/local overlap check
+    # Build brand tokens once — used by organic gate, KG/local overlap, acronyms
     brand_tokens = _mgl_brand_tokens(name)
+
+    # Derive acronyms for this company name (computed once, shared across all candidates)
+    acronyms = _mgl_derive_acronyms(name, brand_tokens)
+    out["manual_google_like_acronym_candidates"] = " ".join(sorted(acronyms))
 
     # Rejection audit lists (filled as we walk results)
     _rejected_domains: list[str] = []
@@ -2636,10 +2783,13 @@ def _manual_google_like_domain_row(
         _rejected_domains.append(domain)
         _rejection_reasons.append(reason)
 
-    def _write_audit(selected_reason: str) -> None:
-        out["manual_google_like_rejected_domains"]  = " | ".join(_rejected_domains)
-        out["manual_google_like_rejection_reasons"] = " | ".join(_rejection_reasons)
-        out["manual_google_like_selected_reason"]   = selected_reason
+    def _write_audit(selected_reason: str, domain_stem: str = "",
+                     parent_accepted: str = "") -> None:
+        out["manual_google_like_rejected_domains"]       = " | ".join(_rejected_domains)
+        out["manual_google_like_rejection_reasons"]      = " | ".join(_rejection_reasons)
+        out["manual_google_like_selected_reason"]        = selected_reason
+        out["manual_google_like_domain_stem"]            = domain_stem
+        out["manual_google_like_parent_domain_accepted"] = parent_accepted
 
     # ── Priority A: Knowledge Graph website ──────────────────────────────────
     if kg_site:
@@ -2674,9 +2824,11 @@ def _manual_google_like_domain_row(
                            "LOCAL_RESULT_DOMAIN_USED", "localResult")
 
     # ── Priority C: First brand-owned organic result (top-5) ─────────────────
-    # Each candidate must pass:
-    #   1. not in skip-list
-    #   2. brand-ownership gate: registered domain contains a brand token
+    # Acceptance order per candidate:
+    #   C1. brand token in registered domain          -> ORGANIC_DOMAIN_USED
+    #   C2. domain stem matches derived acronym       -> ACRONYM_DOMAIN_MATCH
+    #   C3. parent/group page (strong title + signal) -> PARENT_GROUP_OFFICIAL_PAGE
+    # Skip-list is always checked first; C2/C3 never apply to skip-listed domains.
     for _org in organic[:5]:
         _u = (_org.get("link") or "").strip()
         _t = (_org.get("title") or "").strip()
@@ -2687,13 +2839,39 @@ def _manual_google_like_domain_row(
         if _mgl_skip(_d):
             _reject(_d, "organic domain in skip-list")
             continue
+
+        _reg   = _mgl_registered_domain(_d)
+        _stem  = _reg.split(".")[0].lower()
+
+        # C1: brand token in domain
         _owned, _own_reason = _mgl_organic_is_brand_owned(_d, _t, _s, brand_tokens)
         if _owned:
-            _write_audit(f"organic accepted: {_own_reason}")
+            _write_audit(f"C1-brand-token: {_own_reason}", domain_stem=_stem)
             return _mgl_accept(out, existing_website, _d, _u, _t,
                                "ORGANIC_DOMAIN_USED", "organic")
-        else:
-            _reject(_d, f"brand-gate rejected: {_own_reason}")
+
+        # C2: acronym domain match
+        _acr_ok, _acr_reason = _mgl_acronym_matches_domain(
+            _d, acronyms, _t, _s, brand_tokens,
+        )
+        if _acr_ok:
+            _write_audit(f"C2-acronym: {_acr_reason}", domain_stem=_stem)
+            return _mgl_accept(out, existing_website, _d, _u, _t,
+                               "ACRONYM_DOMAIN_MATCH", "organic")
+
+        # C3: parent/group official page
+        _par_ok, _par_reason = _mgl_is_official_parent_page(
+            _d, _t, _s, brand_tokens,
+        )
+        if _par_ok:
+            _write_audit(
+                f"C3-parent-page: {_par_reason}", domain_stem=_stem,
+                parent_accepted=_reg,
+            )
+            return _mgl_accept(out, existing_website, _d, _u, _t,
+                               "PARENT_GROUP_OFFICIAL_PAGE", "organic")
+
+        _reject(_d, f"C1/C2/C3 failed: {_own_reason}")
 
     # Nothing usable found
     _write_audit("no usable result found")
