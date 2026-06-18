@@ -2210,6 +2210,120 @@ _MGL_SKIP_DOMAINS: frozenset[str] = frozenset({
 })
 
 
+# ---------------------------------------------------------------------------
+# MGL domain canonicalization
+#
+# Converts a URL or raw host to the canonical company root domain.
+# Examples:
+#   https://new.abb.com/it        -> abb.com
+#   https://carriera.aldi.it/...  -> aldi.it
+#   https://www.ibm.com/it-it/    -> ibm.com
+#   https://www.siemens-healthineers.com/it -> siemens-healthineers.com
+# ---------------------------------------------------------------------------
+
+# Known two-part eTLD suffixes — host.co.uk → keep last three labels.
+_MGL_TWO_PART_TLDS: frozenset[str] = frozenset({
+    "co.uk", "co.nz", "co.za", "co.jp", "co.kr", "co.in",
+    "com.au", "com.br", "com.ar", "com.mx", "com.tr", "com.pl",
+    "com.sg", "com.hk", "com.my", "com.ph",
+    "org.uk", "net.uk", "gov.uk", "ac.uk",
+    "or.jp", "ne.jp", "ac.jp",
+})
+
+# Corporate subdomains that should be stripped — e.g. new.abb.com -> abb.com.
+# Only applied when the host has more than 2 (or 3 for two-part-TLD) labels.
+_MGL_STRIP_SUBDOMAINS: frozenset[str] = frozenset({
+    "new", "www", "web", "m", "mobile",
+    "it", "en", "de", "fr", "nl", "es", "pt", "pl", "ru",
+    "global", "international", "world",
+    "corp", "corporate",
+    "career", "careers", "carriera", "carriere", "lavoro",
+    "jobs", "job",
+    "shop", "store", "negozio",
+    "news", "press", "media",
+    "support", "help", "assistenza",
+    "portal", "portale",
+    "extranet", "intranet",
+    "mail", "email", "webmail",
+    "blog", "blogs",
+    "dev", "staging", "test", "demo",
+    "static", "cdn", "assets",
+    "my", "account",
+    "about", "info",
+    "login", "auth",
+    "api",
+})
+
+
+def _mgl_registered_domain(host: str) -> str:
+    """
+    Return the registered domain (eTLD+1) for a hostname.
+    Uses a hardcoded two-part-TLD set; falls back to last-two-labels for
+    all other TLDs (.com, .it, .eu, .net, .org, .group, .ai, etc.).
+    """
+    labels = host.lower().split(".")
+    if len(labels) < 2:
+        return host.lower()
+    # Check for two-part TLD
+    if len(labels) >= 3:
+        two_part = ".".join(labels[-2:])
+        if two_part in _MGL_TWO_PART_TLDS:
+            return ".".join(labels[-3:])
+    # Default: last two labels
+    return ".".join(labels[-2:])
+
+
+def _mgl_canonicalize(url_or_domain: str) -> str:
+    """
+    Convert a URL or hostname to canonical company root domain.
+
+    1. Extract hostname (strip protocol, path, query, fragment).
+    2. Strip www.
+    3. Compute the registered domain (eTLD+1).
+    4. If the input host has extra labels beyond the registered domain,
+       check whether ALL of those extra labels are known corporate subdomains.
+       If yes, return the registered domain. If any extra label is NOT in the
+       strip-list (i.e. it looks like a real brand segment), return the
+       full host minus www.
+    """
+    s = (url_or_domain or "").strip()
+    if not s:
+        return ""
+    # Add scheme so urlparse works
+    if not s.startswith("http"):
+        s = "https://" + s
+    try:
+        host = (urlparse(s).hostname or "").lower()
+    except Exception:
+        host = re.sub(r"^https?://", "", s.lower()).split("/")[0].split("?")[0]
+
+    # Strip www.
+    host = re.sub(r"^www\.", "", host)
+    if not host:
+        return ""
+
+    registered = _mgl_registered_domain(host)
+
+    # If host == registered, nothing to strip
+    if host == registered:
+        return host
+
+    # Determine the extra prefix labels (the part before the registered domain)
+    n_reg_labels = len(registered.split("."))
+    all_labels   = host.split(".")
+    prefix_labels = all_labels[: len(all_labels) - n_reg_labels]
+
+    # If ALL prefix labels are known corporate subdomains, strip them
+    if all(lbl in _MGL_STRIP_SUBDOMAINS for lbl in prefix_labels):
+        return registered
+
+    # Otherwise keep the full host (it has a meaningful brand segment, e.g.
+    # siemens-healthineers.com which has no extra prefix, or
+    # extranet.myspecialbrand.it where "extranet" alone isn't brand-distinctive
+    # but "myspecialbrand" is captured in the registered domain).
+    return host
+
+
 def _mgl_skip(domain: str) -> bool:
     """Return True if domain should be skipped in manual Google-like mode."""
     d = (domain or "").lower().strip()
@@ -2290,11 +2404,12 @@ def _manual_google_like_domain_row(
         "manual_google_like_hl":               _HL,
         "manual_google_like_location":         _LOCATION,
         # Selection diagnostics
-        "manual_google_like_selected_source":  "",
-        "manual_google_like_selected_title":   "",
-        "manual_google_like_selected_url":     "",
-        "manual_google_like_selected_domain":  "",
-        "manual_google_like_status":           "NOT_MANUAL_GOOGLE_LIKE_MODE",
+        "manual_google_like_selected_source":     "",
+        "manual_google_like_selected_title":      "",
+        "manual_google_like_selected_url":        "",
+        "manual_google_like_selected_raw_domain": "",
+        "manual_google_like_selected_domain":     "",
+        "manual_google_like_status":              "NOT_MANUAL_GOOGLE_LIKE_MODE",
         # Raw result diagnostics
         "manual_google_like_kg_title":         "",
         "manual_google_like_kg_url":           "",
@@ -2430,21 +2545,30 @@ def _mgl_accept(
     status: str,
     source: str,
 ) -> dict:
-    """Finalise a manual-Google-like result and return the enriched out dict."""
+    """
+    Finalise a manual-Google-like result and return the enriched out dict.
+    `domain` is the raw extracted host (www-stripped). We canonicalize it here
+    to the company root domain (eTLD+1 after stripping known corporate subdomains).
+    """
+    canonical = _mgl_canonicalize(url or domain)
+    # Fallback: if canonicalization produced nothing, keep raw domain
+    if not canonical:
+        canonical = domain
     existing_domain = _extract_domain(existing_website or "")
     out.update(
-        validated_domain=domain,
-        recommended_domain=domain,
+        validated_domain=canonical,
+        recommended_domain=canonical,
         domain_action="MISSING_DOMAIN_FIXED" if not existing_domain else "SUGGEST_REPLACE",
         domain_confidence="Low",
         domain_reason=f"Manual Google-like mode ({source}): {status}.",
         manual_review_needed=True,
-        final_selected_domain=domain,
+        final_selected_domain=canonical,
         final_confidence="Low",
         manual_google_like_selected_source=source,
         manual_google_like_selected_title=title,
         manual_google_like_selected_url=url,
-        manual_google_like_selected_domain=domain,
+        manual_google_like_selected_raw_domain=domain,
+        manual_google_like_selected_domain=canonical,
         manual_google_like_status=status,
     )
     return out
@@ -10599,6 +10723,8 @@ def cli_batch_run() -> None:
     if _dm == _DM_MANUAL_GOOGLE_LIKE:
         print("[cleaner]   Manual Google-like mode: company-name-only query, "
               "knowledge/local/organic priority, obvious bad domains skipped", flush=True)
+        print("[cleaner]   Manual Google-like canonicalization: selected URLs are normalized "
+              "to company root domains", flush=True)
     elif _dm == _DM_SIMPLE_RAW_TOP:
         print("[cleaner]   Simple raw-top mode: one Serper call, raw top organic result, no filtering",
               flush=True)
