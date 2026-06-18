@@ -1955,14 +1955,18 @@ def _call_serper(
     timeout: int = 12,
     gl: str = "it",
     hl: str = "it",
+    location: str | None = None,
 ) -> tuple:
     global _serper_call_count
     _serper_call_count += 1
     try:
+        payload: dict = {"q": query, "gl": gl, "hl": hl, "num": 5}
+        if location:
+            payload["location"] = location
         resp = requests.post(
             SERPER_URL,
             headers={"X-API-KEY": serper_key, "Content-Type": "application/json"},
-            json={"q": query, "gl": gl, "hl": hl, "num": 5},
+            json=payload,
             timeout=timeout,
         )
         resp.raise_for_status()
@@ -2114,6 +2118,133 @@ def _simple_serper_top_domain_row(
         manual_review_needed=True,
         final_selected_domain=top_domain,
         final_confidence="Low",
+    )
+    return out
+
+
+# ---------------------------------------------------------------------------
+# Manual Google-like domain mode
+#
+# Mimics a manual Google search: one query per company, query = "<company_name>"
+# only (quoted, no city/country/official), Serper with gl=it hl=it location=Italy.
+# Top organic result domain is accepted without any filtering.
+#
+# Use --manual-google-like-domain (CLI) or the Streamlit checkbox to enable.
+# ---------------------------------------------------------------------------
+
+def _manual_google_like_domain_row(
+    company_name: str,
+    existing_website: str,
+    serper_key: str,
+) -> dict:
+    """
+    One Serper call, query = '"<company_name>"', gl=it hl=it location=Italy.
+    Top organic result domain accepted unconditionally.
+    Returns normal output fields + manual_google_like_* diagnostics.
+    """
+    _GL       = "it"
+    _HL       = "it"
+    _LOCATION = "Italy"
+
+    out: dict = {
+        "validated_domain":      "",
+        "recommended_domain":    "",
+        "domain_source":         SRC_SERPER,
+        "domain_action":         "",
+        "domain_confidence":     "",
+        "domain_reason":         "",
+        "manual_review_needed":  True,
+        "website_discovery_method": "manual_google_like_domain",
+        "final_selected_domain": "",
+        "final_decision_source": "manual_google_like_domain",
+        "final_confidence":      "",
+        # Diagnostics
+        "manual_google_like_mode":       True,
+        "manual_google_like_query":      "",
+        "manual_google_like_gl":         _GL,
+        "manual_google_like_hl":         _HL,
+        "manual_google_like_location":   _LOCATION,
+        "manual_google_like_top1_title": "",
+        "manual_google_like_top1_url":   "",
+        "manual_google_like_top1_domain": "",
+        "manual_google_like_top2_title": "",
+        "manual_google_like_top2_url":   "",
+        "manual_google_like_top2_domain": "",
+        "manual_google_like_top3_title": "",
+        "manual_google_like_top3_url":   "",
+        "manual_google_like_top3_domain": "",
+        "manual_google_like_status":     "NOT_MANUAL_GOOGLE_LIKE_MODE",
+    }
+
+    name = (company_name or "").strip()
+    if not name:
+        out.update(
+            domain_action="MISSING_DOMAIN",
+            domain_confidence="None",
+            domain_reason="Company name blank — skipped.",
+            manual_google_like_status="NO_COMPANY_NAME",
+        )
+        return out
+
+    query = f'"{name}"'
+    out["manual_google_like_query"] = query
+
+    organic, err = _call_serper(
+        query, serper_key, gl=_GL, hl=_HL, location=_LOCATION,
+    )
+    if err:
+        out.update(
+            domain_action="MISSING_DOMAIN",
+            domain_confidence="None",
+            domain_reason=f"Serper error: {err}",
+            manual_google_like_status="SERPER_ERROR",
+        )
+        return out
+
+    if not organic:
+        out.update(
+            domain_action="MISSING_DOMAIN",
+            domain_confidence="None",
+            domain_reason="Serper returned no organic results.",
+            manual_google_like_status="NO_ORGANIC_RESULT",
+        )
+        return out
+
+    # Populate top-3 diagnostics
+    for _idx, _slot in enumerate(("top1", "top2", "top3"), start=0):
+        if _idx >= len(organic):
+            break
+        _r = organic[_idx]
+        _u = _r.get("link", "") or ""
+        _t = _r.get("title", "") or ""
+        _d = _extract_domain(_u)
+        out[f"manual_google_like_{_slot}_title"]  = _t
+        out[f"manual_google_like_{_slot}_url"]    = _u
+        out[f"manual_google_like_{_slot}_domain"] = _d
+
+    top_url    = organic[0].get("link", "") or ""
+    top_domain = _extract_domain(top_url)
+
+    if not top_domain:
+        out.update(
+            domain_action="MISSING_DOMAIN",
+            domain_confidence="None",
+            domain_reason="Top Serper result URL did not yield an extractable domain.",
+            manual_google_like_status="NO_TOP1_DOMAIN",
+        )
+        return out
+
+    existing_domain = _extract_domain(existing_website or "")
+    out.update(
+        validated_domain=top_domain,
+        recommended_domain=top_domain,
+        domain_action="MISSING_DOMAIN_FIXED" if not existing_domain else "SUGGEST_REPLACE",
+        domain_confidence="Low",
+        domain_reason='Manual Google-like mode: top organic result for "company_name" query accepted.',
+        manual_review_needed=True,
+        final_selected_domain=top_domain,
+        final_confidence="Low",
+        manual_google_like_status="TOP1_DOMAIN_USED",
     )
     return out
 
@@ -7244,6 +7375,8 @@ def process_dataframe(
     infer_size: bool = False,
     # Simple Serper top-domain benchmark mode (bypasses advanced scoring)
     simple_serper_top_domain: bool = False,
+    # Manual Google-like domain mode (one query = "<name>", gl=it hl=it)
+    manual_google_like_domain: bool = False,
 ) -> tuple[pd.DataFrame, list[dict], list[dict], list[dict]]:
     """
     Process rows resume_from..len(df)-1, prepending prior_results for already-done rows.
@@ -7358,6 +7491,39 @@ def process_dataframe(
                 progress_cb(global_i + 1, n)
             continue
         # ── End simple mode ───────────────────────────────────────────────────
+
+        # ── Manual Google-like domain mode ───────────────────────────────────
+        # One query = "<company_name>", Serper gl=it hl=it location=Italy.
+        # Top organic result domain accepted without scoring or filtering.
+        if manual_google_like_domain and serper_key:
+            _mg_res = _manual_google_like_domain_row(
+                name, website, serper_key,
+            )
+            _mg_res.setdefault("cleaned_company_name", name)
+            _mg_res.setdefault("normalized_input_website", website)
+            _mg_res.setdefault("email_domain", "")
+            _mg_res.setdefault("search_query_used", _mg_res.get("manual_google_like_query", ""))
+            _mg_res.setdefault("name_variant_used", "")
+            _mg_res.setdefault("serper_top_result_title", _mg_res.get("manual_google_like_top1_title", ""))
+            _mg_res.setdefault("serper_top_result_url",   _mg_res.get("manual_google_like_top1_url", ""))
+            _mg_res.setdefault("serper_top_result_domain", _mg_res.get("manual_google_like_top1_domain", ""))
+            _mg_res["organization_type"]         = org_type
+            _mg_res["myngle_target_eligibility"] = eligibility
+            _mg_res["pre_filter_decision"]       = pf_decision
+            _mg_res["pre_filter_reason"]         = pf_reason
+            new_results.append(_mg_res)
+            new_evidence.append({"query": _mg_res.get("manual_google_like_query", ""),
+                                  "domain": _mg_res.get("manual_google_like_top1_domain", ""),
+                                  "url": _mg_res.get("manual_google_like_top1_url", ""),
+                                  "title": _mg_res.get("manual_google_like_top1_title", ""),
+                                  "used": True,
+                                  "candidate_source": "manual_google_like_domain"})
+            import time as _time_mg
+            _time_mg.sleep(0.25)
+            if progress_cb:
+                progress_cb(global_i + 1, n)
+            continue
+        # ── End manual Google-like mode ───────────────────────────────────────
 
         res, raw_ev = validate_register_row(
             name, website, email, city, province, postcode, serper_key, max_queries,
@@ -10022,6 +10188,12 @@ def cli_batch_run() -> None:
                             "Benchmark mode: one Serper call per company, domain taken "
                             "from the top organic result — no scoring, no Haiku, no Firecrawl."
                         ))
+    parser.add_argument("--manual-google-like-domain", action="store_true",
+                        help=(
+                            "Manual Google-like mode: one Serper call per company, "
+                            'query = "<company_name>" only (no city/official), '
+                            "gl=it hl=it location=Italy. Top organic result accepted unconditionally."
+                        ))
     parser.add_argument("--project-root",   default=None,   help="Pipeline project root folder")
     parser.add_argument("--serper-key",     default=None,   help="Serper API key")
     parser.add_argument("--anthropic-key",  default=None,   help="Anthropic API key for Haiku")
@@ -10219,6 +10391,11 @@ def cli_batch_run() -> None:
             "one Serper call per row, raw top result, no scoring ***",
             flush=True,
         )
+    _manual_gl_flag = getattr(args, "manual_google_like_domain", False)
+    if _manual_gl_flag:
+        print("[cleaner] *** MANUAL GOOGLE-LIKE DOMAIN MODE ACTIVE ***", flush=True)
+        print('[cleaner]     Query format: company name only (e.g. "Acme Srl")', flush=True)
+        print("[cleaner]     Serper settings: gl=it  hl=it  location=Italy", flush=True)
     print(f"[cleaner] Started:          {pd.Timestamp.now().strftime('%Y-%m-%d %H:%M:%S')}", flush=True)
 
     # ── Column-map debug output ───────────────────────────────────────────────
@@ -10354,6 +10531,7 @@ def cli_batch_run() -> None:
             page_timeout=_cli_fc_page_timeout,
             fc_speed_mode=_cli_fc_speed,
             simple_serper_top_domain=getattr(args, "simple_serper_top_domain", False),
+            manual_google_like_domain=getattr(args, "manual_google_like_domain", False),
         )
     except _FcBudgetExceeded as _bexc:
         _budget_hit = True
@@ -10989,6 +11167,23 @@ def main():
             "result — no scoring, no blacklist filtering. For benchmarking only."
         )
 
+    manual_google_like_domain_ui = st.sidebar.checkbox(
+        "Use manual Google-like domain mode",
+        value=False,
+        key="reg_manual_google_like_domain",
+        help=(
+            'One query per company: "<company_name>" only — no city, no official. '
+            "Serper gl=it hl=it location=Italy. Top organic result accepted unconditionally."
+        ),
+    )
+    if manual_google_like_domain_ui:
+        st.sidebar.info(
+            "Manual Google-like mode is ON.\n"
+            'Query: "<company_name>" only\n'
+            "Serper: gl=it  hl=it  location=Italy\n"
+            "Top organic result accepted — no scoring."
+        )
+
     st.sidebar.markdown("---")
     st.sidebar.subheader("Pipeline output (optional)")
     st.sidebar.caption(
@@ -11243,6 +11438,9 @@ def main():
                 country_config=_resume_cfg,
                 simple_serper_top_domain=st.session_state.get(
                     "reg_simple_serper_top_domain", False
+                ),
+                manual_google_like_domain=st.session_state.get(
+                    "reg_manual_google_like_domain", False
                 ),
             )
 
@@ -11618,6 +11816,7 @@ def main():
             infer_size=infer_size,
             country_config=_country_cfg,
             simple_serper_top_domain=simple_serper_top_domain_ui,
+            manual_google_like_domain=manual_google_like_domain_ui,
         )
 
         progress_bar.progress(1.0)

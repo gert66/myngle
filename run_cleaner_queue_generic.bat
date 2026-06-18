@@ -2,7 +2,7 @@
 setlocal EnableDelayedExpansion
 
 rem Generic runner for input_cleaner_register_edition.py
-rem Usage: run_cleaner_queue_generic.bat <queue> "<batches>" <dry|test|full> [max_rows] [simple]
+rem Usage: run_cleaner_queue_generic.bat <queue> "<batches>" <dry|test|full> [max_rows] [simple|manual]
 rem Examples:
 rem   run_cleaner_queue_generic.bat Italy50 "1" dry
 rem   run_cleaner_queue_generic.bat Italy50 "01" dry
@@ -10,8 +10,11 @@ rem   run_cleaner_queue_generic.bat Italy50 "1" test 50
 rem   run_cleaner_queue_generic.bat Italy50 "1-7" full
 rem   run_cleaner_queue_generic.bat Italy50 "1" test 50 simple
 rem   run_cleaner_queue_generic.bat Italy50 "1-7" full 0 simple
+rem   run_cleaner_queue_generic.bat Italy50 "1" test 50 manual
+rem   run_cleaner_queue_generic.bat Italy50 "1-7" full 0 manual
 rem Aliases: 0=Italy50, 1=Italy100, 2=Italy200, 3=Germany
-rem 5th arg "simple" enables --simple-serper-top-domain benchmark mode
+rem 5th arg "simple"  enables --simple-serper-top-domain benchmark mode
+rem 5th arg "manual"  enables --manual-google-like-domain mode
 
 if "%~1"=="" goto usage
 if "%~2"=="" goto usage
@@ -33,6 +36,7 @@ if /I not "%MODE%"=="dry" if /I not "%MODE%"=="test" if /I not "%MODE%"=="full" 
 
 set "SIMPLE_ARG="
 if /I "%SIMPLE_FLAG%"=="simple" set "SIMPLE_ARG=--simple-serper-top-domain"
+if /I "%SIMPLE_FLAG%"=="manual" set "SIMPLE_ARG=--manual-google-like-domain"
 
 set "SCRIPT_DIR=%~dp0"
 set "SCRIPT_FILE=%SCRIPT_DIR%input_cleaner_register_edition.py"
@@ -144,7 +148,7 @@ type "%LOG_FILE%"
 exit /b %RC%
 
 :usage
-echo Usage: run_cleaner_queue_generic.bat ^<queue^> "^<batches^>" ^<dry^|test^|full^> [max_rows] [simple]
+echo Usage: run_cleaner_queue_generic.bat ^<queue^> "^<batches^>" ^<dry^|test^|full^> [max_rows] [simple^|manual]
 echo Examples:
 echo   run_cleaner_queue_generic.bat Italy50 "1" dry
 echo   run_cleaner_queue_generic.bat Italy50 "01" dry
@@ -153,6 +157,9 @@ echo   run_cleaner_queue_generic.bat Italy50 "1-7" full
 echo   run_cleaner_queue_generic.bat 0 "all" full
 echo   run_cleaner_queue_generic.bat Italy50 "1" test 50 simple
 echo   run_cleaner_queue_generic.bat Italy50 "1-7" full 0 simple
+echo   run_cleaner_queue_generic.bat Italy50 "1" test 50 manual
+echo   run_cleaner_queue_generic.bat Italy50 "1-7" full 0 manual
 echo Aliases: 0=Italy50, 1=Italy100, 2=Italy200, 3=Germany
-echo 5th arg "simple" enables --simple-serper-top-domain benchmark mode
+echo 5th arg "simple"  enables --simple-serper-top-domain benchmark mode
+echo 5th arg "manual"  enables --manual-google-like-domain mode
 exit /b 1
