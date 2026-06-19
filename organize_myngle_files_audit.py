@@ -91,6 +91,9 @@ _DOUBLE_SUFFIX_RE = re.compile(
     r"(url_patched|url_patch).*?(url_patched|url_patch)", re.IGNORECASE
 )
 
+# Sheets likely to contain company rows in an enriched workbook
+_ENRICHED_INPUT_SHEETS = ["Opportunity Input", "Input", "Enriched"]
+
 PLAN_FIELDS = [
     "approve",
     "queue",
@@ -165,6 +168,220 @@ def _plan_row(**kwargs) -> dict:
     defaults["confidence"] = "HIGH"
     defaults.update(kwargs)
     return defaults
+
+
+# ---------------------------------------------------------------------------
+# Company name normalisation (for batch matching)
+# ---------------------------------------------------------------------------
+
+_ITALIAN_LEGAL_RE = re.compile(
+    r"\b(s\.?p\.?a\.?|s\.?r\.?l\.?|spa|srl|snc|sas|scarl|onlus|ets|aps|asd"
+    r"|societa[\s]*per[\s]*azioni|societa[\s]*a[\s]*responsabilita[\s]*limitata"
+    r"|in[\s]*forma[\s]*abbreviata|siglabile)\b",
+    re.IGNORECASE,
+)
+_PUNCT_RE = re.compile(r"[^\w\s]", re.UNICODE)
+_WS_RE = re.compile(r"\s+")
+
+
+def _remove_accents(text: str) -> str:
+    return "".join(
+        c for c in unicodedata.normalize("NFD", text)
+        if unicodedata.category(c) != "Mn"
+    )
+
+
+def _norm_company(name: Any) -> str:
+    if not name:
+        return ""
+    s = _remove_accents(str(name).strip()).lower()
+    s = _ITALIAN_LEGAL_RE.sub(" ", s)
+    s = _PUNCT_RE.sub(" ", s)
+    return _WS_RE.sub(" ", s).strip()
+
+
+# ---------------------------------------------------------------------------
+# Batch metadata builder
+# ---------------------------------------------------------------------------
+
+def _first_company_from_wb(wb) -> str:
+    """Return first non-empty company_name value from a workbook."""
+    for sheet_name in wb.sheetnames:
+        ws = wb[sheet_name]
+        headers = [
+            (str(c.value).strip().lower() if c.value else "")
+            for c in next(ws.iter_rows(max_row=1), [])
+        ]
+        if "company_name" not in headers:
+            continue
+        col_idx = headers.index("company_name")
+        for row in ws.iter_rows(min_row=2, values_only=True):
+            if col_idx < len(row) and row[col_idx]:
+                v = str(row[col_idx]).strip()
+                if v:
+                    return v
+    return ""
+
+
+def _row_count_from_wb(wb, sheet_names: list[str]) -> int:
+    """Return data row count from the first matching sheet."""
+    for name in sheet_names:
+        if name in wb.sheetnames:
+            ws = wb[name]
+            return max(0, ws.max_row - 1)
+    return 0
+
+
+class BatchMeta:
+    """Metadata parsed from one cleaned or raw batch file."""
+    __slots__ = ("filename", "batch_num", "range_start", "range_end",
+                 "first_company_norm", "row_count")
+
+    def __init__(
+        self,
+        filename: str,
+        batch_num: str,
+        range_start: int,
+        range_end: int,
+        first_company_norm: str,
+        row_count: int,
+    ) -> None:
+        self.filename = filename
+        self.batch_num = batch_num
+        self.range_start = range_start
+        self.range_end = range_end
+        self.first_company_norm = first_company_norm
+        self.row_count = row_count
+
+    @property
+    def range_label(self) -> str:
+        return f"R{self.range_start:04d}_{self.range_end:04d}"
+
+
+def build_batch_metadata(queue_dir: Path) -> list[BatchMeta]:
+    """
+    Read 00_raw and 01_cleaned_domains to collect batch metadata.
+    Returns list of BatchMeta objects sorted by range_start.
+    """
+    meta_list: list[BatchMeta] = []
+    seen_ranges: set[tuple[int, int]] = set()
+
+    for sub in ("01_cleaned_domains", "00_raw"):
+        folder = queue_dir / sub
+        if not folder.exists():
+            continue
+        for f in sorted(folder.glob("*.xlsx")):
+            if f.name.startswith("~$"):
+                continue
+            m_cleaned = _CLEANED_RE.match(f.name) or _RAW_RE.match(f.name)
+            if not m_cleaned:
+                continue
+            try:
+                batch_num = m_cleaned.group("batch")
+                r_start = int(m_cleaned.group("start"))
+                r_end = int(m_cleaned.group("end"))
+            except (IndexError, ValueError):
+                continue
+
+            if (r_start, r_end) in seen_ranges:
+                continue
+            seen_ranges.add((r_start, r_end))
+
+            # Open workbook to read first company
+            wb, err = _safe_open_wb(f)
+            first_company = ""
+            row_count = 0
+            if wb is not None:
+                first_company = _norm_company(_first_company_from_wb(wb))
+                row_count = _row_count_from_wb(wb, _ENRICHED_INPUT_SHEETS)
+                wb.close()
+
+            meta_list.append(BatchMeta(
+                filename=f.name,
+                batch_num=batch_num,
+                range_start=r_start,
+                range_end=r_end,
+                first_company_norm=first_company,
+                row_count=row_count,
+            ))
+
+    meta_list.sort(key=lambda m: m.range_start)
+    return meta_list
+
+
+# ---------------------------------------------------------------------------
+# Generic enriched file reader
+# ---------------------------------------------------------------------------
+
+class GenericEnrichedMeta:
+    """Metadata read from one generic enriched file."""
+    __slots__ = ("path", "first_company_norm", "row_count")
+
+    def __init__(self, path: Path, first_company_norm: str, row_count: int) -> None:
+        self.path = path
+        self.first_company_norm = first_company_norm
+        self.row_count = row_count
+
+
+def read_generic_enriched_meta(path: Path) -> GenericEnrichedMeta | None:
+    wb, err = _safe_open_wb(path)
+    if wb is None:
+        return None
+    first_company = _norm_company(_first_company_from_wb(wb))
+    row_count = _row_count_from_wb(wb, _ENRICHED_INPUT_SHEETS)
+    wb.close()
+    return GenericEnrichedMeta(path, first_company, row_count)
+
+
+# ---------------------------------------------------------------------------
+# Batch-match logic
+# ---------------------------------------------------------------------------
+
+_ROW_COUNT_TOLERANCE = 0.10  # allow 10% difference in row counts
+
+
+def _row_counts_compatible(a: int, b: int) -> bool:
+    if a == 0 or b == 0:
+        return True  # unknown → do not penalise
+    diff = abs(a - b) / max(a, b)
+    return diff <= _ROW_COUNT_TOLERANCE
+
+
+def match_generic_to_batch(
+    generic: GenericEnrichedMeta,
+    batch_meta_list: list[BatchMeta],
+    known_enriched_ranges: set[tuple[int, int]],
+) -> tuple[BatchMeta | None, str]:
+    """
+    Returns (best_match, confidence) where confidence is 'HIGH' or 'LOW'.
+    best_match is None when ambiguous or no match found.
+    """
+    if not generic.first_company_norm:
+        return None, "LOW"
+
+    candidates: list[BatchMeta] = []
+    for bm in batch_meta_list:
+        if not bm.first_company_norm:
+            continue
+        if bm.first_company_norm == generic.first_company_norm:
+            if _row_counts_compatible(generic.row_count, bm.row_count):
+                candidates.append(bm)
+
+    # Extra hint: prefer batches whose range is missing from enriched folder
+    missing_candidates = [
+        c for c in candidates
+        if (c.range_start, c.range_end) not in known_enriched_ranges
+    ]
+    if missing_candidates:
+        candidates = missing_candidates
+
+    if len(candidates) == 1:
+        return candidates[0], "HIGH"
+    elif len(candidates) > 1:
+        # Still ambiguous even after hints
+        return None, "LOW"
+    else:
+        return None, "LOW"
 
 
 # ---------------------------------------------------------------------------
@@ -276,17 +493,38 @@ def detect_unexpected_folders(queue_dir: Path, queue: str, rows: list[dict]) -> 
 
 
 def detect_generic_enriched(
-    folder: Path, queue: str, queue_dir: Path, rows: list[dict]
-) -> int:
-    count = 0
+    folder: Path,
+    queue: str,
+    queue_dir: Path,
+    rows: list[dict],
+    batch_meta_list: list[BatchMeta],
+    known_enriched_ranges: set[tuple[int, int]],
+) -> tuple[int, int, int]:
+    """
+    Returns (total_found, matched_high_confidence, ambiguous).
+    Appends plan rows with real suggested_new_name when a confident batch
+    match is found, or a manual placeholder when ambiguous.
+    """
     enriched_dir = queue_dir / "02_lead_prioritized"
     if not enriched_dir.exists():
-        return 0
-    for f in enriched_dir.glob("*.xlsx"):
+        return 0, 0, 0
+
+    total = matched = ambiguous = 0
+
+    for f in sorted(enriched_dir.glob("*.xlsx")):
         if f.name.startswith("~$"):
             continue
-        if _GENERIC_ENRICHED_RE.match(f.name):
-            count += 1
+        if not _GENERIC_ENRICHED_RE.match(f.name):
+            continue
+        total += 1
+
+        # Extract timestamp from generic filename for use in new name
+        ts_match = _TS_RE.search(f.name)
+        file_ts = ts_match.group(0).replace("-", "_") if ts_match else _ts()
+
+        generic = read_generic_enriched_meta(f)
+        if generic is None:
+            # Corrupt – will be caught by corrupt workbook detector
             rows.append(_plan_row(
                 queue=queue,
                 current_path=str(f.parent),
@@ -295,17 +533,75 @@ def detect_generic_enriched(
                 detected_category="GENERIC_ENRICHED_FILENAME",
                 suggested_action="RENAME_WITH_BATCH_PREFIX",
                 suggested_new_path=str(f.parent),
-                suggested_new_name=f"[MANUAL] {queue}_<batch>_R<start>_<end>_enriched_{_ts()}.xlsx",
-                reason="Generic enriched filename not following queue naming convention",
+                suggested_new_name=f"[MANUAL] {queue}_<batch>_R<start>_<end>_enriched_{file_ts}.xlsx",
+                reason="Generic enriched filename; workbook could not be read",
+                confidence="LOW",
+                risk_level="MEDIUM",
+                notes="Workbook may be corrupt – also see CORRUPT_WORKBOOK row",
+                requires_manual_check="YES",
+            ))
+            ambiguous += 1
+            continue
+
+        best, confidence = match_generic_to_batch(
+            generic, batch_meta_list, known_enriched_ranges
+        )
+
+        if best is not None and confidence == "HIGH":
+            matched += 1
+            new_name = (
+                f"{queue}_{best.batch_num}_{best.range_label}"
+                f"_enriched_{file_ts}.xlsx"
+            )
+            rows.append(_plan_row(
+                queue=queue,
+                current_path=str(f.parent),
+                current_name=f.name,
+                item_type="file",
+                detected_category="GENERIC_ENRICHED_FILENAME",
+                suggested_action="RENAME_WITH_BATCH_PREFIX",
+                suggested_new_path=str(f.parent),
+                suggested_new_name=new_name,
+                reason=(
+                    f"Generic enriched filename matched to batch "
+                    f"{queue}_{best.batch_num}_{best.range_label} "
+                    f"via first company name"
+                ),
+                confidence="HIGH",
+                risk_level="MEDIUM",
+                batch_id_detected=best.batch_num,
+                range_detected=best.range_label,
+                related_file=best.filename,
+                notes=(
+                    f"First company match: '{best.first_company_norm}' | "
+                    f"source rows: {best.row_count} | "
+                    f"enriched rows: {generic.row_count}"
+                ),
+                requires_manual_check="NO",
+            ))
+        else:
+            ambiguous += 1
+            rows.append(_plan_row(
+                queue=queue,
+                current_path=str(f.parent),
+                current_name=f.name,
+                item_type="file",
+                detected_category="GENERIC_ENRICHED_FILENAME",
+                suggested_action="RENAME_WITH_BATCH_PREFIX",
+                suggested_new_path=str(f.parent),
+                suggested_new_name=f"[MANUAL] {queue}_<batch>_R<start>_<end>_enriched_{file_ts}.xlsx",
+                reason="Generic enriched filename; batch match ambiguous or not found",
                 confidence="LOW",
                 risk_level="MEDIUM",
                 notes=(
-                    "Open workbook to read first company_name row, "
-                    "compare with cleaned/raw files to infer batch range"
+                    f"First company: '{generic.first_company_norm}' | "
+                    f"rows: {generic.row_count} | "
+                    "Compare manually with cleaned/raw files"
                 ),
                 requires_manual_check="YES",
             ))
-    return count
+
+    return total, matched, ambiguous
 
 
 def detect_root_loose_files(
@@ -629,11 +925,14 @@ def apply_plan(
 
         dst = _safe_new_path(Path(dst_dir) / dst_name)
         log["new_path"] = str(dst)
+        is_rename = dst.parent.resolve() == src.parent.resolve()
+        verb = "RENAMED" if is_rename else "MOVED"
         try:
             dst.parent.mkdir(parents=True, exist_ok=True)
             shutil.move(str(src), str(dst))
-            log["status"] = "MOVED"
-            print(f"  [MOVE] {src.name} → {dst}")
+            log["status"] = verb
+            tag = "[REN ]" if is_rename else "[MOVE]"
+            print(f"  {tag} {src.name} → {dst.name}")
             completed += 1
         except OSError as exc:
             log["status"] = "ERROR"
@@ -683,7 +982,27 @@ def run_audit(
         detect_lockfiles(queue_dir, queue, all_rows)
         detect_scripts_in_data_folders(queue_dir, queue, all_rows)
         detect_org_folders(queue_dir, queue, all_rows)
-        detect_generic_enriched(queue_dir / "02_lead_prioritized", queue, queue_dir, all_rows)
+
+        # Build batch metadata before generic-enriched detection
+        print(f"  Building batch metadata for {queue}…")
+        batch_meta_list = build_batch_metadata(queue_dir)
+        known_enriched_ranges = _collect_ranges(queue_dir / "02_lead_prioritized")
+        print(f"  Batch entries found: {len(batch_meta_list)}")
+
+        gen_total, gen_matched, gen_ambiguous = detect_generic_enriched(
+            queue_dir / "02_lead_prioritized",
+            queue,
+            queue_dir,
+            all_rows,
+            batch_meta_list,
+            known_enriched_ranges,
+        )
+        if gen_total:
+            print(
+                f"  Generic enriched files: {gen_total} found, "
+                f"{gen_matched} matched (HIGH), {gen_ambiguous} ambiguous"
+            )
+
         detect_missing_batches(queue_dir, queue, all_rows)
 
         # Corrupt workbook scan (can be slow on large folders)
@@ -788,10 +1107,17 @@ def main() -> None:
     print("\n" + "=" * 62)
     print("AUDIT SUMMARY")
     print("=" * 62)
+    gen_rows = [r for r in all_rows if r.get("detected_category") == "GENERIC_ENRICHED_FILENAME"]
+    gen_matched_count = sum(1 for r in gen_rows if r.get("confidence") == "HIGH"
+                            and not str(r.get("suggested_new_name", "")).startswith("[MANUAL]"))
+    gen_ambiguous_count = len(gen_rows) - gen_matched_count
+
     print(f"  Queues scanned               : {len(args.queues)}")
     print(f"  Total plan rows              : {len(all_rows)}")
     print(f"  Corrupt workbooks            : {_count('CORRUPT_WORKBOOK')}")
-    print(f"  Generic enriched filenames   : {_count('GENERIC_ENRICHED_FILENAME')}")
+    print(f"  Generic enriched filenames   : {len(gen_rows)}")
+    print(f"    └─ matched (HIGH conf.)    : {gen_matched_count}")
+    print(f"    └─ ambiguous / manual      : {gen_ambiguous_count}")
     print(f"  Lock/temp files              : {_count('LOCKFILE_TEMP')}")
     print(f"  Double-suffix folders        : {_count('DOUBLE_SUFFIX_FOLDER')}")
     print(f"  Unexpected folders           : {_count('UNEXPECTED_FOLDER')}")
