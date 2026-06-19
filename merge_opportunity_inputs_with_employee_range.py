@@ -44,7 +44,7 @@ try:
     from openpyxl import load_workbook, Workbook
     from openpyxl.styles import Font, PatternFill, Alignment
     from openpyxl.utils import get_column_letter
-    from openpyxl.formatting.rule import CellIsRule, Rule
+    from openpyxl.formatting.rule import CellIsRule, DataBarRule, Rule
     from openpyxl.styles.differential import DifferentialStyle
 except ImportError:
     sys.exit("openpyxl is required:  pip install openpyxl")
@@ -174,6 +174,27 @@ _WRAP_COLS = {
 # Domain-check warning keywords
 _DOMAIN_WARN_WORDS = {"mismatch", "uncertain", "review", "fallback", "generic"}
 
+# Columns that get blue data-bar conditional formatting
+DATABAR_COLS = {"Final Commercial Fit Score", "commercial_fit_score"}
+
+# All score columns (for future use / reference)
+SCORE_COL_NAMES = {
+    "Final Commercial Fit Score",
+    "commercial_fit_score",
+    "recommended_final_score",
+    "sig_foreign_hq_score",
+    "sig_explicit_lnd_score",
+    "sig_intl_footprint_score",
+    "sig_employer_branding_score",
+    "sig_lnd_onboarding_score",
+}
+
+# Tier-based row fills (fallback row coloring)
+HOT_FILL  = PatternFill("solid", fgColor="C6EFCE")  # light green
+WARM_FILL = PatternFill("solid", fgColor="DDEBF7")  # light blue
+COOL_FILL = PatternFill("solid", fgColor="FCE4D6")  # light orange
+PASS_FILL = PatternFill("solid", fgColor="FFC7CE")  # light red/pink
+
 
 # ---------------------------------------------------------------------------
 # Safe workbook loader
@@ -201,6 +222,50 @@ def _safe_output_path(path: Path, overwrite: bool) -> Path:
         if not candidate.exists():
             return candidate
         n += 1
+
+
+# ---------------------------------------------------------------------------
+# Formatting helpers
+# ---------------------------------------------------------------------------
+
+def _get_row_fill(row_values: list, headers: list[str]) -> "PatternFill | None":
+    """Return tier-based fill for a data row, or None if no tier/score matches."""
+    h_idx = {h: i for i, h in enumerate(headers)}
+    tier = str(row_values[h_idx["commercial_tier"]] or "").strip().lower() \
+        if "commercial_tier" in h_idx else ""
+    score = None
+    for score_col in ("commercial_fit_score", "Final Commercial Fit Score"):
+        if score_col in h_idx:
+            score = _to_float(row_values[h_idx[score_col]])
+            break
+
+    if tier == "hot" or (score is not None and score >= 8.5):
+        return HOT_FILL
+    if tier == "warm" or (score is not None and score >= 5.0):
+        return WARM_FILL
+    if tier == "cool":
+        return COOL_FILL
+    if tier == "pass":
+        return PASS_FILL
+    return None
+
+
+def _apply_databar_formatting(ws, headers: list[str], first_row: int, last_row: int) -> None:
+    """Add blue data-bar CF rules for DATABAR_COLS columns that exist in headers."""
+    if first_row > last_row:
+        return
+    for col_idx, h in enumerate(headers, start=1):
+        if h in DATABAR_COLS:
+            col_letter = get_column_letter(col_idx)
+            ws.conditional_formatting.add(
+                f"{col_letter}{first_row}:{col_letter}{last_row}",
+                DataBarRule(
+                    start_type="num", start_value=0,
+                    end_type="num", end_value=10,
+                    color="638EC6",
+                    showValue=True,
+                ),
+            )
 
 
 # ---------------------------------------------------------------------------
@@ -495,9 +560,17 @@ def _write_full_sheet(ws, data_rows: list[list[Any]], output_headers: list[str])
         cell.alignment = Alignment(horizontal="center")
         ws.column_dimensions[get_column_letter(col_idx)].width = _col_width_for_full(header)
 
-    for row in data_rows:
-        # Write only the output_headers portion (strip trailing debug flags)
-        ws.append(row[:len(output_headers)])
+    for data_row_idx, row in enumerate(data_rows, start=2):
+        row_values = row[:len(output_headers)]
+        ws.append(row_values)
+        fill = _get_row_fill(row_values, output_headers)
+        if fill is not None:
+            for col_idx in range(1, len(output_headers) + 1):
+                ws.cell(row=data_row_idx, column=col_idx).fill = fill
+
+    last_row = len(data_rows) + 1
+    if last_row >= 2:
+        _apply_databar_formatting(ws, output_headers, 2, last_row)
 
     ws.freeze_panes = "D2"
     ws.auto_filter.ref = ws.dimensions
@@ -572,13 +645,16 @@ def _write_debug_sheet(
     ws.freeze_panes = "C2"   # freeze row 1 + cols A-B
     ws.auto_filter.ref = ws.dimensions
 
-    # Conditional formatting for score columns
+    last_row = len(row_dicts) + 1
+
+    # Blue data bars for commercial_fit_score
+    _apply_databar_formatting(ws, DEBUG_VIEW_COLS, 2, last_row)
+
+    # CellIsRule highlights: green for high score, yellow for high fhq
     score_col_letter = get_column_letter(DEBUG_VIEW_COLS.index("commercial_fit_score") + 1)
     fhq_col_letter   = get_column_letter(DEBUG_VIEW_COLS.index("sig_foreign_hq_score") + 1)
-    last_row = len(row_dicts) + 1
-    max_col_letter = get_column_letter(len(DEBUG_VIEW_COLS))
 
-    green_fill = PatternFill("solid", fgColor="C6EFCE")
+    green_fill  = PatternFill("solid", fgColor="C6EFCE")
     yellow_fill = PatternFill("solid", fgColor="FFEB9C")
 
     ws.conditional_formatting.add(
