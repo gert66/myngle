@@ -78,10 +78,21 @@ EMPLOYEE_RANGE_MAP: dict[str, str] = {
 
 # Score columns that get blue data bars
 DATABAR_COLS = {
-    "Final Commercial Fit Score",
-    "commercial_fit_score",
+    "display_score",
+    "base_commercial_fit_score",
     "final_commercial_fit_score",
+    "commercial_fit_score",
+    "Final Commercial Fit Score",
+    "commercial_fit_score_75_25_legacy",
 }
+
+# Priority order for resolving the canonical display/final score
+_FINAL_SCORE_COLS = [
+    "final_commercial_fit_score",
+    "commercial_fit_score",
+    "Final Commercial Fit Score",
+    "commercial_fit_score_75_25_legacy",
+]
 
 # All debug flag column names
 DEBUG_FLAG_COLS = [
@@ -376,11 +387,45 @@ def _row_to_output(
 def _final_score(row_dict: dict[str, Any]) -> "float | None":
     """Return the best available final/display score."""
     for col in ("display_score", "final_commercial_fit_score",
-                "Final Commercial Fit Score", "commercial_fit_score"):
+                "Final Commercial Fit Score", "commercial_fit_score",
+                "commercial_fit_score_75_25_legacy"):
         v = _to_float(row_dict.get(col))
         if v is not None:
             return v
     return None
+
+
+def _derive_score_fields(row_dict: dict[str, Any]) -> dict[str, Any]:
+    """
+    Derive canonical score fields for use in Debug View.
+    Does not modify the original row_dict or Opportunity Input Full columns.
+
+    Returns a dict with:
+      display_score, base_commercial_fit_score, final_commercial_fit_score
+    """
+    # Resolve final/display score using priority list
+    final = None
+    for col in _FINAL_SCORE_COLS:
+        v = _to_float(row_dict.get(col))
+        if v is not None:
+            final = v
+            break
+
+    # Resolve base score
+    base = _to_float(row_dict.get("base_commercial_fit_score"))
+    if base is None:
+        # If we have both a final score and a commercial_fit_score that differs,
+        # treat commercial_fit_score as the base (pre-override base)
+        cs = _to_float(row_dict.get("commercial_fit_score"))
+        fcs = _to_float(row_dict.get("final_commercial_fit_score"))
+        if cs is not None and fcs is not None and cs != fcs:
+            base = cs
+
+    return {
+        "display_score": final,
+        "final_commercial_fit_score": final,
+        "base_commercial_fit_score": base,
+    }
 
 
 def compute_debug_flags(
@@ -599,13 +644,14 @@ def _row_as_dict(row: list[Any], full_headers: list[str]) -> dict[str, Any]:
 def _get_row_fill(row_dict: dict[str, Any]) -> "PatternFill | None":
     tier = _str_lower(row_dict.get("commercial_tier"))
     score = _final_score(row_dict)
-    if tier == "hot" or (score is not None and score >= 8.5):
+    # Use substring matching to handle emoji-prefixed tier labels like "🏅 Hot"
+    if "hot" in tier or (score is not None and score >= 8.5):
         return HOT_FILL
-    if tier == "warm" or (score is not None and score >= 5.0):
+    if "warm" in tier or (score is not None and score >= 5.0):
         return WARM_FILL
-    if tier == "cool":
+    if "cool" in tier:
         return COOL_FILL
-    if tier == "pass":
+    if "pass" in tier:
         return PASS_FILL
     return None
 
@@ -638,7 +684,8 @@ def _debug_sort_key(rd: dict[str, Any]) -> tuple:
     priority = _str_lower(rd.get(REVIEW_PRIORITY_COL))
     override  = int(_is_truthy(rd.get("icp_override_applied")))
     fhq_sanit = int(_is_truthy(rd.get("foreign_hq_sanitized")))
-    score     = _final_score(rd) or 0.0
+    # Use derived score for stable sorting
+    score = _to_float(_derive_score_fields(rd).get("display_score")) or _final_score(rd) or 0.0
     return (
         _PRIORITY_ORDER.get(priority, 3),
         -override,
@@ -745,6 +792,12 @@ def _write_debug_sheet(
     priority_counts: dict[str, int] = {"High": 0, "Medium": 0, "Low": 0}
 
     for row_idx, rd in enumerate(row_dicts, start=2):
+        # Derive canonical score fields and inject into the debug row dict
+        derived = _derive_score_fields(rd)
+        for k, v in derived.items():
+            if v is not None:
+                rd[k] = v
+
         row_values = [rd.get(col) for col in DEBUG_VIEW_COLS]
         ws.append(row_values)
         ws.row_dimensions[row_idx].height = DEFAULT_ROW_HEIGHT
@@ -850,6 +903,14 @@ def _write_scoring_logic_sheet(ws) -> None:
         ("Future Workflow", ""),
         ("  Reviewed and validated signals should feed an updated commercial fit score.", ""),
         ("  The Debug View is the primary tool for this review.", ""),
+        ("", ""),
+        ("Legacy Score Column", ""),
+        ("  commercial_fit_score_75_25_legacy", "Fallback score only. Used when no newer final/commercial score is present."),
+        ("  Score priority for display_score / final_commercial_fit_score:", ""),
+        ("    1. final_commercial_fit_score", "Preferred."),
+        ("    2. commercial_fit_score", "Standard."),
+        ("    3. Final Commercial Fit Score", "Legacy header name variant."),
+        ("    4. commercial_fit_score_75_25_legacy", "Last-resort fallback. Not the preferred score."),
     ]
     ws.column_dimensions["A"].width = 55
     ws.column_dimensions["B"].width = 70
