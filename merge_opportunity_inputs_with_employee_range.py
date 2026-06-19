@@ -4,25 +4,27 @@ merge_opportunity_inputs_with_employee_range.py
 Merges only the 'Opportunity Input' sheet from all .xlsx files in the
 lead-prioritized output folders for Italy50, Italy100, Italy200.
 
-Output workbook contains three sheets:
-  1. Debug View              – compact outlier-review sheet, sorted by flags then score
-  2. Opportunity Input Full  – all merged rows, all columns
-  3. Merge QA                – run metadata and counts
+Output workbook contains four sheets:
+  1. Debug View              – outlier/manual-review sheet (foreign HQ + competitor focus)
+  2. Opportunity Input Full  – all merged rows, source columns in original order,
+                               trace columns (source_queue/file/row) appended at the end
+  3. Scoring Logic           – explanatory notes on scoring methodology
+  4. Merge QA                – run metadata and review counts
 
 Adds to every row:
-  - source_queue, source_file, source_row  (trace columns, prepended)
-  - Chamber of Commerce Employee Range     (placed at output column O, i.e. col 15)
-  - debug_foreign_hq_flag, debug_score_flag, debug_domain_flag  (computed)
+  - Chamber of Commerce Employee Range  (placed next to existing employee range column)
+  - source_queue, source_file, source_row  (appended at the far right)
+  - debug flags and review_priority  (computed, used in Debug View)
 
 Usage:
-  python merge_opportunity_inputs_with_employee_range.py \
-      --target-root "C:\\Users\\...\\Myngle" \
+  python merge_opportunity_inputs_with_employee_range.py \\
+      --target-root "C:\\Users\\...\\Myngle" \\
       --queues Italy50 Italy100 Italy200
 
-  # Use url-patched folder instead:
-  python merge_opportunity_inputs_with_employee_range.py \
-      --target-root "C:\\Users\\...\\Myngle" \
-      --queues Italy50 Italy100 Italy200 \
+  # URL-patched variant:
+  python merge_opportunity_inputs_with_employee_range.py \\
+      --target-root "C:\\Users\\...\\Myngle" \\
+      --queues Italy50 Italy100 Italy200 \\
       --input-subfolder "02_lead_prioritized_url_patched"
 """
 
@@ -44,8 +46,7 @@ try:
     from openpyxl import load_workbook, Workbook
     from openpyxl.styles import Font, PatternFill, Alignment
     from openpyxl.utils import get_column_letter
-    from openpyxl.formatting.rule import CellIsRule, DataBarRule, Rule
-    from openpyxl.styles.differential import DifferentialStyle
+    from openpyxl.formatting.rule import CellIsRule, DataBarRule
 except ImportError:
     sys.exit("openpyxl is required:  pip install openpyxl")
 
@@ -57,9 +58,17 @@ TARGET_SHEET = "Opportunity Input"
 FULL_SHEET_NAME = "Opportunity Input Full"
 DEBUG_SHEET_NAME = "Debug View"
 EMP_RANGE_COL = "Chamber of Commerce Employee Range"
-OUTPUT_COL_O = 15          # 1-based: column O in the full merged sheet
 TRACE_COLS = ["source_queue", "source_file", "source_row"]
-DEBUG_FLAG_COLS = ["debug_foreign_hq_flag", "debug_score_flag", "debug_domain_flag"]
+
+# Existing employee-range column names to detect (case-insensitive)
+EMP_RANGE_ADJACENT_NAMES = {
+    "employee_range",
+    "employee_range_resolved",
+    "employee_range_source",
+    "employee_count_range",
+    "employee_range_label",
+    "employee range",
+}
 
 EMPLOYEE_RANGE_MAP: dict[str, str] = {
     "italy50":  "50-100 employees",
@@ -67,92 +76,164 @@ EMPLOYEE_RANGE_MAP: dict[str, str] = {
     "italy200": "200+ employees",
 }
 
-# Header fills
-HEADER_FILL  = PatternFill("solid", fgColor="1F4E79")
-HEADER_FONT  = Font(bold=True, color="FFFFFF")
-TRACE_FILL   = PatternFill("solid", fgColor="D6E4F0")
-EMP_FILL     = PatternFill("solid", fgColor="E2EFDA")
-DEBUG_FILL   = PatternFill("solid", fgColor="FCE4D6")  # light orange for debug headers
-FLAG_FILL    = PatternFill("solid", fgColor="FF0000")  # red for non-empty flag cells
-FLAG_FONT    = Font(bold=True, color="FFFFFF")
+# Score columns that get blue data bars
+DATABAR_COLS = {
+    "Final Commercial Fit Score",
+    "commercial_fit_score",
+    "final_commercial_fit_score",
+}
 
-# Debug View ordered columns (A–AK)
+# All debug flag column names
+DEBUG_FLAG_COLS = [
+    "debug_foreign_hq_flag",
+    "debug_competitor_flag",
+    "debug_score_origin_flag",
+    "debug_domain_flag",
+]
+REVIEW_PRIORITY_COL = "review_priority"
+
+# Domain-check warning keywords
+_DOMAIN_WARN_WORDS = {"mismatch", "uncertain", "review", "fallback", "generic"}
+
+# Header / fill styles
+HEADER_FILL = PatternFill("solid", fgColor="1F4E79")
+HEADER_FONT = Font(bold=True, color="FFFFFF")
+TRACE_FILL  = PatternFill("solid", fgColor="D6E4F0")
+EMP_FILL    = PatternFill("solid", fgColor="E2EFDA")
+DEBUG_FILL  = PatternFill("solid", fgColor="FCE4D6")
+FLAG_FILL   = PatternFill("solid", fgColor="FF0000")
+FLAG_FONT   = Font(bold=True, color="FFFFFF")
+HIGH_PRI_FILL   = PatternFill("solid", fgColor="FF0000")
+HIGH_PRI_FONT   = Font(bold=True, color="FFFFFF")
+MEDIUM_PRI_FILL = PatternFill("solid", fgColor="FFEB9C")
+MEDIUM_PRI_FONT = Font(bold=False, color="000000")
+
+# Tier-based row fills (fallback row coloring)
+HOT_FILL  = PatternFill("solid", fgColor="C6EFCE")
+WARM_FILL = PatternFill("solid", fgColor="DDEBF7")
+COOL_FILL = PatternFill("solid", fgColor="FCE4D6")
+PASS_FILL = PatternFill("solid", fgColor="FFC7CE")
+
+DEFAULT_ROW_HEIGHT = 15
+
+# Debug View ordered columns A–BB
 DEBUG_VIEW_COLS = [
+    # Identity
     "company_name",
     "domain",
-    "commercial_fit_score",
+    # Score block
+    "display_score",
+    "base_commercial_fit_score",
+    "final_commercial_fit_score",
     "commercial_tier",
     "outreach_readiness_status",
     EMP_RANGE_COL,
+    # Foreign HQ block
     "sig_foreign_hq_score",
     "foreign_hq_original_score",
     "foreign_hq_sanitized",
     "foreign_hq_sanitizer_reason",
     "sig_foreign_hq_evidence",
-    "evidence_source_urls",
-    "serper_source_urls",
-    "google_snippet_01_title",
-    "google_snippet_01_url",
-    "google_snippet_01_text",
-    "sig_intl_footprint_score",
-    "sig_intl_footprint_evidence",
+    "foreign_hq_original_evidence",
+    "inferred_input_country",
+    "foreign_hq_uncertain",
+    # Competitor block
+    "icp_override_applied",
+    "icp_override_reason",
+    "competitive_switch_opportunity",
+    "sales_action_hint",
+    "competitor_customer_signal",
+    "competitor_signal_strength",
+    "competitor_provider_detected",
+    "competitor_evidence",
+    "competitor_evidence_url",
+    "competitor_confidence_url",
+    "competitor_attention_signal",
+    "competitor_attention_provider_detected",
+    "competitor_attention_url",
+    # Other signal block
     "sig_explicit_lnd_score",
     "sig_explicit_lnd_evidence",
+    "sig_intl_footprint_score",
+    "sig_intl_footprint_evidence",
     "sig_employer_branding_score",
     "sig_employer_branding_evidence",
     "sig_lnd_onboarding_score",
     "sig_lnd_onboarding_evidence",
+    "ti_onboarding_score",
+    "sig_rapid_growth_score",
+    # Domain / review block
+    "possible_domain_mismatch",
+    "domain_check_reason",
+    "needs_manual_review",
     "top_positive_signals",
     "gaps_missing_signals",
     "caller_angle",
     "scoring_notes",
-    "needs_manual_review",
-    "possible_domain_mismatch",
-    "domain_check_reason",
+    # Debug flags
     "debug_foreign_hq_flag",
-    "debug_score_flag",
+    "debug_competitor_flag",
+    "debug_score_origin_flag",
     "debug_domain_flag",
+    REVIEW_PRIORITY_COL,
+    # Trace
     "source_queue",
     "source_file",
     "source_row",
 ]
 
-# Column widths for Debug View
 _DEBUG_COL_WIDTHS: dict[str, int] = {
     "company_name": 35,
-    "domain": 25,
-    "commercial_fit_score": 20,
+    "domain": 28,
+    "display_score": 16,
+    "base_commercial_fit_score": 24,
+    "final_commercial_fit_score": 24,
     "commercial_tier": 16,
-    "outreach_readiness_status": 22,
+    "outreach_readiness_status": 24,
     EMP_RANGE_COL: 26,
     "sig_foreign_hq_score": 20,
     "foreign_hq_original_score": 22,
     "foreign_hq_sanitized": 20,
-    "foreign_hq_sanitizer_reason": 30,
+    "foreign_hq_sanitizer_reason": 32,
     "sig_foreign_hq_evidence": 55,
-    "evidence_source_urls": 45,
-    "serper_source_urls": 45,
-    "google_snippet_01_title": 40,
-    "google_snippet_01_url": 40,
-    "google_snippet_01_text": 60,
-    "sig_intl_footprint_score": 22,
-    "sig_intl_footprint_evidence": 45,
+    "foreign_hq_original_evidence": 55,
+    "inferred_input_country": 22,
+    "foreign_hq_uncertain": 20,
+    "icp_override_applied": 22,
+    "icp_override_reason": 40,
+    "competitive_switch_opportunity": 28,
+    "sales_action_hint": 35,
+    "competitor_customer_signal": 28,
+    "competitor_signal_strength": 24,
+    "competitor_provider_detected": 28,
+    "competitor_evidence": 50,
+    "competitor_evidence_url": 45,
+    "competitor_confidence_url": 45,
+    "competitor_attention_signal": 28,
+    "competitor_attention_provider_detected": 30,
+    "competitor_attention_url": 45,
     "sig_explicit_lnd_score": 20,
     "sig_explicit_lnd_evidence": 45,
+    "sig_intl_footprint_score": 22,
+    "sig_intl_footprint_evidence": 45,
     "sig_employer_branding_score": 24,
     "sig_employer_branding_evidence": 45,
     "sig_lnd_onboarding_score": 22,
     "sig_lnd_onboarding_evidence": 45,
+    "ti_onboarding_score": 18,
+    "sig_rapid_growth_score": 22,
+    "possible_domain_mismatch": 22,
+    "domain_check_reason": 35,
+    "needs_manual_review": 20,
     "top_positive_signals": 55,
     "gaps_missing_signals": 45,
     "caller_angle": 40,
     "scoring_notes": 60,
-    "needs_manual_review": 20,
-    "possible_domain_mismatch": 22,
-    "domain_check_reason": 35,
-    "debug_foreign_hq_flag": 38,
-    "debug_score_flag": 38,
+    "debug_foreign_hq_flag": 40,
+    "debug_competitor_flag": 40,
+    "debug_score_origin_flag": 40,
     "debug_domain_flag": 32,
+    REVIEW_PRIORITY_COL: 16,
     "source_queue": 14,
     "source_file": 48,
     "source_row": 12,
@@ -160,7 +241,8 @@ _DEBUG_COL_WIDTHS: dict[str, int] = {
 
 _WRAP_COLS = {
     "sig_foreign_hq_evidence",
-    "google_snippet_01_text",
+    "foreign_hq_original_evidence",
+    "competitor_evidence",
     "top_positive_signals",
     "scoring_notes",
     "sig_intl_footprint_evidence",
@@ -169,38 +251,14 @@ _WRAP_COLS = {
     "sig_lnd_onboarding_evidence",
     "gaps_missing_signals",
     "caller_angle",
+    "icp_override_reason",
 }
-
-# Domain-check warning keywords
-_DOMAIN_WARN_WORDS = {"mismatch", "uncertain", "review", "fallback", "generic"}
-
-# Columns that get blue data-bar conditional formatting
-DATABAR_COLS = {"Final Commercial Fit Score", "commercial_fit_score"}
-
-# All score columns (for future use / reference)
-SCORE_COL_NAMES = {
-    "Final Commercial Fit Score",
-    "commercial_fit_score",
-    "recommended_final_score",
-    "sig_foreign_hq_score",
-    "sig_explicit_lnd_score",
-    "sig_intl_footprint_score",
-    "sig_employer_branding_score",
-    "sig_lnd_onboarding_score",
-}
-
-# Tier-based row fills (fallback row coloring)
-HOT_FILL  = PatternFill("solid", fgColor="C6EFCE")  # light green
-WARM_FILL = PatternFill("solid", fgColor="DDEBF7")  # light blue
-COOL_FILL = PatternFill("solid", fgColor="FCE4D6")  # light orange
-PASS_FILL = PatternFill("solid", fgColor="FFC7CE")  # light red/pink
-
 
 # ---------------------------------------------------------------------------
 # Safe workbook loader
 # ---------------------------------------------------------------------------
 
-def _safe_load(path: Path) -> tuple[openpyxl.Workbook | None, str]:
+def _safe_load(path: Path) -> tuple["openpyxl.Workbook | None", str]:
     try:
         wb = load_workbook(path, read_only=True, data_only=True)
         return wb, ""
@@ -225,63 +283,58 @@ def _safe_output_path(path: Path, overwrite: bool) -> Path:
 
 
 # ---------------------------------------------------------------------------
-# Formatting helpers
+# Value helpers
 # ---------------------------------------------------------------------------
 
-def _get_row_fill(row_values: list, headers: list[str]) -> "PatternFill | None":
-    """Return tier-based fill for a data row, or None if no tier/score matches."""
-    h_idx = {h: i for i, h in enumerate(headers)}
-    tier = str(row_values[h_idx["commercial_tier"]] or "").strip().lower() \
-        if "commercial_tier" in h_idx else ""
-    score = None
-    for score_col in ("commercial_fit_score", "Final Commercial Fit Score"):
-        if score_col in h_idx:
-            score = _to_float(row_values[h_idx[score_col]])
-            break
-
-    if tier == "hot" or (score is not None and score >= 8.5):
-        return HOT_FILL
-    if tier == "warm" or (score is not None and score >= 5.0):
-        return WARM_FILL
-    if tier == "cool":
-        return COOL_FILL
-    if tier == "pass":
-        return PASS_FILL
-    return None
+def _to_float(v: Any) -> "float | None":
+    try:
+        return float(v)
+    except (TypeError, ValueError):
+        return None
 
 
-def _apply_databar_formatting(ws, headers: list[str], first_row: int, last_row: int) -> None:
-    """Add blue data-bar CF rules for DATABAR_COLS columns that exist in headers."""
-    if first_row > last_row:
-        return
-    for col_idx, h in enumerate(headers, start=1):
-        if h in DATABAR_COLS:
-            col_letter = get_column_letter(col_idx)
-            ws.conditional_formatting.add(
-                f"{col_letter}{first_row}:{col_letter}{last_row}",
-                DataBarRule(
-                    start_type="num", start_value=0,
-                    end_type="num", end_value=10,
-                    color="638EC6",
-                    showValue=True,
-                ),
-            )
+def _is_truthy(v: Any) -> bool:
+    if v is None:
+        return False
+    return str(v).strip().lower() in {"true", "yes", "1", "1.0", "x"}
+
+
+def _is_blank_or_short(v: Any, threshold: int = 10) -> bool:
+    return v is None or len(str(v).strip()) < threshold
+
+
+def _str_lower(v: Any) -> str:
+    return str(v or "").strip().lower()
 
 
 # ---------------------------------------------------------------------------
-# Column layout helpers (full merged sheet)
+# Column layout helpers
 # ---------------------------------------------------------------------------
+
+def _find_emp_range_insert_pos(source_headers: list[str]) -> int:
+    """
+    Return 0-based index of the position to insert EMP_RANGE_COL
+    (immediately after the first existing employee-range column found).
+    Returns len(source_headers) if none found (appended before trace cols).
+    """
+    for i, h in enumerate(source_headers):
+        if h.strip().lower() in EMP_RANGE_ADJACENT_NAMES:
+            return i + 1
+    return len(source_headers)
+
 
 def _build_output_headers(source_headers: list[str]) -> list[str]:
     """
-    TRACE_COLS + source cols (minus existing emp range) + EMP_RANGE_COL at col O.
+    Build full output column list:
+      original source cols (minus existing EMP_RANGE_COL)
+      + EMP_RANGE_COL inserted next to existing employee-range column
+      + TRACE_COLS appended at the end
     """
     clean_source = [h for h in source_headers if h != EMP_RANGE_COL]
-    combined = TRACE_COLS + clean_source
-    while len(combined) < OUTPUT_COL_O - 1:
-        combined.append("")
-    combined.insert(OUTPUT_COL_O - 1, EMP_RANGE_COL)
-    return combined
+    insert_pos = _find_emp_range_insert_pos(clean_source)
+    result = clean_source[:insert_pos] + [EMP_RANGE_COL] + clean_source[insert_pos:]
+    result += TRACE_COLS
+    return result
 
 
 def _row_to_output(
@@ -320,60 +373,77 @@ def _row_to_output(
 # Debug flag computation
 # ---------------------------------------------------------------------------
 
-def _to_float(v: Any) -> float | None:
-    try:
-        return float(v)
-    except (TypeError, ValueError):
-        return None
+def _final_score(row_dict: dict[str, Any]) -> "float | None":
+    """Return the best available final/display score."""
+    for col in ("display_score", "final_commercial_fit_score",
+                "Final Commercial Fit Score", "commercial_fit_score"):
+        v = _to_float(row_dict.get(col))
+        if v is not None:
+            return v
+    return None
 
 
-def _is_truthy(v: Any) -> bool:
-    if v is None:
-        return False
-    s = str(v).strip().lower()
-    return s in {"true", "yes", "1", "1.0", "x"}
+def compute_debug_flags(
+    row_dict: dict[str, Any],
+) -> tuple[str, str, str, str, str]:
+    """Returns (fhq_flag, competitor_flag, score_origin_flag, domain_flag, review_priority)."""
 
-
-def _is_blank_or_short(v: Any, threshold: int = 10) -> bool:
-    if v is None:
-        return True
-    return len(str(v).strip()) < threshold
-
-
-def compute_debug_flags(row_dict: dict[str, Any]) -> tuple[str, str, str]:
-    """Returns (debug_foreign_hq_flag, debug_score_flag, debug_domain_flag)."""
+    score = _final_score(row_dict)
+    fhq_score  = _to_float(row_dict.get("sig_foreign_hq_score"))
+    fhq_orig   = _to_float(row_dict.get("foreign_hq_original_score"))
+    fhq_sanit  = _is_truthy(row_dict.get("foreign_hq_sanitized"))
+    fhq_evid   = row_dict.get("sig_foreign_hq_evidence")
+    override   = _is_truthy(row_dict.get("icp_override_applied"))
 
     # ── foreign HQ flag ─────────────────────────────────────────────────────
     fhq_reasons: list[str] = []
-    fhq_score = _to_float(row_dict.get("sig_foreign_hq_score"))
-    fhq_orig  = _to_float(row_dict.get("foreign_hq_original_score"))
-    fhq_sanit = _is_truthy(row_dict.get("foreign_hq_sanitized"))
-    fhq_evid  = row_dict.get("sig_foreign_hq_evidence")
-
-    if fhq_score is not None and fhq_score >= 7 and _is_blank_or_short(fhq_evid):
-        fhq_reasons.append("High foreign HQ score, weak evidence")
     if fhq_sanit:
-        fhq_reasons.append("Foreign HQ sanitized")
+        fhq_reasons.append("Foreign HQ sanitized, review needed")
+    if fhq_score == 0.0 and fhq_orig is not None and fhq_orig > 0:
+        fhq_reasons.append("Foreign HQ score zero but original positive")
+    if score is not None and score >= 8.5 and fhq_sanit:
+        fhq_reasons.append("High score despite sanitized foreign HQ")
+    if fhq_score is not None and fhq_score >= 7 and _is_blank_or_short(fhq_evid):
+        fhq_reasons.append("Foreign HQ high but evidence weak")
+
+    # ── competitor flag ─────────────────────────────────────────────────────
+    comp_reasons: list[str] = []
+    comp_url_cols = (
+        "competitor_evidence_url", "competitor_confidence_url",
+        "competitor_attention_url",
+    )
+    has_comp_url = any(
+        str(row_dict.get(c) or "").strip() for c in comp_url_cols
+    )
+    comp_fields_populated = (
+        str(row_dict.get("competitor_customer_signal") or "").strip()
+        or str(row_dict.get("competitor_signal_strength") or "").strip()
+        or str(row_dict.get("competitor_provider_detected") or "").strip()
+    )
+
+    if override:
+        comp_reasons.append("Competitor override applied, verify evidence URL")
+    if score is not None and score == 10 and override:
+        comp_reasons.append("Score 10 from competitor override")
+    if has_comp_url:
+        comp_reasons.append("Competitor URL present, needs review")
+    if _str_lower(row_dict.get("competitor_signal_strength")) == "high":
+        comp_reasons.append("Competitor signal high, verify target-company proof")
     if (
-        fhq_orig is not None
-        and fhq_score is not None
-        and fhq_orig - fhq_score >= 1.5
+        score is not None and score == 10
+        and comp_fields_populated
+        and not override
     ):
-        fhq_reasons.append("Foreign HQ score reduced by sanitizer")
+        comp_reasons.append("Competitor override suspected but weak fields")
 
-    # ── score flag ──────────────────────────────────────────────────────────
-    score_reasons: list[str] = []
-    fit_score    = _to_float(row_dict.get("commercial_fit_score"))
-    lnd_score    = _to_float(row_dict.get("sig_explicit_lnd_score"))
-    top_signals  = row_dict.get("top_positive_signals")
-
-    if fit_score is not None and fit_score >= 8.5:
-        low_fhq = fhq_score is None or fhq_score < 4
-        low_lnd = lnd_score is None or lnd_score < 4
-        if low_fhq and low_lnd:
-            score_reasons.append("High score, check supporting signals")
-        if _is_blank_or_short(top_signals, threshold=5):
-            score_reasons.append("High score, no top positive signals")
+    # ── score origin flag ────────────────────────────────────────────────────
+    origin_reasons: list[str] = []
+    if score is not None and score == 10 and override:
+        origin_reasons.append("Score 10 from competitor override")
+    elif score is not None and score == 10:
+        origin_reasons.append("Score 10 from normal scoring - verify drivers")
+    if score is not None and score >= 8.5 and fhq_sanit:
+        origin_reasons.append("High score despite sanitized foreign HQ")
 
     # ── domain flag ─────────────────────────────────────────────────────────
     domain_reasons: list[str] = []
@@ -381,14 +451,31 @@ def compute_debug_flags(row_dict: dict[str, Any]) -> tuple[str, str, str]:
         domain_reasons.append("Possible domain mismatch")
     if _is_truthy(row_dict.get("needs_manual_review")):
         domain_reasons.append("Manual review needed")
-    dcr = str(row_dict.get("domain_check_reason") or "").lower()
+    dcr = _str_lower(row_dict.get("domain_check_reason"))
     if any(w in dcr for w in _DOMAIN_WARN_WORDS):
         domain_reasons.append("Domain check warning")
 
+    # ── review priority ──────────────────────────────────────────────────────
+    high = (
+        (fhq_sanit and score is not None and score >= 8.5)
+        or override
+        or (score is not None and score == 10)
+        or _is_truthy(row_dict.get("possible_domain_mismatch"))
+    )
+    any_flag = bool(fhq_reasons or comp_reasons or origin_reasons or domain_reasons)
+    if high:
+        priority = "High"
+    elif any_flag:
+        priority = "Medium"
+    else:
+        priority = "Low"
+
     return (
         "; ".join(fhq_reasons),
-        "; ".join(score_reasons),
+        "; ".join(comp_reasons),
+        "; ".join(origin_reasons),
         "; ".join(domain_reasons),
+        priority,
     )
 
 
@@ -410,21 +497,17 @@ def _discover_files(queue_dir: Path, subfolder: str) -> list[Path]:
 # Core merge
 # ---------------------------------------------------------------------------
 
+# Extra computed columns appended beyond output_headers in each merged row
+_COMPUTED_COLS = DEBUG_FLAG_COLS + [REVIEW_PRIORITY_COL]
+
+
 def merge_queues(
     target_root: Path,
     queues: list[str],
     input_subfolder: str,
-) -> tuple[list[list[Any]], list[str] | None, list[dict], dict[str, int]]:
-    """
-    Returns:
-      all_data_rows  – each row includes all output_headers columns
-                       PLUS debug flag values appended at the end
-      output_headers – final column list for the full merged sheet
-      report_rows    – per-file status dicts
-      rows_by_queue  – {queue: row_count}
-    """
+) -> tuple[list[list[Any]], "list[str] | None", list[dict], dict[str, int]]:
     all_data_rows: list[list[Any]] = []
-    output_headers: list[str] | None = None
+    output_headers: "list[str] | None" = None
     report_rows: list[dict] = []
     rows_by_queue: dict[str, int] = {}
 
@@ -485,10 +568,9 @@ def merge_queues(
                     filename=xlsx_path.name,
                     row_num=src_row_idx,
                 )
-                # Compute debug flags; append as extra values beyond output_headers
                 row_dict = dict(zip(output_headers, out_row))
-                flags = compute_debug_flags(row_dict)
-                out_row = out_row + list(flags)   # 3 extra values
+                flags = compute_debug_flags(row_dict)   # 5 values
+                out_row = out_row + list(flags)
                 all_data_rows.append(out_row)
                 rows_read += 1
 
@@ -502,35 +584,71 @@ def merge_queues(
 
 
 # ---------------------------------------------------------------------------
-# Row dict helper (for Debug View)
+# Row dict helper
 # ---------------------------------------------------------------------------
 
 def _row_as_dict(row: list[Any], full_headers: list[str]) -> dict[str, Any]:
-    """Map a merged data row (including trailing flag values) to a dict."""
-    extended = full_headers + DEBUG_FLAG_COLS
-    d: dict[str, Any] = {}
-    for i, h in enumerate(extended):
-        d[h] = row[i] if i < len(row) else None
-    return d
+    extended = full_headers + _COMPUTED_COLS
+    return {h: (row[i] if i < len(row) else None) for i, h in enumerate(extended)}
 
 
 # ---------------------------------------------------------------------------
-# Sorting key for Debug View
+# Formatting helpers
 # ---------------------------------------------------------------------------
 
-def _debug_sort_key(row_dict: dict[str, Any]) -> tuple:
-    has_flag = int(
-        bool(row_dict.get("debug_foreign_hq_flag"))
-        or bool(row_dict.get("debug_score_flag"))
-        or bool(row_dict.get("debug_domain_flag"))
+def _get_row_fill(row_dict: dict[str, Any]) -> "PatternFill | None":
+    tier = _str_lower(row_dict.get("commercial_tier"))
+    score = _final_score(row_dict)
+    if tier == "hot" or (score is not None and score >= 8.5):
+        return HOT_FILL
+    if tier == "warm" or (score is not None and score >= 5.0):
+        return WARM_FILL
+    if tier == "cool":
+        return COOL_FILL
+    if tier == "pass":
+        return PASS_FILL
+    return None
+
+
+def _apply_databar_formatting(ws, headers: list[str], first_row: int, last_row: int) -> None:
+    if first_row > last_row:
+        return
+    for col_idx, h in enumerate(headers, start=1):
+        if h in DATABAR_COLS:
+            col_letter = get_column_letter(col_idx)
+            ws.conditional_formatting.add(
+                f"{col_letter}{first_row}:{col_letter}{last_row}",
+                DataBarRule(
+                    start_type="num", start_value=0,
+                    end_type="num", end_value=10,
+                    color="638EC6",
+                    showValue=True,
+                ),
+            )
+
+
+# ---------------------------------------------------------------------------
+# Debug View sort key
+# ---------------------------------------------------------------------------
+
+_PRIORITY_ORDER = {"high": 0, "medium": 1, "low": 2, "": 3}
+
+
+def _debug_sort_key(rd: dict[str, Any]) -> tuple:
+    priority = _str_lower(rd.get(REVIEW_PRIORITY_COL))
+    override  = int(_is_truthy(rd.get("icp_override_applied")))
+    fhq_sanit = int(_is_truthy(rd.get("foreign_hq_sanitized")))
+    score     = _final_score(rd) or 0.0
+    return (
+        _PRIORITY_ORDER.get(priority, 3),
+        -override,
+        -fhq_sanit,
+        -score,
     )
-    score = _to_float(row_dict.get("commercial_fit_score")) or 0.0
-    fhq   = _to_float(row_dict.get("sig_foreign_hq_score")) or 0.0
-    return (-has_flag, -score, -fhq)
 
 
 # ---------------------------------------------------------------------------
-# Output workbook writer
+# Sheet writers
 # ---------------------------------------------------------------------------
 
 def _col_width_for_full(header: str) -> int:
@@ -538,17 +656,21 @@ def _col_width_for_full(header: str) -> int:
         "source_queue": 14, "source_file": 50, "source_row": 10,
         EMP_RANGE_COL: 30, "company_name": 40,
         "website_url": 35, "domain": 28,
-        "commercial_fit_score": 22, "commercial_tier": 16,
+        "commercial_fit_score": 22, "final_commercial_fit_score": 22,
+        "commercial_tier": 16,
     }
     return widths.get(header, max(12, min(len(header) + 4, 40)))
 
 
 def _write_full_sheet(ws, data_rows: list[list[Any]], output_headers: list[str]) -> None:
-    """Write the Opportunity Input Full sheet."""
+    trace_set = set(TRACE_COLS)
+
+    # Header row
     ws.append(output_headers)
+    ws.row_dimensions[1].height = DEFAULT_ROW_HEIGHT
     for col_idx, header in enumerate(output_headers, start=1):
         cell = ws.cell(row=1, column=col_idx)
-        if header in TRACE_COLS:
+        if header in trace_set:
             cell.fill = TRACE_FILL
             cell.font = Font(bold=True)
         elif header == EMP_RANGE_COL:
@@ -557,13 +679,16 @@ def _write_full_sheet(ws, data_rows: list[list[Any]], output_headers: list[str])
         else:
             cell.fill = HEADER_FILL
             cell.font = HEADER_FONT
-        cell.alignment = Alignment(horizontal="center")
+        cell.alignment = Alignment(horizontal="center", wrap_text=False)
         ws.column_dimensions[get_column_letter(col_idx)].width = _col_width_for_full(header)
 
+    # Data rows
     for data_row_idx, row in enumerate(data_rows, start=2):
         row_values = row[:len(output_headers)]
         ws.append(row_values)
-        fill = _get_row_fill(row_values, output_headers)
+        ws.row_dimensions[data_row_idx].height = DEFAULT_ROW_HEIGHT
+        row_dict = dict(zip(output_headers, row_values))
+        fill = _get_row_fill(row_dict)
         if fill is not None:
             for col_idx in range(1, len(output_headers) + 1):
                 ws.cell(row=data_row_idx, column=col_idx).fill = fill
@@ -572,36 +697,29 @@ def _write_full_sheet(ws, data_rows: list[list[Any]], output_headers: list[str])
     if last_row >= 2:
         _apply_databar_formatting(ws, output_headers, 2, last_row)
 
-    ws.freeze_panes = "D2"
+    ws.freeze_panes = "B2"
     ws.auto_filter.ref = ws.dimensions
 
 
 def _write_debug_sheet(
     ws, data_rows: list[list[Any]], full_headers: list[str]
-) -> tuple[int, int, int, int]:
-    """
-    Write the Debug View sheet.
-    Returns (total_rows, fhq_flagged, score_flagged, domain_flagged).
-    """
-    # Build row dicts and sort
+) -> tuple[int, int, int, int, int, dict[str, int]]:
+    """Write Debug View. Returns (total, fhq_cnt, comp_cnt, origin_cnt, domain_cnt, priority_counts)."""
     row_dicts = [_row_as_dict(r, full_headers) for r in data_rows]
     row_dicts.sort(key=_debug_sort_key)
 
-    # Write headers
+    # Header row
     ws.append(DEBUG_VIEW_COLS)
+    ws.row_dimensions[1].height = DEFAULT_ROW_HEIGHT
     for col_idx, col_name in enumerate(DEBUG_VIEW_COLS, start=1):
         cell = ws.cell(row=1, column=col_idx)
-        is_flag = col_name in DEBUG_FLAG_COLS
-        is_trace = col_name in TRACE_COLS
-        is_emp = col_name == EMP_RANGE_COL
-
-        if is_flag:
+        if col_name in set(DEBUG_FLAG_COLS) or col_name == REVIEW_PRIORITY_COL:
             cell.fill = DEBUG_FILL
             cell.font = Font(bold=True)
-        elif is_trace:
+        elif col_name in set(TRACE_COLS):
             cell.fill = TRACE_FILL
             cell.font = Font(bold=True)
-        elif is_emp:
+        elif col_name == EMP_RANGE_COL:
             cell.fill = EMP_FILL
             cell.font = Font(bold=True)
         else:
@@ -612,63 +730,137 @@ def _write_debug_sheet(
             _DEBUG_COL_WIDTHS.get(col_name, 20)
         )
 
-    # Data rows
-    fhq_flagged = score_flagged = domain_flagged = 0
+    # Pre-compute flag column indices (1-based)
+    flag_col_map = {
+        col_name: col_idx
+        for col_idx, col_name in enumerate(DEBUG_VIEW_COLS, start=1)
+        if col_name in set(DEBUG_FLAG_COLS)
+    }
+    priority_col_idx = next(
+        (i for i, c in enumerate(DEBUG_VIEW_COLS, start=1) if c == REVIEW_PRIORITY_COL),
+        None,
+    )
+
+    fhq_cnt = comp_cnt = origin_cnt = domain_cnt = 0
+    priority_counts: dict[str, int] = {"High": 0, "Medium": 0, "Low": 0}
+
     for row_idx, rd in enumerate(row_dicts, start=2):
         row_values = [rd.get(col) for col in DEBUG_VIEW_COLS]
         ws.append(row_values)
+        ws.row_dimensions[row_idx].height = DEFAULT_ROW_HEIGHT
 
-        if rd.get("debug_foreign_hq_flag"):
-            fhq_flagged += 1
-        if rd.get("debug_score_flag"):
-            score_flagged += 1
-        if rd.get("debug_domain_flag"):
-            domain_flagged += 1
-
-        # Wrap text in evidence/long-text columns
+        # Wrap text in long-text columns only
         for col_idx, col_name in enumerate(DEBUG_VIEW_COLS, start=1):
             if col_name in _WRAP_COLS:
                 ws.cell(row=row_idx, column=col_idx).alignment = Alignment(wrap_text=True)
 
-        # Highlight non-empty flag cells
-        flag_col_indices = {
-            col_name: col_idx + 1
-            for col_idx, col_name in enumerate(DEBUG_VIEW_COLS)
-            if col_name in DEBUG_FLAG_COLS
-        }
-        for flag_col, flag_col_idx in flag_col_indices.items():
-            if rd.get(flag_col):
-                cell = ws.cell(row=row_idx, column=flag_col_idx)
-                cell.fill = FLAG_FILL
-                cell.font = FLAG_FONT
+        # Count flags
+        if rd.get("debug_foreign_hq_flag"):
+            fhq_cnt += 1
+        if rd.get("debug_competitor_flag"):
+            comp_cnt += 1
+        if rd.get("debug_score_origin_flag"):
+            origin_cnt += 1
+        if rd.get("debug_domain_flag"):
+            domain_cnt += 1
 
-    ws.freeze_panes = "C2"   # freeze row 1 + cols A-B
+        pri = str(rd.get(REVIEW_PRIORITY_COL) or "").strip()
+        if pri in priority_counts:
+            priority_counts[pri] += 1
+
+        # Highlight non-empty flag cells
+        for flag_col, flag_col_idx in flag_col_map.items():
+            if rd.get(flag_col):
+                c = ws.cell(row=row_idx, column=flag_col_idx)
+                c.fill = FLAG_FILL
+                c.font = FLAG_FONT
+
+        # Highlight review priority cell
+        if priority_col_idx is not None:
+            pri_cell = ws.cell(row=row_idx, column=priority_col_idx)
+            if pri == "High":
+                pri_cell.fill = HIGH_PRI_FILL
+                pri_cell.font = HIGH_PRI_FONT
+            elif pri == "Medium":
+                pri_cell.fill = MEDIUM_PRI_FILL
+                pri_cell.font = MEDIUM_PRI_FONT
+
+    ws.freeze_panes = "C2"
     ws.auto_filter.ref = ws.dimensions
 
     last_row = len(row_dicts) + 1
-
-    # Blue data bars for commercial_fit_score
     _apply_databar_formatting(ws, DEBUG_VIEW_COLS, 2, last_row)
 
-    # CellIsRule highlights: green for high score, yellow for high fhq
-    score_col_letter = get_column_letter(DEBUG_VIEW_COLS.index("commercial_fit_score") + 1)
-    fhq_col_letter   = get_column_letter(DEBUG_VIEW_COLS.index("sig_foreign_hq_score") + 1)
+    # CellIsRule highlights for score columns
+    for score_col_name in ("final_commercial_fit_score", "display_score"):
+        if score_col_name in DEBUG_VIEW_COLS:
+            scl = get_column_letter(DEBUG_VIEW_COLS.index(score_col_name) + 1)
+            ws.conditional_formatting.add(
+                f"{scl}2:{scl}{last_row}",
+                CellIsRule(operator="greaterThanOrEqual", formula=["8.5"],
+                           fill=PatternFill("solid", fgColor="C6EFCE"),
+                           font=Font(bold=True)),
+            )
+    if "sig_foreign_hq_score" in DEBUG_VIEW_COLS:
+        fhq_cl = get_column_letter(DEBUG_VIEW_COLS.index("sig_foreign_hq_score") + 1)
+        ws.conditional_formatting.add(
+            f"{fhq_cl}2:{fhq_cl}{last_row}",
+            CellIsRule(operator="greaterThanOrEqual", formula=["7"],
+                       fill=PatternFill("solid", fgColor="FFEB9C")),
+        )
 
-    green_fill  = PatternFill("solid", fgColor="C6EFCE")
-    yellow_fill = PatternFill("solid", fgColor="FFEB9C")
+    return len(row_dicts), fhq_cnt, comp_cnt, origin_cnt, domain_cnt, priority_counts
 
-    ws.conditional_formatting.add(
-        f"{score_col_letter}2:{score_col_letter}{last_row}",
-        CellIsRule(operator="greaterThanOrEqual", formula=["8.5"],
-                   fill=green_fill, font=Font(bold=True)),
-    )
-    ws.conditional_formatting.add(
-        f"{fhq_col_letter}2:{fhq_col_letter}{last_row}",
-        CellIsRule(operator="greaterThanOrEqual", formula=["7"],
-                   fill=yellow_fill),
-    )
 
-    return len(row_dicts), fhq_flagged, score_flagged, domain_flagged
+def _write_scoring_logic_sheet(ws) -> None:
+    rows = [
+        ("Scoring Logic – mYngle Opportunity Input Merge", ""),
+        ("", ""),
+        ("Normal ICP Scoring", "commercial_fit_scoring.py"),
+        ("", ""),
+        ("Signal fields used in regression/scoring model", ""),
+        ("  sig_foreign_hq_score", "Weight: positive. Indicates foreign HQ structure."),
+        ("  sig_explicit_lnd_score", "Weight: positive. Explicit L&D-related signals."),
+        ("  sig_intl_footprint_score", "Weight: positive. International footprint."),
+        ("  sig_employer_branding_score", "Weight: positive. Employer branding signals."),
+        ("  sig_lnd_onboarding_score", "Weight: positive. L&D onboarding signals."),
+        ("  ti_onboarding_score", "Weight: positive. Technology/implementation signals."),
+        ("  sig_rapid_growth_score", "Weight: NEGATIVE coefficient. Rapid growth reduces score."),
+        ("", ""),
+        ("Competitor Signals", ""),
+        ("  competitor_customer_signal", "Detected competitor customer signals."),
+        ("  competitor_signal_strength", "Strength: Low / Medium / High."),
+        ("  competitor_evidence_url", "URL used as proof of competitor customer signal."),
+        ("  icp_override_applied", "YES = competitor override lifted final score to 10."),
+        ("  icp_override_reason", "Reason for override (if applied)."),
+        ("", ""),
+        ("Important: competitor signals are NOT part of the normal LR score.", ""),
+        ("Competitor override can lift final score to 10 ONLY when", ""),
+        ("strong competitor-customer evidence is accepted.", ""),
+        ("", ""),
+        ("Current Review Concern", ""),
+        ("  Competitor URLs may need manual validation before accepting override.", ""),
+        ("  Rows with icp_override_applied=Yes should be reviewed in Debug View.", ""),
+        ("", ""),
+        ("Foreign HQ Sanitizer", ""),
+        ("  If foreign_hq_sanitized=Yes, the original foreign HQ score was reduced.", ""),
+        ("  foreign_hq_original_score shows the pre-sanitizer score.", ""),
+        ("  Rows where original > final should be reviewed.", ""),
+        ("", ""),
+        ("Future Workflow", ""),
+        ("  Reviewed and validated signals should feed an updated commercial fit score.", ""),
+        ("  The Debug View is the primary tool for this review.", ""),
+    ]
+    ws.column_dimensions["A"].width = 55
+    ws.column_dimensions["B"].width = 70
+    for r_idx, (k, v) in enumerate(rows, start=1):
+        cell_a = ws.cell(row=r_idx, column=1, value=k)
+        cell_b = ws.cell(row=r_idx, column=2, value=v)
+        if r_idx == 1:
+            cell_a.font = Font(bold=True, size=13)
+        elif k and not k.startswith(" ") and v == "":
+            cell_a.font = Font(bold=True)
+        ws.row_dimensions[r_idx].height = DEFAULT_ROW_HEIGHT
 
 
 def write_output_workbook(
@@ -677,35 +869,71 @@ def write_output_workbook(
     output_headers: list[str],
     qa_meta: dict,
     rows_by_queue: dict[str, int],
-) -> tuple[int, int, int, int]:
-    """Write workbook with Debug View, Opportunity Input Full, Merge QA.
-    Returns (debug_total, fhq_flagged, score_flagged, domain_flagged).
+) -> tuple[int, int, int, int, int, dict[str, int], dict[str, int]]:
+    """
+    Write workbook with Debug View, Opportunity Input Full, Scoring Logic, Merge QA.
+    Returns (debug_total, fhq_cnt, comp_cnt, origin_cnt, domain_cnt,
+             priority_counts, override_and_score10_counts).
     """
     wb = Workbook()
 
-    # ── Sheet 1: Debug View ─────────────────────────────────────────────────
+    # Sheet 1: Debug View
     ws_debug = wb.active
     ws_debug.title = DEBUG_SHEET_NAME
-    debug_total, fhq_flagged, score_flagged, domain_flagged = _write_debug_sheet(
-        ws_debug, data_rows, output_headers
+    debug_total, fhq_cnt, comp_cnt, origin_cnt, domain_cnt, priority_counts = (
+        _write_debug_sheet(ws_debug, data_rows, output_headers)
     )
 
-    # ── Sheet 2: Opportunity Input Full ────────────────────────────────────
+    # Sheet 2: Opportunity Input Full
     ws_full = wb.create_sheet(FULL_SHEET_NAME)
     _write_full_sheet(ws_full, data_rows, output_headers)
 
-    # ── Sheet 3: Merge QA ───────────────────────────────────────────────────
+    # Sheet 3: Scoring Logic
+    ws_logic = wb.create_sheet("Scoring Logic")
+    _write_scoring_logic_sheet(ws_logic)
+
+    # Sheet 4: Merge QA — compute extra stats from data rows
+    extended_headers = output_headers + _COMPUTED_COLS
+    rows_fhq_sanitized = 0
+    rows_fhq_zeroed = 0
+    rows_override = 0
+    rows_score_10 = 0
+    rows_score_10_override = 0
+    rows_comp_url = 0
+    comp_url_cols = {"competitor_evidence_url", "competitor_confidence_url",
+                     "competitor_attention_url"}
+
+    for row in data_rows:
+        rd = {h: (row[i] if i < len(row) else None)
+              for i, h in enumerate(extended_headers)}
+        score = _final_score(rd)
+        if _is_truthy(rd.get("foreign_hq_sanitized")):
+            rows_fhq_sanitized += 1
+        fhq_s = _to_float(rd.get("sig_foreign_hq_score"))
+        fhq_o = _to_float(rd.get("foreign_hq_original_score"))
+        if fhq_s == 0.0 and fhq_o is not None and fhq_o > 0:
+            rows_fhq_zeroed += 1
+        override = _is_truthy(rd.get("icp_override_applied"))
+        if override:
+            rows_override += 1
+        if score is not None and score == 10:
+            rows_score_10 += 1
+            if override:
+                rows_score_10_override += 1
+        if any(str(rd.get(c) or "").strip() for c in comp_url_cols):
+            rows_comp_url += 1
+
     ws_qa = wb.create_sheet("Merge QA")
     qa_rows = [
-        ("timestamp",                    qa_meta.get("timestamp", "")),
-        ("target_root",                  qa_meta.get("target_root", "")),
-        ("input_subfolder",              qa_meta.get("input_subfolder", "")),
-        ("queues_included",              ", ".join(qa_meta.get("queues", []))),
-        ("files_scanned",                qa_meta.get("files_scanned", 0)),
-        ("files_merged",                 qa_meta.get("files_merged", 0)),
-        ("files_skipped_no_sheet",       qa_meta.get("files_skipped_no_sheet", 0)),
-        ("files_skipped_invalid",        qa_meta.get("files_skipped_invalid", 0)),
-        ("total_rows_merged",            qa_meta.get("total_rows", 0)),
+        ("timestamp",                               qa_meta.get("timestamp", "")),
+        ("target_root",                             qa_meta.get("target_root", "")),
+        ("input_subfolder",                         qa_meta.get("input_subfolder", "")),
+        ("queues_included",                         ", ".join(qa_meta.get("queues", []))),
+        ("files_scanned",                           qa_meta.get("files_scanned", 0)),
+        ("files_merged",                            qa_meta.get("files_merged", 0)),
+        ("files_skipped_no_sheet",                  qa_meta.get("files_skipped_no_sheet", 0)),
+        ("files_skipped_invalid",                   qa_meta.get("files_skipped_invalid", 0)),
+        ("total_rows_merged",                       qa_meta.get("total_rows", 0)),
         ("", ""),
         ("── rows by queue ──", ""),
     ]
@@ -713,23 +941,48 @@ def write_output_workbook(
         qa_rows.append((f"  {q}", cnt))
     qa_rows += [
         ("", ""),
-        ("── debug view ──", ""),
-        ("debug_view_created",            "YES"),
-        ("debug_view_rows",               debug_total),
-        ("rows_with_debug_foreign_hq_flag", fhq_flagged),
-        ("rows_with_debug_score_flag",    score_flagged),
-        ("rows_with_debug_domain_flag",   domain_flagged),
+        ("── foreign HQ review ──", ""),
+        ("rows_with_foreign_hq_sanitized",          rows_fhq_sanitized),
+        ("rows_fhq_original_positive_but_zeroed",   rows_fhq_zeroed),
         ("", ""),
-        ("output_path", qa_meta.get("output_path", "")),
+        ("── competitor review ──", ""),
+        ("rows_with_icp_override_applied",          rows_override),
+        ("rows_with_final_score_10",                rows_score_10),
+        ("rows_score_10_and_competitor_override",   rows_score_10_override),
+        ("rows_with_competitor_url_populated",      rows_comp_url),
+        ("", ""),
+        ("── review priority ──", ""),
+        ("review_priority_High",                    priority_counts.get("High", 0)),
+        ("review_priority_Medium",                  priority_counts.get("Medium", 0)),
+        ("review_priority_Low",                     priority_counts.get("Low", 0)),
+        ("", ""),
+        ("── debug view ──", ""),
+        ("debug_view_rows",                         debug_total),
+        ("rows_with_debug_foreign_hq_flag",         fhq_cnt),
+        ("rows_with_debug_competitor_flag",         comp_cnt),
+        ("rows_with_debug_score_origin_flag",       origin_cnt),
+        ("rows_with_debug_domain_flag",             domain_cnt),
+        ("", ""),
+        ("output_path",                             qa_meta.get("output_path", "")),
     ]
-    ws_qa.column_dimensions["A"].width = 36
+    ws_qa.column_dimensions["A"].width = 42
     ws_qa.column_dimensions["B"].width = 80
     for r_idx, (k, v) in enumerate(qa_rows, start=1):
         ws_qa.cell(row=r_idx, column=1, value=k).font = Font(bold=True)
         ws_qa.cell(row=r_idx, column=2, value=v)
+        ws_qa.row_dimensions[r_idx].height = DEFAULT_ROW_HEIGHT
 
     wb.save(output_path)
-    return debug_total, fhq_flagged, score_flagged, domain_flagged
+
+    override_and_score10_counts = {
+        "rows_override": rows_override,
+        "rows_score_10": rows_score_10,
+        "rows_score_10_override": rows_score_10_override,
+        "rows_comp_url": rows_comp_url,
+        "rows_fhq_sanitized": rows_fhq_sanitized,
+    }
+    return (debug_total, fhq_cnt, comp_cnt, origin_cnt, domain_cnt,
+            priority_counts, override_and_score10_counts)
 
 
 # ---------------------------------------------------------------------------
@@ -819,16 +1072,17 @@ def main() -> None:
             "\nNo data found. No files with an 'Opportunity Input' sheet were merged."
         )
 
-    files_scanned   = len(report_rows)
-    files_merged    = sum(1 for r in report_rows if r["status"] == "MERGED")
-    files_no_sheet  = sum(1 for r in report_rows
-                          if r["status"] == "SKIPPED_MISSING_OPPORTUNITY_INPUT")
-    files_invalid   = sum(1 for r in report_rows
-                          if r["status"] == "SKIPPED_INVALID_WORKBOOK")
-    total_rows      = len(data_rows)
+    files_scanned  = len(report_rows)
+    files_merged   = sum(1 for r in report_rows if r["status"] == "MERGED")
+    files_no_sheet = sum(1 for r in report_rows
+                         if r["status"] == "SKIPPED_MISSING_OPPORTUNITY_INPUT")
+    files_invalid  = sum(1 for r in report_rows
+                         if r["status"] == "SKIPPED_INVALID_WORKBOOK")
+    total_rows     = len(data_rows)
 
     merge_dir.mkdir(parents=True, exist_ok=True)
-    debug_total, fhq_flagged, score_flagged, domain_flagged = write_output_workbook(
+    (debug_total, fhq_cnt, comp_cnt, origin_cnt, domain_cnt,
+     priority_counts, extra_counts) = write_output_workbook(
         output_path=output_path,
         data_rows=data_rows,
         output_headers=output_headers,
@@ -852,8 +1106,6 @@ def main() -> None:
     print("\n" + "=" * 66)
     print("MERGE SUMMARY")
     print("=" * 66)
-    print(f"  Queues scanned                   : {len(queues)}")
-    print(f"  Source folders                   : {input_subfolder}")
     print(f"  Files scanned                    : {files_scanned}")
     print(f"  Files merged                     : {files_merged}")
     print(f"  Total rows merged                : {total_rows}")
@@ -862,10 +1114,21 @@ def main() -> None:
     print(f"  Skipped (no sheet)               : {files_no_sheet}")
     print(f"  Skipped (invalid wb)             : {files_invalid}")
     print()
+    print(f"  Foreign HQ sanitized             : {extra_counts['rows_fhq_sanitized']}")
+    print(f"  Competitor override applied      : {extra_counts['rows_override']}")
+    print(f"  Final score = 10                 : {extra_counts['rows_score_10']}")
+    print(f"  Score 10 + competitor override   : {extra_counts['rows_score_10_override']}")
+    print(f"  Competitor URL populated         : {extra_counts['rows_comp_url']}")
+    print()
+    print(f"  Review priority High             : {priority_counts.get('High', 0)}")
+    print(f"  Review priority Medium           : {priority_counts.get('Medium', 0)}")
+    print(f"  Review priority Low              : {priority_counts.get('Low', 0)}")
+    print()
     print(f"  Debug View rows                  : {debug_total}")
-    print(f"    debug_foreign_hq_flag set      : {fhq_flagged}")
-    print(f"    debug_score_flag set           : {score_flagged}")
-    print(f"    debug_domain_flag set          : {domain_flagged}")
+    print(f"    debug_foreign_hq_flag          : {fhq_cnt}")
+    print(f"    debug_competitor_flag          : {comp_cnt}")
+    print(f"    debug_score_origin_flag        : {origin_cnt}")
+    print(f"    debug_domain_flag              : {domain_cnt}")
     print()
     print(f"  Output file                      : {output_path}")
     print(f"  CSV report                       : {csv_path}")
