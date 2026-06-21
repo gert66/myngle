@@ -443,7 +443,7 @@ f1, f2, f3, f4 = st.columns(4)
 f_review  = f1.checkbox("Needs manual review only")
 f_foreign = f2.checkbox("Foreign HQ only (new)")
 f_unknown = f3.checkbox("Unknown only")
-f_disagree = f4.checkbox("Old score > 0 but new = not foreign")
+f_disagree = f4.checkbox("Old/new disagreement")
 
 all_display = _build_display_rows(input_rows, probe_results, _KEY_VIEW_COLS)
 
@@ -461,7 +461,9 @@ def _apply_filters(rows: list[dict]) -> list[dict]:
                 old_score = float(r.get("sig_foreign_hq_score") or 0)
             except (ValueError, TypeError):
                 old_score = 0.0
-            return old_score > 0 and r.get("foreign_hq_simple") == "False"
+            # Old enrichment flagged as foreign, but new probe says not foreign or unknown
+            new_val = r.get("foreign_hq_simple", "")
+            return old_score > 0 and new_val in ("False", "")
         out = [r for r in out if _disagree(r)]
     return out
 

@@ -114,47 +114,115 @@ PROBE_COLS = [
 
 # Maps normalised lowercase alias -> (city_display, country)
 _ITALY_CITIES: dict[str, tuple[str, str]] = {
-    "milan":     ("Milan",   "Italy"),
-    "milano":    ("Milano",  "Italy"),
-    "rome":      ("Rome",    "Italy"),
-    "roma":      ("Roma",    "Italy"),
-    "turin":     ("Turin",   "Italy"),
-    "torino":    ("Torino",  "Italy"),
-    "naples":    ("Naples",  "Italy"),
-    "napoli":    ("Napoli",  "Italy"),
-    "bologna":   ("Bologna", "Italy"),
-    "bergamo":   ("Bergamo", "Italy"),
-    "brescia":   ("Brescia", "Italy"),
-    "verona":    ("Verona",  "Italy"),
-    "padova":    ("Padova",  "Italy"),
-    "padua":     ("Padua",   "Italy"),
-    "vicenza":   ("Vicenza", "Italy"),
-    "treviso":   ("Treviso", "Italy"),
-    "modena":    ("Modena",  "Italy"),
-    "parma":     ("Parma",   "Italy"),
-    "firenze":   ("Firenze", "Italy"),
-    "florence":  ("Florence","Italy"),
-    "genova":    ("Genova",  "Italy"),
-    "genoa":     ("Genoa",   "Italy"),
-    "venice":    ("Venice",  "Italy"),
-    "venezia":   ("Venezia", "Italy"),
-    "trieste":   ("Trieste", "Italy"),
-    "bari":      ("Bari",    "Italy"),
-    "catania":   ("Catania", "Italy"),
-    "palermo":   ("Palermo", "Italy"),
-    "perugia":   ("Perugia", "Italy"),
-    "ancona":    ("Ancona",  "Italy"),
-    "trento":    ("Trento",  "Italy"),
-    "bolzano":   ("Bolzano", "Italy"),
-    "reggio":    ("Reggio",  "Italy"),
-    "cagliari":  ("Cagliari","Italy"),
-    "lecce":     ("Lecce",   "Italy"),
-    "pescara":   ("Pescara", "Italy"),
-    "pisa":      ("Pisa",    "Italy"),
-    "siena":     ("Siena",   "Italy"),
-    "udine":     ("Udine",   "Italy"),
-    "novara":    ("Novara",  "Italy"),
-    "monza":     ("Monza",   "Italy"),
+    "milan":          ("Milan",          "Italy"),
+    "milano":         ("Milano",         "Italy"),
+    "rome":           ("Rome",           "Italy"),
+    "roma":           ("Roma",           "Italy"),
+    "turin":          ("Turin",          "Italy"),
+    "torino":         ("Torino",         "Italy"),
+    "naples":         ("Naples",         "Italy"),
+    "napoli":         ("Napoli",         "Italy"),
+    "bologna":        ("Bologna",        "Italy"),
+    "bergamo":        ("Bergamo",        "Italy"),
+    "brescia":        ("Brescia",        "Italy"),
+    "verona":         ("Verona",         "Italy"),
+    "padova":         ("Padova",         "Italy"),
+    "padua":          ("Padua",          "Italy"),
+    "vicenza":        ("Vicenza",        "Italy"),
+    "treviso":        ("Treviso",        "Italy"),
+    "modena":         ("Modena",         "Italy"),
+    "parma":          ("Parma",          "Italy"),
+    "firenze":        ("Firenze",        "Italy"),
+    "florence":       ("Florence",       "Italy"),
+    "genova":         ("Genova",         "Italy"),
+    "genoa":          ("Genoa",          "Italy"),
+    "venice":         ("Venice",         "Italy"),
+    "venezia":        ("Venezia",        "Italy"),
+    "trieste":        ("Trieste",        "Italy"),
+    "bari":           ("Bari",           "Italy"),
+    "catania":        ("Catania",        "Italy"),
+    "palermo":        ("Palermo",        "Italy"),
+    "perugia":        ("Perugia",        "Italy"),
+    "ancona":         ("Ancona",         "Italy"),
+    "trento":         ("Trento",         "Italy"),
+    "bolzano":        ("Bolzano",        "Italy"),
+    "reggio":         ("Reggio",         "Italy"),
+    "cagliari":       ("Cagliari",       "Italy"),
+    "lecce":          ("Lecce",          "Italy"),
+    "pescara":        ("Pescara",        "Italy"),
+    "pisa":           ("Pisa",           "Italy"),
+    "siena":          ("Siena",          "Italy"),
+    "udine":          ("Udine",          "Italy"),
+    "novara":         ("Novara",         "Italy"),
+    "monza":          ("Monza",          "Italy"),
+    # Additional municipalities
+    "bentivoglio":    ("Bentivoglio",    "Italy"),
+    "interporto":     ("Interporto Bologna", "Italy"),
+    "castel maggiore":("Castel Maggiore","Italy"),
+    "calderara":      ("Calderara di Reno", "Italy"),
+    "imola":          ("Imola",          "Italy"),
+    "faenza":         ("Faenza",         "Italy"),
+    "rimini":         ("Rimini",         "Italy"),
+    "ravenna":        ("Ravenna",        "Italy"),
+    "ferrara":        ("Ferrara",        "Italy"),
+    "forlì":          ("Forlì",          "Italy"),
+    "forli":          ("Forlì",          "Italy"),
+    "piacenza":       ("Piacenza",       "Italy"),
+    "reggio emilia":  ("Reggio Emilia",  "Italy"),
+    "mantova":        ("Mantova",        "Italy"),
+    "mantua":         ("Mantua",         "Italy"),
+    "cremona":        ("Cremona",        "Italy"),
+    "como":           ("Como",           "Italy"),
+    "varese":         ("Varese",         "Italy"),
+    "lecco":          ("Lecco",          "Italy"),
+    "pavia":          ("Pavia",          "Italy"),
+    "lodi":           ("Lodi",           "Italy"),
+    "sesto san giovanni": ("Sesto San Giovanni", "Italy"),
+    "cinisello balsamo":  ("Cinisello Balsamo",  "Italy"),
+    "busto arsizio":  ("Busto Arsizio",  "Italy"),
+    "gallarate":      ("Gallarate",      "Italy"),
+    "saronno":        ("Saronno",        "Italy"),
+    "rho":            ("Rho",            "Italy"),
+    "segrate":        ("Segrate",        "Italy"),
+    "assago":         ("Assago",         "Italy"),
+    "cernusco":       ("Cernusco sul Naviglio", "Italy"),
+    "agrate brianza": ("Agrate Brianza", "Italy"),
+    "vimercate":      ("Vimercate",      "Italy"),
+    "cassina de' pecchi": ("Cassina de' Pecchi", "Italy"),
+    "sesto fiorentino": ("Sesto Fiorentino", "Italy"),
+    "prato":          ("Prato",          "Italy"),
+    "livorno":        ("Livorno",        "Italy"),
+    "lucca":          ("Lucca",          "Italy"),
+    "pistoia":        ("Pistoia",        "Italy"),
+    "arezzo":         ("Arezzo",         "Italy"),
+    "grosseto":       ("Grosseto",       "Italy"),
+    "la spezia":      ("La Spezia",      "Italy"),
+    "savona":         ("Savona",         "Italy"),
+    "imperia":        ("Imperia",        "Italy"),
+    "salerno":        ("Salerno",        "Italy"),
+    "caserta":        ("Caserta",        "Italy"),
+    "foggia":         ("Foggia",         "Italy"),
+    "taranto":        ("Taranto",        "Italy"),
+    "brindisi":       ("Brindisi",       "Italy"),
+    "cosenza":        ("Cosenza",        "Italy"),
+    "catanzaro":      ("Catanzaro",      "Italy"),
+    "reggio calabria": ("Reggio Calabria", "Italy"),
+    "messina":        ("Messina",        "Italy"),
+    "agrigento":      ("Agrigento",      "Italy"),
+    "ragusa":         ("Ragusa",         "Italy"),
+    "siracusa":       ("Siracusa",       "Italy"),
+    "trapani":        ("Trapani",        "Italy"),
+    "sassari":        ("Sassari",        "Italy"),
+    "nuoro":          ("Nuoro",          "Italy"),
+    "oristano":       ("Oristano",       "Italy"),
+    "macerata":       ("Macerata",       "Italy"),
+    "pesaro":         ("Pesaro",         "Italy"),
+    "ascoli piceno":  ("Ascoli Piceno",  "Italy"),
+    "teramo":         ("Teramo",         "Italy"),
+    "chieti":         ("Chieti",         "Italy"),
+    "campobasso":     ("Campobasso",     "Italy"),
+    "potenza":        ("Potenza",        "Italy"),
+    "matera":         ("Matera",         "Italy"),
 }
 
 # International city aliases (city_lower -> (city_display, country))
@@ -230,6 +298,86 @@ _COUNTRY_ALIASES: dict[str, str] = {
     "ireland": "Ireland", "irish": "Ireland",
 }
 
+# Italian province codes → (provincial capital, "Italy")
+_ITALY_PROVINCE_CODES: dict[str, tuple[str, str]] = {
+    "AG": ("Agrigento", "Italy"), "AL": ("Alessandria", "Italy"),
+    "AN": ("Ancona",    "Italy"), "AO": ("Aosta",       "Italy"),
+    "AR": ("Arezzo",    "Italy"), "AP": ("Ascoli Piceno","Italy"),
+    "AT": ("Asti",      "Italy"), "AV": ("Avellino",    "Italy"),
+    "BA": ("Bari",      "Italy"), "BT": ("Barletta",    "Italy"),
+    "BL": ("Belluno",   "Italy"), "BN": ("Benevento",   "Italy"),
+    "BG": ("Bergamo",   "Italy"), "BI": ("Biella",      "Italy"),
+    "BO": ("Bologna",   "Italy"), "BZ": ("Bolzano",     "Italy"),
+    "BS": ("Brescia",   "Italy"), "BR": ("Brindisi",    "Italy"),
+    "CA": ("Cagliari",  "Italy"), "CL": ("Caltanissetta","Italy"),
+    "CB": ("Campobasso","Italy"), "CE": ("Caserta",     "Italy"),
+    "CT": ("Catania",   "Italy"), "CZ": ("Catanzaro",   "Italy"),
+    "CH": ("Chieti",    "Italy"), "CO": ("Como",        "Italy"),
+    "CS": ("Cosenza",   "Italy"), "CR": ("Cremona",     "Italy"),
+    "KR": ("Crotone",   "Italy"), "CN": ("Cuneo",       "Italy"),
+    "EN": ("Enna",      "Italy"), "FM": ("Fermo",       "Italy"),
+    "FE": ("Ferrara",   "Italy"), "FI": ("Firenze",     "Italy"),
+    "FG": ("Foggia",    "Italy"), "FC": ("Forlì",       "Italy"),
+    "FR": ("Frosinone", "Italy"), "GE": ("Genova",      "Italy"),
+    "GO": ("Gorizia",   "Italy"), "GR": ("Grosseto",    "Italy"),
+    "IM": ("Imperia",   "Italy"), "IS": ("Isernia",     "Italy"),
+    "SP": ("La Spezia", "Italy"), "AQ": ("L'Aquila",    "Italy"),
+    "LT": ("Latina",    "Italy"), "LE": ("Lecce",       "Italy"),
+    "LC": ("Lecco",     "Italy"), "LI": ("Livorno",     "Italy"),
+    "LO": ("Lodi",      "Italy"), "LU": ("Lucca",       "Italy"),
+    "MC": ("Macerata",  "Italy"), "MN": ("Mantova",     "Italy"),
+    "MS": ("Massa",     "Italy"), "MT": ("Matera",      "Italy"),
+    "ME": ("Messina",   "Italy"), "MI": ("Milano",      "Italy"),
+    "MO": ("Modena",    "Italy"), "MB": ("Monza",       "Italy"),
+    "NA": ("Napoli",    "Italy"), "NO": ("Novara",      "Italy"),
+    "NU": ("Nuoro",     "Italy"), "OR": ("Oristano",    "Italy"),
+    "PD": ("Padova",    "Italy"), "PA": ("Palermo",     "Italy"),
+    "PR": ("Parma",     "Italy"), "PV": ("Pavia",       "Italy"),
+    "PG": ("Perugia",   "Italy"), "PU": ("Pesaro",      "Italy"),
+    "PE": ("Pescara",   "Italy"), "PC": ("Piacenza",    "Italy"),
+    "PI": ("Pisa",      "Italy"), "PT": ("Pistoia",     "Italy"),
+    "PN": ("Pordenone", "Italy"), "PZ": ("Potenza",     "Italy"),
+    "PO": ("Prato",     "Italy"), "RG": ("Ragusa",      "Italy"),
+    "RA": ("Ravenna",   "Italy"), "RC": ("Reggio Calabria","Italy"),
+    "RE": ("Reggio Emilia","Italy"),"RI": ("Rieti",     "Italy"),
+    "RN": ("Rimini",    "Italy"), "RM": ("Roma",        "Italy"),
+    "RO": ("Rovigo",    "Italy"), "SA": ("Salerno",     "Italy"),
+    "SS": ("Sassari",   "Italy"), "SV": ("Savona",      "Italy"),
+    "SI": ("Siena",     "Italy"), "SR": ("Siracusa",    "Italy"),
+    "SO": ("Sondrio",   "Italy"), "TA": ("Taranto",     "Italy"),
+    "TE": ("Teramo",    "Italy"), "TR": ("Terni",       "Italy"),
+    "TO": ("Torino",    "Italy"), "TP": ("Trapani",     "Italy"),
+    "TN": ("Trento",    "Italy"), "TV": ("Treviso",     "Italy"),
+    "TS": ("Trieste",   "Italy"), "UD": ("Udine",       "Italy"),
+    "VA": ("Varese",    "Italy"), "VE": ("Venezia",     "Italy"),
+    "VB": ("Verbania",  "Italy"), "VC": ("Vercelli",    "Italy"),
+    "VR": ("Verona",    "Italy"), "VV": ("Vibo Valentia","Italy"),
+    "VI": ("Vicenza",   "Italy"), "VT": ("Viterbo",     "Italy"),
+}
+
+# Province code in parentheses or following a comma then Italy/Italia,
+# e.g. "(BO)", ", BO)", ", BO Italy", ", BO Italia", ", BO\n"
+_PROVINCE_CODE_RE = re.compile(
+    r"(?:[\(,\s])([A-Z]{2})(?:\)|(?:\s*[-,]\s*(?:Ital(?:y|ia)))|\s*$)",
+    re.MULTILINE,
+)
+
+# Postal code pattern (5-digit Italian CAP) immediately resolves to Italy
+_ITALIAN_CAP_RE = re.compile(r"\b([1-9]\d{4})\b")
+
+# Group/parent context signal — presence means the snippet is about the group,
+# not necessarily the exact operating company.
+_GROUP_CONTEXT_RE = re.compile(
+    r"\b(?:"
+    r"part\s+of|owned\s+by|subsidiary\s+of|member\s+of|division\s+of"
+    r"|affiliated\s+(?:with|to)|belongs?\s+to"
+    r"|parent\s+company|holding\s+company|holding\s+group"
+    r"|gruppo\b|gruppo\s+\w+|appartenente\s+(?:a|al)"
+    r"|fa\s+parte\s+(?:del|di)|filiale\s+di|controllata\s+da"
+    r")\b",
+    re.IGNORECASE,
+)
+
 # Regex patterns for deterministic HQ extraction.
 # Each yields the city/country text in group 1.
 _HQ_PATTERNS = [
@@ -242,13 +390,25 @@ _HQ_PATTERNS = [
     re.compile(r"based\s+in\s+([A-Z][A-Za-zÀ-ÿ\s,]{2,35}?)(?:\.|,|\s+(?:and|with|since))", re.IGNORECASE),
     re.compile(r"Headquarters?\s*:\s*([A-Za-zÀ-ÿ\s,]{2,50}?)(?:\n|$|\.)", re.IGNORECASE),
     re.compile(r"Head\s+[Oo]ffice\s*:\s*([A-Za-zÀ-ÿ\s,]{2,50}?)(?:\n|$|\.)", re.IGNORECASE),
+    # English – additional
+    re.compile(r"registered\s+office\s*(?:in|at|:)\s*([A-Za-zÀ-ÿ\s,]{2,50}?)(?:\n|$|\.|,)", re.IGNORECASE),
+    re.compile(r"corporate\s+office\s*(?:in|at|:)\s*([A-Za-zÀ-ÿ\s,]{2,50}?)(?:\n|$|\.|,)", re.IGNORECASE),
+    re.compile(r"principal\s+office\s*(?:in|at|:)\s*([A-Za-zÀ-ÿ\s,]{2,50}?)(?:\n|$|\.|,)", re.IGNORECASE),
+    re.compile(r"registered\s+in\s+([A-Za-zÀ-ÿ\s,]{2,40}?)(?:\n|$|\.|,)", re.IGNORECASE),
     # Italian
     re.compile(r"sede\s+legale\s*[:\s]+(?:in\s+)?([A-Za-zÀ-ÿ\s,]{2,50}?)(?:\n|$|\.|,)", re.IGNORECASE),
     re.compile(r"sede\s+principale\s*[:\s]+(?:in\s+)?([A-Za-zÀ-ÿ\s,]{2,50}?)(?:\n|$|\.|,)", re.IGNORECASE),
     re.compile(r"sede\s+amministrativa\s+(?:in\s+)?([A-Za-zÀ-ÿ\s,]{2,40}?)(?:\n|$|\.|,)", re.IGNORECASE),
+    re.compile(r"sede\s+operativa\s+(?:in\s+)?([A-Za-zÀ-ÿ\s,]{2,40}?)(?:\n|$|\.|,)", re.IGNORECASE),
     re.compile(r"con\s+sede\s+(?:a|in)\s+([A-Za-zÀ-ÿ\s,]{2,40}?)(?:\n|$|\.|,)", re.IGNORECASE),
     re.compile(r"ha\s+sede\s+(?:a|in)\s+([A-Za-zÀ-ÿ\s,]{2,40}?)(?:\n|$|\.|,)", re.IGNORECASE),
     re.compile(r"(?:la\s+)?(?:sua\s+)?sede\s+(?:è\s+)?(?:a|in)\s+([A-Za-zÀ-ÿ\s,]{2,40}?)(?:\n|$|\.|,)", re.IGNORECASE),
+    re.compile(r"uffici\s+(?:a|in|di)\s+([A-Za-zÀ-ÿ\s,]{2,40}?)(?:\n|$|\.|,)", re.IGNORECASE),
+    re.compile(r"ufficio\s+(?:a|in|di)\s+([A-Za-zÀ-ÿ\s,]{2,40}?)(?:\n|$|\.|,)", re.IGNORECASE),
+    # c/o or address-style patterns
+    re.compile(r"c/o\s+[A-Za-zÀ-ÿ\s]+?,\s*([A-Za-zÀ-ÿ\s,]{2,40}?)(?:\n|$|\.|,)", re.IGNORECASE),
+    # "located in / located at"
+    re.compile(r"located\s+(?:in|at)\s+([A-Za-zÀ-ÿ\s,]{2,40}?)(?:\n|$|\.|,)", re.IGNORECASE),
 ]
 
 
@@ -304,6 +464,15 @@ def _resolve_city_country(text: str) -> tuple[str, str]:
     for alias, (city, country) in _ITALY_CITIES.items():
         if alias in text_lc:
             return city, country
+    # Italian province codes in parentheses, e.g. (BO), , BO Italy
+    for m in _PROVINCE_CODE_RE.finditer(text):
+        code = m.group(1)
+        if code in _ITALY_PROVINCE_CODES:
+            city, country = _ITALY_PROVINCE_CODES[code]
+            return city, country
+    # Italian CAP (5-digit postal code) → Italy
+    if _ITALIAN_CAP_RE.search(text):
+        return "", "Italy"
     # International cities
     for alias, (city, country) in _INTL_CITIES.items():
         if alias in text_lc:
@@ -315,17 +484,43 @@ def _resolve_city_country(text: str) -> tuple[str, str]:
     return "", ""
 
 
+def _has_group_context(text: str) -> bool:
+    """Return True if the text signals parent/group context (not the exact company's own HQ)."""
+    return bool(_GROUP_CONTEXT_RE.search(text))
+
+
+def _italy_in_text(text: str) -> bool:
+    """Return True if any Italian city, province code, CAP, or 'Italy/Italia' appears in text."""
+    text_lc = text.lower()
+    if "italy" in text_lc or "italia" in text_lc:
+        return True
+    for alias in _ITALY_CITIES:
+        if alias in text_lc:
+            return True
+    if _PROVINCE_CODE_RE.search(text):
+        code = _PROVINCE_CODE_RE.search(text).group(1)
+        if code in _ITALY_PROVINCE_CODES:
+            return True
+    if _ITALIAN_CAP_RE.search(text):
+        return True
+    return False
+
+
 def _extract_deterministic(
     organic: list[dict],
     kg_location: str,
     answer_box: str,
+    input_country: str = "",
 ) -> dict[str, Any]:
     """
     Scan snippets, titles, knowledge graph, and answer box for HQ patterns.
-    Returns partial probe result dict or empty dict if nothing found.
+
+    Group-context safety: if a snippet contains parent/group language AND the
+    matched country is foreign, we do not immediately accept it.  We continue
+    scanning for a clean Italy/input-country hit.  Only if no clean hit is
+    found do we fall back to the group-context match (marked Low confidence).
     """
-    # Combine all text sources in priority order
-    texts: list[tuple[str, str]] = []  # (text, source_url)
+    texts: list[tuple[str, str]] = []
     if kg_location:
         texts.append((kg_location, ""))
     if answer_box:
@@ -334,24 +529,73 @@ def _extract_deterministic(
         combined = f"{item.get('title', '')} {item.get('snippet', '')}"
         texts.append((combined, item.get("link", "")))
 
+    input_country_std = _COUNTRY_ALIASES.get(input_country.lower(), input_country)
+    fallback_group_hit: dict[str, Any] = {}
+
     for text, url in texts:
+        is_group = _has_group_context(text)
         for pat in _HQ_PATTERNS:
             m = pat.search(text)
-            if m:
-                captured = m.group(1).strip(" ,.")
-                city, country = _resolve_city_country(captured)
-                if city or country:
-                    # Find the matching snippet for the evidence quote
-                    quote = text[:200].strip()
+            if not m:
+                continue
+            captured = m.group(1).strip(" ,.")
+            city, country = _resolve_city_country(captured)
+            if not city and not country:
+                continue
+
+            quote = text[:250].strip()
+            candidate = {
+                "hq_detected_city":    city,
+                "hq_detected_country": country,
+                "hq_confidence":       "High",
+                "hq_reason":           f"Pattern match: '{m.group(0)[:80]}'",
+                "hq_evidence_url":     url,
+                "hq_evidence_quote":   quote,
+            }
+
+            # Always accept if the detected country matches the input country
+            country_std = _COUNTRY_ALIASES.get(country.lower(), country)
+            if country_std.lower() == input_country_std.lower():
+                return candidate
+
+            # For foreign country: reject if group context in same snippet
+            if is_group:
+                # Check whether Italy also appears in this snippet
+                # (company may have Italian address mentioned alongside group HQ)
+                if _italy_in_text(text) and input_country_std == "Italy":
+                    # Something Italian is here — skip to next snippet to find cleaner hit
+                    pass
+                elif not fallback_group_hit:
+                    # Keep as low-confidence fallback
+                    candidate["hq_confidence"] = "Low"
+                    candidate["hq_reason"] = (
+                        "[group context detected] " + candidate["hq_reason"]
+                    )
+                    fallback_group_hit = candidate
+                continue  # Don't accept group-context foreign hit immediately
+
+            # Clean foreign hit (no group context)
+            return candidate
+
+    # Try a direct Italy scan of all snippets even without a pattern match
+    # (handles "Bentivoglio, Bologna" in an address line without a pattern trigger)
+    for text, url in texts:
+        if _italy_in_text(text):
+            # Find the first Italian city/province mentioned
+            text_lc = text.lower()
+            for alias, (city, country) in _ITALY_CITIES.items():
+                if alias in text_lc:
+                    quote = text[:250].strip()
                     return {
                         "hq_detected_city":    city,
-                        "hq_detected_country": country,
-                        "hq_confidence":       "High",
-                        "hq_reason":           f"Pattern match: '{m.group(0)[:80]}'",
+                        "hq_detected_country": "Italy",
+                        "hq_confidence":       "Medium",
+                        "hq_reason":           f"Italian city '{city}' found in evidence (no explicit HQ pattern)",
                         "hq_evidence_url":     url,
                         "hq_evidence_quote":   quote,
                     }
-    return {}
+
+    return fallback_group_hit
 
 
 # ---------------------------------------------------------------------------
@@ -361,13 +605,20 @@ def _extract_deterministic(
 _MODEL_EXTRACTION_PROMPT = """\
 You are a headquarters-location extractor.
 
-You will receive a JSON array of search result snippets for a company.
-Your task is to identify the EXACT headquarters location of this specific company.
+You will receive a JSON array of search result snippets for a specific company.
+Your task is to identify the EXACT headquarters location of THIS specific company.
 
 Rules:
 - Extract headquarters of the EXACT company named, not of a parent group or subsidiary.
-- Do NOT infer HQ from: international activity, branches, distributors, customers, training providers, competitor mentions, or group ownership unless evidence EXPLICITLY says this exact company is headquartered outside the input country.
-- If the evidence only shows a city without a country, infer the country only if it is unambiguous.
+- Do NOT infer HQ from: international activity, branches, distributors, customers, \
+training providers, competitor mentions, or group ownership.
+- If the evidence says the company is PART OF a foreign group but also gives an Italian \
+registered office or corporate address for the exact company itself, return Italy — \
+group context is not the same as the company's own HQ.
+- If the evidence is ONLY about a parent/holding group with no specific address for the \
+exact company, set is_group_or_parent_only to true and confidence to "Low".
+- entity_match: "Exact" if evidence explicitly names this company, "Likely" if very \
+similar name, "Weak" if indirect, "No" if evidence is about a different entity entirely.
 - If uncertain, set confidence to "Low" or "Unknown".
 
 Return ONLY valid JSON, no other text:
@@ -378,7 +629,9 @@ Return ONLY valid JSON, no other text:
   "confidence": "High|Medium|Low|Unknown",
   "reason": "",
   "evidence_url": "",
-  "evidence_quote": ""
+  "evidence_quote": "",
+  "entity_match": "Exact|Likely|Weak|No",
+  "is_group_or_parent_only": false
 }
 """
 
@@ -410,7 +663,11 @@ def _model_extract(
         # Strip any markdown fences
         raw = re.sub(r"^```(?:json)?\s*", "", raw)
         raw = re.sub(r"\s*```$", "", raw)
-        return json.loads(raw)
+        parsed = json.loads(raw)
+        # Normalise new fields with safe defaults
+        parsed.setdefault("entity_match", "")
+        parsed.setdefault("is_group_or_parent_only", False)
+        return parsed
     except json.JSONDecodeError as exc:
         return {"probe_error": f"Model JSON parse error: {exc}"}
     except Exception as exc:
@@ -520,7 +777,7 @@ def probe_company(
         if not all_organic and organic:
             all_organic = organic
 
-        extracted = _extract_deterministic(organic, kg_location, answer_box_text)
+        extracted = _extract_deterministic(organic, kg_location, answer_box_text, input_country=input_country)
         if extracted and extracted.get("hq_detected_country"):
             best = extracted
             used_query = query
@@ -535,13 +792,29 @@ def probe_company(
             for r in all_organic[:5]
         ]
         model_result = _model_extract(company_name, snippets, anthropic_key)
-        if model_result.get("hq_country"):
+        is_group_only = model_result.get("is_group_or_parent_only", False)
+        entity_match  = model_result.get("entity_match", "")
+        if model_result.get("hq_country") and not is_group_only and entity_match != "No":
+            reason_prefix = f"[model entity={entity_match}] " if entity_match else "[model] "
             best = {
                 "hq_detected_city":    model_result.get("hq_city", ""),
                 "hq_detected_region":  model_result.get("hq_region", ""),
                 "hq_detected_country": model_result.get("hq_country", ""),
                 "hq_confidence":       model_result.get("confidence", ""),
-                "hq_reason":           f"[model] {model_result.get('reason', '')}",
+                "hq_reason":           reason_prefix + model_result.get("reason", ""),
+                "hq_evidence_url":     model_result.get("evidence_url", ""),
+                "hq_evidence_quote":   model_result.get("evidence_quote", ""),
+            }
+            if not used_query and queries:
+                used_query = queries[0]
+        elif model_result.get("hq_country") and is_group_only:
+            # Model says evidence is group-only: keep as low-confidence fallback
+            best = {
+                "hq_detected_city":    model_result.get("hq_city", ""),
+                "hq_detected_region":  model_result.get("hq_region", ""),
+                "hq_detected_country": model_result.get("hq_country", ""),
+                "hq_confidence":       "Low",
+                "hq_reason":           "[model – group/parent only] " + model_result.get("reason", ""),
                 "hq_evidence_url":     model_result.get("evidence_url", ""),
                 "hq_evidence_quote":   model_result.get("evidence_quote", ""),
             }
@@ -998,6 +1271,46 @@ def _self_test() -> None:
         ok = (city == expected_city or not expected_city) and country == expected_country
         status = "PASS" if ok else "FAIL"
         print(f"  [{status}] text={text[:60]!r}  → city={city!r}, country={country!r}")
+
+    # FARMACIE PRATESI: domain phoenixpharmaitalia.it is part of German PHOENIX group,
+    # but the company itself has sede/registered office in Bentivoglio (Bologna), Italy.
+    # Group context snippets must NOT cause a false foreign HQ detection.
+    print("[self-test] FARMACIE PRATESI false-foreign regression...")
+    fp_snippets = [
+        {
+            "title": "PHOENIX group – international pharmaceutical wholesaler",
+            "snippet": (
+                "PHOENIX group is one of the leading pharmaceutical companies in Europe, "
+                "headquartered in Mannheim, Germany. It is part of the PHOENIX group holding."
+            ),
+            "link": "https://www.phoenixgroup.eu/en/",
+        },
+        {
+            "title": "Farmacie Pratesi Pratofarma S.p.A. – chi siamo",
+            "snippet": (
+                "Farmacie Pratesi Pratofarma S.p.A. ha sede legale a Bentivoglio (BO), "
+                "Via dell'Artigianato 1, 40010 Bentivoglio, Italia."
+            ),
+            "link": "https://www.phoenixpharmaitalia.it/chi-siamo",
+        },
+    ]
+    fp_result = _extract_deterministic(fp_snippets, "", "", input_country="Italy")
+    fp_country = fp_result.get("hq_detected_country", "")
+    fp_city    = fp_result.get("hq_detected_city", "")
+    fp_conf    = fp_result.get("hq_confidence", "")
+    fp_ok      = fp_country == "Italy"
+    fp_status  = "PASS" if fp_ok else "FAIL"
+    print(
+        f"  [{fp_status}] FARMACIE PRATESI → city={fp_city!r}, country={fp_country!r}, "
+        f"confidence={fp_conf!r}"
+    )
+    if not fp_ok:
+        print(f"         reason={fp_result.get('hq_reason', '')!r}")
+    # Verify classification
+    fp_foreign, _ = _classify(fp_country, "Italy", fp_conf, fp_result.get("hq_reason", ""), [])
+    fp_cls_ok = fp_foreign == "False"
+    fp_cls_status = "PASS" if fp_cls_ok else "FAIL"
+    print(f"  [{fp_cls_status}] FARMACIE PRATESI foreign_hq_simple={fp_foreign!r} (expected 'False')")
 
     # Classification test
     foreign, review = _classify("Germany", "Italy", "High", "found it", [])
