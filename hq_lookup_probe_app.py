@@ -404,8 +404,8 @@ try:
 except ImportError:
     HAS_PANDAS = False
 
-# Key columns for the results table
-_KEY_VIEW_COLS = [
+# Key columns for the results table — deduplicated (country col may equal company col)
+_KEY_VIEW_COLS_RAW = [
     company_col_r, domain_col_r, country_col_r,
     "sig_foreign_hq_score", "sig_foreign_hq_evidence",
     "foreign_hq_sanitized", "foreign_hq_sanitizer_reason",
@@ -413,6 +413,12 @@ _KEY_VIEW_COLS = [
     "hq_confidence", "foreign_hq_simple", "needs_manual_review",
     "hq_reason", "hq_evidence_url", "hq_evidence_quote", "hq_query_used",
 ]
+_seen_kvc: set[str] = set()
+_KEY_VIEW_COLS: list[str] = []
+for _c in _KEY_VIEW_COLS_RAW:
+    if _c not in _seen_kvc:
+        _KEY_VIEW_COLS.append(_c)
+        _seen_kvc.add(_c)
 
 def _build_display_rows(
     input_rows: list[dict],
@@ -462,11 +468,13 @@ def _apply_filters(rows: list[dict]) -> list[dict]:
 filtered_display = _apply_filters(all_display)
 st.caption(f"Showing {len(filtered_display)} of {len(all_display)} rows")
 
-# Only include columns that actually have data
-present_view_cols = ["#"] + [
-    c for c in _KEY_VIEW_COLS
-    if any(str(r.get(c, "")).strip() for r in filtered_display)
-]
+# Only include columns that actually have data; deduplicate for safety
+_pvc_seen: set[str] = {"#"}
+present_view_cols = ["#"]
+for _c in _KEY_VIEW_COLS:
+    if _c not in _pvc_seen and any(str(r.get(_c, "")).strip() for r in filtered_display):
+        present_view_cols.append(_c)
+        _pvc_seen.add(_c)
 
 if HAS_PANDAS:
     import pandas as pd
