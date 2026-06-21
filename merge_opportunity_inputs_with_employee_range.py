@@ -76,6 +76,23 @@ EMPLOYEE_RANGE_MAP: dict[str, str] = {
     "italy200": "200+ employees",
 }
 
+FOREIGN_HQ_SANITIZER_FIELDS = [
+    "sig_foreign_hq_score",
+    "sig_foreign_hq_evidence",
+    "foreign_hq_sanitized",
+    "foreign_hq_sanitizer_reason",
+    "foreign_hq_original_score",
+    "foreign_hq_original_evidence",
+    "inferred_input_country",
+    "foreign_hq_uncertain",
+]
+
+REQUIRED_CORE_COLS = [
+    "company_name", "domain",
+    "final_commercial_fit_score", "commercial_fit_score", "commercial_tier",
+    "icp_override_applied",
+]
+
 # Score columns that get blue data bars
 DATABAR_COLS = {
     "display_score",
@@ -550,11 +567,14 @@ def merge_queues(
     target_root: Path,
     queues: list[str],
     input_subfolder: str,
-) -> tuple[list[list[Any]], "list[str] | None", list[dict], dict[str, int]]:
+) -> tuple[list[list[Any]], "list[str] | None", list[dict], dict[str, int], list[dict], list[str]]:
     all_data_rows: list[list[Any]] = []
-    output_headers: "list[str] | None" = None
     report_rows: list[dict] = []
     rows_by_queue: dict[str, int] = {}
+
+    # ── Pass 1: read headers only ─────────────────────────────────────────────
+    # valid_files: list of (queue, path, source_headers)
+    valid_files: list[tuple[str, Path, list[str]]] = []
 
     for queue in queues:
         queue_dir = target_root / queue
@@ -597,35 +617,124 @@ def merge_queues(
                 continue
 
             source_headers = [str(h).strip() if h is not None else "" for h in header_row]
-
-            if output_headers is None:
-                output_headers = _build_output_headers(source_headers)
-
-            rows_read = 0
-            for src_row_idx, src_row in enumerate(rows_iter, start=2):
-                if all(v is None or str(v).strip() == "" for v in src_row):
-                    continue
-                out_row = _row_to_output(
-                    source_row=src_row,
-                    source_headers=source_headers,
-                    output_headers=output_headers,
-                    queue=queue,
-                    filename=xlsx_path.name,
-                    row_num=src_row_idx,
-                )
-                row_dict = dict(zip(output_headers, out_row))
-                flags = compute_debug_flags(row_dict)   # 5 values
-                out_row = out_row + list(flags)
-                all_data_rows.append(out_row)
-                rows_read += 1
-
             wb.close()
-            rows_by_queue[queue] = rows_by_queue.get(queue, 0) + rows_read
-            print(f"    [OK  {rows_read:>6} rows] {xlsx_path.name}")
-            report_rows.append({"queue": queue, "file": xlsx_path.name,
-                                 "status": "MERGED", "rows_read": rows_read, "notes": ""})
+            valid_files.append((queue, xlsx_path, source_headers))
 
-    return all_data_rows, output_headers, report_rows, rows_by_queue
+    # ── Build union schema ────────────────────────────────────────────────────
+    if not valid_files:
+        return [], None, report_rows, rows_by_queue, [], []
+
+    # Select the file with most non-empty headers as base
+    base_queue, base_path, base_headers = max(
+        valid_files,
+        key=lambda t: sum(1 for h in t[2] if h),
+    )
+    # Build union: start with base, append any new headers from other files
+    union_headers: list[str] = list(base_headers)
+    union_set: set[str] = set(union_headers)
+    for _q, _p, hdrs in valid_files:
+        for h in hdrs:
+            if h and h not in union_set:
+                union_headers.append(h)
+                union_set.add(h)
+
+    # Track columns added beyond first-file's headers (for WARN-UNION-NEW)
+    first_headers_set = set(valid_files[0][2])
+    new_in_union: list[str] = [h for h in union_headers if h not in first_headers_set]
+
+    # Remove EMP_RANGE_COL from union source headers before building output headers
+    union_source = [h for h in union_headers if h != EMP_RANGE_COL]
+    output_headers = _build_output_headers(union_source)
+
+    # ── Console warnings ──────────────────────────────────────────────────────
+    required_check_fields = REQUIRED_CORE_COLS + FOREIGN_HQ_SANITIZER_FIELDS
+    for queue, xlsx_path, source_headers in valid_files:
+        dups = [h for h in source_headers if h and source_headers.count(h) > 1]
+        if dups:
+            print(f"    [WARN-DUPS] {queue}/{xlsx_path.name}: duplicate headers: "
+                  f"{', '.join(sorted(set(dups)))}")
+        hdrs_set = set(source_headers)
+        missing = [f for f in required_check_fields if f not in hdrs_set]
+        if missing:
+            print(f"    [WARN-MISSING-FIELDS] {queue}/{xlsx_path.name}: "
+                  f"missing: {', '.join(missing)}")
+
+    if new_in_union:
+        print(f"    [WARN-UNION-NEW] union schema added {len(new_in_union)} column(s) "
+              f"not in first-file headers: {', '.join(new_in_union[:20])}")
+
+    # ── Build file_schema_info stubs (num_rows filled in pass 2) ─────────────
+    file_schema_info: list[dict] = []
+    base_headers_set = set(base_headers)
+    for queue, xlsx_path, source_headers in valid_files:
+        hdrs_set = set(source_headers)
+        missing_core = [f for f in (REQUIRED_CORE_COLS + FOREIGN_HQ_SANITIZER_FIELDS)
+                        if f not in hdrs_set]
+        extra_vs_base = [h for h in source_headers if h and h not in base_headers_set]
+        fhq_field_presence = {f: (f in hdrs_set) for f in FOREIGN_HQ_SANITIZER_FIELDS}
+        fhq_field_positions: dict[str, "int | None"] = {}
+        for f in FOREIGN_HQ_SANITIZER_FIELDS:
+            try:
+                fhq_field_positions[f] = source_headers.index(f) + 1  # 1-based
+            except ValueError:
+                fhq_field_positions[f] = None
+        dups = [h for h in source_headers if h and source_headers.count(h) > 1]
+        file_schema_info.append({
+            "queue": queue,
+            "file": xlsx_path.name,
+            "num_headers": len(source_headers),
+            "num_rows": 0,  # filled in pass 2
+            "missing_core": missing_core,
+            "extra_vs_base": extra_vs_base,
+            "fhq_field_presence": fhq_field_presence,
+            "fhq_field_positions": fhq_field_positions,
+            "duplicate_headers": sorted(set(dups)),
+        })
+
+    # ── Pass 2: re-open each valid file and read data rows ────────────────────
+    schema_info_by_key: dict[tuple[str, str], dict] = {
+        (info["queue"], info["file"]): info for info in file_schema_info
+    }
+
+    for queue, xlsx_path, source_headers in valid_files:
+        wb, err = _safe_load(xlsx_path)
+        if wb is None:
+            # Shouldn't normally happen since pass 1 succeeded, but handle gracefully
+            report_rows.append({"queue": queue, "file": xlsx_path.name,
+                                "status": "SKIPPED_INVALID_WORKBOOK",
+                                "rows_read": 0, "notes": err})
+            continue
+
+        ws = wb[TARGET_SHEET]
+        rows_iter = ws.iter_rows(values_only=True)
+        next(rows_iter)  # skip header row
+
+        rows_read = 0
+        for src_row_idx, src_row in enumerate(rows_iter, start=2):
+            if all(v is None or str(v).strip() == "" for v in src_row):
+                continue
+            out_row = _row_to_output(
+                source_row=src_row,
+                source_headers=source_headers,
+                output_headers=output_headers,
+                queue=queue,
+                filename=xlsx_path.name,
+                row_num=src_row_idx,
+            )
+            row_dict = dict(zip(output_headers, out_row))
+            flags = compute_debug_flags(row_dict)   # 5 values
+            out_row = out_row + list(flags)
+            all_data_rows.append(out_row)
+            rows_read += 1
+
+        wb.close()
+        rows_by_queue[queue] = rows_by_queue.get(queue, 0) + rows_read
+        schema_info_by_key[(queue, xlsx_path.name)]["num_rows"] = rows_read
+        print(f"    [OK  {rows_read:>6} rows] {xlsx_path.name}")
+        report_rows.append({"queue": queue, "file": xlsx_path.name,
+                             "status": "MERGED", "rows_read": rows_read, "notes": ""})
+
+    return all_data_rows, output_headers, report_rows, rows_by_queue, file_schema_info, new_in_union
 
 
 # ---------------------------------------------------------------------------
@@ -930,6 +1039,8 @@ def write_output_workbook(
     output_headers: list[str],
     qa_meta: dict,
     rows_by_queue: dict[str, int],
+    file_schema_info: "list[dict] | None" = None,
+    new_in_union: "list[str] | None" = None,
 ) -> tuple[int, int, int, int, int, dict[str, int], dict[str, int]]:
     """
     Write workbook with Debug View, Opportunity Input Full, Scoring Logic, Merge QA.
@@ -1033,6 +1144,119 @@ def write_output_workbook(
         ws_qa.cell(row=r_idx, column=2, value=v)
         ws_qa.row_dimensions[r_idx].height = DEFAULT_ROW_HEIGHT
 
+    # ── Enhanced per-source-file schema section ───────────────────────────────
+    if file_schema_info is not None:
+        next_row = len(qa_rows) + 1
+
+        # Blank separator + section heading
+        next_row += 1  # blank row
+        ws_qa.cell(row=next_row, column=1, value="── per-source-file schema ──").font = Font(bold=True)
+        ws_qa.cell(row=next_row, column=2, value="")
+        ws_qa.row_dimensions[next_row].height = DEFAULT_ROW_HEIGHT
+        next_row += 1
+
+        # Table header row across columns A–I
+        table_headers = [
+            "Queue", "File", "Headers", "Rows Merged",
+            "Missing Core Cols", "Extra vs Base (count)",
+            "FHQ Fields Present", "Missing FHQ Fields", "FHQ Field Positions",
+        ]
+        for col_idx, th in enumerate(table_headers, start=1):
+            cell = ws_qa.cell(row=next_row, column=col_idx, value=th)
+            cell.font = Font(bold=True)
+        ws_qa.row_dimensions[next_row].height = DEFAULT_ROW_HEIGHT
+        next_row += 1
+
+        # Set column widths for C–I
+        col_widths = {3: 20, 4: 20, 5: 50, 6: 25, 7: 22, 8: 50, 9: 70}
+        for col_idx, width in col_widths.items():
+            ws_qa.column_dimensions[get_column_letter(col_idx)].width = width
+
+        # Data rows
+        for info in file_schema_info:
+            q = info["queue"]
+            f = info["file"]
+            num_headers = info["num_headers"]
+            num_rows = info["num_rows"]
+            missing_core = info["missing_core"]
+            extra_vs_base = info["extra_vs_base"]
+            fhq_field_presence = info["fhq_field_presence"]
+            fhq_field_positions = info["fhq_field_positions"]
+
+            missing_core_str = ", ".join(missing_core) if missing_core else "(none)"
+            extra_count = len(extra_vs_base)
+            fhq_present_str = (
+                f"{sum(fhq_field_presence.values())}/{len(FOREIGN_HQ_SANITIZER_FIELDS)}"
+            )
+            missing_fhq_str = (
+                ", ".join(
+                    fld for fld in FOREIGN_HQ_SANITIZER_FIELDS
+                    if not fhq_field_presence[fld]
+                ) or "(none)"
+            )
+            fhq_positions_str = ", ".join(
+                f"{fld}@col{fhq_field_positions[fld]}"
+                for fld in FOREIGN_HQ_SANITIZER_FIELDS
+                if fhq_field_positions[fld] is not None
+            )
+
+            row_values = [
+                q, f, num_headers, num_rows,
+                missing_core_str, extra_count,
+                fhq_present_str, missing_fhq_str, fhq_positions_str,
+            ]
+            for col_idx, val in enumerate(row_values, start=1):
+                ws_qa.cell(row=next_row, column=col_idx, value=val)
+            ws_qa.row_dimensions[next_row].height = DEFAULT_ROW_HEIGHT
+            next_row += 1
+
+        # Schema warnings section
+        next_row += 1  # blank row
+        ws_qa.cell(row=next_row, column=1, value="── schema warnings ──").font = Font(bold=True)
+        ws_qa.row_dimensions[next_row].height = DEFAULT_ROW_HEIGHT
+        next_row += 1
+
+        red_font = Font(color="FF0000")
+        has_warnings = False
+
+        for info in file_schema_info:
+            q = info["queue"]
+            f = info["file"]
+            fhq_field_presence = info["fhq_field_presence"]
+            missing_fhq = [
+                fld for fld in FOREIGN_HQ_SANITIZER_FIELDS
+                if not fhq_field_presence[fld]
+            ]
+            if missing_fhq:
+                has_warnings = True
+                ws_qa.cell(
+                    row=next_row, column=1,
+                    value=f"[WARN] {q}/{f}: missing FHQ fields",
+                ).font = red_font
+                ws_qa.cell(
+                    row=next_row, column=2,
+                    value=", ".join(missing_fhq),
+                ).font = red_font
+                ws_qa.row_dimensions[next_row].height = DEFAULT_ROW_HEIGHT
+                next_row += 1
+
+        if new_in_union:
+            has_warnings = True
+            ws_qa.cell(
+                row=next_row, column=1,
+                value=f"[WARN] union schema added {len(new_in_union)} column(s) not in first-file schema",
+            ).font = red_font
+            ws_qa.cell(
+                row=next_row, column=2,
+                value=", ".join(new_in_union[:20]),
+            ).font = red_font
+            ws_qa.row_dimensions[next_row].height = DEFAULT_ROW_HEIGHT
+            next_row += 1
+
+        if not has_warnings:
+            ws_qa.cell(row=next_row, column=1, value="(no schema warnings)")
+            ws_qa.row_dimensions[next_row].height = DEFAULT_ROW_HEIGHT
+
     wb.save(output_path)
 
     override_and_score10_counts = {
@@ -1122,7 +1346,7 @@ def main() -> None:
     print(f"  Input subfolder  : {input_subfolder}")
     print(f"  Output           : {output_path}")
 
-    data_rows, output_headers, report_rows, rows_by_queue = merge_queues(
+    data_rows, output_headers, report_rows, rows_by_queue, file_schema_info, new_in_union = merge_queues(
         target_root=target_root,
         queues=queues,
         input_subfolder=input_subfolder,
@@ -1160,6 +1384,8 @@ def main() -> None:
             "output_path": str(output_path),
         },
         rows_by_queue=rows_by_queue,
+        file_schema_info=file_schema_info,
+        new_in_union=new_in_union,
     )
 
     csv_path = write_csv_report(report_rows, report_dir, ts)
