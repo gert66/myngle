@@ -32,6 +32,7 @@ Environment variables (all optional):
 from __future__ import annotations
 
 import argparse
+import io
 import json
 import os
 import re
@@ -623,6 +624,102 @@ def _read_input(
 
 
 # ---------------------------------------------------------------------------
+# Public input helpers (used by Streamlit app and CLI alike)
+# ---------------------------------------------------------------------------
+
+def get_excel_sheet_names(fileobj: "io.IOBase | Path") -> list[str]:
+    """Return sheet names from an Excel file or file-like object."""
+    wb = load_workbook(fileobj, read_only=True, data_only=True)
+    names = wb.sheetnames
+    wb.close()
+    return names
+
+
+def read_input_from_fileobj(
+    fileobj: "io.IOBase",
+    suffix: str,
+    limit: int = DEFAULT_LIMIT,
+    sheet_name: "str | None" = None,
+) -> list[dict[str, Any]]:
+    """
+    Read Excel or CSV from a file-like object (e.g. Streamlit UploadedFile).
+    Returns list of row dicts keyed by header name.
+    All rows returned; caller selects company/domain/country by key.
+    """
+    rows: list[dict[str, Any]] = []
+    suffix = suffix.lower()
+
+    if suffix in (".xlsx", ".xls"):
+        wb = load_workbook(fileobj, read_only=True, data_only=True)
+        ws = wb[sheet_name] if sheet_name and sheet_name in wb.sheetnames else wb.active
+        iter_rows = ws.iter_rows(values_only=True)
+        headers = [str(h).strip() if h is not None else "" for h in next(iter_rows)]
+        for raw in iter_rows:
+            if all(v is None or str(v).strip() == "" for v in raw):
+                continue
+            rows.append({headers[i]: raw[i] for i in range(len(headers))})
+            if len(rows) >= limit:
+                break
+        wb.close()
+    elif suffix == ".csv":
+        import csv
+        text = fileobj.read()
+        if isinstance(text, bytes):
+            text = text.decode("utf-8-sig", errors="replace")
+        reader = csv.DictReader(io.StringIO(text))
+        for row in reader:
+            rows.append(dict(row))
+            if len(rows) >= limit:
+                break
+    return rows
+
+
+# ---------------------------------------------------------------------------
+# Public batch runner (used by Streamlit app)
+# ---------------------------------------------------------------------------
+
+def run_probe_on_rows(
+    rows: list[dict[str, Any]],
+    company_col: str,
+    domain_col: str,
+    country_col: str,
+    default_country: str,
+    serper_key: str,
+    use_model: bool,
+    anthropic_key: str,
+    model: str = "claude-haiku-4-5-20251001",
+    cache: "dict | None" = None,
+    progress_cb: "Any | None" = None,
+) -> list[dict[str, Any]]:
+    """
+    Run the HQ probe on a list of row dicts.
+    progress_cb: optional callable(current_idx, total) for progress reporting.
+    Returns list of probe result dicts (one per input row).
+    """
+    if cache is None:
+        cache = {}
+    results: list[dict[str, Any]] = []
+    total = len(rows)
+    for i, row in enumerate(rows):
+        company = str(row.get(company_col) or "").strip()
+        domain  = str(row.get(domain_col)  or "").strip()
+        country = str(row.get(country_col) or default_country).strip() or default_country
+        probe = probe_company(
+            company_name=company,
+            domain=domain,
+            input_country=country,
+            serper_key=serper_key,
+            use_model=use_model,
+            anthropic_key=anthropic_key,
+            cache=cache,
+        )
+        results.append(probe)
+        if progress_cb:
+            progress_cb(i + 1, total)
+    return results
+
+
+# ---------------------------------------------------------------------------
 # Output writing
 # ---------------------------------------------------------------------------
 
@@ -656,8 +753,7 @@ _COL_WIDTHS: dict[str, int] = {
 }
 
 
-def _write_output(
-    output_path: Path,
+def _build_workbook(
     input_rows: list[dict],
     probe_results: list[dict],
     present_old_cols: list[str],
@@ -665,7 +761,9 @@ def _write_output(
     domain_col: str,
     country_col: str,
     qa_meta: dict,
-) -> None:
+    output_label: str = "",
+) -> "Workbook":
+    """Build and return the openpyxl Workbook. Caller decides how to save it."""
     wb = Workbook()
 
     # ── Sheet 1: results ────────────────────────────────────────────────────
@@ -673,23 +771,23 @@ def _write_output(
     ws.title = "HQ Probe Results"
 
     input_identity_cols = ["source_row", company_col, domain_col, country_col]
-    # Avoid duplicates if user-specified cols differ from defaults
-    seen = set()
+    seen: set[str] = set()
     all_cols: list[str] = []
     for c in input_identity_cols + present_old_cols + PROBE_COLS:
         if c not in seen:
             all_cols.append(c)
             seen.add(c)
 
-    # Header row
     ws.append(all_cols)
     ws.row_dimensions[1].height = 18
+    probe_col_set = set(PROBE_COLS)
+    old_col_set   = set(present_old_cols)
     for col_idx, h in enumerate(all_cols, start=1):
         cell = ws.cell(row=1, column=col_idx)
-        if h in set(PROBE_COLS):
+        if h in probe_col_set:
             cell.fill = _PROBE_FILL
             cell.font = _PROBE_FONT
-        elif h in set(present_old_cols):
+        elif h in old_col_set:
             cell.fill = _OLD_FILL
             cell.font = Font(bold=True)
         else:
@@ -698,7 +796,6 @@ def _write_output(
         cell.alignment = Alignment(horizontal="center", wrap_text=False)
         ws.column_dimensions[get_column_letter(col_idx)].width = _COL_WIDTHS.get(h, max(14, min(len(h) + 4, 35)))
 
-    # Data rows
     for row_idx, (in_row, probe) in enumerate(zip(input_rows, probe_results), start=2):
         values: list[Any] = []
         for h in all_cols:
@@ -711,13 +808,9 @@ def _write_output(
                 values.append(v if v is not None else "")
         ws.append(values)
         ws.row_dimensions[row_idx].height = 15
-
-        # Highlight rows needing review
         if probe.get("needs_manual_review") == "Yes":
             for col_idx in range(1, len(all_cols) + 1):
                 ws.cell(row=row_idx, column=col_idx).fill = _WARN_FILL
-
-        # Wrap long-text cells
         for col_idx, h in enumerate(all_cols, start=1):
             if h in _WRAP_COLS:
                 ws.cell(row=row_idx, column=col_idx).alignment = Alignment(wrap_text=True)
@@ -728,42 +821,44 @@ def _write_output(
     # ── Sheet 2: Run QA ─────────────────────────────────────────────────────
     ws_qa = wb.create_sheet("Run QA")
 
-    detected_italy   = sum(1 for p in probe_results
-                           if (p.get("hq_detected_country") or "").lower() == "italy"
-                           or _COUNTRY_ALIASES.get((p.get("hq_detected_country") or "").lower()) == "Italy")
+    detected_italy   = sum(
+        1 for p in probe_results
+        if _COUNTRY_ALIASES.get((p.get("hq_detected_country") or "").lower(),
+                                 p.get("hq_detected_country", "")) == "Italy"
+    )
     detected_foreign = sum(1 for p in probe_results if p.get("foreign_hq_simple") == "True")
     detected_unknown = sum(1 for p in probe_results if not p.get("hq_detected_country"))
     needs_review_cnt = sum(1 for p in probe_results if p.get("needs_manual_review") == "Yes")
     has_errors       = sum(1 for p in probe_results if p.get("probe_error"))
 
-    qa_rows = [
+    qa_rows_data = [
         ("Run QA – hq_lookup_probe.py", ""),
         ("", ""),
-        ("timestamp",            qa_meta.get("timestamp", "")),
-        ("input_file",           qa_meta.get("input_file", "")),
-        ("output_file",          str(output_path)),
-        ("company_col",          company_col),
-        ("domain_col",           domain_col),
-        ("country_col",          country_col),
-        ("rows_processed",       len(probe_results)),
+        ("timestamp",             qa_meta.get("timestamp", "")),
+        ("input_file",            qa_meta.get("input_file", "")),
+        ("output_file",           output_label or qa_meta.get("output_file", "")),
+        ("company_col",           company_col),
+        ("domain_col",            domain_col),
+        ("country_col",           country_col),
+        ("rows_processed",        len(probe_results)),
         ("", ""),
         ("── detection summary ──", ""),
-        ("detected_italy_hq",    detected_italy),
-        ("detected_foreign_hq",  detected_foreign),
-        ("detected_unknown",     detected_unknown),
-        ("needs_manual_review",  needs_review_cnt),
-        ("rows_with_errors",     has_errors),
+        ("detected_italy_hq",     detected_italy),
+        ("detected_foreign_hq",   detected_foreign),
+        ("detected_unknown",      detected_unknown),
+        ("needs_manual_review",   needs_review_cnt),
+        ("rows_with_errors",      has_errors),
         ("", ""),
         ("── settings ──", ""),
         ("model_extraction_used", qa_meta.get("use_model", False)),
-        ("model_used",           qa_meta.get("model", "")),
-        ("serper_available",     qa_meta.get("serper_available", False)),
-        ("limit",                qa_meta.get("limit", "")),
+        ("model_used",            qa_meta.get("model", "")),
+        ("serper_available",      qa_meta.get("serper_available", False)),
+        ("limit",                 qa_meta.get("limit", "")),
     ]
 
     ws_qa.column_dimensions["A"].width = 30
     ws_qa.column_dimensions["B"].width = 80
-    for r_idx, (k, v) in enumerate(qa_rows, start=1):
+    for r_idx, (k, v) in enumerate(qa_rows_data, start=1):
         cell_a = ws_qa.cell(row=r_idx, column=1, value=k)
         ws_qa.cell(row=r_idx, column=2, value=v)
         if r_idx == 1:
@@ -772,10 +867,13 @@ def _write_output(
             cell_a.font = Font(bold=True)
         ws_qa.row_dimensions[r_idx].height = 15
 
-    # Per-row error summary
-    errors_present = [(i + 1, p.get("probe_error")) for i, p in enumerate(probe_results) if p.get("probe_error")]
+    errors_present = [
+        (i + 1, p.get("probe_error"))
+        for i, p in enumerate(probe_results)
+        if p.get("probe_error")
+    ]
     if errors_present:
-        r_idx = len(qa_rows) + 2
+        r_idx = len(qa_rows_data) + 2
         ws_qa.cell(row=r_idx, column=1, value="── per-row errors ──").font = Font(bold=True)
         r_idx += 1
         for src_row, err in errors_present:
@@ -783,7 +881,56 @@ def _write_output(
             ws_qa.cell(row=r_idx, column=2, value=err)
             r_idx += 1
 
+    return wb
+
+
+def _write_output(
+    output_path: Path,
+    input_rows: list[dict],
+    probe_results: list[dict],
+    present_old_cols: list[str],
+    company_col: str,
+    domain_col: str,
+    country_col: str,
+    qa_meta: dict,
+) -> None:
+    wb = _build_workbook(
+        input_rows=input_rows,
+        probe_results=probe_results,
+        present_old_cols=present_old_cols,
+        company_col=company_col,
+        domain_col=domain_col,
+        country_col=country_col,
+        qa_meta=qa_meta,
+        output_label=str(output_path),
+    )
     wb.save(output_path)
+
+
+def build_excel_bytes(
+    input_rows: list[dict],
+    probe_results: list[dict],
+    present_old_cols: list[str],
+    company_col: str,
+    domain_col: str,
+    country_col: str,
+    qa_meta: dict,
+) -> bytes:
+    """Build the output workbook in memory and return raw bytes (for Streamlit download)."""
+    wb = _build_workbook(
+        input_rows=input_rows,
+        probe_results=probe_results,
+        present_old_cols=present_old_cols,
+        company_col=company_col,
+        domain_col=domain_col,
+        country_col=country_col,
+        qa_meta=qa_meta,
+        output_label="(in-memory)",
+    )
+    buf = io.BytesIO()
+    wb.save(buf)
+    buf.seek(0)
+    return buf.getvalue()
 
 
 # ---------------------------------------------------------------------------
