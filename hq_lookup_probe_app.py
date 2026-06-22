@@ -194,6 +194,12 @@ PROBE_COLS = [
     # Simple HQ mode
     "simple_hq_mode_used",
     "simple_hq_query",
+    # HQ Recovery workflow columns
+    "hq_recovery_selected",
+    "hq_recovery_selection_reason",
+    "sig_foreign_hq_score_original_before_recovery",
+    "sig_foreign_hq_score_for_next_scoring",
+    "competitor_signal_excluded_from_next_scoring",
 ]
 
 # Token columns tracked internally but NOT exported to Excel/CSV visible columns.
@@ -3276,175 +3282,617 @@ if not file_source:
     st.info("Upload a file or enter a local path in the sidebar to get started.")
     st.stop()
 
-_mode_max = 3 if run_mode == "fast" else 8
-_mode_label = {"fast": "Fast", "deep": "Deep", "debug": "Debug"}.get(run_mode, run_mode)
-if use_simple_hq_mode:
-    st.warning("Simple mode uses 1 Serper call per row when a domain is present.")
-    st.markdown(
-        f"**Simple HQ mode** — 1 Serper call/row (domain-root query). "
-        f"With limit={int(limit)}, that is up to **{int(limit):,} Serper calls**."
-    )
-else:
-    st.markdown(
-        f"**Mode: {_mode_label}** — up to **{_mode_max} Serper calls/row**"
-        + (", + 1 website fetch for multilingual detection" if use_multilingual_check else "")
-        + (", + Anthropic review for ambiguous rows" if use_anthropic_review else "")
-        + f". With limit={int(limit)}, that is up to **{int(limit) * _mode_max:,} Serper calls**."
-        + (" Early stopping is active: rows with clear official HQ evidence skip further queries." if run_mode == "fast" else "")
-    )
-
-run_btn = st.button("▶ Run HQ Probe", type="primary", disabled=(not serper_key))
-if not serper_key:
-    st.warning("Enter a Serper API key in the sidebar to enable the run button.")
-
-if run_btn:
-    # Load input rows
-    with st.spinner("Reading input file…"):
-        try:
-            if file_source == "upload":
-                uploaded_file.seek(0)
-                input_rows = read_input_from_fileobj(
-                    uploaded_file, file_suffix, limit=int(limit), sheet_name=selected_sheet,
-                )
-            else:
-                with open(local_path_str.strip(), "rb") as f:
-                    input_rows = read_input_from_fileobj(
-                        f, file_suffix, limit=int(limit), sheet_name=selected_sheet,
-                    )
-        except Exception as exc:
-            st.error(f"Failed to read input: {exc}")
-            st.stop()
-
-    if not input_rows:
-        st.warning("No rows found in the input file.")
-        st.stop()
-
-    # Old-FHQ signal filter
-    if only_fhq_signal:
-        def _has_fhq_signal(row: dict) -> bool:
-            score = row.get("sig_foreign_hq_score")
-            sanitized = str(row.get("foreign_hq_sanitized") or "").strip().lower()
-            try:
-                score_val = float(score)
-            except (TypeError, ValueError):
-                score_val = 0.0
-            return score_val > 0 or sanitized in {"true", "yes", "1"}
-
-        filtered = [r for r in input_rows if _has_fhq_signal(r)]
-        if filtered:
-            st.info(f"Old FHQ filter: {len(filtered)} / {len(input_rows)} rows have a signal.")
-            input_rows = filtered
-        else:
-            st.warning("No rows matched the old FHQ signal filter. Running on all rows.")
-
-    # Recovery candidates filter (zero/blank FHQ score)
-    if only_recovery:
-        def _is_recovery_candidate(row: dict) -> bool:
-            try:
-                return float(row.get("sig_foreign_hq_score") or 0) == 0
-            except (TypeError, ValueError):
-                return True
-
-        filtered_r = [r for r in input_rows if _is_recovery_candidate(r)]
-        if filtered_r:
-            st.info(f"Recovery filter: {len(filtered_r)} / {len(input_rows)} rows have zero/blank FHQ score.")
-            input_rows = filtered_r
-        else:
-            st.warning("No recovery candidates found (all rows have non-zero FHQ score). Running on all rows.")
-
-    # Detect old enrichment cols
-    sample_keys = set(input_rows[0].keys()) if input_rows else set()
-    present_old_cols = [c for c in OLD_ENRICHMENT_COLS if c in sample_keys]
-
-    # Run probe
-    progress_bar = st.progress(0.0, text="Starting…")
-    probe_results: list[dict] = []
-    total = len(input_rows)
-    cache: dict = {}
-    error_rows: list[str] = []
-
-    for i, row in enumerate(input_rows):
-        company = str(row.get(company_col) or "").strip()
-        domain  = str(row.get(domain_col)  or "").strip()
-        # Country: use column if selected and non-blank, else default
-        if country_col:
-            country = str(row.get(country_col) or "").strip() or default_country
-        else:
-            country = default_country
-
-        probe = probe_company(
-            company_name=company,
-            domain=domain,
-            input_country=country,
-            serper_key=serper_key,
-            use_model=use_model,
-            anthropic_key=anthropic_key,
-            cache=cache,
-            input_row=row,
-            use_multilingual_check=use_multilingual_check,
-            use_anthropic_review=use_anthropic_review,
-            use_mimic_check=use_mimic_check,
-            run_mode=run_mode,
-            use_simple_hq_mode=use_simple_hq_mode,
-        )
-
-        # Sanity guard: if detected country == input country, force foreign_hq_simple = False
-        det = _std_country(probe.get("hq_detected_country") or "")
-        inp = _std_country(probe.get("input_country_used") or "")
-        if det and inp and det.lower() == inp.lower():
-            probe["foreign_hq_simple"] = "False"
-
-        probe_results.append(probe)
-        if probe.get("probe_error"):
-            error_rows.append(f"Row {i+1} ({company}): {probe['probe_error']}")
-
-        pct = (i + 1) / total
-        country_hit = probe.get("hq_detected_country") or "…"
-        progress_bar.progress(pct, text=f"[{i+1}/{total}] {company[:45]} → {country_hit}")
-
-    progress_bar.empty()
-
-    # Run-level usage aggregation
-    run_usage = {
-        "rows_processed":           len(probe_results),
-        "serper_calls_used":        sum(int(p.get("serper_calls_used") or 0) for p in probe_results),
-        "rows_with_cache_hit":      sum(1 for p in probe_results if p.get("serper_cache_hit") in ("True", "partial")),
-        "website_fetches":          sum(int(p.get("website_fetch_count") or 0) for p in probe_results),
-        "anthropic_reviews_used":   sum(1 for p in probe_results if p.get("anthropic_hq_review_used") == "Yes"),
-        "anthropic_web_search_used":sum(1 for p in probe_results if p.get("anthropic_web_search_used") == "Yes"),
-        "anthropic_input_tokens":   sum(int(p.get("_anthr_input_tok") or 0) for p in probe_results),
-        "anthropic_output_tokens":  sum(int(p.get("_anthr_output_tok") or 0) for p in probe_results),
-        "anthropic_total_tokens":   sum(int(p.get("_anthr_total_tok") or 0) for p in probe_results),
-        "anthropic_errors":         sum(1 for p in probe_results if p.get("anthropic_error")),
-    }
-
-    # Store in session state
-    ts = datetime.now().strftime("%Y%m%d_%H%M%S")
-    st.session_state[_KEY_RESULTS]    = probe_results
-    st.session_state[_KEY_INPUT_ROWS] = input_rows
-    st.session_state[_KEY_OLD_COLS]   = present_old_cols
-    st.session_state[_KEY_COLS_CFG]   = (company_col, domain_col, country_col or "(default)")
-    st.session_state[_KEY_META] = {
-        "timestamp":              ts,
-        "input_file":             file_label,
-        "use_model":              use_model,
-        "model":                  "claude-haiku-4-5-20251001" if (use_model or use_anthropic_review) else "",
-        "serper_available":       bool(serper_key),
-        "limit":                  int(limit),
-        "use_multilingual_check": use_multilingual_check,
-        "use_anthropic_review":   use_anthropic_review,
-        "use_mimic_check":        use_mimic_check,
-        "run_mode":               run_mode,
-        "use_simple_hq_mode":     use_simple_hq_mode,
-    }
-    st.session_state["hq_probe_run_usage"] = run_usage
-
-    if error_rows:
-        with st.expander(f"⚠️ {len(error_rows)} row error(s)", expanded=False):
-            for e in error_rows:
-                st.text(e)
 
 # ---------------------------------------------------------------------------
+# Workflow mode selector
+# ---------------------------------------------------------------------------
+
+if "hq_app_mode" not in st.session_state:
+    st.session_state["hq_app_mode"] = "probe"
+
+_wf_c1, _wf_c2 = st.columns(2)
+if _wf_c1.button(
+    "🔍 HQ Probe",
+    use_container_width=True,
+    type="primary" if st.session_state["hq_app_mode"] == "probe" else "secondary",
+):
+    st.session_state["hq_app_mode"] = "probe"
+    st.rerun()
+if _wf_c2.button(
+    "🔄 HQ Recovery",
+    use_container_width=True,
+    type="primary" if st.session_state["hq_app_mode"] == "recovery" else "secondary",
+):
+    st.session_state["hq_app_mode"] = "recovery"
+    st.rerun()
+st.markdown("---")
+
+_app_mode = st.session_state["hq_app_mode"]
+
+# ---------------------------------------------------------------------------
+# HQ PROBE workflow (existing)
+# ---------------------------------------------------------------------------
+if _app_mode == "probe":
+    _mode_max = 3 if run_mode == "fast" else 8
+    _mode_label = {"fast": "Fast", "deep": "Deep", "debug": "Debug"}.get(run_mode, run_mode)
+    if use_simple_hq_mode:
+        st.warning("Simple mode uses 1 Serper call per row when a domain is present.")
+        st.markdown(
+            f"**Simple HQ mode** — 1 Serper call/row (domain-root query). "
+            f"With limit={int(limit)}, that is up to **{int(limit):,} Serper calls**."
+        )
+    else:
+        st.markdown(
+            f"**Mode: {_mode_label}** — up to **{_mode_max} Serper calls/row**"
+            + (", + 1 website fetch for multilingual detection" if use_multilingual_check else "")
+            + (", + Anthropic review for ambiguous rows" if use_anthropic_review else "")
+            + f". With limit={int(limit)}, that is up to **{int(limit) * _mode_max:,} Serper calls**."
+            + (" Early stopping is active: rows with clear official HQ evidence skip further queries." if run_mode == "fast" else "")
+        )
+
+    run_btn = st.button("▶ Run HQ Probe", type="primary", disabled=(not serper_key))
+    if not serper_key:
+        st.warning("Enter a Serper API key in the sidebar to enable the run button.")
+
+    if run_btn:
+        # Load input rows
+        with st.spinner("Reading input file…"):
+            try:
+                if file_source == "upload":
+                    uploaded_file.seek(0)
+                    input_rows = read_input_from_fileobj(
+                        uploaded_file, file_suffix, limit=int(limit), sheet_name=selected_sheet,
+                    )
+                else:
+                    with open(local_path_str.strip(), "rb") as f:
+                        input_rows = read_input_from_fileobj(
+                            f, file_suffix, limit=int(limit), sheet_name=selected_sheet,
+                        )
+            except Exception as exc:
+                st.error(f"Failed to read input: {exc}")
+                st.stop()
+
+        if not input_rows:
+            st.warning("No rows found in the input file.")
+            st.stop()
+
+        # Old-FHQ signal filter
+        if only_fhq_signal:
+            def _has_fhq_signal(row: dict) -> bool:
+                score = row.get("sig_foreign_hq_score")
+                sanitized = str(row.get("foreign_hq_sanitized") or "").strip().lower()
+                try:
+                    score_val = float(score)
+                except (TypeError, ValueError):
+                    score_val = 0.0
+                return score_val > 0 or sanitized in {"true", "yes", "1"}
+
+            filtered = [r for r in input_rows if _has_fhq_signal(r)]
+            if filtered:
+                st.info(f"Old FHQ filter: {len(filtered)} / {len(input_rows)} rows have a signal.")
+                input_rows = filtered
+            else:
+                st.warning("No rows matched the old FHQ signal filter. Running on all rows.")
+
+        # Recovery candidates filter (zero/blank FHQ score)
+        if only_recovery:
+            def _is_recovery_candidate(row: dict) -> bool:
+                try:
+                    return float(row.get("sig_foreign_hq_score") or 0) == 0
+                except (TypeError, ValueError):
+                    return True
+
+            filtered_r = [r for r in input_rows if _is_recovery_candidate(r)]
+            if filtered_r:
+                st.info(f"Recovery filter: {len(filtered_r)} / {len(input_rows)} rows have zero/blank FHQ score.")
+                input_rows = filtered_r
+            else:
+                st.warning("No recovery candidates found (all rows have non-zero FHQ score). Running on all rows.")
+
+        # Detect old enrichment cols
+        sample_keys = set(input_rows[0].keys()) if input_rows else set()
+        present_old_cols = [c for c in OLD_ENRICHMENT_COLS if c in sample_keys]
+
+        # Run probe
+        progress_bar = st.progress(0.0, text="Starting…")
+        probe_results: list[dict] = []
+        total = len(input_rows)
+        cache: dict = {}
+        error_rows: list[str] = []
+
+        for i, row in enumerate(input_rows):
+            company = str(row.get(company_col) or "").strip()
+            domain  = str(row.get(domain_col)  or "").strip()
+            # Country: use column if selected and non-blank, else default
+            if country_col:
+                country = str(row.get(country_col) or "").strip() or default_country
+            else:
+                country = default_country
+
+            probe = probe_company(
+                company_name=company,
+                domain=domain,
+                input_country=country,
+                serper_key=serper_key,
+                use_model=use_model,
+                anthropic_key=anthropic_key,
+                cache=cache,
+                input_row=row,
+                use_multilingual_check=use_multilingual_check,
+                use_anthropic_review=use_anthropic_review,
+                use_mimic_check=use_mimic_check,
+                run_mode=run_mode,
+                use_simple_hq_mode=use_simple_hq_mode,
+            )
+
+            # Sanity guard: if detected country == input country, force foreign_hq_simple = False
+            det = _std_country(probe.get("hq_detected_country") or "")
+            inp = _std_country(probe.get("input_country_used") or "")
+            if det and inp and det.lower() == inp.lower():
+                probe["foreign_hq_simple"] = "False"
+
+            probe_results.append(probe)
+            if probe.get("probe_error"):
+                error_rows.append(f"Row {i+1} ({company}): {probe['probe_error']}")
+
+            pct = (i + 1) / total
+            country_hit = probe.get("hq_detected_country") or "…"
+            progress_bar.progress(pct, text=f"[{i+1}/{total}] {company[:45]} → {country_hit}")
+
+        progress_bar.empty()
+
+        # Run-level usage aggregation
+        run_usage = {
+            "rows_processed":           len(probe_results),
+            "serper_calls_used":        sum(int(p.get("serper_calls_used") or 0) for p in probe_results),
+            "rows_with_cache_hit":      sum(1 for p in probe_results if p.get("serper_cache_hit") in ("True", "partial")),
+            "website_fetches":          sum(int(p.get("website_fetch_count") or 0) for p in probe_results),
+            "anthropic_reviews_used":   sum(1 for p in probe_results if p.get("anthropic_hq_review_used") == "Yes"),
+            "anthropic_web_search_used":sum(1 for p in probe_results if p.get("anthropic_web_search_used") == "Yes"),
+            "anthropic_input_tokens":   sum(int(p.get("_anthr_input_tok") or 0) for p in probe_results),
+            "anthropic_output_tokens":  sum(int(p.get("_anthr_output_tok") or 0) for p in probe_results),
+            "anthropic_total_tokens":   sum(int(p.get("_anthr_total_tok") or 0) for p in probe_results),
+            "anthropic_errors":         sum(1 for p in probe_results if p.get("anthropic_error")),
+        }
+
+        # Store in session state
+        ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+        st.session_state[_KEY_RESULTS]    = probe_results
+        st.session_state[_KEY_INPUT_ROWS] = input_rows
+        st.session_state[_KEY_OLD_COLS]   = present_old_cols
+        st.session_state[_KEY_COLS_CFG]   = (company_col, domain_col, country_col or "(default)")
+        st.session_state[_KEY_META] = {
+            "timestamp":              ts,
+            "input_file":             file_label,
+            "use_model":              use_model,
+            "model":                  "claude-haiku-4-5-20251001" if (use_model or use_anthropic_review) else "",
+            "serper_available":       bool(serper_key),
+            "limit":                  int(limit),
+            "use_multilingual_check": use_multilingual_check,
+            "use_anthropic_review":   use_anthropic_review,
+            "use_mimic_check":        use_mimic_check,
+            "run_mode":               run_mode,
+            "use_simple_hq_mode":     use_simple_hq_mode,
+        }
+        st.session_state["hq_probe_run_usage"] = run_usage
+
+        if error_rows:
+            with st.expander(f"⚠️ {len(error_rows)} row error(s)", expanded=False):
+                for e in error_rows:
+                    st.text(e)
+
+
+# ---------------------------------------------------------------------------
+# HQ RECOVERY workflow  ("Opportunity Input Full HQ Recovery")
+# ---------------------------------------------------------------------------
+elif _app_mode == "recovery":
+    _REC_TARGET_SHEET = "Opportunity Input Full"
+    _KEY_REC_RESULTS  = "hq_recovery_results"
+    _KEY_REC_ALL_ROWS = "hq_recovery_all_rows"
+    _KEY_REC_META     = "hq_recovery_meta"
+
+    st.subheader("Opportunity Input Full — HQ Recovery")
+    st.caption(
+        "Reads the full workbook, selects under-scored rows, runs simple HQ lookup, "
+        "and writes back a revised workbook."
+    )
+
+    # ── Sheet selection ─────────────────────────────────────────────────────
+    _rec_sheet = _REC_TARGET_SHEET
+    if sheet_names:
+        if _REC_TARGET_SHEET in sheet_names:
+            st.success(f"Sheet '{_REC_TARGET_SHEET}' detected.")
+        else:
+            st.warning(
+                f"Sheet '{_REC_TARGET_SHEET}' not found. "
+                f"Available sheets: {sheet_names}. Using first sheet."
+            )
+            _rec_sheet = sheet_names[0]
+
+    # ── Threshold setting ───────────────────────────────────────────────────
+    _rec_threshold = st.number_input(
+        "Commercial fit score threshold (high-score HQ-zero candidates)",
+        min_value=0.0, max_value=100.0, value=5.0, step=0.5,
+        help="Rows with commercial_fit_score ≥ threshold AND sig_foreign_hq_score = 0 are selected.",
+    )
+
+    # ── Load ALL rows from the target sheet ─────────────────────────────────
+    _rec_all_rows: list[dict] = []
+    _rec_load_err = ""
+    try:
+        if file_source == "upload":
+            uploaded_file.seek(0)
+            _rec_all_rows = read_input_from_fileobj(
+                uploaded_file, file_suffix, limit=50000, sheet_name=_rec_sheet
+            )
+            uploaded_file.seek(0)
+        else:
+            with open(local_path_str.strip(), "rb") as _f:
+                _rec_all_rows = read_input_from_fileobj(
+                    _f, file_suffix, limit=50000, sheet_name=_rec_sheet
+                )
+    except Exception as _exc:
+        _rec_load_err = str(_exc)
+
+    if _rec_load_err:
+        st.error(f"Failed to read '{_rec_sheet}': {_rec_load_err}")
+        st.stop()
+
+    if not _rec_all_rows:
+        st.warning(f"No rows found in sheet '{_rec_sheet}'.")
+        st.stop()
+
+    # ── Selection logic ─────────────────────────────────────────────────────
+    def _rec_fhq_score(row: dict) -> float:
+        try:
+            return float(row.get("sig_foreign_hq_score") or 0)
+        except (TypeError, ValueError):
+            return 0.0
+
+    def _rec_is_sanitized(row: dict) -> bool:
+        """sig_foreign_hq_score = 0 AND (sanitized=True OR original_score=3 OR reason non-empty)."""
+        if _rec_fhq_score(row) != 0:
+            return False
+        sanitized = str(row.get("foreign_hq_sanitized") or "").strip().lower()
+        try:
+            orig = float(row.get("foreign_hq_original_score") or 0)
+        except (TypeError, ValueError):
+            orig = 0.0
+        reason = str(row.get("foreign_hq_sanitizer_reason") or "").strip()
+        return sanitized in ("true", "yes", "1") or orig == 3 or bool(reason)
+
+    def _rec_is_highscore_hq_zero(row: dict, threshold: float) -> bool:
+        """sig_foreign_hq_score = 0 AND commercial_fit_score >= threshold."""
+        if _rec_fhq_score(row) != 0:
+            return False
+        try:
+            comm = float(
+                row.get("commercial_fit_score")
+                or row.get("final_commercial_fit_score")
+                or 0
+            )
+        except (TypeError, ValueError):
+            comm = 0.0
+        return comm >= threshold
+
+    _rec_sanitized_idx   = [i for i, r in enumerate(_rec_all_rows) if _rec_is_sanitized(r)]
+    _rec_highscore_idx   = [i for i, r in enumerate(_rec_all_rows)
+                             if _rec_is_highscore_hq_zero(r, _rec_threshold)]
+    _rec_selected_idx    = sorted(set(_rec_sanitized_idx) | set(_rec_highscore_idx))
+    _rec_unchanged_idx   = [i for i in range(len(_rec_all_rows)) if i not in set(_rec_selected_idx)]
+
+    # ── Pre-run counts ──────────────────────────────────────────────────────
+    _rc1, _rc2, _rc3, _rc4 = st.columns(4)
+    _rc1.metric("Total rows",               len(_rec_all_rows))
+    _rc2.metric("Sanitized candidates",     len(_rec_sanitized_idx))
+    _rc3.metric("High-score HQ-zero",       len(_rec_highscore_idx))
+    _rc4.metric("Selected (unique)",        len(_rec_selected_idx))
+    _rc5, _rc6 = st.columns(2)
+    _rc5.metric("Rows to process",          len(_rec_selected_idx))
+    _rc6.metric("Rows left unchanged",      len(_rec_unchanged_idx))
+
+    if not _rec_selected_idx:
+        st.info("No rows match the selection criteria. Adjust the threshold or check the input data.")
+        st.stop()
+
+    # ── Run button ──────────────────────────────────────────────────────────
+    _rec_run_btn = st.button(
+        f"▶ Run HQ Recovery ({len(_rec_selected_idx)} rows)",
+        type="primary",
+        disabled=(not serper_key),
+    )
+    if not serper_key:
+        st.warning("Enter a Serper API key in the sidebar to enable the run button.")
+
+    if _rec_run_btn:
+        _rec_sample_keys = set(_rec_all_rows[0].keys()) if _rec_all_rows else set()
+        _rec_present_old = [c for c in OLD_ENRICHMENT_COLS if c in _rec_sample_keys]
+
+        _rec_progress = st.progress(0.0, text="Starting HQ Recovery…")
+        _rec_probe_map: dict[int, dict] = {}  # row_index → probe result
+        _rec_cache: dict = {}
+        _rec_errors: list[str] = []
+        _rec_total = len(_rec_selected_idx)
+
+        for _rec_i, _rec_row_idx in enumerate(_rec_selected_idx):
+            _rec_row     = _rec_all_rows[_rec_row_idx]
+            _rec_company = str(_rec_row.get(company_col) or "").strip()
+            _rec_domain  = str(_rec_row.get(domain_col)  or "").strip()
+            _rec_country = (
+                str(_rec_row.get(country_col) or "").strip()
+                if country_col else default_country
+            ) or default_country
+
+            _rec_probe = probe_company(
+                company_name=_rec_company,
+                domain=_rec_domain,
+                input_country=_rec_country,
+                serper_key=serper_key,
+                use_model=False,
+                anthropic_key="",
+                cache=_rec_cache,
+                input_row=_rec_row,
+                use_multilingual_check=False,
+                use_anthropic_review=False,
+                use_mimic_check=False,
+                run_mode="fast",
+                use_simple_hq_mode=True,
+            )
+
+            # Sanity guard
+            _rec_det = _std_country(_rec_probe.get("hq_detected_country") or "")
+            _rec_inp = _std_country(_rec_probe.get("input_country_used") or "")
+            if _rec_det and _rec_inp and _rec_det.lower() == _rec_inp.lower():
+                _rec_probe["foreign_hq_simple"] = "False"
+
+            # Recovery-specific columns
+            _rec_probe["hq_recovery_selected"]           = "Yes"
+            _rec_probe["hq_recovery_selection_reason"]   = (
+                "sanitized_candidate" if _rec_row_idx in set(_rec_sanitized_idx)
+                else "high_score_hq_zero"
+            )
+            _rec_probe["sig_foreign_hq_score_original_before_recovery"] = (
+                _rec_row.get("sig_foreign_hq_score", "")
+            )
+            # Score for next scoring: use reviewed score if trusted, else original
+            _rec_reviewed = _rec_probe.get("sig_foreign_hq_score_reviewed", 0)
+            _rec_trusted  = (
+                str(_rec_probe.get("needs_manual_review", "")).lower() != "yes"
+            )
+            _rec_probe["sig_foreign_hq_score_for_next_scoring"] = (
+                int(_rec_reviewed) if _rec_trusted and _rec_reviewed else
+                _rec_row.get("sig_foreign_hq_score", 0)
+            )
+            # Competitor signal: exclude from next scoring
+            _rec_probe["competitor_signal_excluded_from_next_scoring"] = "True"
+
+            _rec_probe_map[_rec_row_idx] = _rec_probe
+
+            if _rec_probe.get("probe_error"):
+                _rec_errors.append(
+                    f"Row {_rec_row_idx+1} ({_rec_company}): {_rec_probe['probe_error']}"
+                )
+
+            _rec_pct     = (_rec_i + 1) / _rec_total
+            _rec_country_hit = _rec_probe.get("hq_detected_country") or "…"
+            _rec_progress.progress(
+                _rec_pct,
+                text=f"[{_rec_i+1}/{_rec_total}] {_rec_company[:45]} → {_rec_country_hit}",
+            )
+
+        _rec_progress.empty()
+
+        # ── Store in session state ──────────────────────────────────────────
+        _rec_ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+        st.session_state[_KEY_REC_RESULTS]  = _rec_probe_map
+        st.session_state[_KEY_REC_ALL_ROWS] = _rec_all_rows
+        st.session_state[_KEY_REC_META]     = {
+            "timestamp":     _rec_ts,
+            "input_file":    file_label,
+            "sheet":         _rec_sheet,
+            "threshold":     _rec_threshold,
+            "selected":      len(_rec_selected_idx),
+            "total":         len(_rec_all_rows),
+            "sanitized":     len(_rec_sanitized_idx),
+            "highscore":     len(_rec_highscore_idx),
+            "unchanged":     len(_rec_unchanged_idx),
+        }
+
+        if _rec_errors:
+            with st.expander(f"⚠️ {len(_rec_errors)} row error(s)", expanded=False):
+                for _e in _rec_errors:
+                    st.text(_e)
+
+    # ── Show recovery results (persist across reruns) ───────────────────────
+    if _KEY_REC_RESULTS not in st.session_state:
+        st.stop()
+
+    _rec_probe_map_r: dict[int, dict] = st.session_state[_KEY_REC_RESULTS]
+    _rec_all_rows_r: list[dict]       = st.session_state[_KEY_REC_ALL_ROWS]
+    _rec_meta_r: dict                 = st.session_state[_KEY_REC_META]
+    _rec_ts_r = _rec_meta_r.get("timestamp", "")
+
+    # Summary metrics
+    _rec_updated_to_3 = sum(
+        1 for p in _rec_probe_map_r.values()
+        if str(p.get("sig_foreign_hq_score_for_next_scoring", "")) == "3"
+    )
+    _rec_needs_review = sum(
+        1 for p in _rec_probe_map_r.values()
+        if p.get("needs_manual_review") == "Yes"
+    )
+
+    st.markdown("---")
+    st.subheader("Recovery Results")
+    _rr1, _rr2, _rr3, _rr4 = st.columns(4)
+    _rr1.metric("Total rows",              _rec_meta_r.get("total", 0))
+    _rr2.metric("Rows processed",          _rec_meta_r.get("selected", 0))
+    _rr3.metric("Updated to score 3",      _rec_updated_to_3)
+    _rr4.metric("Needs manual review",     _rec_needs_review)
+
+    # ── Build revised rows (all rows, only selected rows get probe output) ──
+    def _build_recovery_rows() -> list[dict]:
+        out = []
+        _rec_probe_cols_set = set(PROBE_COLS + [
+            "hq_recovery_selected",
+            "hq_recovery_selection_reason",
+            "sig_foreign_hq_score_original_before_recovery",
+            "sig_foreign_hq_score_for_next_scoring",
+            "competitor_signal_excluded_from_next_scoring",
+        ])
+        for idx, row in enumerate(_rec_all_rows_r):
+            merged = dict(row)
+            if idx in _rec_probe_map_r:
+                probe = _rec_probe_map_r[idx]
+                for k, v in probe.items():
+                    if k in _rec_probe_cols_set and not k.startswith("_"):
+                        merged[k] = v
+                # Preserve competitor columns (do not overwrite with probe output)
+                for col_name in row:
+                    if "competitor" in col_name.lower() and col_name in row:
+                        merged[col_name] = row[col_name]
+            else:
+                merged["hq_recovery_selected"] = "No"
+            out.append(merged)
+        return out
+
+    _rec_revised_rows = _build_recovery_rows()
+
+    # ── Display table ───────────────────────────────────────────────────────
+    _rec_display_cols = [
+        company_col, domain_col,
+        "hq_recovery_selected", "hq_recovery_selection_reason",
+        "sig_foreign_hq_score_original_before_recovery",
+        "sig_foreign_hq_score_for_next_scoring",
+        "sig_foreign_hq_score_reviewed",
+        "hq_detected_country", "parent_group_hq_country",
+        "hq_structure_type", "needs_manual_review",
+        "sig_foreign_hq_review_evidence_quote",
+        "serper_queries_used", "serper_calls_used",
+        "competitor_signal_excluded_from_next_scoring",
+    ]
+
+    try:
+        import pandas as _pd
+        _rec_df_rows = [
+            {c: r.get(c, "") for c in _rec_display_cols if c}
+            for r in _rec_revised_rows
+            if r.get("hq_recovery_selected") == "Yes"
+        ]
+        if _rec_df_rows:
+            _rec_df = _pd.DataFrame(_rec_df_rows)
+            _rec_present_cols = [c for c in _rec_display_cols if c and c in _rec_df.columns]
+            st.dataframe(_rec_df[_rec_present_cols], use_container_width=True, height=400)
+    except ImportError:
+        pass
+
+    # ── Export revised workbook ─────────────────────────────────────────────
+    st.markdown("---")
+    st.subheader("Download revised workbook")
+
+    @st.cache_data(show_spinner=False)
+    def _make_recovery_excel(_key: int) -> bytes:
+        """Build a workbook with the revised 'Opportunity Input Full' sheet + run summary."""
+        import openpyxl
+        from openpyxl.styles import Font, PatternFill, Alignment
+        from openpyxl.utils import get_column_letter
+
+        wb = openpyxl.Workbook()
+
+        # ── Sheet 1: revised Opportunity Input Full ─────────────────────────
+        ws = wb.active
+        ws.title = _REC_TARGET_SHEET
+
+        rows = _rec_revised_rows
+        if not rows:
+            buf = io.BytesIO(); wb.save(buf); buf.seek(0); return buf.getvalue()
+
+        # Column order: original cols first, then new probe cols appended
+        _orig_cols   = list(_rec_all_rows_r[0].keys()) if _rec_all_rows_r else []
+        _extra_cols  = [
+            "hq_recovery_selected", "hq_recovery_selection_reason",
+            "sig_foreign_hq_score_original_before_recovery",
+            "sig_foreign_hq_score_for_next_scoring",
+            "sig_foreign_hq_score_reviewed",
+            "hq_detected_country", "hq_detected_city",
+            "parent_group_hq_country", "parent_group_hq_city",
+            "hq_structure_type", "needs_manual_review",
+            "hq_confidence", "foreign_hq_simple",
+            "sig_foreign_hq_review_reason", "sig_foreign_hq_review_confidence",
+            "sig_foreign_hq_review_evidence_url", "sig_foreign_hq_review_evidence_quote",
+            "serper_queries_used", "serper_calls_used",
+            "domain_root_hq_evidence_rank", "domain_root_hq_rejected_evidence_reason",
+            "competitor_signal_excluded_from_next_scoring",
+            "hq_review_trigger",
+        ]
+        _all_cols = _orig_cols + [c for c in _extra_cols if c not in _orig_cols]
+
+        # Header row
+        _hdr_fill = PatternFill("solid", fgColor="1F4E79")
+        _hdr_font = Font(bold=True, color="FFFFFF")
+        for col_i, col_name in enumerate(_all_cols, start=1):
+            cell = ws.cell(row=1, column=col_i, value=col_name)
+            cell.fill = _hdr_fill
+            cell.font = _hdr_font
+            cell.alignment = Alignment(wrap_text=False)
+            ws.column_dimensions[get_column_letter(col_i)].width = max(12, min(len(col_name) + 2, 40))
+
+        # Data rows
+        _new_col_set = set(_extra_cols)
+        _new_fill    = PatternFill("solid", fgColor="E2EFDA")
+        for row_i, row_data in enumerate(rows, start=2):
+            for col_i, col_name in enumerate(_all_cols, start=1):
+                val = row_data.get(col_name, "")
+                if val is True:  val = "True"
+                if val is False: val = "False"
+                cell = ws.cell(row=row_i, column=col_i, value=val)
+                if col_name in _new_col_set and val not in ("", None):
+                    cell.fill = _new_fill
+
+        ws.freeze_panes = "A2"
+
+        # ── Sheet 2: Run Summary ────────────────────────────────────────────
+        ws2 = wb.create_sheet("Recovery Run Summary")
+        _sum_data = [
+            ("Input file",          _rec_meta_r.get("input_file", "")),
+            ("Sheet",               _rec_meta_r.get("sheet", "")),
+            ("Timestamp",           _rec_meta_r.get("timestamp", "")),
+            ("Total rows",          _rec_meta_r.get("total", 0)),
+            ("Sanitized candidates",_rec_meta_r.get("sanitized", 0)),
+            ("High-score HQ-zero",  _rec_meta_r.get("highscore", 0)),
+            ("Rows selected",       _rec_meta_r.get("selected", 0)),
+            ("Rows unchanged",      _rec_meta_r.get("unchanged", 0)),
+            ("Updated to score 3",  _rec_updated_to_3),
+            ("Needs manual review", _rec_needs_review),
+            ("Threshold",           _rec_meta_r.get("threshold", 5.0)),
+        ]
+        for r_i, (k, v) in enumerate(_sum_data, start=1):
+            ws2.cell(row=r_i, column=1, value=k).font = Font(bold=True)
+            ws2.cell(row=r_i, column=2, value=v)
+        ws2.column_dimensions["A"].width = 30
+        ws2.column_dimensions["B"].width = 40
+
+        buf = io.BytesIO()
+        wb.save(buf)
+        buf.seek(0)
+        return buf.getvalue()
+
+    _rec_dl_fname = f"hq_recovery_{_rec_ts_r}.xlsx"
+    st.download_button(
+        label="⬇️ Download revised workbook",
+        data=_make_recovery_excel(id(_rec_revised_rows)),
+        file_name=_rec_dl_fname,
+        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        help=f"Revised '{_REC_TARGET_SHEET}' sheet + Recovery Run Summary. "
+             f"Same number of rows as input ({len(_rec_all_rows_r)}).",
+    )
+    st.caption(
+        f"Output: **{_rec_dl_fname}** · "
+        f"{len(_rec_all_rows_r)} rows (same as source) · "
+        f"sheet: '{_REC_TARGET_SHEET}'"
+    )
+
+
 # Show results (persists across reruns via session state)
 # ---------------------------------------------------------------------------
 
