@@ -174,6 +174,11 @@ PROBE_COLS = [
     "brand_root_hq_country",
     "brand_root_hq_city",
     "brand_root_hq_source_type",
+    # Known-global-brand detection
+    "known_global_brand_detected",
+    "known_global_brand_name",
+    "known_global_brand_type",
+    "known_global_brand_reason",
 ]
 
 # Token columns tracked internally but NOT exported to Excel/CSV visible columns.
@@ -1296,7 +1301,8 @@ def _extract_brand_roots(company_name: str, domain: str) -> list[str]:
     out: list[str] = []
     for c in candidates:
         c = _smart_case(c.strip())
-        if len(c) > 2 and c.lower() not in seen:
+        # Allow short tokens (≥2 chars) for known acronyms like "EY", "HP"
+        if len(c) >= 2 and c.lower() not in seen:
             seen.add(c.lower())
             out.append(c)
 
@@ -1391,6 +1397,44 @@ def _scan_for_hq(text: str) -> tuple[str, str, str, str]:
     return "", "", "", ""
 
 
+# Known global brands: brand_root_token (lowercase) → type
+# "corporate"      = single parent company with a clear HQ country
+# "global_network" = federated professional-services network of member firms
+_KNOWN_GLOBAL_BRANDS: dict[str, str] = {
+    # Corporate
+    "ibm": "corporate", "microsoft": "corporate", "oracle": "corporate",
+    "sap": "corporate", "siemens": "corporate", "bosch": "corporate",
+    "fresenius": "corporate", "hp": "corporate", "hpe": "corporate",
+    "cisco": "corporate", "ntt": "corporate", "fujitsu": "corporate",
+    "accenture": "corporate", "capgemini": "corporate",
+    # Global professional-services networks
+    "kpmg": "global_network", "ey": "global_network", "pwc": "global_network",
+    "deloitte": "global_network", "bdo": "global_network",
+    "grant thornton": "global_network",
+}
+
+# Map brand root → canonical display name (for audit col)
+_KNOWN_GLOBAL_BRAND_NAMES: dict[str, str] = {
+    "ibm": "IBM", "microsoft": "Microsoft", "oracle": "Oracle",
+    "sap": "SAP", "siemens": "Siemens", "bosch": "Bosch",
+    "fresenius": "Fresenius", "hp": "HP", "hpe": "HPE",
+    "cisco": "Cisco", "ntt": "NTT", "fujitsu": "Fujitsu",
+    "accenture": "Accenture", "capgemini": "Capgemini",
+    "kpmg": "KPMG", "ey": "EY", "pwc": "PwC",
+    "deloitte": "Deloitte", "bdo": "BDO",
+    "grant thornton": "Grant Thornton",
+}
+
+
+def _match_known_global_brand(brand_roots: list[str]) -> tuple[str, str, str]:
+    """Return (brand_key, brand_type, canonical_name) or ('','','') if no match."""
+    for root in brand_roots:
+        key = root.lower().strip()
+        if key in _KNOWN_GLOBAL_BRANDS:
+            return key, _KNOWN_GLOBAL_BRANDS[key], _KNOWN_GLOBAL_BRAND_NAMES.get(key, root)
+    return "", "", ""
+
+
 def _mimic_google_hq_check(
     company_name: str,
     domain: str,
@@ -1451,6 +1495,11 @@ def _mimic_google_hq_check(
         "brand_root_hq_country":        "",
         "brand_root_hq_city":           "",
         "brand_root_hq_source_type":    "",
+        # Known-global-brand detection
+        "known_global_brand_detected":  False,
+        "known_global_brand_name":      "",
+        "known_global_brand_type":      "",
+        "known_global_brand_reason":    "",
         # Internal
         "_mimic_serper_calls":      0,
         "_mimic_queries":           [],
@@ -1503,6 +1552,21 @@ def _mimic_google_hq_check(
     # Pre-compute brand-root candidates (used in both fetch scan and brand-root search)
     _brand_roots = _extract_brand_roots(company_name, domain or off_netloc)
     out["brand_root_candidates"] = " | ".join(_brand_roots)
+
+    # Known-global-brand detection
+    _kgb_key, _kgb_type, _kgb_name = _match_known_global_brand(_brand_roots)
+    if _kgb_key:
+        out["known_global_brand_detected"] = True
+        out["known_global_brand_name"]     = _kgb_name
+        out["known_global_brand_type"]     = _kgb_type
+        out["known_global_brand_reason"]   = (
+            f"Brand root '{_kgb_name}' matched known global brand registry (type={_kgb_type})"
+        )
+        # Ensure queries use canonical brand name (e.g. 'IBM' not 'Ibm')
+        _brand_roots = [
+            _kgb_name if r.lower() == _kgb_key else r for r in _brand_roots
+        ]
+        out["brand_root_candidates"] = " | ".join(_brand_roots)
 
     # ── 3. Fetch official pages ────────────────────────────────────────────
     fetch_domain = off_netloc or (
@@ -2017,6 +2081,10 @@ def probe_company(
     _br_city    = result.get("brand_root_hq_city", "")
     _input_std  = _std_country(input_country or "Italy")
     _br_std     = _std_country(_br_country)
+    _kgb_type   = result.get("known_global_brand_type", "")
+    _kgb_name   = result.get("known_global_brand_name", "")
+    _kgb_detected = bool(result.get("known_global_brand_detected"))
+
     if _br_country and _br_std and _br_std.lower() != _input_std.lower():
         # Brand-root found a foreign parent HQ → classify as foreign_parent
         result["hq_structure_type"]           = "foreign_parent"
@@ -2042,6 +2110,32 @@ def probe_company(
         result["needs_anthropic_hq_review"]   = "No"
         needs_adj = False
 
+    elif _kgb_detected and _kgb_type == "global_network" and not _br_country:
+        # Known global professional-services network — no single HQ country needed
+        result["hq_structure_type"]              = "global_network"
+        result["local_entity_hq_country"]        = _input_std
+        result["sig_foreign_hq_score_reviewed"]  = 3
+        result["review_global_network_score"]    = 3
+        result["sig_foreign_hq_review_source"]   = "known_global_brand_check"
+        result["sig_foreign_hq_review_reason"]   = (
+            f"{_kgb_name} is a known global professional-services network; "
+            "local entity classified as global_network"
+        )
+        result["sig_foreign_hq_review_confidence"] = "High"
+        result["sig_foreign_hq_review_evidence_url"]   = result.get("brand_root_hq_evidence_url", "")
+        result["sig_foreign_hq_review_evidence_quote"] = result.get("brand_root_hq_evidence_quote", "")
+        result["foreign_hq_simple"]              = "True"
+        result["needs_anthropic_hq_review"]      = "No"
+        needs_adj = False
+
+    elif _kgb_detected and _kgb_type == "corporate" and not _br_country:
+        # Known corporate brand but brand-root HQ search didn't resolve a country yet.
+        # Mark for potential Anthropic review; don't force classify.
+        result["sig_foreign_hq_review_reason"] = (
+            f"{_kgb_name} is a known global corporate brand; "
+            "brand-root HQ search did not resolve a foreign country"
+        )
+
     # Suppress Anthropic when official page evidence is already strong and unambiguous
     _has_strong_official = (
         result.get("official_page_hq_evidence_strength") == "Strong"
@@ -2053,11 +2147,13 @@ def probe_company(
         and _mimic_evidence.get("hq_confidence") == "High"
         and _mimic_evidence.get("hq_detected_country")
     )
-    _has_strong_brand_root = bool(_br_country and _br_std.lower() != _input_std.lower())
-    if _has_strong_official or _has_strong_brand or _has_strong_brand_root:
+    _has_strong_brand_root  = bool(_br_country and _br_std.lower() != _input_std.lower())
+    _has_global_network_kgb = bool(_kgb_detected and _kgb_type == "global_network")
+    if _has_strong_official or _has_strong_brand or _has_strong_brand_root or _has_global_network_kgb:
         _ev_src = (
             "brand_root_hq_check" if _has_strong_brand_root
-            else ("official_page_mimic_check" if _has_strong_official else "brand_hq_mimic_check")
+            else ("known_global_brand_check" if _has_global_network_kgb
+                  else ("official_page_mimic_check" if _has_strong_official else "brand_hq_mimic_check"))
         )
         result["needs_anthropic_hq_review"] = "No"
         result["anthropic_hq_review_used"]  = "No"
@@ -2883,6 +2979,7 @@ _KEY_VIEW_COLS_RAW = [
     "brand_root_hq_search_used", "brand_root_hq_search_queries",
     "brand_root_hq_evidence_found", "brand_root_hq_evidence_quote",
     "brand_root_hq_evidence_url", "brand_root_hq_country", "brand_root_hq_city",
+    "known_global_brand_detected", "known_global_brand_name", "known_global_brand_type",
     "brand_hq_evidence_found", "brand_hq_evidence_quote",
     "hq_reason", "hq_evidence_url", "hq_evidence_quote", "hq_query_used",
 ]
