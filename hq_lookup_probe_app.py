@@ -153,6 +153,12 @@ PROBE_COLS = [
     "brand_hq_top_result_domain",
     "brand_hq_top_result_is_official_domain",
     "brand_hq_result_selection_reason",
+    # Performance / run metadata
+    "run_mode",
+    "max_serper_calls_per_row",
+    "early_stop_used",
+    "early_stop_reason",
+    "row_runtime_seconds",
 ]
 
 # Token columns tracked internally but NOT exported to Excel/CSV visible columns.
@@ -1228,6 +1234,8 @@ def _mimic_google_hq_check(
     input_country: str,
     serper_key: str,
     cache: dict,
+    max_page_paths: int = 7,
+    max_brand_queries: int = 4,
 ) -> dict[str, Any]:
     """Run manual Google mimic HQ check.
 
@@ -1315,7 +1323,7 @@ def _mimic_google_hq_check(
 
     if fetch_domain:
         out["official_page_fetch_used"] = True
-        for path in _OFFICIAL_PAGE_PATHS[:7]:
+        for path in _OFFICIAL_PAGE_PATHS[:max_page_paths]:
             url_try = f"https://{fetch_domain}{path}"
             text, err = _fetch_page_text(url_try, cache)
             fetch_count += 1
@@ -1380,6 +1388,7 @@ def _mimic_google_hq_check(
                 f'"{primary}" group headquarters',
                 f'"{primary}" parent company',
             ]
+        brand_queries = brand_queries[:max_brand_queries]
         if brand_queries:
             out["brand_hq_search_used"]    = True
             out["brand_hq_search_queries"] = " | ".join(brand_queries)
@@ -1480,9 +1489,31 @@ def probe_company(
     use_multilingual_check: bool = True,
     use_anthropic_review: bool = False,
     use_mimic_check: bool = True,
+    run_mode: str = "fast",
 ) -> dict[str, Any]:
     """Run all queries for one company; return probe column dict."""
+    import time as _time_mod
+    _row_start = _time_mod.monotonic()
+
+    # ── Mode-based limits ───────────────────────────────────────────────────
+    # fast: ≤3 real Serper calls, 1 page path, 2 brand queries, 5s fetch timeout
+    # deep/debug: ≤8 Serper calls, 7 page paths, 4 brand queries
+    if run_mode == "fast":
+        _max_serper        = 3
+        _max_page_paths    = 1   # only homepage in fast mode
+        _max_brand_queries = 2
+        _fetch_timeout     = 5
+    else:
+        _max_serper        = 8
+        _max_page_paths    = 7
+        _max_brand_queries = 4
+        _fetch_timeout     = 10
+
     result: dict[str, Any] = {col: "" for col in PROBE_COLS}
+    result["run_mode"]               = run_mode
+    result["max_serper_calls_per_row"] = _max_serper
+    result["early_stop_used"]        = False
+    result["early_stop_reason"]      = ""
 
     if not company_name.strip():
         result["probe_error"] = "blank company name"
@@ -1512,7 +1543,9 @@ def probe_company(
     _mimic_evidence: dict = {}
     if use_mimic_check and serper_key:
         _mimic_result = _mimic_google_hq_check(
-            company_name, domain, input_country, serper_key, cache
+            company_name, domain, input_country, serper_key, cache,
+            max_page_paths=_max_page_paths,
+            max_brand_queries=_max_brand_queries,
         )
         _mimic_serper_calls = _mimic_result.pop("_mimic_serper_calls", 0)
         _mimic_queries      = _mimic_result.pop("_mimic_queries", [])
@@ -1528,21 +1561,30 @@ def probe_company(
         if _mimic_evidence.get("hq_detected_country"):
             best = {k: v for k, v in _mimic_evidence.items()}
             used_query = _mimic_queries[0] if _mimic_queries else ""
+            result["early_stop_used"]   = True
+            result["early_stop_reason"] = "clear_official_hq_evidence"
     else:
         _mimic_audit = {"manual_google_mimic_used": False}
 
+    _narrow_serper_budget = max(0, _max_serper - _serper_calls)
+
     for query in queries:
         if best.get("hq_detected_country"):
-            break  # mimic already found strong evidence
+            break  # mimic already found strong evidence — early stop
+        if _narrow_serper_budget <= 0:
+            break  # Serper budget exhausted for this row
         _queries_attempted.append(query)
         cache_key = ("serper", query)
         if cache_key in cache:
             data, err = cache[cache_key]
             _serper_cache_hits += 1
         else:
+            if _serper_calls >= _max_serper:
+                break  # double-guard
             data, err = _serper_search(query, serper_key)
             cache[cache_key] = (data, err)
             _serper_calls += 1
+            _narrow_serper_budget -= 1
             time.sleep(_INTER_REQUEST_SLEEP)
 
         if err:
@@ -1756,6 +1798,7 @@ def probe_company(
         result["serper_cache_hit"] = "False"
     result["website_fetch_count"] = ml_result.get("website_fetch_count", 0)
     result["anthropic_error"]     = "; ".join(_anthr_errors)
+    result["row_runtime_seconds"] = round(_time_mod.monotonic() - _row_start, 2)
     # Internal token tracking (for run-summary aggregation only, not in Excel rows)
     result["_anthr_model"]        = _anthr_model
     result["_anthr_input_tok"]    = _anthr_input_tok
@@ -1967,7 +2010,8 @@ def _build_workbook(
         ("anthropic_errors",           _ru.get("anthropic_errors", "")),
         ("", ""),
         ("── options used ──", ""),
-        ("multilingual_check_enabled", qa_meta.get("use_multilingual_check", "")),
+        ("run_mode",                    qa_meta.get("run_mode", "")),
+        ("multilingual_check_enabled",  qa_meta.get("use_multilingual_check", "")),
         ("anthropic_hq_review_enabled", qa_meta.get("use_anthropic_review", "")),
         ("model_fallback_enabled",      qa_meta.get("use_model", "")),
         ("model",                       qa_meta.get("model", "")),
@@ -2219,16 +2263,26 @@ with st.sidebar:
         help="Focus on companies where sig_foreign_hq_score is 0 or blank — likely under-scored.",
     )
 
-    use_mimic_check = st.checkbox(
-        "Use manual Google mimic HQ check",
-        value=True,
-        help="Before narrow queries, runs a plain company search, fetches official pages, and scans for HQ evidence. Reduces Anthropic calls for clear cases.",
+    run_mode = st.radio(
+        "Run mode",
+        options=["fast", "deep", "debug"],
+        index=0,
+        help=(
+            "**Fast** (default): ≤3 Serper calls/row, 1 page fetch, 2 brand queries, 5 s timeout. "
+            "Stop immediately when official HQ evidence is clear.\n\n"
+            "**Deep**: ≤8 Serper calls/row, up to 7 page paths, 4 brand queries, 10 s timeout. "
+            "Enables Anthropic review for ambiguous cases.\n\n"
+            "**Debug**: same as Deep but keeps all audit detail visible in the results table."
+        ),
+        horizontal=True,
     )
+
+    use_mimic_check = True  # always on; mode controls depth
 
     use_multilingual_check = st.checkbox(
         "Detect multilingual website",
-        value=True,
-        help="Fetches company homepage to detect language switchers and hreflang tags.",
+        value=(run_mode != "fast"),
+        help="Fetches company homepage to detect language switchers and hreflang tags. Disabled by default in Fast mode.",
     )
 
     st.header("API keys")
@@ -2248,8 +2302,8 @@ with st.sidebar:
 
     use_anthropic_review = st.checkbox(
         "Use Anthropic HQ review for ambiguous/global cases",
-        value=False,
-        help="Calls Claude to adjudicate hq_structure_type for rows with needs_anthropic_hq_review=Yes.",
+        value=(run_mode in ("deep", "debug")),
+        help="Calls Claude to adjudicate hq_structure_type for rows with needs_anthropic_hq_review=Yes. Auto-enabled in Deep/Debug mode.",
     )
 
     anthropic_key = ""
@@ -2268,11 +2322,14 @@ if not file_source:
     st.info("Upload a file or enter a local path in the sidebar to get started.")
     st.stop()
 
+_mode_max = 3 if run_mode == "fast" else 8
+_mode_label = {"fast": "Fast", "deep": "Deep", "debug": "Debug"}.get(run_mode, run_mode)
 st.markdown(
-    "⚠️ **Each row may use up to 8 Serper calls** (+ 1 website fetch if multilingual detection is on"
-    + (", + 1 Anthropic call per ambiguous row" if use_anthropic_review else "") + "). "
-    f"With limit={int(limit)}, that is up to **{int(limit) * 8:,} Serper calls**."
-    + (" For large batches, disable multilingual detection to speed up runs." if int(limit) > 200 else "")
+    f"**Mode: {_mode_label}** — up to **{_mode_max} Serper calls/row**"
+    + (", + 1 website fetch for multilingual detection" if use_multilingual_check else "")
+    + (", + Anthropic review for ambiguous rows" if use_anthropic_review else "")
+    + f". With limit={int(limit)}, that is up to **{int(limit) * _mode_max:,} Serper calls**."
+    + (" Early stopping is active: rows with clear official HQ evidence skip further queries." if run_mode == "fast" else "")
 )
 
 run_btn = st.button("▶ Run HQ Probe", type="primary", disabled=(not serper_key))
@@ -2366,6 +2423,7 @@ if run_btn:
             use_multilingual_check=use_multilingual_check,
             use_anthropic_review=use_anthropic_review,
             use_mimic_check=use_mimic_check,
+            run_mode=run_mode,
         )
 
         # Sanity guard: if detected country == input country, force foreign_hq_simple = False
@@ -2414,6 +2472,7 @@ if run_btn:
         "use_multilingual_check": use_multilingual_check,
         "use_anthropic_review":   use_anthropic_review,
         "use_mimic_check":        use_mimic_check,
+        "run_mode":               run_mode,
     }
     st.session_state["hq_probe_run_usage"] = run_usage
 
@@ -2495,6 +2554,7 @@ _KEY_VIEW_COLS_RAW = [
     "anthropic_error",
     "sig_foreign_hq_review_reason",
     "sig_foreign_hq_review_evidence_url",
+    "run_mode", "early_stop_used", "early_stop_reason",
     "serper_calls_used", "serper_cache_hit",
     "manual_google_mimic_used",
     "plain_company_official_domain", "official_domain_matches_input_domain",
