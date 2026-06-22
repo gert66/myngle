@@ -89,6 +89,31 @@ PROBE_COLS = [
     "top_organic_snippet_3",
     "top_organic_url_3",
     "probe_error",
+    # Recovery review columns
+    "has_multilingual_site",
+    "website_language_count",
+    "website_languages_detected",
+    "has_global_structure_signal",
+    "global_structure_evidence",
+    "hq_review_trigger",
+    "hq_structure_type",
+    "local_entity_hq_country",
+    "local_entity_hq_city",
+    "parent_group_hq_country",
+    "parent_group_hq_city",
+    "review_foreign_parent_score",
+    "review_global_network_score",
+    "review_multilingual_website_score",
+    "review_recommended_hq_signal",
+    "sig_foreign_hq_score_original",
+    "sig_foreign_hq_score_reviewed",
+    "sig_foreign_hq_review_reason",
+    "sig_foreign_hq_review_confidence",
+    "sig_foreign_hq_review_source",
+    "sig_foreign_hq_review_evidence_url",
+    "sig_foreign_hq_review_evidence_quote",
+    "needs_anthropic_hq_review",
+    "anthropic_hq_review_used",
 ]
 
 # ---------------------------------------------------------------------------
@@ -379,6 +404,39 @@ _HQ_PATTERNS = [
 ]
 
 # ---------------------------------------------------------------------------
+# Global structure / multilingual detection constants
+# ---------------------------------------------------------------------------
+
+_GLOBAL_STRUCTURE_TERMS = re.compile(
+    r"\b(?:group|gruppo|international|worldwide|global|locations"
+    r"|subsidiar(?:y|ies)|offices?\s+worldwide|holding|parent\s+company"
+    r"|member\s+firm|member\s+of|network|global\s+network|head\s+office"
+    r"|headquarters|corporate\s+headquarters|GmbH|Corporation|Corp\.)\b"
+    r"|(?<!\w)(?:AG|SA|Ltd)(?!\w)",
+    re.IGNORECASE,
+)
+
+_LANG_HREFLANG_RE = re.compile(r'hreflang=["\']([a-z]{2})(?:-[A-Za-z]{2,4})?["\']', re.IGNORECASE)
+_LANG_URL_RE = re.compile(r'href=["\'][^"\']{0,200}/([a-z]{2})/', re.IGNORECASE)
+_LANG_LABELS: dict[str, str] = {
+    "english": "en", "italiano": "it", "deutsch": "de", "français": "fr",
+    "español": "es", "português": "pt", "svenska": "sv", "русский": "ru",
+    "中文": "zh", "한국인": "ko", "dutch": "nl", "polski": "pl",
+    "română": "ro", "česky": "cs",
+}
+_LANG_KNOWN = {
+    "en", "it", "de", "fr", "es", "pt", "sv", "ru", "zh", "ko",
+    "nl", "pl", "ja", "da", "fi", "no", "cs", "ro", "tr", "ar", "hu", "el",
+}
+_FETCH_TIMEOUT = 8
+
+_HIGH_INTL_COLS = [
+    "sig_intl_footprint_score", "sig_multicultural_score",
+    "ti_intercultural_score", "sig_lnd_onboarding_score",
+    "ti_onboarding_score", "model_signal_overall_confidence_score",
+]
+
+# ---------------------------------------------------------------------------
 # Core location / country resolution
 # ---------------------------------------------------------------------------
 
@@ -444,6 +502,136 @@ def _italy_in_text(text: str) -> bool:
 def _std_country(raw: str) -> str:
     """Normalise a country string via aliases."""
     return _COUNTRY_ALIASES.get(raw.strip().lower(), raw.strip())
+
+
+def _safe_float(val: Any, default: float = 0.0) -> float:
+    try:
+        return float(val)
+    except (TypeError, ValueError):
+        return default
+
+
+def detect_multilingual_site(domain: str) -> dict[str, Any]:
+    """Cheap homepage fetch to detect multilingual website. Cached by caller."""
+    out: dict[str, Any] = {"has_multilingual_site": False, "website_language_count": 0, "website_languages_detected": ""}
+    if not domain:
+        return out
+    domain = domain.strip().lstrip("https://").lstrip("http://").rstrip("/")
+    html = ""
+    for scheme in ("https", "http"):
+        try:
+            resp = _requests.get(
+                f"{scheme}://{domain}", timeout=_FETCH_TIMEOUT,
+                headers={"User-Agent": "Mozilla/5.0 (compatible; HQProbe/1.0)"},
+                allow_redirects=True,
+            )
+            html = resp.text[:80_000]
+            break
+        except Exception:
+            continue
+    if not html:
+        return out
+
+    langs: set[str] = set()
+    for m in _LANG_HREFLANG_RE.finditer(html):
+        lang = m.group(1).lower()
+        if lang in _LANG_KNOWN:
+            langs.add(lang)
+    for m in _LANG_URL_RE.finditer(html):
+        lang = m.group(1).lower()
+        if lang in _LANG_KNOWN:
+            langs.add(lang)
+    html_lc = html.lower()
+    for label, code in _LANG_LABELS.items():
+        if label in html_lc:
+            langs.add(code)
+
+    count = len(langs)
+    out["website_language_count"] = count
+    out["website_languages_detected"] = ", ".join(sorted(langs))
+    out["has_multilingual_site"] = count >= 2
+    return out
+
+
+def detect_global_structure(
+    organic: list[dict],
+    kg_location: str,
+    answer_box: str,
+    page_text: str = "",
+) -> dict[str, Any]:
+    """Scan Serper evidence for global/group/network structure signals."""
+    out: dict[str, Any] = {"has_global_structure_signal": False, "global_structure_evidence": ""}
+    texts: list[str] = []
+    if kg_location:
+        texts.append(kg_location)
+    if answer_box:
+        texts.append(answer_box)
+    for item in organic[:5]:
+        texts.append(f"{item.get('title', '')} {item.get('snippet', '')}")
+    if page_text:
+        texts.append(page_text[:3_000])
+
+    for text in texts:
+        m = _GLOBAL_STRUCTURE_TERMS.search(text)
+        if m:
+            start = max(0, m.start() - 60)
+            end   = min(len(text), m.end() + 60)
+            out["has_global_structure_signal"] = True
+            out["global_structure_evidence"]   = text[start:end].strip()
+            return out
+    return out
+
+
+_HQ_NEAR_TERMS_RE = re.compile(
+    r"\b(?:head\s+office|headquarters|parent|group|network)\b", re.IGNORECASE
+)
+
+
+def compute_review_trigger(
+    probe: dict,
+    input_row: dict,
+    multilingual: dict,
+    global_struct: dict,
+) -> tuple[str, bool]:
+    """Returns (hq_review_trigger, needs_anthropic_hq_review)."""
+    triggers: list[str] = []
+
+    det_country = _std_country(probe.get("hq_detected_country") or "")
+    inp_country  = _std_country(probe.get("input_country_used") or "")
+    confidence   = probe.get("hq_confidence", "")
+
+    if multilingual.get("has_multilingual_site") and det_country and det_country.lower() == inp_country.lower():
+        triggers.append("multilingual_domestic_hq")
+
+    if global_struct.get("has_global_structure_signal"):
+        triggers.append("global_structure_signal")
+
+    # Foreign country near HQ terms in organic snippets
+    all_snip = " ".join(
+        f"{probe.get(f'top_organic_title_{i}', '')} {probe.get(f'top_organic_snippet_{i}', '')}"
+        for i in range(1, 4)
+    ).lower()
+    if _HQ_NEAR_TERMS_RE.search(all_snip):
+        for alias, country in _COUNTRY_ALIASES.items():
+            if alias in all_snip and _std_country(country).lower() != inp_country.lower():
+                triggers.append("foreign_country_near_hq_terms")
+                break
+
+    if confidence in ("Medium", "Low", ""):
+        if any(_safe_float(input_row.get(col)) > 0 for col in _HIGH_INTL_COLS if col in input_row):
+            triggers.append("low_confidence_with_intl_signals")
+
+    try:
+        old_score = float(input_row.get("sig_foreign_hq_score") or 0)
+    except (TypeError, ValueError):
+        old_score = 0.0
+    if old_score == 0 and any(
+        _safe_float(input_row.get(col)) > 0 for col in _HIGH_INTL_COLS if col in input_row
+    ):
+        triggers.append("zero_fhq_score_but_intl_signals")
+
+    return "; ".join(triggers), bool(triggers)
+
 
 # ---------------------------------------------------------------------------
 # Deterministic extraction
@@ -590,6 +778,107 @@ def _model_extract(
         return {"probe_error": f"Model error: {exc}"}
 
 # ---------------------------------------------------------------------------
+# Anthropic HQ structure adjudication (optional, for ambiguous cases)
+# ---------------------------------------------------------------------------
+
+_ANTHROPIC_HQ_REVIEW_PROMPT = """\
+You are an expert HQ analyst reviewing company headquarters structure.
+
+Based on the provided evidence classify the company's HQ structure:
+- "domestic_italy": Company's own HQ is in Italy with no clear foreign parent or global network.
+- "foreign_parent": Company has a non-Italian parent, or its own registered HQ is outside Italy.
+- "global_network": Company belongs to a global professional network (e.g. KPMG, PwC networks) — \
+local entity may be Italian but the brand/network is worldwide.
+- "exporter_multilingual": Italian HQ, multilingual website or international activity, \
+but no clear foreign parent or global network structure.
+- "unclear": Evidence is ambiguous or insufficient.
+
+Key rules:
+- Multilingual website alone does NOT make "foreign_parent".
+- A local entity in a professional services network should be "global_network", not "foreign_parent".
+- If clear foreign registered office or foreign parent company → "foreign_parent".
+
+Scoring 0–3:
+- review_foreign_parent_score: 3 = clear foreign parent/HQ, 0 = no evidence
+- review_global_network_score: 3 = clear global network, 0 = no evidence
+- review_multilingual_website_score: 3 = clearly multilingual, 0 = Italian-only
+- review_recommended_hq_signal: overall signal strength recommendation
+- sig_foreign_hq_score_reviewed: 3 = clear foreign/global network; 1 = exporter/multilingual only; 0 = domestic Italy
+
+Return ONLY valid JSON:
+{
+  "hq_structure_type": "domestic_italy|foreign_parent|global_network|exporter_multilingual|unclear",
+  "local_entity_hq_country": "",
+  "local_entity_hq_city": "",
+  "parent_group_hq_country": "",
+  "parent_group_hq_city": "",
+  "review_foreign_parent_score": 0,
+  "review_global_network_score": 0,
+  "review_multilingual_website_score": 0,
+  "review_recommended_hq_signal": 0,
+  "sig_foreign_hq_score_reviewed": 0,
+  "confidence": "High|Medium|Low|Unknown",
+  "reason": "",
+  "evidence_url": "",
+  "evidence_quote": ""
+}
+"""
+
+
+def _anthropic_hq_adjudicate(
+    company_name: str,
+    domain: str,
+    probe: dict,
+    multilingual: dict,
+    global_struct: dict,
+    anthropic_key: str,
+    model: str = "claude-haiku-4-5-20251001",
+) -> dict[str, Any]:
+    try:
+        import anthropic as _anthropic
+    except ImportError:
+        return {"probe_error": "anthropic package not installed (pip install anthropic)"}
+
+    evidence = {
+        "company": company_name,
+        "domain": domain,
+        "hq_detected_country": probe.get("hq_detected_country", ""),
+        "hq_detected_city": probe.get("hq_detected_city", ""),
+        "hq_confidence": probe.get("hq_confidence", ""),
+        "hq_reason": probe.get("hq_reason", ""),
+        "has_multilingual_site": multilingual.get("has_multilingual_site", False),
+        "website_languages_detected": multilingual.get("website_languages_detected", ""),
+        "has_global_structure_signal": global_struct.get("has_global_structure_signal", False),
+        "global_structure_evidence": global_struct.get("global_structure_evidence", ""),
+        "serper_snippets": [
+            {
+                "title":   probe.get(f"top_organic_title_{i}", ""),
+                "snippet": probe.get(f"top_organic_snippet_{i}", ""),
+                "url":     probe.get(f"top_organic_url_{i}", ""),
+            }
+            for i in range(1, 4)
+            if probe.get(f"top_organic_snippet_{i}")
+        ],
+    }
+
+    client = _anthropic.Anthropic(api_key=anthropic_key)
+    try:
+        resp = client.messages.create(
+            model=model,
+            max_tokens=600,
+            messages=[{"role": "user", "content": json.dumps(evidence, ensure_ascii=False)}],
+            system=_ANTHROPIC_HQ_REVIEW_PROMPT,
+        )
+        raw = resp.content[0].text.strip()
+        raw = re.sub(r"^```(?:json)?\s*", "", raw)
+        raw = re.sub(r"\s*```$", "", raw)
+        return json.loads(raw)
+    except json.JSONDecodeError as exc:
+        return {"probe_error": f"Anthropic HQ review JSON parse error: {exc}"}
+    except Exception as exc:
+        return {"probe_error": f"Anthropic HQ review error: {exc}"}
+
+# ---------------------------------------------------------------------------
 # Classification
 # ---------------------------------------------------------------------------
 
@@ -664,6 +953,9 @@ def probe_company(
     use_model: bool,
     anthropic_key: str,
     cache: dict,
+    input_row: "dict | None" = None,
+    use_multilingual_check: bool = True,
+    use_anthropic_review: bool = False,
 ) -> dict[str, Any]:
     """Run all queries for one company; return probe column dict."""
     result: dict[str, Any] = {col: "" for col in PROBE_COLS}
@@ -778,6 +1070,64 @@ def probe_company(
 
     if errors:
         result["probe_error"] = "; ".join(errors)
+
+    # ----------------------------------------------------------------
+    # Recovery review additions
+    # ----------------------------------------------------------------
+    _irow = input_row or {}
+
+    # Preserve original sig_foreign_hq_score
+    orig_score = _safe_float(_irow.get("sig_foreign_hq_score"))
+    result["sig_foreign_hq_score_original"] = orig_score
+    result["sig_foreign_hq_score_reviewed"] = orig_score  # default: keep original
+
+    # Multilingual site detection
+    ml_result: dict[str, Any] = {
+        "has_multilingual_site": False, "website_language_count": 0, "website_languages_detected": "",
+    }
+    if use_multilingual_check and domain:
+        _ml_key = ("multilingual", domain.strip().lstrip("https://").lstrip("http://").rstrip("/"))
+        if _ml_key in cache:
+            ml_result = cache[_ml_key]
+        else:
+            ml_result = detect_multilingual_site(domain)
+            cache[_ml_key] = ml_result
+    result.update(ml_result)
+
+    # Global structure detection
+    gs_result = detect_global_structure(all_organic, kg_location, answer_box_text)
+    result.update(gs_result)
+
+    # HQ review trigger
+    trigger_str, needs_adj = compute_review_trigger(result, _irow, ml_result, gs_result)
+    result["hq_review_trigger"]        = trigger_str
+    result["needs_anthropic_hq_review"] = "Yes" if needs_adj else "No"
+    result["anthropic_hq_review_used"]  = "No"
+
+    # Optional Anthropic HQ adjudication
+    if use_anthropic_review and needs_adj and anthropic_key:
+        adj = _anthropic_hq_adjudicate(
+            company_name, domain, result, ml_result, gs_result, anthropic_key
+        )
+        if not adj.get("probe_error"):
+            for _field in (
+                "hq_structure_type", "local_entity_hq_country", "local_entity_hq_city",
+                "parent_group_hq_country", "parent_group_hq_city",
+                "review_foreign_parent_score", "review_global_network_score",
+                "review_multilingual_website_score", "review_recommended_hq_signal",
+                "sig_foreign_hq_score_reviewed",
+            ):
+                if _field in adj:
+                    result[_field] = adj[_field]
+            result["sig_foreign_hq_review_reason"]        = adj.get("reason", "")
+            result["sig_foreign_hq_review_confidence"]    = adj.get("confidence", "")
+            result["sig_foreign_hq_review_source"]        = "anthropic"
+            result["sig_foreign_hq_review_evidence_url"]  = adj.get("evidence_url", "")
+            result["sig_foreign_hq_review_evidence_quote"] = adj.get("evidence_quote", "")
+            result["anthropic_hq_review_used"]            = "Yes"
+        else:
+            _adj_err = adj["probe_error"]
+            result["probe_error"] = (result["probe_error"] + "; " + _adj_err).lstrip("; ") if result.get("probe_error") else _adj_err
 
     return result
 
@@ -1181,12 +1531,24 @@ with st.sidebar:
 
     st.header("Options")
 
-    limit = st.number_input("Row limit", min_value=1, max_value=200, value=50, step=10)
+    limit = st.number_input("Row limit", min_value=1, max_value=2000, value=50, step=50)
 
     only_fhq_signal = st.checkbox(
         "Only rows with old foreign HQ signal",
         value=False,
         help="Filter input to rows where sig_foreign_hq_score > 0 or foreign_hq_sanitized = True/Yes.",
+    )
+
+    only_recovery = st.checkbox(
+        "Only recovery candidates (zero/blank old FHQ score)",
+        value=False,
+        help="Focus on companies where sig_foreign_hq_score is 0 or blank — likely under-scored.",
+    )
+
+    use_multilingual_check = st.checkbox(
+        "Detect multilingual website",
+        value=True,
+        help="Fetches company homepage to detect language switchers and hreflang tags.",
     )
 
     st.header("API keys")
@@ -1204,8 +1566,14 @@ with st.sidebar:
         help="Calls Claude Haiku for companies where pattern matching finds nothing.",
     )
 
+    use_anthropic_review = st.checkbox(
+        "Use Anthropic HQ review for ambiguous/global cases",
+        value=False,
+        help="Calls Claude to adjudicate hq_structure_type for rows with needs_anthropic_hq_review=Yes.",
+    )
+
     anthropic_key = ""
-    if use_model:
+    if use_model or use_anthropic_review:
         anthropic_key = st.text_input(
             "Anthropic API key",
             value=os.environ.get("ANTHROPIC_API_KEY", ""),
@@ -1221,8 +1589,10 @@ if not file_source:
     st.stop()
 
 st.markdown(
-    "⚠️ **Each row may use up to 8 Serper search calls.** "
-    f"With limit={int(limit)}, that is up to **{int(limit) * 8:,} calls**."
+    "⚠️ **Each row may use up to 8 Serper calls** (+ 1 website fetch if multilingual detection is on"
+    + (", + 1 Anthropic call per ambiguous row" if use_anthropic_review else "") + "). "
+    f"With limit={int(limit)}, that is up to **{int(limit) * 8:,} Serper calls**."
+    + (" For large batches, disable multilingual detection to speed up runs." if int(limit) > 200 else "")
 )
 
 run_btn = st.button("▶ Run HQ Probe", type="primary", disabled=(not serper_key))
@@ -1251,7 +1621,7 @@ if run_btn:
         st.warning("No rows found in the input file.")
         st.stop()
 
-    # Old-FHQ filter
+    # Old-FHQ signal filter
     if only_fhq_signal:
         def _has_fhq_signal(row: dict) -> bool:
             score = row.get("sig_foreign_hq_score")
@@ -1268,6 +1638,21 @@ if run_btn:
             input_rows = filtered
         else:
             st.warning("No rows matched the old FHQ signal filter. Running on all rows.")
+
+    # Recovery candidates filter (zero/blank FHQ score)
+    if only_recovery:
+        def _is_recovery_candidate(row: dict) -> bool:
+            try:
+                return float(row.get("sig_foreign_hq_score") or 0) == 0
+            except (TypeError, ValueError):
+                return True
+
+        filtered_r = [r for r in input_rows if _is_recovery_candidate(r)]
+        if filtered_r:
+            st.info(f"Recovery filter: {len(filtered_r)} / {len(input_rows)} rows have zero/blank FHQ score.")
+            input_rows = filtered_r
+        else:
+            st.warning("No recovery candidates found (all rows have non-zero FHQ score). Running on all rows.")
 
     # Detect old enrichment cols
     sample_keys = set(input_rows[0].keys()) if input_rows else set()
@@ -1297,6 +1682,9 @@ if run_btn:
             use_model=use_model,
             anthropic_key=anthropic_key,
             cache=cache,
+            input_row=row,
+            use_multilingual_check=use_multilingual_check,
+            use_anthropic_review=use_anthropic_review,
         )
 
         # Sanity guard: if detected country == input country, force foreign_hq_simple = False
@@ -1322,12 +1710,14 @@ if run_btn:
     st.session_state[_KEY_OLD_COLS]   = present_old_cols
     st.session_state[_KEY_COLS_CFG]   = (company_col, domain_col, country_col or "(default)")
     st.session_state[_KEY_META] = {
-        "timestamp":        ts,
-        "input_file":       file_label,
-        "use_model":        use_model,
-        "model":            "claude-haiku-4-5-20251001" if use_model else "",
-        "serper_available": bool(serper_key),
-        "limit":            int(limit),
+        "timestamp":              ts,
+        "input_file":             file_label,
+        "use_model":              use_model,
+        "model":                  "claude-haiku-4-5-20251001" if (use_model or use_anthropic_review) else "",
+        "serper_available":       bool(serper_key),
+        "limit":                  int(limit),
+        "use_multilingual_check": use_multilingual_check,
+        "use_anthropic_review":   use_anthropic_review,
     }
 
     if error_rows:
@@ -1354,6 +1744,10 @@ detected_foreign = sum(1 for p in probe_results if p.get("foreign_hq_simple") ==
 detected_unknown = sum(1 for p in probe_results if not p.get("hq_detected_country"))
 needs_review_cnt = sum(1 for p in probe_results if p.get("needs_manual_review") == "Yes")
 
+needs_adj_cnt    = sum(1 for p in probe_results if p.get("needs_anthropic_hq_review") == "Yes")
+multilingual_cnt = sum(1 for p in probe_results if p.get("has_multilingual_site"))
+global_net_cnt   = sum(1 for p in probe_results if p.get("has_global_structure_signal"))
+
 st.markdown("---")
 st.subheader("Results")
 c1, c2, c3, c4, c5 = st.columns(5)
@@ -1363,14 +1757,30 @@ c3.metric("Foreign HQ",        detected_foreign)
 c4.metric("Unknown",           detected_unknown)
 c5.metric("Needs review",      needs_review_cnt)
 
-# Display columns: input_country_used appears between hq_detected_country and foreign_hq_simple
+r1, r2, r3 = st.columns(3)
+r1.metric("Multilingual site",      multilingual_cnt)
+r2.metric("Global structure signal", global_net_cnt)
+r3.metric("Needs Anthropic review",  needs_adj_cnt)
+
+# Display columns
 _KEY_VIEW_COLS_RAW = [
     company_col_r, domain_col_r, country_col_r,
+    "sig_foreign_hq_score_original",
+    "sig_foreign_hq_score_reviewed",
     "sig_foreign_hq_score", "sig_foreign_hq_evidence",
     "foreign_hq_sanitized", "foreign_hq_sanitizer_reason",
     "hq_detected_city", "hq_detected_region", "hq_detected_country",
     "input_country_used",
     "hq_confidence", "foreign_hq_simple", "needs_manual_review",
+    "hq_structure_type",
+    "parent_group_hq_country", "parent_group_hq_city",
+    "local_entity_hq_country", "local_entity_hq_city",
+    "has_multilingual_site", "website_languages_detected",
+    "has_global_structure_signal", "global_structure_evidence",
+    "hq_review_trigger",
+    "needs_anthropic_hq_review", "anthropic_hq_review_used",
+    "sig_foreign_hq_review_reason",
+    "sig_foreign_hq_review_evidence_url",
     "hq_reason", "hq_evidence_url", "hq_evidence_quote", "hq_query_used",
 ]
 _seen_kvc: set[str] = set()
