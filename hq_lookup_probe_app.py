@@ -3360,7 +3360,7 @@ st.markdown(
     + (" Early stopping is active: rows with clear official HQ evidence skip further queries." if run_mode == "fast" else "")
 )
 
-run_btn = st.button("▶ Run HQ Probe", type="primary", disabled=(not serper_key))
+run_btn = st.button("▶ Run HQ Probe", type="primary", disabled=(not serper_key), key="hq_probe_run_button_main")
 if not serper_key:
     st.warning("Enter a Serper API key in the sidebar to enable the run button.")
 
@@ -3558,7 +3558,7 @@ if _app_mode == "probe":
             + (" Early stopping is active: rows with clear official HQ evidence skip further queries." if run_mode == "fast" else "")
         )
 
-    run_btn = st.button("▶ Run HQ Probe", type="primary", disabled=(not serper_key))
+    run_btn = st.button("▶ Run HQ Probe", type="primary", disabled=(not serper_key), key="hq_probe_run_button_tab")
     if not serper_key:
         st.warning("Enter a Serper API key in the sidebar to enable the run button.")
 
@@ -3844,7 +3844,7 @@ elif _app_mode == "recovery":
     _rec_run_btn = st.button(
         f"▶ Run HQ Recovery ({len(_rec_to_process_idx)} rows)",
         type="primary",
-        disabled=(not serper_key),
+        disabled=(not serper_key), key="hq_recovery_run_button",
     )
     if not serper_key:
         st.warning("Enter a Serper API key in the sidebar to enable the run button.")
@@ -4163,6 +4163,7 @@ elif _app_mode == "recovery":
         mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         help=f"Revised '{_REC_TARGET_SHEET}' sheet + Recovery Run Summary. "
              f"Same number of rows as input ({len(_rec_all_rows_r)}).",
+    key="hq_recovery_download_button",
     )
     st.caption(
         f"Output: **{_rec_dl_fname}** · "
@@ -4354,6 +4355,7 @@ with dl1:
         data=_make_excel(id(input_rows), id(probe_results)),
         file_name=f"hq_probe_results_{ts}.xlsx",
         mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    key="hq_probe_download_excel_button",
     )
 
 with dl2:
@@ -4371,4 +4373,5 @@ with dl2:
         data=_make_csv(),
         file_name=f"hq_probe_results_{ts}.csv",
         mime="text/csv",
+    key="hq_probe_download_csv_button",
     )
