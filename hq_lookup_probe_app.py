@@ -189,6 +189,9 @@ PROBE_COLS = [
     "domain_root_hq_country",
     "domain_root_hq_city",
     "domain_root_hq_confidence",
+    # Simple HQ mode
+    "simple_hq_mode_used",
+    "simple_hq_query",
 ]
 
 # Token columns tracked internally but NOT exported to Excel/CSV visible columns.
@@ -1965,6 +1968,7 @@ def probe_company(
     use_anthropic_review: bool = False,
     use_mimic_check: bool = True,
     run_mode: str = "fast",
+    use_simple_hq_mode: bool = True,
 ) -> dict[str, Any]:
     """Run all queries for one company; return probe column dict."""
     import time as _time_mod
@@ -1992,6 +1996,157 @@ def probe_company(
 
     if not company_name.strip():
         result["probe_error"] = "blank company name"
+        return result
+
+    # ── Simple HQ mode (default) ─────────────────────────────────────────────
+    # One query only: "{domain_root} headquarters" (or "{company_name} headquarters"
+    # when domain is absent).  No mimic, no brand-root ladder, no Anthropic.
+    if use_simple_hq_mode:
+        result["simple_hq_mode_used"] = True
+        result["max_serper_calls_per_row"] = 1
+
+        if domain:
+            _dr_root, _dr_query = _domain_root_hq_query(domain)
+        else:
+            _dr_root, _dr_query = "", f"{company_name.strip()} headquarters"
+
+        result["domain_root"]             = _dr_root
+        result["simple_hq_query"]         = _dr_query
+        result["domain_root_hq_query"]    = _dr_query
+        result["domain_root_hq_search_used"] = True
+
+        _s_calls: int = 0
+        _s_cache_hit: bool = False
+        _s_queries: list[str] = [_dr_query] if _dr_query else []
+        _s_data: dict = {}
+        _s_err: str = ""
+
+        if _dr_query and serper_key:
+            _s_ck = ("serper", _dr_query)
+            if _s_ck in cache:
+                _s_data, _ = cache[_s_ck]
+                _s_cache_hit = True
+            else:
+                _s_data, _s_err = _serper_search(_dr_query, serper_key)
+                cache[_s_ck] = (_s_data, _s_err)
+                _s_calls = 1
+                time.sleep(_INTER_REQUEST_SLEEP)
+
+        if _s_data:
+            _s_org    = _s_data.get("organic", [])
+            _s_kg     = _s_data.get("knowledgeGraph", {})
+            _s_kg_loc = (_s_kg.get("address", "") or _s_kg.get("headquarters", "")
+                         or _s_kg.get("location", ""))
+            _s_ab     = _s_data.get("answerBox", {})
+            _s_ab_t   = _s_ab.get("answer", "") or _s_ab.get("snippet", "")
+            _s_places = _s_data.get("places", []) or _s_data.get("local", [])
+
+            result["serper_knowledge_graph_location"] = _s_kg_loc
+            result["serper_answer_box"]               = _s_ab_t
+            for _si, _sitem in enumerate(_s_org[:3], start=1):
+                result[f"top_organic_title_{_si}"]   = _sitem.get("title", "")
+                result[f"top_organic_snippet_{_si}"] = _sitem.get("snippet", "")
+                result[f"top_organic_url_{_si}"]     = _sitem.get("link", "")
+
+            _s_all = " ".join([
+                _s_kg_loc, _s_ab_t,
+                *[f"{r.get('title','')} {r.get('snippet','')}" for r in _s_org[:5]],
+                *[f"{p.get('title','')} {p.get('address','')}" for p in _s_places[:3]],
+            ])
+            _s_quote, _s_country, _s_city, _s_strength = _scan_for_hq(_s_all)
+
+            if _s_country or _s_city:
+                _s_country_std = _std_country(_s_country)
+                _s_input_std   = _std_country(input_country or "Italy")
+                _s_is_foreign  = bool(_s_country_std and
+                                      _s_country_std.lower() != _s_input_std.lower())
+                _s_conf = ("High"   if _s_strength == "Strong"
+                           else ("Medium" if _s_strength == "Medium" else "Low"))
+
+                result["hq_detected_country"]          = _s_country_std
+                result["hq_detected_city"]             = _s_city
+                result["hq_confidence"]                = _s_conf
+                result["hq_evidence_quote"]            = _s_quote
+                result["hq_reason"]                    = f"[simple-hq:{_dr_query}] {_s_quote[:150]}"
+                result["domain_root_hq_evidence_found"]  = True
+                result["domain_root_hq_evidence_quote"]  = _s_quote
+                result["domain_root_hq_country"]         = _s_country_std
+                result["domain_root_hq_city"]            = _s_city
+                result["domain_root_hq_confidence"]      = _s_conf
+
+                # Best evidence URL: prefer official domain, avoid directories
+                from urllib.parse import urlparse as _up_s
+                _s_input_nl = re.sub(
+                    r"^www\.", "",
+                    (domain or "").strip().lstrip("https://").lstrip("http://").rstrip("/").lower()
+                )
+                _s_best_url = ""
+                for _sr in _s_org:
+                    _sl = _sr.get("link", "")
+                    if _is_directory_url(_sl):
+                        continue
+                    _snl = re.sub(r"^www\.", "", _up_s(_sl).netloc.lower())
+                    if _s_input_nl and (_snl == _s_input_nl or _snl.endswith("." + _s_input_nl)):
+                        _s_best_url = _sl
+                        break
+                if not _s_best_url:
+                    _s_best_url = next(
+                        (r.get("link", "") for r in _s_org if not _is_directory_url(r.get("link", ""))),
+                        "",
+                    )
+                result["hq_evidence_url"]              = _s_best_url
+                result["domain_root_hq_evidence_url"]  = _s_best_url
+
+                if _s_is_foreign:
+                    result["foreign_hq_simple"]                  = "True"
+                    result["hq_structure_type"]                  = "foreign_parent"
+                    result["parent_group_hq_country"]            = _s_country_std
+                    result["parent_group_hq_city"]               = _s_city
+                    result["local_entity_hq_country"]            = _s_input_std
+                    result["sig_foreign_hq_score_reviewed"]      = 3
+                    result["review_foreign_parent_score"]        = 3
+                    result["sig_foreign_hq_review_source"]       = "simple_domain_root_hq_search"
+                    result["sig_foreign_hq_review_evidence_url"]   = _s_best_url
+                    result["sig_foreign_hq_review_evidence_quote"] = _s_quote
+                    result["sig_foreign_hq_review_reason"]       = (
+                        f"Simple domain-root HQ search ('{_dr_query}') "
+                        f"identifies {_s_country_std} as HQ"
+                    )
+                    result["sig_foreign_hq_review_confidence"]   = _s_conf
+                    result["needs_manual_review"]                = "No"
+                else:
+                    result["foreign_hq_simple"]              = "False"
+                    result["hq_structure_type"]              = "domestic_italy"
+                    result["sig_foreign_hq_score_reviewed"]  = 0
+                    result["needs_manual_review"]            = "No"
+            else:
+                result["needs_manual_review"] = "Yes"
+                result["hq_reason"] = f"No HQ location found for query: '{_dr_query}'"
+        else:
+            result["needs_manual_review"] = "Yes"
+            if _s_err:
+                result["probe_error"] = _s_err
+
+        result["input_country_used"]  = _std_country(input_country)
+        result["hq_query_used"]       = _dr_query
+        result["serper_calls_used"]   = _s_calls
+        result["serper_queries_used"] = " | ".join(_s_queries)
+        result["serper_cache_hit"]    = (
+            "partial" if (_s_calls > 0 and _s_cache_hit)
+            else ("True" if _s_cache_hit else "False")
+        )
+        result["row_runtime_seconds"] = round(time.monotonic() - _row_start, 2)
+        result["_anthr_model"]        = ""
+        result["_anthr_input_tok"]    = 0
+        result["_anthr_output_tok"]   = 0
+        result["_anthr_total_tok"]    = 0
+        result["_anthr_stop"]         = ""
+
+        _irow = input_row or {}
+        result["sig_foreign_hq_score_original"] = _safe_float(_irow.get("sig_foreign_hq_score"))
+        if not result.get("sig_foreign_hq_score_reviewed"):
+            result["sig_foreign_hq_score_reviewed"] = _safe_float(_irow.get("sig_foreign_hq_score"))
+
         return result
 
     queries    = _build_queries(company_name, domain)
@@ -2837,8 +2992,18 @@ with st.sidebar:
         help="Focus on companies where sig_foreign_hq_score is 0 or blank — likely under-scored.",
     )
 
+    use_simple_hq_mode = st.checkbox(
+        "Use simple HQ mode",
+        value=True,
+        help=(
+            "When enabled, runs exactly one Serper query per row: "
+            "{domain_root} headquarters.  No company-name queries, no page fetches, "
+            "no brand-root ladder, no Anthropic."
+        ),
+    )
+
     run_mode = st.radio(
-        "Run mode",
+        "Run mode (legacy — only active when simple HQ mode is off)",
         options=["fast", "deep", "debug"],
         index=0,
         help=(
@@ -2849,6 +3014,7 @@ with st.sidebar:
             "**Debug**: same as Deep but keeps all audit detail visible in the results table."
         ),
         horizontal=True,
+        disabled=use_simple_hq_mode,
     )
 
     use_mimic_check = True  # always on; mode controls depth
@@ -2898,13 +3064,20 @@ if not file_source:
 
 _mode_max = 3 if run_mode == "fast" else 8
 _mode_label = {"fast": "Fast", "deep": "Deep", "debug": "Debug"}.get(run_mode, run_mode)
-st.markdown(
-    f"**Mode: {_mode_label}** — up to **{_mode_max} Serper calls/row**"
-    + (", + 1 website fetch for multilingual detection" if use_multilingual_check else "")
-    + (", + Anthropic review for ambiguous rows" if use_anthropic_review else "")
-    + f". With limit={int(limit)}, that is up to **{int(limit) * _mode_max:,} Serper calls**."
-    + (" Early stopping is active: rows with clear official HQ evidence skip further queries." if run_mode == "fast" else "")
-)
+if use_simple_hq_mode:
+    st.warning("Simple mode uses 1 Serper call per row when a domain is present.")
+    st.markdown(
+        f"**Simple HQ mode** — 1 Serper call/row (domain-root query). "
+        f"With limit={int(limit)}, that is up to **{int(limit):,} Serper calls**."
+    )
+else:
+    st.markdown(
+        f"**Mode: {_mode_label}** — up to **{_mode_max} Serper calls/row**"
+        + (", + 1 website fetch for multilingual detection" if use_multilingual_check else "")
+        + (", + Anthropic review for ambiguous rows" if use_anthropic_review else "")
+        + f". With limit={int(limit)}, that is up to **{int(limit) * _mode_max:,} Serper calls**."
+        + (" Early stopping is active: rows with clear official HQ evidence skip further queries." if run_mode == "fast" else "")
+    )
 
 run_btn = st.button("▶ Run HQ Probe", type="primary", disabled=(not serper_key))
 if not serper_key:
@@ -2998,6 +3171,7 @@ if run_btn:
             use_anthropic_review=use_anthropic_review,
             use_mimic_check=use_mimic_check,
             run_mode=run_mode,
+            use_simple_hq_mode=use_simple_hq_mode,
         )
 
         # Sanity guard: if detected country == input country, force foreign_hq_simple = False
@@ -3047,6 +3221,7 @@ if run_btn:
         "use_anthropic_review":   use_anthropic_review,
         "use_mimic_check":        use_mimic_check,
         "run_mode":               run_mode,
+        "use_simple_hq_mode":     use_simple_hq_mode,
     }
     st.session_state["hq_probe_run_usage"] = run_usage
 
