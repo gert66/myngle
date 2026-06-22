@@ -198,6 +198,7 @@ PROBE_COLS = [
     "hq_recovery_selected",
     "hq_recovery_selection_reason",
     "sig_foreign_hq_score_original_before_recovery",
+    # Final reviewed score carried forward to next scoring run
     "sig_foreign_hq_score_for_next_scoring",
     "competitor_signal_excluded_from_next_scoring",
 ]
@@ -2736,6 +2737,73 @@ def probe_company(
             _anthr_errors.append(_adj_err)
             result["probe_error"] = (result["probe_error"] + "; " + _adj_err).lstrip("; ") if result.get("probe_error") else _adj_err
 
+    # ── Final domestic-safety guard ──────────────────────────────────────────
+    # Two triggers:
+    # 1. hq_detected_country normalises to input_country (e.g. Italy)
+    # 2. Evidence quote explicitly mentions an Italian location but
+    #    hq_detected_country was misclassified as a foreign country
+    #    (e.g. "emmegi headquarters" snippet says "Modena" but Serper KG
+    #     shows a US address for a different entity)
+    _final_det = _std_country(result.get("hq_detected_country") or "")
+    _final_inp = _std_country(result.get("input_country_used") or input_country or "")
+
+    # Build a combined evidence string from all collected quotes
+    _ev_quotes = " ".join(filter(None, [
+        result.get("hq_evidence_quote", ""),
+        result.get("domain_root_hq_evidence_quote", ""),
+        result.get("brand_root_hq_evidence_quote", ""),
+        result.get("official_page_hq_evidence_quote", ""),
+        result.get("sig_foreign_hq_review_evidence_quote", ""),
+    ]))
+
+    # Italian location tokens that should indicate domestic Italy HQ
+    _ITALY_LOCATION_TOKENS = re.compile(
+        r"\b(?:Italy|Italia|Italian|Modena|Ancona|Osimo|Senigallia|Venezia|Venice|"
+        r"Milano|Milan|Roma|Rome|Torino|Turin|Firenze|Florence|Bologna|Napoli|Naples|"
+        r"Bergamo|Brescia|Padova|Padua|Verona|Perugia|Bari|Catania|Palermo|Cagliari|"
+        r"Reggio|Emilia|Toscana|Lombardia|Veneto|Lazio|Campania|Puglia|Sicilia)\b",
+        re.IGNORECASE,
+    )
+    # Simplified: if quote contains Italy tokens AND detected country is NOT Italy → override
+    _quote_has_italy = bool(_ITALY_LOCATION_TOKENS.search(_ev_quotes))
+    _italy_inp = _final_inp.lower() in ("italy", "italia")
+    _quote_overrides_foreign = (
+        _italy_inp
+        and _quote_has_italy
+        and _final_det
+        and _final_det.lower() not in ("italy", "italia")
+    )
+
+    _is_domestic = (
+        (_final_det and _final_inp and _final_det.lower() == _final_inp.lower())
+        or _quote_overrides_foreign
+    )
+
+    if _is_domestic:
+        _dom_country = _final_inp or "Italy"
+        result["foreign_hq_simple"]             = "False"
+        result["hq_structure_type"]             = "domestic"
+        result["sig_foreign_hq_score_reviewed"] = 0
+        result["sig_foreign_hq_score_for_next_scoring"] = 0
+        result["parent_group_hq_country"]       = _dom_country
+        result["hq_detected_country"]           = _dom_country
+        result["review_foreign_parent_score"]   = 0
+        result["review_global_network_score"]   = 0
+        if result.get("hq_confidence") in ("High", "Medium"):
+            result["needs_manual_review"] = "No"
+        _guard_reason = (
+            "quote_contains_italy_location_overrides_foreign"
+            if _quote_overrides_foreign
+            else f"hq_detected_country={_final_det} == input_country={_final_inp}"
+        )
+        result["sig_foreign_hq_review_reason"] = (
+            (result.get("sig_foreign_hq_review_reason") or "")
+            + f" [domestic-guard: {_guard_reason}]"
+        ).lstrip()
+    else:
+        # Keep reviewed score as-is; copy to next-scoring column
+        result["sig_foreign_hq_score_for_next_scoring"] = result.get("sig_foreign_hq_score_reviewed", "")
+
     # ---- Populate usage columns ----
     result["serper_calls_used"]   = _serper_calls
     result["serper_queries_used"] = " | ".join(_queries_attempted)
@@ -3282,6 +3350,166 @@ if not file_source:
     st.info("Upload a file or enter a local path in the sidebar to get started.")
     st.stop()
 
+_mode_max = 3 if run_mode == "fast" else 8
+_mode_label = {"fast": "Fast", "deep": "Deep", "debug": "Debug"}.get(run_mode, run_mode)
+st.markdown(
+    f"**Mode: {_mode_label}** — up to **{_mode_max} Serper calls/row**"
+    + (", + 1 website fetch for multilingual detection" if use_multilingual_check else "")
+    + (", + Anthropic review for ambiguous rows" if use_anthropic_review else "")
+    + f". With limit={int(limit)}, that is up to **{int(limit) * _mode_max:,} Serper calls**."
+    + (" Early stopping is active: rows with clear official HQ evidence skip further queries." if run_mode == "fast" else "")
+)
+
+run_btn = st.button("▶ Run HQ Probe", type="primary", disabled=(not serper_key))
+if not serper_key:
+    st.warning("Enter a Serper API key in the sidebar to enable the run button.")
+
+if run_btn:
+    # Load input rows
+    with st.spinner("Reading input file…"):
+        try:
+            if file_source == "upload":
+                uploaded_file.seek(0)
+                input_rows = read_input_from_fileobj(
+                    uploaded_file, file_suffix, limit=int(limit), sheet_name=selected_sheet,
+                )
+            else:
+                with open(local_path_str.strip(), "rb") as f:
+                    input_rows = read_input_from_fileobj(
+                        f, file_suffix, limit=int(limit), sheet_name=selected_sheet,
+                    )
+        except Exception as exc:
+            st.error(f"Failed to read input: {exc}")
+            st.stop()
+
+    if not input_rows:
+        st.warning("No rows found in the input file.")
+        st.stop()
+
+    # Old-FHQ signal filter
+    if only_fhq_signal:
+        def _has_fhq_signal(row: dict) -> bool:
+            score = row.get("sig_foreign_hq_score")
+            sanitized = str(row.get("foreign_hq_sanitized") or "").strip().lower()
+            try:
+                score_val = float(score)
+            except (TypeError, ValueError):
+                score_val = 0.0
+            return score_val > 0 or sanitized in {"true", "yes", "1"}
+
+        filtered = [r for r in input_rows if _has_fhq_signal(r)]
+        if filtered:
+            st.info(f"Old FHQ filter: {len(filtered)} / {len(input_rows)} rows have a signal.")
+            input_rows = filtered
+        else:
+            st.warning("No rows matched the old FHQ signal filter. Running on all rows.")
+
+    # Recovery candidates filter (zero/blank FHQ score)
+    if only_recovery:
+        def _is_recovery_candidate(row: dict) -> bool:
+            try:
+                return float(row.get("sig_foreign_hq_score") or 0) == 0
+            except (TypeError, ValueError):
+                return True
+
+        filtered_r = [r for r in input_rows if _is_recovery_candidate(r)]
+        if filtered_r:
+            st.info(f"Recovery filter: {len(filtered_r)} / {len(input_rows)} rows have zero/blank FHQ score.")
+            input_rows = filtered_r
+        else:
+            st.warning("No recovery candidates found (all rows have non-zero FHQ score). Running on all rows.")
+
+    # Detect old enrichment cols
+    sample_keys = set(input_rows[0].keys()) if input_rows else set()
+    present_old_cols = [c for c in OLD_ENRICHMENT_COLS if c in sample_keys]
+
+    # Run probe
+    progress_bar = st.progress(0.0, text="Starting…")
+    probe_results: list[dict] = []
+    total = len(input_rows)
+    cache: dict = {}
+    error_rows: list[str] = []
+
+    for i, row in enumerate(input_rows):
+        company = str(row.get(company_col) or "").strip()
+        domain  = str(row.get(domain_col)  or "").strip()
+        # Country: use column if selected and non-blank, else default
+        if country_col:
+            country = str(row.get(country_col) or "").strip() or default_country
+        else:
+            country = default_country
+
+        probe = probe_company(
+            company_name=company,
+            domain=domain,
+            input_country=country,
+            serper_key=serper_key,
+            use_model=use_model,
+            anthropic_key=anthropic_key,
+            cache=cache,
+            input_row=row,
+            use_multilingual_check=use_multilingual_check,
+            use_anthropic_review=use_anthropic_review,
+            use_mimic_check=use_mimic_check,
+            run_mode=run_mode,
+        )
+
+        # Sanity guard handled inside probe_company (domestic-safety guard).
+        # This outer guard is kept as a belt-and-suspenders fallback.
+        det = _std_country(probe.get("hq_detected_country") or "")
+        inp = _std_country(probe.get("input_country_used") or "")
+        if det and inp and det.lower() == inp.lower():
+            probe["foreign_hq_simple"] = "False"
+            probe["sig_foreign_hq_score_for_next_scoring"] = 0
+
+        probe_results.append(probe)
+        if probe.get("probe_error"):
+            error_rows.append(f"Row {i+1} ({company}): {probe['probe_error']}")
+
+        pct = (i + 1) / total
+        country_hit = probe.get("hq_detected_country") or "…"
+        progress_bar.progress(pct, text=f"[{i+1}/{total}] {company[:45]} → {country_hit}")
+
+    progress_bar.empty()
+
+    # Run-level usage aggregation
+    run_usage = {
+        "rows_processed":           len(probe_results),
+        "serper_calls_used":        sum(int(p.get("serper_calls_used") or 0) for p in probe_results),
+        "rows_with_cache_hit":      sum(1 for p in probe_results if p.get("serper_cache_hit") in ("True", "partial")),
+        "website_fetches":          sum(int(p.get("website_fetch_count") or 0) for p in probe_results),
+        "anthropic_reviews_used":   sum(1 for p in probe_results if p.get("anthropic_hq_review_used") == "Yes"),
+        "anthropic_web_search_used":sum(1 for p in probe_results if p.get("anthropic_web_search_used") == "Yes"),
+        "anthropic_input_tokens":   sum(int(p.get("_anthr_input_tok") or 0) for p in probe_results),
+        "anthropic_output_tokens":  sum(int(p.get("_anthr_output_tok") or 0) for p in probe_results),
+        "anthropic_total_tokens":   sum(int(p.get("_anthr_total_tok") or 0) for p in probe_results),
+        "anthropic_errors":         sum(1 for p in probe_results if p.get("anthropic_error")),
+    }
+
+    # Store in session state
+    ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+    st.session_state[_KEY_RESULTS]    = probe_results
+    st.session_state[_KEY_INPUT_ROWS] = input_rows
+    st.session_state[_KEY_OLD_COLS]   = present_old_cols
+    st.session_state[_KEY_COLS_CFG]   = (company_col, domain_col, country_col or "(default)")
+    st.session_state[_KEY_META] = {
+        "timestamp":              ts,
+        "input_file":             file_label,
+        "use_model":              use_model,
+        "model":                  "claude-haiku-4-5-20251001" if (use_model or use_anthropic_review) else "",
+        "serper_available":       bool(serper_key),
+        "limit":                  int(limit),
+        "use_multilingual_check": use_multilingual_check,
+        "use_anthropic_review":   use_anthropic_review,
+        "use_mimic_check":        use_mimic_check,
+        "run_mode":               run_mode,
+    }
+    st.session_state["hq_probe_run_usage"] = run_usage
+
+    if error_rows:
+        with st.expander(f"⚠️ {len(error_rows)} row error(s)", expanded=False):
+            for e in error_rows:
+                st.text(e)
 
 # ---------------------------------------------------------------------------
 # Workflow mode selector
