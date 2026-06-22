@@ -158,7 +158,22 @@ PROBE_COLS = [
     "max_serper_calls_per_row",
     "early_stop_used",
     "early_stop_reason",
+    "early_stop_blocked_reason",
     "row_runtime_seconds",
+    # Local-country page detection
+    "official_top_result_is_local_country_page",
+    "official_top_result_country_context",
+    "official_top_result_local_page_reason",
+    # Brand-root HQ check
+    "brand_root_candidates",
+    "brand_root_hq_search_used",
+    "brand_root_hq_search_queries",
+    "brand_root_hq_evidence_found",
+    "brand_root_hq_evidence_quote",
+    "brand_root_hq_evidence_url",
+    "brand_root_hq_country",
+    "brand_root_hq_city",
+    "brand_root_hq_source_type",
 ]
 
 # Token columns tracked internally but NOT exported to Excel/CSV visible columns.
@@ -1170,6 +1185,154 @@ def _extract_brand(company_name: str, domain: str) -> list[str]:
     return out[:3]
 
 
+# Terms to strip when building brand-root candidates
+_LOCAL_ENTITY_RE = re.compile(
+    r"\s*\b(?:"
+    r"ITALIA(?:N[AE]?)?|ITALY|ITALIAN"
+    r"|SEALING\s+SOLUTIONS|SOLUTIONS|INGREDIENTS"
+    r"|ADVISORY|SERVICES|SERVICE|CONSULTING|MANAGEMENT"
+    r"|S\.?\s*P\.?\s*A\.?|S\.?\s*R\.?\s*L\.?|S\.?\s*A\.?\s*S\.?"
+    r"|S\.?\s*N\.?\s*C\.?|S\.?\s*A\.?|GmbH|AG\b|Ltd\.?|LLC\.?|Corp\.?"
+    r"|Corporation|Inc\.?|B\.?\s*V\.?\b|N\.?\s*V\.?\b"
+    r"|GROUP\b|GRUPPO\b|HOLDING\b|INTERNATIONAL\b|GLOBAL\b"
+    r")\b\s*",
+    re.IGNORECASE,
+)
+
+# Local-country page URL patterns
+_LOCAL_COUNTRY_URL_RE = re.compile(
+    r"(?:/|-|_|\.)"
+    r"(?:it(?:al(?:ia?|ian)|y)|"
+    r"in[-_]it(?:aly)?|"
+    r"[-_]italy[-_/]?|"
+    r"[-_]italia[-_/]?|"
+    r"locations?/|"
+    r"offices?/|"
+    r"contact/|"
+    r"filial[ei]/)",
+    re.IGNORECASE,
+)
+
+# Local-country text signals in title/snippet
+_LOCAL_COUNTRY_TEXT_RE = re.compile(
+    r"\b(?:"
+    r"Italy\s*[-–]|Italia\s*[-–]"
+    r"|Italy S\.?[PR]\.?[LA]\.?|Italia S\.?[PR]\.?[LA]\.?"
+    r"|Italy\s+(?:office|branch|location|operations|division|unit)"
+    r"|Italian\s+(?:office|branch|subsidiary|division|operations)"
+    r"|sede\s+italian[ae]"
+    r"|ufficio\s+italiano"
+    r")\b",
+    re.IGNORECASE,
+)
+
+
+def _extract_brand_roots(company_name: str, domain: str) -> list[str]:
+    """Generate brand-root candidates from most specific to broadest.
+
+    For 'DATWYLER SEALING SOLUTIONS ITALY S.P.A.' + 'datwyler.com':
+      → ['Datwyler Sealing Solutions', 'Datwyler']
+    For 'NADARA ITALY S.P.A.' + 'nadara.com':
+      → ['Nadara']
+    For 'CSM INGREDIENTS ITALY S.P.A.' + 'csmingredients.com':
+      → ['CSM Ingredients', 'CSM']
+    """
+    _VOWELS = set("aeiouAEIOU")
+
+    def _smart_case(s: str) -> str:
+        """Title-case, preserving consonant-only all-caps acronyms (CSM, KPMG, not CARE)."""
+        parts = s.split()
+        return " ".join(
+            p if (p.isupper() and not any(c in _VOWELS for c in p)) else p.title()
+            for p in parts
+        )
+
+    candidates: list[str] = []
+
+    # 1. Strip legal + local suffixes iteratively; collect intermediate results
+    cleaned = company_name.strip()
+    prev_states: list[str] = []
+    for _ in range(10):
+        new = _LEGAL_SUFFIX_RE.sub("", cleaned).strip().rstrip(",. ")
+        new = re.sub(r"\s+", " ", new)
+        if not new or new == cleaned:
+            break
+        cleaned = new
+        prev_states.append(cleaned)
+
+    # After basic legal-suffix strip, also strip local-entity terms
+    after_local = re.sub(r"\s+", " ", _LOCAL_ENTITY_RE.sub(" ", cleaned)).strip().rstrip(",. -")
+    if after_local and after_local.lower() != cleaned.lower():
+        # prev_states[-1] is most specific (e.g. "DATWYLER SEALING SOLUTIONS")
+        if prev_states and prev_states[-1].strip().lower() != after_local.lower():
+            candidates.append(_smart_case(prev_states[-1].strip()))  # e.g. "Datwyler Sealing Solutions"
+        candidates.append(_smart_case(after_local))  # e.g. "Datwyler" after stripping "Sealing Solutions"
+    elif prev_states:
+        candidates.append(_smart_case(prev_states[-1].strip()))
+    else:
+        # name unchanged by legal strips — smart-case it
+        after_loc2 = re.sub(r"\s+", " ", _LOCAL_ENTITY_RE.sub(" ", company_name)).strip().rstrip(",. -")
+        if after_loc2:
+            candidates.append(_smart_case(after_loc2))
+
+    # 2. Also add domain body as a candidate
+    if domain:
+        body = _get_domain_body(domain)
+        if body and len(body) > 2:
+            body_tc = body.title()
+            # Match meaningful name tokens (≥3 chars) against domain body
+            name_tokens = re.findall(r"[A-Za-z]{3,}", company_name)
+            matched = [t for t in name_tokens
+                       if (t.lower() in body.lower() or body.lower() in t.lower())
+                       and t.lower() not in {"italy", "italia", "italian", "advisory",
+                                              "solutions", "services", "ingredients",
+                                              "management", "consulting"}]
+            domain_root = " ".join(_smart_case(t) for t in matched[:3]) if matched else body_tc
+            if domain_root.lower() not in {c.lower() for c in candidates}:
+                candidates.append(domain_root)
+
+    # 3. Deduplicate; remove empty or too-short
+    seen: set[str] = set()
+    out: list[str] = []
+    for c in candidates:
+        c = _smart_case(c.strip())
+        if len(c) > 2 and c.lower() not in seen:
+            seen.add(c.lower())
+            out.append(c)
+
+    return out[:4]
+
+
+def _is_local_country_page(
+    url: str, title: str, snippet: str, country_keyword: str = "italy"
+) -> tuple[bool, str, str]:
+    """Return (is_local, country_context, reason).
+
+    Checks whether the given URL / title / snippet indicate a local
+    country office / location / branch page rather than a global brand page.
+    """
+    ck = country_keyword.lower()
+    combined_url   = url.lower()
+    combined_text  = f"{title} {snippet}".lower()
+
+    # URL patterns
+    url_local = bool(_LOCAL_COUNTRY_URL_RE.search(combined_url))
+    # Text patterns (title/snippet)
+    text_local = bool(_LOCAL_COUNTRY_TEXT_RE.search(f"{title} {snippet}"))
+
+    # Generic contact/location path on a brand domain
+    contact_path = bool(re.search(r"/(?:contact|location|office|branch|find-us|where)", combined_url))
+
+    if url_local:
+        return True, ck, f"url_contains_local_pattern:{combined_url}"
+    if text_local:
+        return True, ck, f"title_snippet_local_signal"
+    if contact_path and ck in combined_url + combined_text:
+        return True, ck, f"contact_path_with_country_keyword"
+
+    return False, "", ""
+
+
 def _find_official_result(
     organic: list[dict], input_domain: str
 ) -> tuple[int, dict, str]:
@@ -1273,6 +1436,21 @@ def _mimic_google_hq_check(
         "brand_hq_top_result_domain":         "",
         "brand_hq_top_result_is_official_domain": False,
         "brand_hq_result_selection_reason":   "",
+        # Local-country page detection
+        "official_top_result_is_local_country_page": False,
+        "official_top_result_country_context":        "",
+        "official_top_result_local_page_reason":      "",
+        "early_stop_blocked_reason":                  "",
+        # Brand-root HQ check
+        "brand_root_candidates":        "",
+        "brand_root_hq_search_used":    False,
+        "brand_root_hq_search_queries": "",
+        "brand_root_hq_evidence_found": False,
+        "brand_root_hq_evidence_quote": "",
+        "brand_root_hq_evidence_url":   "",
+        "brand_root_hq_country":        "",
+        "brand_root_hq_city":           "",
+        "brand_root_hq_source_type":    "",
         # Internal
         "_mimic_serper_calls":      0,
         "_mimic_queries":           [],
@@ -1311,6 +1489,20 @@ def _mimic_google_hq_check(
         out["official_domain_matches_input_domain"] = bool(
             input_body and (input_body in off_body or off_body in input_body)
         )
+        # Detect if the top official result is a local-country page
+        _lc_is, _lc_ctx, _lc_why = _is_local_country_page(
+            off_result.get("link", ""),
+            off_result.get("title", ""),
+            off_result.get("snippet", ""),
+            country_keyword=input_country or "italy",
+        )
+        out["official_top_result_is_local_country_page"] = _lc_is
+        out["official_top_result_country_context"]       = _lc_ctx
+        out["official_top_result_local_page_reason"]     = _lc_why
+
+    # Pre-compute brand-root candidates (used in both fetch scan and brand-root search)
+    _brand_roots = _extract_brand_roots(company_name, domain or off_netloc)
+    out["brand_root_candidates"] = " | ".join(_brand_roots)
 
     # ── 3. Fetch official pages ────────────────────────────────────────────
     fetch_domain = off_netloc or (
@@ -1376,11 +1568,101 @@ def _mimic_google_hq_check(
                     "hq_evidence_quote":   q,
                 }
 
+    # If we found evidence from official page but the top result was a local-country page,
+    # block early-stop and force brand-root check to validate parent HQ.
+    _is_local_top = out["official_top_result_is_local_country_page"]
+    if _is_local_top and out["_mimic_hq_evidence"]:
+        # Only Italian local entity evidence — not enough to conclude parent/group HQ
+        out["early_stop_blocked_reason"] = "local_country_page_requires_brand_root_hq_check"
+        out["_mimic_hq_evidence"] = {}   # clear; brand-root check will decide
+
     # ── 4. Brand/domain HQ follow-up (only if no strong evidence yet) ──────
-    if not out["_mimic_hq_evidence"]:
+    # Also mandatory when local-country page was detected, even if some page evidence exists
+    _need_brand_root = not out["_mimic_hq_evidence"] or _is_local_top
+    if _need_brand_root:
+        # Use brand roots (specific → broad) for brand-root HQ check
+        brand_root_queries: list[str] = []
+        if _brand_roots:
+            primary = _brand_roots[0]
+            brand_root_queries = [
+                f'"{primary}" headquarters',
+                f'"{primary}" group headquarters',
+                f'"{primary}" head office',
+                f'"{primary}" corporate headquarters',
+                f'"{primary}" parent company',
+            ]
+        # Limit per mode; caller controls max_brand_queries
+        brand_root_queries = brand_root_queries[:max_brand_queries]
+
+        # ── 4a. Brand-root HQ search ──
+        if brand_root_queries:
+            out["brand_root_hq_search_used"]    = True
+            out["brand_root_hq_search_queries"] = " | ".join(brand_root_queries)
+            for bq in brand_root_queries:
+                out["_mimic_queries"].append(bq)
+                ck_b = ("serper", bq)
+                if ck_b in cache:
+                    bdata, _ = cache[ck_b]
+                    out["_mimic_serper_cache_hits"] += 1
+                else:
+                    bdata, _ = _serper_search(bq, serper_key)
+                    cache[ck_b] = (bdata, "")
+                    out["_mimic_serper_calls"] += 1
+                    time.sleep(_INTER_REQUEST_SLEEP)
+                if not bdata:
+                    continue
+                b_org    = bdata.get("organic", [])
+                b_kg     = bdata.get("knowledgeGraph", {})
+                b_kg_loc = (b_kg.get("address", "") or b_kg.get("headquarters", "")
+                            or b_kg.get("location", ""))
+                b_ab     = bdata.get("answerBox", {})
+                b_ab_t   = b_ab.get("answer", "") or b_ab.get("snippet", "")
+                # Scan KG + answer box + top organic
+                all_b = " ".join([
+                    b_kg_loc, b_ab_t,
+                    *[f"{r.get('title','')} {r.get('snippet','')}" for r in b_org[:5]],
+                ])
+                q, country, city, strength = _scan_for_hq(all_b)
+                if country or city:
+                    out["brand_root_hq_evidence_found"] = True
+                    out["brand_root_hq_evidence_quote"] = q
+                    out["brand_root_hq_country"]        = country
+                    out["brand_root_hq_city"]           = city
+                    # Determine source type
+                    if b_kg_loc and (country.lower() in b_kg_loc.lower() or city.lower() in b_kg_loc.lower()):
+                        src_type = "knowledge_graph"
+                    elif b_ab_t and (country.lower() in b_ab_t.lower() or city.lower() in b_ab_t.lower()):
+                        src_type = "answer_box"
+                    else:
+                        src_type = "organic_snippet"
+                    out["brand_root_hq_source_type"] = src_type
+                    # Pick best URL (prefer official/input domain)
+                    from urllib.parse import urlparse as _up2
+                    _official_nl = (fetch_domain or domain or "").lstrip("www.").lower()
+                    def _br_rank(r: dict) -> int:
+                        nl = _up2(r.get("link", "")).netloc.lstrip("www.").lower()
+                        if _is_directory_url(r.get("link", "")):
+                            return 10
+                        if _official_nl and (nl == _official_nl or nl.endswith("." + _official_nl)):
+                            return 0
+                        return 5
+                    top_r = sorted(b_org, key=_br_rank)[0] if b_org else {}
+                    out["brand_root_hq_evidence_url"] = top_r.get("link", "") if top_r else ""
+                    if strength in ("Strong", "Medium") and not out["_mimic_hq_evidence"]:
+                        out["_mimic_hq_evidence"] = {
+                            "hq_detected_city":    city,
+                            "hq_detected_country": country,
+                            "hq_confidence":       "High" if strength == "Strong" else "Medium",
+                            "hq_reason":           f"[mimic-brand-root:{bq[:60]}] {q[:150]}",
+                            "hq_evidence_url":     out["brand_root_hq_evidence_url"],
+                            "hq_evidence_quote":   q,
+                        }
+                    break  # stop after first successful brand-root query
+
+        # ── 4b. Original brand follow-up (fallback when brand-root produced nothing) ──
         brands = _extract_brand(company_name, fetch_domain or domain)
         brand_queries: list[str] = []
-        if brands:
+        if brands and not out["brand_root_hq_evidence_found"]:
             primary = brands[0]
             brand_queries = [
                 f'"{primary}" headquarters',
@@ -1730,24 +2012,60 @@ def probe_company(
         if _k in result:
             result[_k] = _v
 
+    # ── Apply brand-root HQ evidence to classification fields ────────────────
+    _br_country = result.get("brand_root_hq_country", "")
+    _br_city    = result.get("brand_root_hq_city", "")
+    _input_std  = _std_country(input_country or "Italy")
+    _br_std     = _std_country(_br_country)
+    if _br_country and _br_std and _br_std.lower() != _input_std.lower():
+        # Brand-root found a foreign parent HQ → classify as foreign_parent
+        result["hq_structure_type"]           = "foreign_parent"
+        result["parent_group_hq_country"]     = _br_country
+        result["parent_group_hq_city"]        = _br_city
+        result["local_entity_hq_country"]     = _input_std
+        result["sig_foreign_hq_score_reviewed"] = 3
+        result["review_foreign_parent_score"] = 3
+        result["sig_foreign_hq_review_source"] = "brand_root_hq_check"
+        result["sig_foreign_hq_review_evidence_url"]   = result.get("brand_root_hq_evidence_url", "")
+        result["sig_foreign_hq_review_evidence_quote"] = result.get("brand_root_hq_evidence_quote", "")
+        result["sig_foreign_hq_review_reason"] = (
+            f"Brand-root HQ check ({result.get('brand_root_hq_source_type','')}) "
+            f"identifies {_br_country} as parent/group HQ"
+        )
+        result["sig_foreign_hq_review_confidence"] = (
+            "High" if _mimic_evidence.get("hq_confidence") == "High" else "Medium"
+        )
+        result["foreign_hq_simple"]           = "True"
+        result["hq_detected_country"]         = _br_std
+        result["hq_detected_city"]            = _br_city
+        result["hq_confidence"]               = "High"
+        result["needs_anthropic_hq_review"]   = "No"
+        needs_adj = False
+
     # Suppress Anthropic when official page evidence is already strong and unambiguous
     _has_strong_official = (
         result.get("official_page_hq_evidence_strength") == "Strong"
         and result.get("official_page_hq_country")
+        and not result.get("official_top_result_is_local_country_page")
     )
     _has_strong_brand = (
         result.get("brand_hq_evidence_found")
         and _mimic_evidence.get("hq_confidence") == "High"
         and _mimic_evidence.get("hq_detected_country")
     )
-    if _has_strong_official or _has_strong_brand:
-        _ev_src = "official_page_mimic_check" if _has_strong_official else "brand_hq_mimic_check"
+    _has_strong_brand_root = bool(_br_country and _br_std.lower() != _input_std.lower())
+    if _has_strong_official or _has_strong_brand or _has_strong_brand_root:
+        _ev_src = (
+            "brand_root_hq_check" if _has_strong_brand_root
+            else ("official_page_mimic_check" if _has_strong_official else "brand_hq_mimic_check")
+        )
         result["needs_anthropic_hq_review"] = "No"
         result["anthropic_hq_review_used"]  = "No"
         result["anthropic_web_search_used"] = "No"
         result["anthropic_review_evidence_mode"] = ""
-        result["sig_foreign_hq_review_source"] = _ev_src
-        if _has_strong_official:
+        if not _has_strong_brand_root:
+            result["sig_foreign_hq_review_source"] = _ev_src
+        if _has_strong_official and not _has_strong_brand_root:
             result["sig_foreign_hq_review_evidence_url"]   = result.get("official_page_fetch_url", "")
             result["sig_foreign_hq_review_evidence_quote"] = result.get("official_page_hq_evidence_quote", "")
         needs_adj = False
@@ -2554,12 +2872,17 @@ _KEY_VIEW_COLS_RAW = [
     "anthropic_error",
     "sig_foreign_hq_review_reason",
     "sig_foreign_hq_review_evidence_url",
-    "run_mode", "early_stop_used", "early_stop_reason",
+    "run_mode", "early_stop_used", "early_stop_reason", "early_stop_blocked_reason",
     "serper_calls_used", "serper_cache_hit",
     "manual_google_mimic_used",
     "plain_company_official_domain", "official_domain_matches_input_domain",
+    "official_top_result_is_local_country_page", "official_top_result_local_page_reason",
     "official_page_hq_evidence_found", "official_page_hq_evidence_strength",
     "official_page_hq_country", "official_page_hq_city",
+    "brand_root_candidates",
+    "brand_root_hq_search_used", "brand_root_hq_search_queries",
+    "brand_root_hq_evidence_found", "brand_root_hq_evidence_quote",
+    "brand_root_hq_evidence_url", "brand_root_hq_country", "brand_root_hq_city",
     "brand_hq_evidence_found", "brand_hq_evidence_quote",
     "hq_reason", "hq_evidence_url", "hq_evidence_quote", "hq_query_used",
 ]
