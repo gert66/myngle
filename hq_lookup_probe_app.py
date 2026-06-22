@@ -649,7 +649,7 @@ def detect_multilingual_site(domain: str) -> dict[str, Any]:
     }
     if not domain:
         return out
-    domain = domain.strip().lstrip("https://").lstrip("http://").rstrip("/")
+    domain = re.sub(r"^https?://", "", domain.strip()).rstrip("/")
     html = ""
     for scheme in ("https", "http"):
         out["website_fetch_count"] += 1
@@ -1719,7 +1719,7 @@ def _mimic_google_hq_check(
                 )
                 # Pick best evidence URL
                 from urllib.parse import urlparse as _up0
-                _dr_input_nl = (domain or "").strip().lstrip("https://").lstrip("http://").rstrip("/")
+                _dr_input_nl = re.sub(r"^https?://", "", (domain or "").strip()).rstrip("/")
                 _dr_input_nl = re.sub(r"^www\.", "", _dr_input_nl).lower()
                 def _dr_url_rank(r: dict) -> int:
                     nl = re.sub(r"^www\.", "", _up0(r.get("link","")).netloc.lower())
@@ -1827,7 +1827,7 @@ def _mimic_google_hq_check(
 
     # ── 3. Fetch official pages ────────────────────────────────────────────
     fetch_domain = off_netloc or (
-        domain.strip().lstrip("https://").lstrip("http://").rstrip("/") if domain else ""
+        re.sub(r"^https?://", "", domain.strip()).rstrip("/") if domain else ""
     )
     combined_page_text = ""
     first_ok_url = ""
@@ -2064,7 +2064,7 @@ def _mimic_google_hq_check(
 
 def _build_queries(company_name: str, domain: str) -> list[str]:
     n = company_name.strip()
-    d = (domain or "").strip().lstrip("https://").lstrip("http://").rstrip("/")
+    d = re.sub(r"^https?://", "", (domain or "").strip()).rstrip("/")
     queries = [
         f'"{n}" headquarters',
         f'"{n}" head office',
@@ -2240,7 +2240,7 @@ def probe_company(
                 from urllib.parse import urlparse as _up_s
                 _s_input_nl = re.sub(
                     r"^www\.", "",
-                    (domain or "").strip().lstrip("https://").lstrip("http://").rstrip("/").lower()
+                    re.sub(r"^https?://", "", (domain or "").strip()).rstrip("/").lower()
                 )
                 _s_best_url = ""
                 for _sr in _s_org:
@@ -2545,7 +2545,7 @@ def probe_company(
         "website_languages_detected": "", "website_fetch_count": 0,
     }
     if use_multilingual_check and domain:
-        _ml_key = ("multilingual", domain.strip().lstrip("https://").lstrip("http://").rstrip("/"))
+        _ml_key = ("multilingual", re.sub(r"^https?://", "", domain.strip()).rstrip("/"))
         if _ml_key in cache:
             ml_result = cache[_ml_key]
         else:
