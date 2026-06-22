@@ -366,6 +366,10 @@ _INTL_CITIES: dict[str, tuple[str, str]] = {
     "uri": ("Uri", "Switzerland"),
     "brande": ("Brande", "Denmark"), "aarhus": ("Aarhus", "Denmark"),
     "odense": ("Odense", "Denmark"), "aalborg": ("Aalborg", "Denmark"),
+    "venice": ("Venice", "Italy"), "venezia": ("Venezia", "Italy"),
+    "santa maria di sala": ("Santa Maria di Sala", "Italy"),
+    "verona": ("Verona", "Italy"), "padova": ("Padova", "Italy"),
+    "padua": ("Padua", "Italy"),
 }
 
 _COUNTRY_ALIASES: dict[str, str] = {
@@ -612,6 +616,22 @@ def _italy_in_text(text: str) -> bool:
 def _std_country(raw: str) -> str:
     """Normalise a country string via aliases."""
     return _COUNTRY_ALIASES.get(raw.strip().lower(), raw.strip())
+
+
+def _set_manual_review(result: dict, value: str, reason: str = "") -> None:
+    """Set needs_manual_review, but never downgrade 'Yes' to 'No'."""
+    existing = str(result.get("needs_manual_review", "")).strip().lower()
+    if existing == "yes":
+        result["needs_manual_review"] = "Yes"
+    else:
+        result["needs_manual_review"] = value
+    if reason:
+        old = str(result.get("hq_review_trigger") or "").strip()
+        if old and reason not in old:
+            result["hq_review_trigger"] = old + "; " + reason
+        elif not old:
+            result["hq_review_trigger"] = reason
+
 
 
 def _safe_float(val: Any, default: float = 0.0) -> float:
@@ -1139,14 +1159,14 @@ _OFFICIAL_PAGE_PATHS = [
 ]
 
 _OFFICIAL_HQ_PATTERNS: list[tuple[re.Pattern, str]] = [
-    (re.compile(r"its?\s+head\s+office\s+is\s+in\s+([A-Za-zÀ-ÿ\s,\(\)]{3,60}?)(?:\.|;|\n)", re.I), "Strong"),
-    (re.compile(r"head\s+office\s+(?:is\s+)?(?:located\s+)?in\s+([A-Za-zÀ-ÿ\s,\(\)]{3,60}?)(?:\.|;|,\s*(?:with|which)|\n)", re.I), "Strong"),
-    (re.compile(r"headquartered\s+in\s+([A-Za-zÀ-ÿ\s,\(\)]{3,60}?)(?:\.|;|\n)", re.I), "Strong"),
-    (re.compile(r"headquarters\s+(?:are\s+)?(?:is\s+)?(?:located\s+)?in\s+([A-Za-zÀ-ÿ\s,\(\)]{3,60}?)(?:\.|;|\n)", re.I), "Strong"),
-    (re.compile(r"corporate\s+headquarters\s+in\s+([A-Za-zÀ-ÿ\s,\(\)]{3,60}?)(?:\.|;|\n)", re.I), "Strong"),
-    (re.compile(r"group\s+headquarters\s+in\s+([A-Za-zÀ-ÿ\s,\(\)]{3,60}?)(?:\.|;|\n)", re.I), "Strong"),
-    (re.compile(r"operational\s+headquarters\s+in\s+([A-Za-zÀ-ÿ\s,\(\)]{3,60}?)(?:\.|;|\n)", re.I), "Strong"),
-    (re.compile(r"registered\s+office\s+(?:in|at|:)\s*([A-Za-zÀ-ÿ\s,\(\)]{3,60}?)(?:\.|;|\n)", re.I), "Strong"),
+    (re.compile(r"its?\s+head\s+office\s+is\s+in\s+([A-Za-zÀ-ÿ\s,\(\)]{3,60}?)(?:\.|;|\n|\Z)", re.I), "Strong"),
+    (re.compile(r"head\s+office\s+(?:is\s+)?(?:located\s+)?in\s+([A-Za-zÀ-ÿ\s,\(\)]{3,60}?)(?:\.|;|,\s*(?:with|which)|\n|\Z)", re.I), "Strong"),
+    (re.compile(r"headquartered\s+in\s+([A-Za-zÀ-ÿ\s,\(\)]{3,60}?)(?:\.|;|\n|\Z)", re.I), "Strong"),
+    (re.compile(r"headquarters\s+(?:are\s+)?(?:is\s+)?(?:located\s+)?in\s+([A-Za-zÀ-ÿ\s,\(\)]{3,60}?)(?:\.|;|\n|\Z)", re.I), "Strong"),
+    (re.compile(r"corporate\s+headquarters\s+in\s+([A-Za-zÀ-ÿ\s,\(\)]{3,60}?)(?:\.|;|\n|\Z)", re.I), "Strong"),
+    (re.compile(r"group\s+headquarters\s+in\s+([A-Za-zÀ-ÿ\s,\(\)]{3,60}?)(?:\.|;|\n|\Z)", re.I), "Strong"),
+    (re.compile(r"operational\s+headquarters\s+in\s+([A-Za-zÀ-ÿ\s,\(\)]{3,60}?)(?:\.|;|\n|\Z)", re.I), "Strong"),
+    (re.compile(r"registered\s+office\s+(?:in|at|:)\s*([A-Za-zÀ-ÿ\s,\(\)]{3,60}?)(?:\.|;|\n|\Z)", re.I), "Strong"),
     (re.compile(r"sede\s+(?:principale|legale|centrale)\s*[:\s]+(?:in\s+)?([A-Za-zÀ-ÿ\s,]{3,50}?)(?:\.|;|,|\n)", re.I), "Strong"),
     (re.compile(r"parent\s+company\s+is\s+([A-Za-zÀ-ÿ\s,]{3,60}?)(?:\.|;|\n)", re.I), "Medium"),
     (re.compile(r"part\s+of\s+the\s+([A-Za-zÀ-ÿ\s]{3,40}?)\s+group\b", re.I), "Medium"),
@@ -1431,11 +1451,24 @@ _HQ_SIGNAL_RE = re.compile(
     re.IGNORECASE,
 )
 
-# Regional/divisional HQ phrases — these should NOT override a global HQ signal
+# Regional/divisional/subsidiary HQ phrases — these should NOT auto-score as global parent HQ
 _REGIONAL_HQ_RE = re.compile(
-    r"\b(?:(?:north\s*america[n]?|na|emea|apac|latam|asia[\s\-]pacific|european?|"
-    r"regional?|division[al]?|segment)\s+(?:headquarters?|hq)|"
-    r"headquarters?\s+for\s+(?:north\s*america[n]?|emea|apac|europe))\b",
+    r"\b(?:"
+    r"(?:north\s*america[n]?|na|emea|apac|latam|asia[\s\-]pacific|european?|"
+    r"regional?|division[al]?|segment|us|usa?)\s+(?:headquarters?|hq)|"
+    r"headquarters?\s+for\s+(?:north\s*america[n]?|emea|apac|europe|us|usa?)|"
+    r"usa?\s+corp(?:oration)?\s+headquarters?|"
+    r"branch\s+(?:office|headquarters?)|local\s+(?:office|headquarters?)|"
+    r"subsidiary\s+headquarters?|affiliate\s+headquarters?"
+    r")\b",
+    re.IGNORECASE,
+)
+
+# Subsidiary/third-party evidence phrases — downgrade confidence, require manual review
+_SUBSIDIARY_SIGNAL_RE = re.compile(
+    r"\b(?:usa?\s+corp(?:oration)?|subsidiary|affiliate|"
+    r"branch\s+(?:office|headquarters?)|local\s+(?:office|headquarters?)|"
+    r"regional\s+headquarters?|division\s+headquarters?)\b",
     re.IGNORECASE,
 )
 
@@ -2223,56 +2256,85 @@ def probe_company(
                         (r.get("link", "") for r in _s_org if not _is_directory_url(r.get("link", ""))),
                         "",
                     )
-                result["hq_evidence_url"]              = _s_best_url
-                result["domain_root_hq_evidence_url"]  = _s_best_url
+                result["hq_evidence_url"]             = _s_best_url
+                result["domain_root_hq_evidence_url"] = _s_best_url
 
-                # Domain-match validation: if evidence URL is from a different domain
-                # (e.g. jobtechalliance.com for jobtech.it) and it's not a known
-                # directory or global brand, downgrade confidence and flag for review.
-                _s_evidence_domain = re.sub(r"^www\.", "", _up_s(_s_best_url).netloc.lower()) if _s_best_url else ""
-                _s_domain_mismatch = bool(
-                    _s_evidence_domain
-                    and _s_input_nl
-                    and _s_evidence_domain != _s_input_nl
-                    and not _s_evidence_domain.endswith("." + _s_input_nl)
-                    and not _is_directory_url(_s_best_url)
-                    and _dr_root not in _KNOWN_GLOBAL_BRANDS
+                # ── Evidence quality checks ──────────────────────────────────────
+                _s_evidence_domain = (
+                    re.sub(r"^www\.", "", _up_s(_s_best_url).netloc.lower())
+                    if _s_best_url else ""
                 )
+                _s_is_official_domain = bool(
+                    _s_evidence_domain and _s_input_nl
+                    and (_s_evidence_domain == _s_input_nl
+                         or _s_evidence_domain.endswith("." + _s_input_nl))
+                )
+                _s_is_known_brand = bool(_dr_root and _dr_root in _KNOWN_GLOBAL_BRANDS)
+
+                # Domain mismatch: best URL is from a different, non-directory domain
+                _s_domain_mismatch = bool(
+                    _s_evidence_domain and _s_input_nl
+                    and not _s_is_official_domain
+                    and not _is_directory_url(_s_best_url)
+                    and not _s_is_known_brand
+                )
+
+                # Subsidiary/regional signal in evidence quote
+                _s_is_subsidiary_regional = bool(_SUBSIDIARY_SIGNAL_RE.search(_s_quote))
+
+                # Aggregate untrusted flag
+                _s_untrusted = _s_domain_mismatch or _s_is_subsidiary_regional
+
+                # Build rejection/trigger reason
+                _s_trust_reason = ""
                 if _s_domain_mismatch:
-                    _s_conf = "Low"
-                    result["hq_confidence"]           = _s_conf
-                    result["domain_root_hq_confidence"] = _s_conf
-                    result["needs_manual_review"]     = "Yes"
+                    _s_trust_reason = f"unrelated_domain:{_s_evidence_domain}"
                     result["domain_root_hq_rejected_evidence_reason"] = (
                         f"evidence from {_s_evidence_domain}, not {_s_input_nl}"
                     )
+                if _s_is_subsidiary_regional:
+                    _s_sub_label = "subsidiary_or_regional_hq_evidence"
+                    _s_trust_reason = (
+                        (_s_trust_reason + "; " + _s_sub_label)
+                        if _s_trust_reason else _s_sub_label
+                    )
+
+                if _s_untrusted:
+                    _s_conf = "Low"
+                    result["hq_confidence"]             = _s_conf
+                    result["domain_root_hq_confidence"] = _s_conf
+                    _set_manual_review(result, "Yes", _s_trust_reason)
 
                 if _s_is_foreign:
-                    result["foreign_hq_simple"]                  = "True"
-                    result["hq_structure_type"]                  = "foreign_parent"
-                    result["parent_group_hq_country"]            = _s_country_std
-                    result["parent_group_hq_city"]               = _s_city
-                    result["local_entity_hq_country"]            = _s_input_std
-                    result["sig_foreign_hq_score_reviewed"]      = 3
-                    result["review_foreign_parent_score"]        = 3
-                    result["sig_foreign_hq_review_source"]       = "simple_domain_root_hq_search"
+                    result["foreign_hq_simple"]                    = "True"
+                    result["hq_structure_type"]                    = "foreign_parent"
+                    result["parent_group_hq_country"]              = _s_country_std
+                    result["parent_group_hq_city"]                 = _s_city
+                    result["local_entity_hq_country"]              = _s_input_std
+                    result["sig_foreign_hq_review_source"]         = "simple_domain_root_hq_search"
                     result["sig_foreign_hq_review_evidence_url"]   = _s_best_url
                     result["sig_foreign_hq_review_evidence_quote"] = _s_quote
-                    result["sig_foreign_hq_review_reason"]       = (
+                    result["sig_foreign_hq_review_reason"] = (
                         f"Simple domain-root HQ search ('{_dr_query}') "
                         f"identifies {_s_country_std} as HQ"
                     )
-                    result["sig_foreign_hq_review_confidence"]   = _s_conf
-                    if not _s_domain_mismatch:
-                        result["needs_manual_review"]            = "No"
+                    result["sig_foreign_hq_review_confidence"] = _s_conf
+                    if _s_untrusted:
+                        # Evidence not trusted — keep score at 0, require manual review
+                        result["sig_foreign_hq_score_reviewed"] = 0
+                        result["review_foreign_parent_score"]   = 0
+                    else:
+                        result["sig_foreign_hq_score_reviewed"] = 3
+                        result["review_foreign_parent_score"]   = 3
+                        _set_manual_review(result, "No")
                 else:
-                    result["foreign_hq_simple"]              = "False"
-                    result["hq_structure_type"]              = "domestic_italy"
-                    result["sig_foreign_hq_score_reviewed"]  = 0
-                    if not _s_domain_mismatch:
-                        result["needs_manual_review"]        = "No"
+                    result["foreign_hq_simple"]             = "False"
+                    result["hq_structure_type"]             = "domestic_italy"
+                    result["sig_foreign_hq_score_reviewed"] = 0
+                    if not _s_untrusted:
+                        _set_manual_review(result, "No")
             else:
-                result["needs_manual_review"] = "Yes"
+                _set_manual_review(result, "Yes")
                 result["hq_reason"] = f"No HQ location found for query: '{_dr_query}'"
         else:
             result["needs_manual_review"] = "Yes"
