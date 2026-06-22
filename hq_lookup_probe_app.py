@@ -179,6 +179,16 @@ PROBE_COLS = [
     "known_global_brand_name",
     "known_global_brand_type",
     "known_global_brand_reason",
+    # Domain-root HQ search (very first query: "{domain_root} headquarters")
+    "domain_root",
+    "domain_root_hq_query",
+    "domain_root_hq_search_used",
+    "domain_root_hq_evidence_found",
+    "domain_root_hq_evidence_quote",
+    "domain_root_hq_evidence_url",
+    "domain_root_hq_country",
+    "domain_root_hq_city",
+    "domain_root_hq_confidence",
 ]
 
 # Token columns tracked internally but NOT exported to Excel/CSV visible columns.
@@ -1425,6 +1435,12 @@ _KNOWN_GLOBAL_BRAND_NAMES: dict[str, str] = {
     "grant thornton": "Grant Thornton",
 }
 
+# Domain roots of global professional-services networks that get an extra
+# "global network" follow-up query after the domain-root HQ search.
+_GLOBAL_NETWORK_DOMAIN_ROOTS: frozenset[str] = frozenset({
+    "kpmg", "ey", "pwc", "deloitte", "bdo", "grantthornton",
+})
+
 
 def _match_known_global_brand(brand_roots: list[str]) -> tuple[str, str, str]:
     """Return (brand_key, brand_type, canonical_name) or ('','','') if no match."""
@@ -1433,6 +1449,21 @@ def _match_known_global_brand(brand_roots: list[str]) -> tuple[str, str, str]:
         if key in _KNOWN_GLOBAL_BRANDS:
             return key, _KNOWN_GLOBAL_BRANDS[key], _KNOWN_GLOBAL_BRAND_NAMES.get(key, root)
     return "", "", ""
+
+
+def _domain_root_hq_query(domain: str) -> tuple[str, str]:
+    """Return (domain_root, query) for a simple un-quoted domain-root HQ search.
+
+    Examples:
+        'datwyler.com'      → ('datwyler', 'datwyler headquarters')
+        'www.ibm.com'       → ('ibm', 'ibm headquarters')
+        'jobtech.it'        → ('jobtech', 'jobtech headquarters')
+        'csmingredients.com'→ ('csmingredients', 'csmingredients headquarters')
+    """
+    root = _get_domain_body(domain) if domain else ""
+    if not root:
+        return "", ""
+    return root, f"{root} headquarters"
 
 
 def _mimic_google_hq_check(
@@ -1500,6 +1531,16 @@ def _mimic_google_hq_check(
         "known_global_brand_name":      "",
         "known_global_brand_type":      "",
         "known_global_brand_reason":    "",
+        # Domain-root HQ search
+        "domain_root":                  "",
+        "domain_root_hq_query":         "",
+        "domain_root_hq_search_used":   False,
+        "domain_root_hq_evidence_found": False,
+        "domain_root_hq_evidence_quote": "",
+        "domain_root_hq_evidence_url":   "",
+        "domain_root_hq_country":        "",
+        "domain_root_hq_city":           "",
+        "domain_root_hq_confidence":     "",
         # Internal
         "_mimic_serper_calls":      0,
         "_mimic_queries":           [],
@@ -1507,20 +1548,108 @@ def _mimic_google_hq_check(
         "_mimic_hq_evidence":       {},
     }
 
+    # ── 0. Domain-root HQ search (very first, simplest query) ────────────
+    # Always runs first when a domain is provided. Query: "{domain_root} headquarters"
+    # Not quoted, no company name, no legal suffix, no Italy.
+    _dr_root, _dr_query = _domain_root_hq_query(domain)
+    if _dr_root and _dr_query:
+        out["domain_root"]            = _dr_root
+        out["domain_root_hq_query"]   = _dr_query
+        out["domain_root_hq_search_used"] = True
+        out["_mimic_queries"].append(_dr_query)
+
+        _dr_ck = ("serper", _dr_query)
+        if _dr_ck in cache:
+            _dr_data, _ = cache[_dr_ck]
+            out["_mimic_serper_cache_hits"] += 1
+        else:
+            _dr_data, _ = _serper_search(_dr_query, serper_key)
+            cache[_dr_ck] = (_dr_data, "")
+            out["_mimic_serper_calls"] += 1
+            time.sleep(_INTER_REQUEST_SLEEP)
+
+        if _dr_data:
+            _dr_org    = _dr_data.get("organic", [])
+            _dr_kg     = _dr_data.get("knowledgeGraph", {})
+            _dr_kg_loc = (_dr_kg.get("address", "") or _dr_kg.get("headquarters", "")
+                          or _dr_kg.get("location", ""))
+            _dr_ab     = _dr_data.get("answerBox", {})
+            _dr_ab_t   = _dr_ab.get("answer", "") or _dr_ab.get("snippet", "")
+            _dr_all    = " ".join([
+                _dr_kg_loc, _dr_ab_t,
+                *[f"{r.get('title','')} {r.get('snippet','')}" for r in _dr_org[:5]],
+            ])
+            _dr_q, _dr_country, _dr_city, _dr_strength = _scan_for_hq(_dr_all)
+            if _dr_country or _dr_city:
+                out["domain_root_hq_evidence_found"] = True
+                out["domain_root_hq_evidence_quote"] = _dr_q
+                out["domain_root_hq_country"]        = _dr_country
+                out["domain_root_hq_city"]           = _dr_city
+                out["domain_root_hq_confidence"]     = (
+                    "High" if _dr_strength == "Strong" else
+                    ("Medium" if _dr_strength == "Medium" else "Low")
+                )
+                # Pick best evidence URL
+                from urllib.parse import urlparse as _up0
+                _dr_input_nl = (domain or "").strip().lstrip("https://").lstrip("http://").rstrip("/")
+                _dr_input_nl = re.sub(r"^www\.", "", _dr_input_nl).lower()
+                def _dr_url_rank(r: dict) -> int:
+                    nl = re.sub(r"^www\.", "", _up0(r.get("link","")).netloc.lower())
+                    if _is_directory_url(r.get("link","")):
+                        return 10
+                    if _dr_input_nl and (nl == _dr_input_nl or nl.endswith("." + _dr_input_nl)):
+                        return 0
+                    return 5
+                _dr_top_r = sorted(_dr_org, key=_dr_url_rank)[0] if _dr_org else {}
+                out["domain_root_hq_evidence_url"] = _dr_top_r.get("link", "") if _dr_top_r else ""
+
+                # Populate _mimic_hq_evidence for strong/medium evidence
+                _input_std_dr = _std_country(input_country or "Italy")
+                _dr_country_std = _std_country(_dr_country)
+                if _dr_strength in ("Strong", "Medium") and _dr_country_std.lower() != _input_std_dr.lower():
+                    out["_mimic_hq_evidence"] = {
+                        "hq_detected_city":    _dr_city,
+                        "hq_detected_country": _dr_country,
+                        "hq_confidence":       "High" if _dr_strength == "Strong" else "Medium",
+                        "hq_reason":           f"[domain-root-hq:{_dr_query}] {_dr_q[:150]}",
+                        "hq_evidence_url":     out["domain_root_hq_evidence_url"],
+                        "hq_evidence_quote":   _dr_q,
+                    }
+
+        # Global-network follow-up: one extra query if domain root is a known network
+        if _dr_root.lower() in _GLOBAL_NETWORK_DOMAIN_ROOTS and not out["_mimic_hq_evidence"]:
+            _gn_query = f"{_dr_root} global network"
+            out["_mimic_queries"].append(_gn_query)
+            _gn_ck = ("serper", _gn_query)
+            if _gn_ck in cache:
+                _gn_data, _ = cache[_gn_ck]
+                out["_mimic_serper_cache_hits"] += 1
+            else:
+                _gn_data, _ = _serper_search(_gn_query, serper_key)
+                cache[_gn_ck] = (_gn_data, "")
+                out["_mimic_serper_calls"] += 1
+                time.sleep(_INTER_REQUEST_SLEEP)
+            # We don't need to parse this result — the KGB detection in step 4 will
+            # classify the brand as global_network. The query is logged for audit only.
+
     # ── 1. Plain company name search ──────────────────────────────────────
+    # Skip if domain-root search already produced strong foreign-HQ evidence.
+    _dr_found_foreign = bool(out.get("_mimic_hq_evidence"))
     plain_query = company_name.strip()
     out["plain_company_search_query"] = plain_query
     out["_mimic_queries"].append(plain_query)
 
-    ck = ("serper", plain_query)
-    if ck in cache:
-        plain_data, plain_err = cache[ck]
-        out["_mimic_serper_cache_hits"] += 1
-    else:
-        plain_data, plain_err = _serper_search(plain_query, serper_key)
-        cache[ck] = (plain_data, plain_err)
-        out["_mimic_serper_calls"] += 1
-        time.sleep(_INTER_REQUEST_SLEEP)
+    plain_data: dict = {}
+    if not _dr_found_foreign:
+        ck = ("serper", plain_query)
+        if ck in cache:
+            plain_data, _plain_err = cache[ck]
+            out["_mimic_serper_cache_hits"] += 1
+        else:
+            plain_data, _plain_err = _serper_search(plain_query, serper_key)
+            cache[ck] = (plain_data, "")
+            out["_mimic_serper_calls"] += 1
+            time.sleep(_INTER_REQUEST_SLEEP)
 
     plain_organic = plain_data.get("organic", []) if plain_data else []
 
@@ -1577,7 +1706,7 @@ def _mimic_google_hq_check(
     fetch_count  = 0
     fetch_errors: list[str] = []
 
-    if fetch_domain:
+    if fetch_domain and not _dr_found_foreign:
         out["official_page_fetch_used"] = True
         for path in _OFFICIAL_PAGE_PATHS[:max_page_paths]:
             url_try = f"https://{fetch_domain}{path}"
@@ -2076,16 +2205,47 @@ def probe_company(
         if _k in result:
             result[_k] = _v
 
-    # ── Apply brand-root HQ evidence to classification fields ────────────────
+    # ── Apply classification fields from all HQ evidence sources ─────────────
+    # Priority: domain_root_hq → brand_root_hq → known_global_brand → Anthropic
+    _input_std  = _std_country(input_country or "Italy")
+
+    # Domain-root evidence (highest priority — clean, unambiguous query)
+    _dr_country = result.get("domain_root_hq_country", "")
+    _dr_city    = result.get("domain_root_hq_city", "")
+    _dr_conf    = result.get("domain_root_hq_confidence", "")
+    _dr_std     = _std_country(_dr_country)
+    _dr_is_foreign = bool(_dr_country and _dr_std and _dr_std.lower() != _input_std.lower())
+
+    if _dr_is_foreign and _dr_conf in ("High", "Medium"):
+        result["hq_structure_type"]             = "foreign_parent"
+        result["parent_group_hq_country"]       = _dr_country
+        result["parent_group_hq_city"]          = _dr_city
+        result["local_entity_hq_country"]       = _input_std
+        result["sig_foreign_hq_score_reviewed"] = 3
+        result["review_foreign_parent_score"]   = 3
+        result["sig_foreign_hq_review_source"]  = "domain_root_hq_search"
+        result["sig_foreign_hq_review_evidence_url"]   = result.get("domain_root_hq_evidence_url", "")
+        result["sig_foreign_hq_review_evidence_quote"] = result.get("domain_root_hq_evidence_quote", "")
+        result["sig_foreign_hq_review_reason"]  = (
+            f"Domain-root HQ search ('{result.get('domain_root_hq_query','')}') "
+            f"identifies {_dr_country} as parent/group HQ"
+        )
+        result["sig_foreign_hq_review_confidence"] = _dr_conf
+        result["foreign_hq_simple"]             = "True"
+        result["hq_detected_country"]           = _dr_std
+        result["hq_detected_city"]              = _dr_city
+        result["hq_confidence"]                 = _dr_conf
+        result["needs_anthropic_hq_review"]     = "No"
+        needs_adj = False
+
     _br_country = result.get("brand_root_hq_country", "")
     _br_city    = result.get("brand_root_hq_city", "")
-    _input_std  = _std_country(input_country or "Italy")
     _br_std     = _std_country(_br_country)
     _kgb_type   = result.get("known_global_brand_type", "")
     _kgb_name   = result.get("known_global_brand_name", "")
     _kgb_detected = bool(result.get("known_global_brand_detected"))
 
-    if _br_country and _br_std and _br_std.lower() != _input_std.lower():
+    if not _dr_is_foreign and _br_country and _br_std and _br_std.lower() != _input_std.lower():
         # Brand-root found a foreign parent HQ → classify as foreign_parent
         result["hq_structure_type"]           = "foreign_parent"
         result["parent_group_hq_country"]     = _br_country
@@ -2110,7 +2270,7 @@ def probe_company(
         result["needs_anthropic_hq_review"]   = "No"
         needs_adj = False
 
-    elif _kgb_detected and _kgb_type == "global_network" and not _br_country:
+    elif not _dr_is_foreign and _kgb_detected and _kgb_type == "global_network" and not _br_country:
         # Known global professional-services network — no single HQ country needed
         result["hq_structure_type"]              = "global_network"
         result["local_entity_hq_country"]        = _input_std
@@ -2128,12 +2288,11 @@ def probe_company(
         result["needs_anthropic_hq_review"]      = "No"
         needs_adj = False
 
-    elif _kgb_detected and _kgb_type == "corporate" and not _br_country:
-        # Known corporate brand but brand-root HQ search didn't resolve a country yet.
-        # Mark for potential Anthropic review; don't force classify.
+    elif not _dr_is_foreign and _kgb_detected and _kgb_type == "corporate" and not _br_country:
+        # Known corporate brand but neither domain-root nor brand-root resolved a country yet.
         result["sig_foreign_hq_review_reason"] = (
             f"{_kgb_name} is a known global corporate brand; "
-            "brand-root HQ search did not resolve a foreign country"
+            "domain-root/brand-root HQ search did not resolve a foreign country"
         )
 
     # Suppress Anthropic when official page evidence is already strong and unambiguous
@@ -2149,19 +2308,20 @@ def probe_company(
     )
     _has_strong_brand_root  = bool(_br_country and _br_std.lower() != _input_std.lower())
     _has_global_network_kgb = bool(_kgb_detected and _kgb_type == "global_network")
-    if _has_strong_official or _has_strong_brand or _has_strong_brand_root or _has_global_network_kgb:
+    if _dr_is_foreign or _has_strong_official or _has_strong_brand or _has_strong_brand_root or _has_global_network_kgb:
         _ev_src = (
-            "brand_root_hq_check" if _has_strong_brand_root
-            else ("known_global_brand_check" if _has_global_network_kgb
-                  else ("official_page_mimic_check" if _has_strong_official else "brand_hq_mimic_check"))
+            "domain_root_hq_search" if _dr_is_foreign
+            else ("brand_root_hq_check" if _has_strong_brand_root
+                  else ("known_global_brand_check" if _has_global_network_kgb
+                        else ("official_page_mimic_check" if _has_strong_official else "brand_hq_mimic_check")))
         )
         result["needs_anthropic_hq_review"] = "No"
         result["anthropic_hq_review_used"]  = "No"
         result["anthropic_web_search_used"] = "No"
         result["anthropic_review_evidence_mode"] = ""
-        if not _has_strong_brand_root:
+        if not _dr_is_foreign and not _has_strong_brand_root:
             result["sig_foreign_hq_review_source"] = _ev_src
-        if _has_strong_official and not _has_strong_brand_root:
+        if _has_strong_official and not _dr_is_foreign and not _has_strong_brand_root:
             result["sig_foreign_hq_review_evidence_url"]   = result.get("official_page_fetch_url", "")
             result["sig_foreign_hq_review_evidence_quote"] = result.get("official_page_hq_evidence_quote", "")
         needs_adj = False
