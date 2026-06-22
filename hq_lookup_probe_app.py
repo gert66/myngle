@@ -125,6 +125,31 @@ PROBE_COLS = [
     "serper_cache_hit",
     # Website fetch
     "website_fetch_count",
+    # Manual Google mimic HQ check
+    "manual_google_mimic_used",
+    "plain_company_search_query",
+    "plain_company_top_result_url",
+    "plain_company_top_result_title",
+    "plain_company_top_result_snippet",
+    "plain_company_official_domain",
+    "plain_company_official_result_rank",
+    "official_domain_from_plain_search",
+    "official_domain_matches_input_domain",
+    "official_page_fetch_used",
+    "official_page_fetch_url",
+    "official_page_fetch_count",
+    "official_page_fetch_error",
+    "official_page_hq_evidence_found",
+    "official_page_hq_evidence_quote",
+    "official_page_hq_country",
+    "official_page_hq_city",
+    "official_page_hq_evidence_strength",
+    "brand_hq_search_used",
+    "brand_hq_search_queries",
+    "brand_hq_top_result_url",
+    "brand_hq_top_result_snippet",
+    "brand_hq_evidence_found",
+    "brand_hq_evidence_quote",
 ]
 
 # Token columns tracked internally but NOT exported to Excel/CSV visible columns.
@@ -1027,6 +1052,374 @@ def _serper_search(query: str, api_key: str) -> tuple[dict, str]:
         return {}, str(exc)[:200]
 
 
+# ---------------------------------------------------------------------------
+# Manual Google Mimic HQ Check
+# ---------------------------------------------------------------------------
+
+_DIRECTORY_DOMAINS = frozenset({
+    "linkedin.com", "facebook.com", "instagram.com", "twitter.com", "x.com",
+    "youtube.com", "wikipedia.org", "crunchbase.com", "bloomberg.com",
+    "zoominfo.com", "dnb.com", "hoovers.com", "glassdoor.com", "indeed.com",
+    "infobel.com", "paginegialle.it", "kompass.com", "europages.com",
+    "europages.it", "registroimprese.it", "registro.imprese.it",
+    "atoka.io", "cerved.com", "ilsole24ore.com", "corriere.it",
+    "bizjournals.com", "wsj.com", "ft.com", "reuters.com",
+    "yelp.com", "foursquare.com", "angellist.com", "pitchbook.com",
+    "owler.com", "manta.com", "opencorporates.com", "sec.gov",
+})
+
+_LEGAL_SUFFIX_RE = re.compile(
+    r"\s*\b(?:S\.?\s*P\.?\s*A\.?|S\.?\s*R\.?\s*L\.?|S\.?\s*A\.?\s*S\.?"
+    r"|S\.?\s*N\.?\s*C\.?|S\.?\s*A\.?|GmbH|AG\b|Ltd\.?|LLC\.?|Corp\.?"
+    r"|Corporation|Inc\.?|B\.?\s*V\.?\b|N\.?\s*V\.?\b"
+    r"|ITALIA\b|ITALY\b|GROUP\b|GRUPPO\b|HOLDING\b|INTERNATIONAL\b)\s*$",
+    re.IGNORECASE,
+)
+
+_OFFICIAL_PAGE_PATHS = [
+    "/", "/about-us", "/about", "/company",
+    "/en/about-us", "/en/about", "/ch/en/about-us",
+    "/it/chi-siamo", "/chi-siamo", "/contatti", "/contact",
+]
+
+_OFFICIAL_HQ_PATTERNS: list[tuple[re.Pattern, str]] = [
+    (re.compile(r"its?\s+head\s+office\s+is\s+in\s+([A-Za-zÀ-ÿ\s,\(\)]{3,60}?)(?:\.|;|\n)", re.I), "Strong"),
+    (re.compile(r"head\s+office\s+(?:is\s+)?(?:located\s+)?in\s+([A-Za-zÀ-ÿ\s,\(\)]{3,60}?)(?:\.|;|,\s*(?:with|which)|\n)", re.I), "Strong"),
+    (re.compile(r"headquartered\s+in\s+([A-Za-zÀ-ÿ\s,\(\)]{3,60}?)(?:\.|;|\n)", re.I), "Strong"),
+    (re.compile(r"headquarters\s+(?:are\s+)?(?:is\s+)?(?:located\s+)?in\s+([A-Za-zÀ-ÿ\s,\(\)]{3,60}?)(?:\.|;|\n)", re.I), "Strong"),
+    (re.compile(r"corporate\s+headquarters\s+in\s+([A-Za-zÀ-ÿ\s,\(\)]{3,60}?)(?:\.|;|\n)", re.I), "Strong"),
+    (re.compile(r"group\s+headquarters\s+in\s+([A-Za-zÀ-ÿ\s,\(\)]{3,60}?)(?:\.|;|\n)", re.I), "Strong"),
+    (re.compile(r"operational\s+headquarters\s+in\s+([A-Za-zÀ-ÿ\s,\(\)]{3,60}?)(?:\.|;|\n)", re.I), "Strong"),
+    (re.compile(r"registered\s+office\s+(?:in|at|:)\s*([A-Za-zÀ-ÿ\s,\(\)]{3,60}?)(?:\.|;|\n)", re.I), "Strong"),
+    (re.compile(r"sede\s+(?:principale|legale|centrale)\s*[:\s]+(?:in\s+)?([A-Za-zÀ-ÿ\s,]{3,50}?)(?:\.|;|,|\n)", re.I), "Strong"),
+    (re.compile(r"parent\s+company\s+is\s+([A-Za-zÀ-ÿ\s,]{3,60}?)(?:\.|;|\n)", re.I), "Medium"),
+    (re.compile(r"part\s+of\s+the\s+([A-Za-zÀ-ÿ\s]{3,40}?)\s+group\b", re.I), "Medium"),
+    (re.compile(r"subsidiary\s+of\s+([A-Za-zÀ-ÿ\s,]{3,60}?)(?:\.|;|\n)", re.I), "Medium"),
+    (re.compile(r"owned\s+by\s+([A-Za-zÀ-ÿ\s,]{3,60}?)(?:\.|;|,|\n)", re.I), "Medium"),
+    (re.compile(r"based\s+in\s+([A-Za-zÀ-ÿ\s,\(\)]{3,50}?)(?:\.|;|,\s*(?:and|with|since)|\n)", re.I), "Medium"),
+]
+
+
+def _strip_html(html: str) -> str:
+    html = re.sub(r"<(script|style|head)[^>]*>.*?</\1>", " ", html, flags=re.S | re.I)
+    html = re.sub(r"<[^>]+>", " ", html)
+    return re.sub(r"\s+", " ", html).strip()
+
+
+def _is_directory_url(url: str) -> bool:
+    try:
+        from urllib.parse import urlparse
+        host = urlparse(url).netloc.lower()
+        host = re.sub(r"^www\.", "", host)
+        return any(host == d or host.endswith("." + d) for d in _DIRECTORY_DOMAINS)
+    except Exception:
+        return False
+
+
+def _get_domain_body(url_or_domain: str) -> str:
+    """Return the main token of a domain (e.g. 'repower' from 'repower.com')."""
+    s = url_or_domain.strip()
+    try:
+        from urllib.parse import urlparse
+        parsed = urlparse(s if "://" in s else "https://" + s)
+        host = re.sub(r"^www\.", "", parsed.netloc.lower()) or s
+    except Exception:
+        host = s
+    parts = host.split(".")
+    return parts[-2] if len(parts) >= 2 else parts[0]
+
+
+def _extract_brand(company_name: str, domain: str) -> list[str]:
+    """Strip legal suffixes; also extract domain body. Returns up to 3 brand candidates."""
+    brands: list[str] = []
+    cleaned = company_name.strip()
+    for _ in range(6):
+        new = _LEGAL_SUFFIX_RE.sub("", cleaned).strip().rstrip(",. ")
+        if not new or new == cleaned:
+            break
+        cleaned = new
+    if cleaned and cleaned.lower() != company_name.strip().lower():
+        brands.append(cleaned)
+    # Title-case variant
+    if cleaned:
+        tc = cleaned.title()
+        if tc not in brands:
+            brands.append(tc)
+    # Domain body
+    if domain:
+        body = _get_domain_body(domain)
+        if body and len(body) > 2:
+            tc_body = body.title()
+            if tc_body.lower() not in {b.lower() for b in brands}:
+                brands.append(tc_body)
+    seen: set[str] = set()
+    out: list[str] = []
+    for b in brands:
+        if b.lower() not in seen and len(b) > 2:
+            seen.add(b.lower())
+            out.append(b)
+    return out[:3]
+
+
+def _find_official_result(
+    organic: list[dict], input_domain: str
+) -> tuple[int, dict, str]:
+    """Return (1-based rank, result, clean_netloc) of best non-directory organic result."""
+    input_body = _get_domain_body(input_domain) if input_domain else ""
+    first_rank, first_result, first_netloc = 0, {}, ""
+    for i, item in enumerate(organic[:10], start=1):
+        url = item.get("link", "")
+        if not url or _is_directory_url(url):
+            continue
+        try:
+            from urllib.parse import urlparse
+            netloc = re.sub(r"^www\.", "", urlparse(url).netloc.lower())
+        except Exception:
+            netloc = url
+        body = _get_domain_body(netloc)
+        if input_body and (input_body in body or body in input_body):
+            return i, item, netloc
+        if not first_rank:
+            first_rank, first_result, first_netloc = i, item, netloc
+    return first_rank, first_result, first_netloc
+
+
+def _fetch_page_text(url: str, cache: dict) -> tuple[str, str]:
+    """Fetch URL, strip HTML, return (text[:8000], error). Cached."""
+    ck = ("fetch", url)
+    if ck in cache:
+        return cache[ck]
+    try:
+        resp = _requests.get(
+            url, timeout=_FETCH_TIMEOUT,
+            headers={"User-Agent": "Mozilla/5.0 (compatible; HQProbe/1.0)"},
+            allow_redirects=True,
+        )
+        resp.raise_for_status()
+        text = _strip_html(resp.text[:100_000])[:8_000]
+        result: tuple[str, str] = (text, "")
+    except Exception as exc:
+        result = ("", str(exc)[:120])
+    cache[ck] = result
+    return result
+
+
+def _scan_for_hq(text: str) -> tuple[str, str, str, str]:
+    """Scan text with OFFICIAL_HQ_PATTERNS. Returns (quote, country, city, strength)."""
+    for pat, strength in _OFFICIAL_HQ_PATTERNS:
+        m = pat.search(text)
+        if m:
+            captured = m.group(1).strip(" ,.()")
+            city, country = _resolve_city_country(captured)
+            if country or city:
+                start = max(0, m.start() - 30)
+                end   = min(len(text), m.end() + 80)
+                quote = text[start:end].strip()
+                return quote[:300], country, city, strength
+    return "", "", "", ""
+
+
+def _mimic_google_hq_check(
+    company_name: str,
+    domain: str,
+    input_country: str,
+    serper_key: str,
+    cache: dict,
+) -> dict[str, Any]:
+    """Run manual Google mimic HQ check.
+
+    Returns audit column dict plus internal keys:
+        _mimic_serper_calls (int)
+        _mimic_queries      (list[str])
+        _mimic_serper_cache_hits (int)
+        _mimic_hq_evidence  (dict)  — empty if nothing found
+    """
+    out: dict[str, Any] = {
+        "manual_google_mimic_used":           True,
+        "plain_company_search_query":         "",
+        "plain_company_top_result_url":       "",
+        "plain_company_top_result_title":     "",
+        "plain_company_top_result_snippet":   "",
+        "plain_company_official_domain":      "",
+        "plain_company_official_result_rank": 0,
+        "official_domain_from_plain_search":  "",
+        "official_domain_matches_input_domain": False,
+        "official_page_fetch_used":           False,
+        "official_page_fetch_url":            "",
+        "official_page_fetch_count":          0,
+        "official_page_fetch_error":          "",
+        "official_page_hq_evidence_found":    False,
+        "official_page_hq_evidence_quote":    "",
+        "official_page_hq_country":           "",
+        "official_page_hq_city":              "",
+        "official_page_hq_evidence_strength": "",
+        "brand_hq_search_used":               False,
+        "brand_hq_search_queries":            "",
+        "brand_hq_top_result_url":            "",
+        "brand_hq_top_result_snippet":        "",
+        "brand_hq_evidence_found":            False,
+        "brand_hq_evidence_quote":            "",
+        # Internal
+        "_mimic_serper_calls":      0,
+        "_mimic_queries":           [],
+        "_mimic_serper_cache_hits": 0,
+        "_mimic_hq_evidence":       {},
+    }
+
+    # ── 1. Plain company name search ──────────────────────────────────────
+    plain_query = company_name.strip()
+    out["plain_company_search_query"] = plain_query
+    out["_mimic_queries"].append(plain_query)
+
+    ck = ("serper", plain_query)
+    if ck in cache:
+        plain_data, plain_err = cache[ck]
+        out["_mimic_serper_cache_hits"] += 1
+    else:
+        plain_data, plain_err = _serper_search(plain_query, serper_key)
+        cache[ck] = (plain_data, plain_err)
+        out["_mimic_serper_calls"] += 1
+        time.sleep(_INTER_REQUEST_SLEEP)
+
+    plain_organic = plain_data.get("organic", []) if plain_data else []
+
+    # ── 2. Find official result ────────────────────────────────────────────
+    rank, off_result, off_netloc = _find_official_result(plain_organic, domain)
+    if off_result:
+        out["plain_company_top_result_url"]       = off_result.get("link", "")
+        out["plain_company_top_result_title"]     = off_result.get("title", "")
+        out["plain_company_top_result_snippet"]   = off_result.get("snippet", "")
+        out["plain_company_official_domain"]      = off_netloc
+        out["plain_company_official_result_rank"] = rank
+        out["official_domain_from_plain_search"]  = off_netloc
+        input_body  = _get_domain_body(domain) if domain else ""
+        off_body    = _get_domain_body(off_netloc)
+        out["official_domain_matches_input_domain"] = bool(
+            input_body and (input_body in off_body or off_body in input_body)
+        )
+
+    # ── 3. Fetch official pages ────────────────────────────────────────────
+    fetch_domain = off_netloc or (
+        domain.strip().lstrip("https://").lstrip("http://").rstrip("/") if domain else ""
+    )
+    combined_page_text = ""
+    first_ok_url = ""
+    fetch_count  = 0
+    fetch_errors: list[str] = []
+
+    if fetch_domain:
+        out["official_page_fetch_used"] = True
+        for path in _OFFICIAL_PAGE_PATHS[:7]:
+            url_try = f"https://{fetch_domain}{path}"
+            text, err = _fetch_page_text(url_try, cache)
+            fetch_count += 1
+            if text:
+                if not first_ok_url:
+                    first_ok_url = url_try
+                # Early-exit scan for Strong evidence
+                q, country, city, strength = _scan_for_hq(text)
+                if strength == "Strong" and country:
+                    out["official_page_fetch_url"]           = url_try
+                    out["official_page_fetch_count"]         = fetch_count
+                    out["official_page_hq_evidence_found"]   = True
+                    out["official_page_hq_evidence_quote"]   = q
+                    out["official_page_hq_country"]          = country
+                    out["official_page_hq_city"]             = city
+                    out["official_page_hq_evidence_strength"]= strength
+                    out["_mimic_hq_evidence"] = {
+                        "hq_detected_city":    city,
+                        "hq_detected_country": country,
+                        "hq_confidence":       "High",
+                        "hq_reason":           f"[mimic-official-page:{path}] {q[:150]}",
+                        "hq_evidence_url":     url_try,
+                        "hq_evidence_quote":   q,
+                    }
+                    break
+                combined_page_text += " " + text
+            else:
+                fetch_errors.append(f"{path}: {err}")
+
+        out["official_page_fetch_url"]   = out["official_page_fetch_url"] or first_ok_url
+        out["official_page_fetch_count"] = fetch_count
+        out["official_page_fetch_error"] = "; ".join(fetch_errors[:3])
+
+    # Fallback: scan combined text if single-page scan missed
+    if combined_page_text and not out["official_page_hq_evidence_found"]:
+        q, country, city, strength = _scan_for_hq(combined_page_text)
+        if country or city:
+            out["official_page_hq_evidence_found"]    = True
+            out["official_page_hq_evidence_quote"]    = q
+            out["official_page_hq_country"]           = country
+            out["official_page_hq_city"]              = city
+            out["official_page_hq_evidence_strength"] = strength
+            if strength in ("Strong", "Medium") and not out["_mimic_hq_evidence"]:
+                out["_mimic_hq_evidence"] = {
+                    "hq_detected_city":    city,
+                    "hq_detected_country": country,
+                    "hq_confidence":       "High" if strength == "Strong" else "Medium",
+                    "hq_reason":           f"[mimic-official-page-combined] {q[:150]}",
+                    "hq_evidence_url":     out["official_page_fetch_url"],
+                    "hq_evidence_quote":   q,
+                }
+
+    # ── 4. Brand/domain HQ follow-up (only if no strong evidence yet) ──────
+    if not out["_mimic_hq_evidence"]:
+        brands = _extract_brand(company_name, fetch_domain or domain)
+        brand_queries: list[str] = []
+        if brands:
+            primary = brands[0]
+            brand_queries = [
+                f'"{primary}" headquarters',
+                f'"{primary}" head office',
+                f'"{primary}" group headquarters',
+                f'"{primary}" parent company',
+            ]
+        if brand_queries:
+            out["brand_hq_search_used"]    = True
+            out["brand_hq_search_queries"] = " | ".join(brand_queries)
+            for bq in brand_queries:
+                out["_mimic_queries"].append(bq)
+                ck_b = ("serper", bq)
+                if ck_b in cache:
+                    bdata, _ = cache[ck_b]
+                    out["_mimic_serper_cache_hits"] += 1
+                else:
+                    bdata, _ = _serper_search(bq, serper_key)
+                    cache[ck_b] = (bdata, "")
+                    out["_mimic_serper_calls"] += 1
+                    time.sleep(_INTER_REQUEST_SLEEP)
+                if not bdata:
+                    continue
+                b_org = bdata.get("organic", [])
+                b_kg  = bdata.get("knowledgeGraph", {})
+                b_kg_loc = b_kg.get("address","") or b_kg.get("headquarters","") or b_kg.get("location","")
+                b_ab  = bdata.get("answerBox", {})
+                b_ab_t = b_ab.get("answer","") or b_ab.get("snippet","")
+                all_b = " ".join([
+                    b_kg_loc, b_ab_t,
+                    *[f"{r.get('title','')} {r.get('snippet','')}" for r in b_org[:3]],
+                ])
+                q, country, city, strength = _scan_for_hq(all_b)
+                if country or city:
+                    out["brand_hq_evidence_found"]   = True
+                    out["brand_hq_evidence_quote"]   = q
+                    top_r = next((r for r in b_org if not _is_directory_url(r.get("link",""))), b_org[0] if b_org else {})
+                    out["brand_hq_top_result_url"]     = top_r.get("link", "")
+                    out["brand_hq_top_result_snippet"] = top_r.get("snippet", "")
+                    if strength in ("Strong", "Medium") and not out["_mimic_hq_evidence"]:
+                        out["_mimic_hq_evidence"] = {
+                            "hq_detected_city":    city,
+                            "hq_detected_country": country,
+                            "hq_confidence":       "High" if strength == "Strong" else "Medium",
+                            "hq_reason":           f"[mimic-brand-search:{bq[:60]}] {q[:150]}",
+                            "hq_evidence_url":     out["brand_hq_top_result_url"],
+                            "hq_evidence_quote":   q,
+                        }
+                    break  # stop after first brand query with evidence
+
+    return out
+
+
 def _build_queries(company_name: str, domain: str) -> list[str]:
     n = company_name.strip()
     d = (domain or "").strip().lstrip("https://").lstrip("http://").rstrip("/")
@@ -1056,6 +1449,7 @@ def probe_company(
     input_row: "dict | None" = None,
     use_multilingual_check: bool = True,
     use_anthropic_review: bool = False,
+    use_mimic_check: bool = True,
 ) -> dict[str, Any]:
     """Run all queries for one company; return probe column dict."""
     result: dict[str, Any] = {col: "" for col in PROBE_COLS}
@@ -1083,7 +1477,32 @@ def probe_company(
     _anthr_stop       = ""
     _anthr_errors: list[str] = []
 
+    # --- Manual Google Mimic HQ Check (runs before narrow queries) ---
+    _mimic_audit: dict = {}
+    if use_mimic_check and serper_key:
+        _mimic_result = _mimic_google_hq_check(
+            company_name, domain, input_country, serper_key, cache
+        )
+        _mimic_serper_calls = _mimic_result.pop("_mimic_serper_calls", 0)
+        _mimic_queries      = _mimic_result.pop("_mimic_queries", [])
+        _mimic_cache_hits   = _mimic_result.pop("_mimic_serper_cache_hits", 0)
+        _mimic_evidence     = _mimic_result.pop("_mimic_hq_evidence", {})
+        # Accumulate into tracking
+        _serper_calls      += _mimic_serper_calls
+        _serper_cache_hits += _mimic_cache_hits
+        _queries_attempted  = _mimic_queries + _queries_attempted
+        # Store audit cols for later merge
+        _mimic_audit = _mimic_result
+        # If mimic found strong evidence, use it as best and skip narrow queries
+        if _mimic_evidence.get("hq_detected_country"):
+            best = {k: v for k, v in _mimic_evidence.items()}
+            used_query = _mimic_queries[0] if _mimic_queries else ""
+    else:
+        _mimic_audit = {"manual_google_mimic_used": False}
+
     for query in queries:
+        if best.get("hq_detected_country"):
+            break  # mimic already found strong evidence
         _queries_attempted.append(query)
         cache_key = ("serper", query)
         if cache_key in cache:
@@ -1267,6 +1686,11 @@ def probe_company(
             _adj_err = adj["probe_error"]
             _anthr_errors.append(_adj_err)
             result["probe_error"] = (result["probe_error"] + "; " + _adj_err).lstrip("; ") if result.get("probe_error") else _adj_err
+
+    # ---- Merge mimic audit columns ----
+    for _k, _v in _mimic_audit.items():
+        if _k in result:
+            result[_k] = _v
 
     # ---- Populate usage columns ----
     result["serper_calls_used"]   = _serper_calls
@@ -1745,6 +2169,12 @@ with st.sidebar:
         help="Focus on companies where sig_foreign_hq_score is 0 or blank — likely under-scored.",
     )
 
+    use_mimic_check = st.checkbox(
+        "Use manual Google mimic HQ check",
+        value=True,
+        help="Before narrow queries, runs a plain company search, fetches official pages, and scans for HQ evidence. Reduces Anthropic calls for clear cases.",
+    )
+
     use_multilingual_check = st.checkbox(
         "Detect multilingual website",
         value=True,
@@ -1885,6 +2315,7 @@ if run_btn:
             input_row=row,
             use_multilingual_check=use_multilingual_check,
             use_anthropic_review=use_anthropic_review,
+            use_mimic_check=use_mimic_check,
         )
 
         # Sanity guard: if detected country == input country, force foreign_hq_simple = False
@@ -1932,6 +2363,7 @@ if run_btn:
         "limit":                  int(limit),
         "use_multilingual_check": use_multilingual_check,
         "use_anthropic_review":   use_anthropic_review,
+        "use_mimic_check":        use_mimic_check,
     }
     st.session_state["hq_probe_run_usage"] = run_usage
 
@@ -2014,6 +2446,11 @@ _KEY_VIEW_COLS_RAW = [
     "sig_foreign_hq_review_reason",
     "sig_foreign_hq_review_evidence_url",
     "serper_calls_used", "serper_cache_hit",
+    "manual_google_mimic_used",
+    "plain_company_official_domain", "official_domain_matches_input_domain",
+    "official_page_hq_evidence_found", "official_page_hq_evidence_strength",
+    "official_page_hq_country", "official_page_hq_city",
+    "brand_hq_evidence_found", "brand_hq_evidence_quote",
     "hq_reason", "hq_evidence_url", "hq_evidence_quote", "hq_query_used",
 ]
 _seen_kvc: set[str] = set()
