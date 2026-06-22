@@ -3579,6 +3579,16 @@ elif _app_mode == "recovery":
     _rec_highscore_idx   = [i for i, r in enumerate(_rec_all_rows)
                              if _rec_is_highscore_hq_zero(r, _rec_threshold)]
     _rec_selected_idx    = sorted(set(_rec_sanitized_idx) | set(_rec_highscore_idx))
+    _rec_selected_full   = len(_rec_selected_idx)
+
+    # Apply row limit (uses the same sidebar `limit` variable as the probe tab)
+    _rec_row_limit = int(limit) if limit and int(limit) > 0 else 0
+    if _rec_row_limit > 0:
+        _rec_to_process_idx = _rec_selected_idx[:_rec_row_limit]
+    else:
+        _rec_to_process_idx = _rec_selected_idx
+    _rec_to_process_set  = set(_rec_to_process_idx)
+    _rec_skipped_idx     = [i for i in _rec_selected_idx if i not in _rec_to_process_set]
     _rec_unchanged_idx   = [i for i in range(len(_rec_all_rows)) if i not in set(_rec_selected_idx)]
 
     # ── Pre-run counts ──────────────────────────────────────────────────────
@@ -3586,18 +3596,25 @@ elif _app_mode == "recovery":
     _rc1.metric("Total rows",               len(_rec_all_rows))
     _rc2.metric("Sanitized candidates",     len(_rec_sanitized_idx))
     _rc3.metric("High-score HQ-zero",       len(_rec_highscore_idx))
-    _rc4.metric("Selected (unique)",        len(_rec_selected_idx))
-    _rc5, _rc6 = st.columns(2)
-    _rc5.metric("Rows to process",          len(_rec_selected_idx))
-    _rc6.metric("Rows left unchanged",      len(_rec_unchanged_idx))
+    _rc4.metric("Selected (unique)",        _rec_selected_full)
+    _rc5, _rc6, _rc7 = st.columns(3)
+    _rc5.metric("Rows to process",          len(_rec_to_process_idx))
+    _rc6.metric("Skipped by row limit",     len(_rec_skipped_idx))
+    _rc7.metric("Rows left unchanged",      len(_rec_unchanged_idx))
 
-    if not _rec_selected_idx:
+    if _rec_row_limit > 0 and _rec_selected_full > _rec_row_limit:
+        st.caption(
+            f"Row limit {_rec_row_limit} applied — processing first {len(_rec_to_process_idx)} "
+            f"of {_rec_selected_full} selected rows. Adjust 'Row limit' in the sidebar to change."
+        )
+
+    if not _rec_to_process_idx:
         st.info("No rows match the selection criteria. Adjust the threshold or check the input data.")
         st.stop()
 
     # ── Run button ──────────────────────────────────────────────────────────
     _rec_run_btn = st.button(
-        f"▶ Run HQ Recovery ({len(_rec_selected_idx)} rows)",
+        f"▶ Run HQ Recovery ({len(_rec_to_process_idx)} rows)",
         type="primary",
         disabled=(not serper_key),
     )
@@ -3612,9 +3629,9 @@ elif _app_mode == "recovery":
         _rec_probe_map: dict[int, dict] = {}  # row_index → probe result
         _rec_cache: dict = {}
         _rec_errors: list[str] = []
-        _rec_total = len(_rec_selected_idx)
+        _rec_total = len(_rec_to_process_idx)
 
-        for _rec_i, _rec_row_idx in enumerate(_rec_selected_idx):
+        for _rec_i, _rec_row_idx in enumerate(_rec_to_process_idx):
             _rec_row     = _rec_all_rows[_rec_row_idx]
             _rec_company = str(_rec_row.get(company_col) or "").strip()
             _rec_domain  = str(_rec_row.get(domain_col)  or "").strip()
@@ -3647,6 +3664,8 @@ elif _app_mode == "recovery":
 
             # Recovery-specific columns
             _rec_probe["hq_recovery_selected"]           = "Yes"
+            _rec_probe["hq_recovery_processed"]          = "Yes"
+            _rec_probe["hq_recovery_skip_reason"]        = ""
             _rec_probe["hq_recovery_selection_reason"]   = (
                 "sanitized_candidate" if _rec_row_idx in set(_rec_sanitized_idx)
                 else "high_score_hq_zero"
@@ -3687,16 +3706,23 @@ elif _app_mode == "recovery":
         st.session_state[_KEY_REC_RESULTS]  = _rec_probe_map
         st.session_state[_KEY_REC_ALL_ROWS] = _rec_all_rows
         st.session_state[_KEY_REC_META]     = {
-            "timestamp":     _rec_ts,
-            "input_file":    file_label,
-            "sheet":         _rec_sheet,
-            "threshold":     _rec_threshold,
-            "selected":      len(_rec_selected_idx),
-            "total":         len(_rec_all_rows),
-            "sanitized":     len(_rec_sanitized_idx),
-            "highscore":     len(_rec_highscore_idx),
-            "unchanged":     len(_rec_unchanged_idx),
+            "timestamp":        _rec_ts,
+            "input_file":       file_label,
+            "sheet":            _rec_sheet,
+            "threshold":        _rec_threshold,
+            "row_limit":        _rec_row_limit,
+            "selected_full":    _rec_selected_full,
+            "selected":         len(_rec_to_process_idx),  # actually processed
+            "skipped":          len(_rec_skipped_idx),
+            "total":            len(_rec_all_rows),
+            "sanitized":        len(_rec_sanitized_idx),
+            "highscore":        len(_rec_highscore_idx),
+            "unchanged":        len(_rec_unchanged_idx),
         }
+        # Store index sets so _build_recovery_rows can mark skipped rows
+        st.session_state["hq_recovery_to_process_set"] = _rec_to_process_set
+        st.session_state["hq_recovery_skipped_set"]    = set(_rec_skipped_idx)
+        st.session_state["hq_recovery_selected_full"]  = set(_rec_selected_idx)
 
         if _rec_errors:
             with st.expander(f"⚠️ {len(_rec_errors)} row error(s)", expanded=False):
@@ -3727,14 +3753,25 @@ elif _app_mode == "recovery":
     _rr1, _rr2, _rr3, _rr4 = st.columns(4)
     _rr1.metric("Total rows",              _rec_meta_r.get("total", 0))
     _rr2.metric("Rows processed",          _rec_meta_r.get("selected", 0))
+    if _rec_meta_r.get("skipped", 0):
+        st.caption(
+            f"Row limit {_rec_meta_r.get('row_limit', '—')} was applied: "
+            f"{_rec_meta_r.get('skipped', 0)} selected rows were skipped "
+            f"(hq_recovery_processed=No, hq_recovery_skip_reason=row_limit)."
+        )
     _rr3.metric("Updated to score 3",      _rec_updated_to_3)
     _rr4.metric("Needs manual review",     _rec_needs_review)
 
-    # ── Build revised rows (all rows, only selected rows get probe output) ──
+    # ── Build revised rows (all rows, only processed rows get probe output) ──
+    _rec_skipped_set_r  = st.session_state.get("hq_recovery_skipped_set", set())
+    _rec_selected_all_r = st.session_state.get("hq_recovery_selected_full", set())
+
     def _build_recovery_rows() -> list[dict]:
         out = []
         _rec_probe_cols_set = set(PROBE_COLS + [
             "hq_recovery_selected",
+            "hq_recovery_processed",
+            "hq_recovery_skip_reason",
             "hq_recovery_selection_reason",
             "sig_foreign_hq_score_original_before_recovery",
             "sig_foreign_hq_score_for_next_scoring",
@@ -3743,16 +3780,25 @@ elif _app_mode == "recovery":
         for idx, row in enumerate(_rec_all_rows_r):
             merged = dict(row)
             if idx in _rec_probe_map_r:
+                # Processed row — merge probe output
                 probe = _rec_probe_map_r[idx]
                 for k, v in probe.items():
                     if k in _rec_probe_cols_set and not k.startswith("_"):
                         merged[k] = v
-                # Preserve competitor columns (do not overwrite with probe output)
+                # Preserve original competitor columns
                 for col_name in row:
-                    if "competitor" in col_name.lower() and col_name in row:
+                    if "competitor" in col_name.lower():
                         merged[col_name] = row[col_name]
+            elif idx in _rec_skipped_set_r:
+                # Selected but skipped due to row limit
+                merged["hq_recovery_selected"]    = "Yes"
+                merged["hq_recovery_processed"]   = "No"
+                merged["hq_recovery_skip_reason"] = "row_limit"
             else:
-                merged["hq_recovery_selected"] = "No"
+                # Not selected at all
+                merged["hq_recovery_selected"]    = "No"
+                merged["hq_recovery_processed"]   = "No"
+                merged["hq_recovery_skip_reason"] = ""
             out.append(merged)
         return out
 
@@ -3761,7 +3807,8 @@ elif _app_mode == "recovery":
     # ── Display table ───────────────────────────────────────────────────────
     _rec_display_cols = [
         company_col, domain_col,
-        "hq_recovery_selected", "hq_recovery_selection_reason",
+        "hq_recovery_selected", "hq_recovery_processed", "hq_recovery_skip_reason",
+        "hq_recovery_selection_reason",
         "sig_foreign_hq_score_original_before_recovery",
         "sig_foreign_hq_score_for_next_scoring",
         "sig_foreign_hq_score_reviewed",
@@ -3860,7 +3907,10 @@ elif _app_mode == "recovery":
             ("Total rows",          _rec_meta_r.get("total", 0)),
             ("Sanitized candidates",_rec_meta_r.get("sanitized", 0)),
             ("High-score HQ-zero",  _rec_meta_r.get("highscore", 0)),
-            ("Rows selected",       _rec_meta_r.get("selected", 0)),
+            ("Selected (full)",     _rec_meta_r.get("selected_full", _rec_meta_r.get("selected", 0))),
+            ("Rows processed",      _rec_meta_r.get("selected", 0)),
+            ("Rows skipped (limit)",_rec_meta_r.get("skipped", 0)),
+            ("Row limit applied",   _rec_meta_r.get("row_limit", 0) or "none"),
             ("Rows unchanged",      _rec_meta_r.get("unchanged", 0)),
             ("Updated to score 3",  _rec_updated_to_3),
             ("Needs manual review", _rec_needs_review),
