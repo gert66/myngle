@@ -189,6 +189,8 @@ PROBE_COLS = [
     "domain_root_hq_country",
     "domain_root_hq_city",
     "domain_root_hq_confidence",
+    "domain_root_hq_evidence_rank",
+    "domain_root_hq_rejected_evidence_reason",
     # Simple HQ mode
     "simple_hq_mode_used",
     "simple_hq_query",
@@ -361,6 +363,9 @@ _INTL_CITIES: dict[str, tuple[str, str]] = {
     "luxembourg": ("Luxembourg", "Luxembourg"),
     "bertrange": ("Bertrange", "Luxembourg"),
     "altdorf": ("Altdorf", "Switzerland"), "poschiavo": ("Poschiavo", "Switzerland"),
+    "uri": ("Uri", "Switzerland"),
+    "brande": ("Brande", "Denmark"), "aarhus": ("Aarhus", "Denmark"),
+    "odense": ("Odense", "Denmark"), "aalborg": ("Aalborg", "Denmark"),
 }
 
 _COUNTRY_ALIASES: dict[str, str] = {
@@ -373,7 +378,9 @@ _COUNTRY_ALIASES: dict[str, str] = {
     "switzerland": "Switzerland", "swiss": "Switzerland", "svizzera": "Switzerland",
     "austria": "Austria", "austrian": "Austria",
     "united kingdom": "United Kingdom", "uk": "United Kingdom",
-    "great britain": "United Kingdom",
+    "great britain": "United Kingdom", "gb": "United Kingdom",
+    "england": "United Kingdom", "scotland": "United Kingdom",
+    "wales": "United Kingdom",
     "united states": "United States", "usa": "United States", "us": "United States",
     "america": "United States",
     "japan": "Japan", "japanese": "Japan",
@@ -1146,6 +1153,8 @@ _OFFICIAL_HQ_PATTERNS: list[tuple[re.Pattern, str]] = [
     (re.compile(r"subsidiary\s+of\s+([A-Za-zÀ-ÿ\s,]{3,60}?)(?:\.|;|\n)", re.I), "Medium"),
     (re.compile(r"owned\s+by\s+([A-Za-zÀ-ÿ\s,]{3,60}?)(?:\.|;|,|\n)", re.I), "Medium"),
     (re.compile(r"based\s+in\s+([A-Za-zÀ-ÿ\s,\(\)]{3,50}?)(?:\.|;|,\s*(?:and|with|since)|\n)", re.I), "Medium"),
+    # Structured data pattern: "Headquarters London" (no preposition), followed by non-location word
+    (re.compile(r"\bheadquarters\s+([A-Z][A-Za-zÀ-ÿ\s]{2,40}?)(?:\s+(?:Type|Founded|Employees?|Industry|Revenue|CEO|Chairman|Website|Phone|Email)|[,;.]|\s*$)", re.I), "Medium"),
 ]
 
 
@@ -1422,6 +1431,21 @@ _HQ_SIGNAL_RE = re.compile(
     re.IGNORECASE,
 )
 
+# Regional/divisional HQ phrases — these should NOT override a global HQ signal
+_REGIONAL_HQ_RE = re.compile(
+    r"\b(?:(?:north\s*america[n]?|na|emea|apac|latam|asia[\s\-]pacific|european?|"
+    r"regional?|division[al]?|segment)\s+(?:headquarters?|hq)|"
+    r"headquarters?\s+for\s+(?:north\s*america[n]?|emea|apac|europe))\b",
+    re.IGNORECASE,
+)
+
+# Text markers that indicate we've entered a "locations list" section
+_LOCATION_SECTION_RE = re.compile(
+    r"\b(?:locations?|get\s+directions?|other\s+offices?|all\s+offices?|"
+    r"offices?\s+worldwide|global\s+locations?|primary\s+location)\b",
+    re.IGNORECASE,
+)
+
 
 def _scan_hq_title_snippet(organic: list[dict]) -> tuple[str, str, str, str]:
     """Scan organic result titles/snippets for HQ evidence without requiring
@@ -1431,18 +1455,50 @@ def _scan_hq_title_snippet(organic: list[dict]) -> tuple[str, str, str, str]:
       title="Bodycote Macclesfield Head Office"
       snippet="Macclesfield, Cheshire, United Kingdom"
 
+    Proximity fix: only look at text within ~80 chars AFTER the HQ signal word,
+    stopping at location-section boundary phrases (e.g. "Locations", "Get directions").
+    Regional HQ guard: skip results whose only HQ signal is regional (NA HQ, EMEA HQ).
+
     Returns (quote, country, city, strength).  Strength is always "Medium".
     """
     for item in organic[:5]:
         title   = item.get("title", "")
         snippet = item.get("snippet", "")
         combined = f"{title} {snippet}"
-        if not _HQ_SIGNAL_RE.search(combined):
+
+        sig_m = _HQ_SIGNAL_RE.search(combined)
+        if not sig_m:
             continue
-        city, country = _resolve_city_country(combined)
-        if country or city:
-            quote = combined[:300].strip()
-            return quote, country, city, "Medium"
+
+        # Skip purely regional HQ signals (e.g. "NA Headquarters Dallas")
+        if _REGIONAL_HQ_RE.search(combined) and not _HQ_SIGNAL_RE.search(
+            re.sub(_REGIONAL_HQ_RE.pattern, "", combined, flags=re.IGNORECASE)
+        ):
+            continue
+
+        # Extract only the text within ~80 chars after the HQ signal, stopping
+        # at a location-section boundary so we don't read a second city.
+        sig_end = sig_m.end()
+        window  = combined[sig_end: sig_end + 80]
+        # Truncate at location boundary
+        loc_boundary = _LOCATION_SECTION_RE.search(window)
+        if loc_boundary:
+            window = window[: loc_boundary.start()]
+
+        # Also try text BEFORE the signal (for "Bodycote Macclesfield Head Office")
+        sig_start  = sig_m.start()
+        pre_window = combined[max(0, sig_start - 60): sig_start]
+
+        # Try post-signal window first, then pre-signal
+        for chunk in (window, pre_window):
+            chunk = chunk.strip(" ,-–")
+            if not chunk:
+                continue
+            city, country = _resolve_city_country(chunk)
+            if country or city:
+                quote = combined[:300].strip()
+                return quote, country, city, "Medium"
+
     return "", "", "", ""
 
 
@@ -2084,17 +2140,49 @@ def probe_company(
                 result[f"top_organic_snippet_{_si}"] = _sitem.get("snippet", "")
                 result[f"top_organic_url_{_si}"]     = _sitem.get("link", "")
 
-            _s_all = " ".join([
-                _s_kg_loc, _s_ab_t,
-                *[f"{r.get('title','')} {r.get('snippet','')}" for r in _s_org[:5]],
-                *[f"{p.get('title','')} {p.get('address','')}" for p in _s_places[:3]],
-            ])
-            _s_quote, _s_country, _s_city, _s_strength = _scan_for_hq(_s_all)
+            # Per-source scan in priority order — first hit wins.
+            # Priority: KG > answerBox > organic[0] > organic[1] > … > places
+            # This avoids concatenating all text (which causes Italian cities to
+            # match before a later-occurring foreign city).
+            _s_quote = _s_country = _s_city = _s_strength = ""
+            _s_evidence_rank = ""
+            _s_rejected_reasons: list[str] = []
 
-            # Fallback: detect HQ evidence from title/snippet signal words
-            # (handles "Bodycote Macclesfield Head Office" in title without "in X")
+            def _try_source(text: str, label: str) -> bool:
+                nonlocal _s_quote, _s_country, _s_city, _s_strength, _s_evidence_rank
+                q, co, ci, st = _scan_for_hq(text)
+                if co or ci:
+                    _s_quote, _s_country, _s_city, _s_strength = q, co, ci, st
+                    _s_evidence_rank = label
+                    return True
+                return False
+
+            if _s_kg_loc and not _try_source(_s_kg_loc, "knowledge_graph"):
+                _s_rejected_reasons.append(f"kg_loc='{_s_kg_loc[:80]}' no match")
+            if _s_ab_t and not (_s_country or _s_city) and not _try_source(_s_ab_t, "answer_box"):
+                _s_rejected_reasons.append(f"answer_box='{_s_ab_t[:80]}' no match")
+
+            for _s_rank_i, _s_r in enumerate(_s_org[:5], start=1):
+                if _s_country or _s_city:
+                    break
+                _s_r_text = f"{_s_r.get('title','')} {_s_r.get('snippet','')}"
+                if not _try_source(_s_r_text, f"organic_{_s_rank_i}"):
+                    # Try proximity/signal scan as fallback for this single result
+                    _fb_q, _fb_co, _fb_ci, _fb_st = _scan_hq_title_snippet([_s_r])
+                    if _fb_co or _fb_ci:
+                        _s_quote, _s_country, _s_city, _s_strength = _fb_q, _fb_co, _fb_ci, _fb_st
+                        _s_evidence_rank = f"organic_{_s_rank_i}_signal"
+                    else:
+                        _s_rejected_reasons.append(f"organic_{_s_rank_i}='{_s_r_text[:60]}' no match")
+
             if not (_s_country or _s_city):
-                _s_quote, _s_country, _s_city, _s_strength = _scan_hq_title_snippet(_s_org)
+                for _s_rank_p, _s_p in enumerate(_s_places[:3], start=1):
+                    _s_p_text = f"{_s_p.get('title','')} {_s_p.get('address','')}"
+                    if _try_source(_s_p_text, f"places_{_s_rank_p}"):
+                        break
+
+            result["domain_root_hq_evidence_rank"]            = _s_evidence_rank
+            result["domain_root_hq_rejected_evidence_reason"] = "; ".join(_s_rejected_reasons[:5])
 
             if _s_country or _s_city:
                 _s_country_std = _std_country(_s_country)
@@ -2138,6 +2226,27 @@ def probe_company(
                 result["hq_evidence_url"]              = _s_best_url
                 result["domain_root_hq_evidence_url"]  = _s_best_url
 
+                # Domain-match validation: if evidence URL is from a different domain
+                # (e.g. jobtechalliance.com for jobtech.it) and it's not a known
+                # directory or global brand, downgrade confidence and flag for review.
+                _s_evidence_domain = re.sub(r"^www\.", "", _up_s(_s_best_url).netloc.lower()) if _s_best_url else ""
+                _s_domain_mismatch = bool(
+                    _s_evidence_domain
+                    and _s_input_nl
+                    and _s_evidence_domain != _s_input_nl
+                    and not _s_evidence_domain.endswith("." + _s_input_nl)
+                    and not _is_directory_url(_s_best_url)
+                    and _dr_root not in _KNOWN_GLOBAL_BRANDS
+                )
+                if _s_domain_mismatch:
+                    _s_conf = "Low"
+                    result["hq_confidence"]           = _s_conf
+                    result["domain_root_hq_confidence"] = _s_conf
+                    result["needs_manual_review"]     = "Yes"
+                    result["domain_root_hq_rejected_evidence_reason"] = (
+                        f"evidence from {_s_evidence_domain}, not {_s_input_nl}"
+                    )
+
                 if _s_is_foreign:
                     result["foreign_hq_simple"]                  = "True"
                     result["hq_structure_type"]                  = "foreign_parent"
@@ -2154,12 +2263,14 @@ def probe_company(
                         f"identifies {_s_country_std} as HQ"
                     )
                     result["sig_foreign_hq_review_confidence"]   = _s_conf
-                    result["needs_manual_review"]                = "No"
+                    if not _s_domain_mismatch:
+                        result["needs_manual_review"]            = "No"
                 else:
                     result["foreign_hq_simple"]              = "False"
                     result["hq_structure_type"]              = "domestic_italy"
                     result["sig_foreign_hq_score_reviewed"]  = 0
-                    result["needs_manual_review"]            = "No"
+                    if not _s_domain_mismatch:
+                        result["needs_manual_review"]        = "No"
             else:
                 result["needs_manual_review"] = "Yes"
                 result["hq_reason"] = f"No HQ location found for query: '{_dr_query}'"
