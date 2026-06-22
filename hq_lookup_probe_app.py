@@ -114,6 +114,17 @@ PROBE_COLS = [
     "sig_foreign_hq_review_evidence_quote",
     "needs_anthropic_hq_review",
     "anthropic_hq_review_used",
+    # Usage / cost audit columns
+    "serper_calls_used",
+    "serper_queries_used",
+    "serper_cache_hit",
+    "website_fetch_count",
+    "anthropic_model_used",
+    "anthropic_input_tokens",
+    "anthropic_output_tokens",
+    "anthropic_total_tokens",
+    "anthropic_stop_reason",
+    "anthropic_error",
 ]
 
 # ---------------------------------------------------------------------------
@@ -513,12 +524,16 @@ def _safe_float(val: Any, default: float = 0.0) -> float:
 
 def detect_multilingual_site(domain: str) -> dict[str, Any]:
     """Cheap homepage fetch to detect multilingual website. Cached by caller."""
-    out: dict[str, Any] = {"has_multilingual_site": False, "website_language_count": 0, "website_languages_detected": ""}
+    out: dict[str, Any] = {
+        "has_multilingual_site": False, "website_language_count": 0,
+        "website_languages_detected": "", "website_fetch_count": 0,
+    }
     if not domain:
         return out
     domain = domain.strip().lstrip("https://").lstrip("http://").rstrip("/")
     html = ""
     for scheme in ("https", "http"):
+        out["website_fetch_count"] += 1
         try:
             resp = _requests.get(
                 f"{scheme}://{domain}", timeout=_FETCH_TIMEOUT,
@@ -771,6 +786,15 @@ def _model_extract(
         parsed = json.loads(raw)
         parsed.setdefault("entity_match", "")
         parsed.setdefault("is_group_or_parent_only", False)
+        parsed["_usage"] = {
+            "model": resp.model,
+            "input_tokens":  getattr(resp.usage, "input_tokens",  0),
+            "output_tokens": getattr(resp.usage, "output_tokens", 0),
+            "stop_reason":   getattr(resp, "stop_reason", ""),
+        }
+        parsed["_usage"]["total_tokens"] = (
+            parsed["_usage"]["input_tokens"] + parsed["_usage"]["output_tokens"]
+        )
         return parsed
     except json.JSONDecodeError as exc:
         return {"probe_error": f"Model JSON parse error: {exc}"}
@@ -872,7 +896,17 @@ def _anthropic_hq_adjudicate(
         raw = resp.content[0].text.strip()
         raw = re.sub(r"^```(?:json)?\s*", "", raw)
         raw = re.sub(r"\s*```$", "", raw)
-        return json.loads(raw)
+        parsed = json.loads(raw)
+        parsed["_usage"] = {
+            "model":         resp.model,
+            "input_tokens":  getattr(resp.usage, "input_tokens",  0),
+            "output_tokens": getattr(resp.usage, "output_tokens", 0),
+            "stop_reason":   getattr(resp, "stop_reason", ""),
+        }
+        parsed["_usage"]["total_tokens"] = (
+            parsed["_usage"]["input_tokens"] + parsed["_usage"]["output_tokens"]
+        )
+        return parsed
     except json.JSONDecodeError as exc:
         return {"probe_error": f"Anthropic HQ review JSON parse error: {exc}"}
     except Exception as exc:
@@ -972,13 +1006,27 @@ def probe_company(
     answer_box_text = ""
     errors: list[str] = []
 
+    # Usage tracking
+    _serper_calls      = 0
+    _serper_cache_hits = 0
+    _queries_attempted: list[str] = []
+    _anthr_input_tok  = 0
+    _anthr_output_tok = 0
+    _anthr_total_tok  = 0
+    _anthr_model      = ""
+    _anthr_stop       = ""
+    _anthr_errors: list[str] = []
+
     for query in queries:
+        _queries_attempted.append(query)
         cache_key = ("serper", query)
         if cache_key in cache:
             data, err = cache[cache_key]
+            _serper_cache_hits += 1
         else:
             data, err = _serper_search(query, serper_key)
             cache[cache_key] = (data, err)
+            _serper_calls += 1
             time.sleep(_INTER_REQUEST_SLEEP)
 
         if err:
@@ -1014,6 +1062,13 @@ def probe_company(
             for r in all_organic[:5]
         ]
         model_result = _model_extract(company_name, snippets, anthropic_key)
+        _mu = model_result.pop("_usage", {})
+        if _mu:
+            _anthr_model      = _mu.get("model", "")
+            _anthr_input_tok  += _mu.get("input_tokens", 0)
+            _anthr_output_tok += _mu.get("output_tokens", 0)
+            _anthr_total_tok  += _mu.get("total_tokens", 0)
+            _anthr_stop        = _mu.get("stop_reason", "")
         is_group_only = model_result.get("is_group_or_parent_only", False)
         entity_match  = model_result.get("entity_match", "")
         if model_result.get("hq_country") and not is_group_only and entity_match != "No":
@@ -1043,6 +1098,7 @@ def probe_company(
                 used_query = queries[0]
         if model_result.get("probe_error"):
             errors.append(model_result["probe_error"])
+            _anthr_errors.append(model_result["probe_error"])
 
     for k, v in best.items():
         if k in result:
@@ -1083,7 +1139,8 @@ def probe_company(
 
     # Multilingual site detection
     ml_result: dict[str, Any] = {
-        "has_multilingual_site": False, "website_language_count": 0, "website_languages_detected": "",
+        "has_multilingual_site": False, "website_language_count": 0,
+        "website_languages_detected": "", "website_fetch_count": 0,
     }
     if use_multilingual_check and domain:
         _ml_key = ("multilingual", domain.strip().lstrip("https://").lstrip("http://").rstrip("/"))
@@ -1109,6 +1166,13 @@ def probe_company(
         adj = _anthropic_hq_adjudicate(
             company_name, domain, result, ml_result, gs_result, anthropic_key
         )
+        _au = adj.pop("_usage", {})
+        if _au:
+            _anthr_model      = _anthr_model or _au.get("model", "")
+            _anthr_input_tok  += _au.get("input_tokens", 0)
+            _anthr_output_tok += _au.get("output_tokens", 0)
+            _anthr_total_tok  += _au.get("total_tokens", 0)
+            _anthr_stop        = _anthr_stop or _au.get("stop_reason", "")
         if not adj.get("probe_error"):
             for _field in (
                 "hq_structure_type", "local_entity_hq_country", "local_entity_hq_city",
@@ -1119,15 +1183,28 @@ def probe_company(
             ):
                 if _field in adj:
                     result[_field] = adj[_field]
-            result["sig_foreign_hq_review_reason"]        = adj.get("reason", "")
-            result["sig_foreign_hq_review_confidence"]    = adj.get("confidence", "")
-            result["sig_foreign_hq_review_source"]        = "anthropic"
-            result["sig_foreign_hq_review_evidence_url"]  = adj.get("evidence_url", "")
+            result["sig_foreign_hq_review_reason"]         = adj.get("reason", "")
+            result["sig_foreign_hq_review_confidence"]     = adj.get("confidence", "")
+            result["sig_foreign_hq_review_source"]         = "anthropic"
+            result["sig_foreign_hq_review_evidence_url"]   = adj.get("evidence_url", "")
             result["sig_foreign_hq_review_evidence_quote"] = adj.get("evidence_quote", "")
-            result["anthropic_hq_review_used"]            = "Yes"
+            result["anthropic_hq_review_used"]             = "Yes"
         else:
             _adj_err = adj["probe_error"]
+            _anthr_errors.append(_adj_err)
             result["probe_error"] = (result["probe_error"] + "; " + _adj_err).lstrip("; ") if result.get("probe_error") else _adj_err
+
+    # ---- Populate usage columns ----
+    result["serper_calls_used"]   = _serper_calls
+    result["serper_queries_used"] = " | ".join(_queries_attempted)
+    result["serper_cache_hit"]    = _serper_cache_hits > 0
+    result["website_fetch_count"] = ml_result.get("website_fetch_count", 0)
+    result["anthropic_model_used"]    = _anthr_model
+    result["anthropic_input_tokens"]  = _anthr_input_tok
+    result["anthropic_output_tokens"] = _anthr_output_tok
+    result["anthropic_total_tokens"]  = _anthr_total_tok
+    result["anthropic_stop_reason"]   = _anthr_stop
+    result["anthropic_error"]         = "; ".join(_anthr_errors)
 
     return result
 
@@ -1217,6 +1294,7 @@ def _build_workbook(
     country_col: str,
     qa_meta: dict,
     output_label: str = "",
+    run_usage: "dict | None" = None,
 ) -> "Workbook":
     wb = Workbook()
     ws = wb.active
@@ -1312,6 +1390,44 @@ def _build_workbook(
             cell_a.font = Font(bold=True)
         ws_qa.row_dimensions[r_idx].height = 15
 
+    # Run Summary sheet
+    _ru = run_usage or {}
+    ws_sum = wb.create_sheet("Run Summary")
+    sum_rows = [
+        ("Run Summary – hq_lookup_probe_app.py", ""),
+        ("", ""),
+        ("── run info ──", ""),
+        ("timestamp",           qa_meta.get("timestamp", "")),
+        ("input_file",          qa_meta.get("input_file", "")),
+        ("rows_processed",      len(probe_results)),
+        ("", ""),
+        ("── API usage ──", ""),
+        ("serper_calls_used",   _ru.get("serper_calls_used", "")),
+        ("website_fetches_attempted", _ru.get("website_fetches", "")),
+        ("anthropic_reviews_used",    _ru.get("anthropic_reviews_used", "")),
+        ("anthropic_input_tokens",    _ru.get("anthropic_input_tokens", "")),
+        ("anthropic_output_tokens",   _ru.get("anthropic_output_tokens", "")),
+        ("anthropic_total_tokens",    _ru.get("anthropic_total_tokens", "")),
+        ("anthropic_errors",          _ru.get("anthropic_errors", "")),
+        ("", ""),
+        ("── options used ──", ""),
+        ("multilingual_check_enabled", qa_meta.get("use_multilingual_check", "")),
+        ("anthropic_hq_review_enabled", qa_meta.get("use_anthropic_review", "")),
+        ("model_fallback_enabled",      qa_meta.get("use_model", "")),
+        ("model",                       qa_meta.get("model", "")),
+        ("row_limit",                   qa_meta.get("limit", "")),
+    ]
+    ws_sum.column_dimensions["A"].width = 32
+    ws_sum.column_dimensions["B"].width = 50
+    for r_idx, (k, v) in enumerate(sum_rows, start=1):
+        cell_a = ws_sum.cell(row=r_idx, column=1, value=k)
+        ws_sum.cell(row=r_idx, column=2, value=v)
+        if r_idx == 1:
+            cell_a.font = Font(bold=True, size=13)
+        elif k and not k.startswith("─"):
+            cell_a.font = Font(bold=True)
+        ws_sum.row_dimensions[r_idx].height = 15
+
     return wb
 
 
@@ -1323,6 +1439,7 @@ def build_excel_bytes(
     domain_col: str,
     country_col: str,
     qa_meta: dict,
+    run_usage: "dict | None" = None,
 ) -> bytes:
     wb = _build_workbook(
         input_rows=input_rows,
@@ -1333,6 +1450,7 @@ def build_excel_bytes(
         country_col=country_col,
         qa_meta=qa_meta,
         output_label="(in-memory)",
+        run_usage=run_usage,
     )
     buf = io.BytesIO()
     wb.save(buf)
@@ -1703,6 +1821,18 @@ if run_btn:
 
     progress_bar.empty()
 
+    # Run-level usage aggregation
+    run_usage = {
+        "rows_processed":         len(probe_results),
+        "serper_calls_used":      sum(int(p.get("serper_calls_used") or 0) for p in probe_results),
+        "website_fetches":        sum(int(p.get("website_fetch_count") or 0) for p in probe_results),
+        "anthropic_reviews_used": sum(1 for p in probe_results if p.get("anthropic_hq_review_used") == "Yes" or p.get("anthropic_model_used")),
+        "anthropic_input_tokens": sum(int(p.get("anthropic_input_tokens") or 0) for p in probe_results),
+        "anthropic_output_tokens":sum(int(p.get("anthropic_output_tokens") or 0) for p in probe_results),
+        "anthropic_total_tokens": sum(int(p.get("anthropic_total_tokens") or 0) for p in probe_results),
+        "anthropic_errors":       sum(1 for p in probe_results if p.get("anthropic_error")),
+    }
+
     # Store in session state
     ts = datetime.now().strftime("%Y%m%d_%H%M%S")
     st.session_state[_KEY_RESULTS]    = probe_results
@@ -1719,6 +1849,7 @@ if run_btn:
         "use_multilingual_check": use_multilingual_check,
         "use_anthropic_review":   use_anthropic_review,
     }
+    st.session_state["hq_probe_run_usage"] = run_usage
 
     if error_rows:
         with st.expander(f"⚠️ {len(error_rows)} row error(s)", expanded=False):
@@ -1747,6 +1878,7 @@ needs_review_cnt = sum(1 for p in probe_results if p.get("needs_manual_review") 
 needs_adj_cnt    = sum(1 for p in probe_results if p.get("needs_anthropic_hq_review") == "Yes")
 multilingual_cnt = sum(1 for p in probe_results if p.get("has_multilingual_site"))
 global_net_cnt   = sum(1 for p in probe_results if p.get("has_global_structure_signal"))
+run_usage        = st.session_state.get("hq_probe_run_usage", {})
 
 st.markdown("---")
 st.subheader("Results")
@@ -1758,9 +1890,21 @@ c4.metric("Unknown",           detected_unknown)
 c5.metric("Needs review",      needs_review_cnt)
 
 r1, r2, r3 = st.columns(3)
-r1.metric("Multilingual site",      multilingual_cnt)
+r1.metric("Multilingual site",       multilingual_cnt)
 r2.metric("Global structure signal", global_net_cnt)
 r3.metric("Needs Anthropic review",  needs_adj_cnt)
+
+if run_usage:
+    with st.expander("Usage / API call summary", expanded=False):
+        u1, u2, u3, u4 = st.columns(4)
+        u1.metric("Serper calls",          run_usage.get("serper_calls_used", 0))
+        u2.metric("Website fetches",       run_usage.get("website_fetches", 0))
+        u3.metric("Anthropic reviews run", run_usage.get("anthropic_reviews_used", 0))
+        u4.metric("Anthropic errors",      run_usage.get("anthropic_errors", 0))
+        t1, t2, t3 = st.columns(3)
+        t1.metric("Anthropic input tokens",  run_usage.get("anthropic_input_tokens", 0))
+        t2.metric("Anthropic output tokens", run_usage.get("anthropic_output_tokens", 0))
+        t3.metric("Anthropic total tokens",  run_usage.get("anthropic_total_tokens", 0))
 
 # Display columns
 _KEY_VIEW_COLS_RAW = [
@@ -1870,6 +2014,7 @@ with dl1:
             domain_col=domain_col_r,
             country_col=country_col_r,
             qa_meta=qa_meta,
+            run_usage=run_usage,
         )
 
     ts = qa_meta.get("timestamp", "")
