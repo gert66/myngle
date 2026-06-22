@@ -219,3 +219,223 @@ def download_job(job_id: str):
         media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         filename=Path(output_files[0]).name,
     )
+
+
+# ---------------------------------------------------------------------------
+# Company Hub API  — read-only endpoints for the Lovable frontend
+#
+# NOTE: All data below is MOCK / in-memory placeholder data.
+#       It will be replaced by database-backed queries once the Company Hub
+#       data model and persistence layer are in place.
+# ---------------------------------------------------------------------------
+
+from typing import Optional  # noqa: E402  (stdlib, safe to import late)
+
+
+# ── Pydantic models ──────────────────────────────────────────────────────────
+
+from pydantic import BaseModel  # already a FastAPI transitive dep
+
+
+class CompanyListItem(BaseModel):
+    company_id: str
+    company_name: str
+    domain: str
+    country: str
+    industry: str
+    employee_range: str
+    commercial_fit_score: float
+    commercial_tier: str          # e.g. "Tier 1", "Tier 2", "Tier 3"
+    outreach_readiness_status: str  # e.g. "Ready", "Needs review", "Not ready"
+    has_detail: bool
+    has_contacts: bool
+    last_updated: str             # ISO-8601 date string
+
+
+class CompanyDetail(BaseModel):
+    # Core fields (same as CompanyListItem)
+    company_id: str
+    company_name: str
+    domain: str
+    country: str
+    industry: str
+    employee_range: str
+    commercial_fit_score: float
+    commercial_tier: str
+    outreach_readiness_status: str
+    has_detail: bool
+    has_contacts: bool
+    last_updated: str
+    # Detail-only fields
+    why_relevant: str
+    whats_hot: str
+    whats_not_hot: str
+    caller_angle: str
+    evidence_summary: str
+    key_source_links: list[str]
+    recommended_next_action: str
+    warnings: list[str]
+
+
+# ── Mock data (TEMPORARY — replace with DB queries) ──────────────────────────
+
+_MOCK_COMPANIES: list[dict] = [
+    {
+        "company_id": "quanta-robotics",
+        "company_name": "Quanta Robotics S.r.l.",
+        "domain": "quantarobotics.it",
+        "country": "Italy",
+        "industry": "Industrial Automation",
+        "employee_range": "50–200",
+        "commercial_fit_score": 7.8,
+        "commercial_tier": "Tier 1",
+        "outreach_readiness_status": "Ready",
+        "has_detail": True,
+        "has_contacts": True,
+        "last_updated": "2025-06-01",
+        # Detail fields
+        "why_relevant": "Fast-growing cobot integrator with EU expansion plans.",
+        "whats_hot": "New €4M Series A closed Q1 2025; hiring sales in DE and NL.",
+        "whats_not_hot": "No established HR tech stack yet — learning opportunity.",
+        "caller_angle": (
+            "Lead with ROI on reduced ramp time for technical sales reps "
+            "in new markets (DE, NL)."
+        ),
+        "evidence_summary": (
+            "LinkedIn: 12 open roles in DACH region. "
+            "Press release: Series A, March 2025. "
+            "Website: product page updated with EN/DE copy."
+        ),
+        "key_source_links": [
+            "https://quantarobotics.it/en/news/series-a",
+            "https://linkedin.com/company/quanta-robotics",
+        ],
+        "recommended_next_action": "Send intro email to CMO; reference DACH expansion.",
+        "warnings": [],
+    },
+    {
+        "company_id": "meridian-foods",
+        "company_name": "Meridian Foods S.p.A.",
+        "domain": "meridianfoods.it",
+        "country": "Italy",
+        "industry": "Food & Beverage",
+        "employee_range": "200–500",
+        "commercial_fit_score": 5.4,
+        "commercial_tier": "Tier 2",
+        "outreach_readiness_status": "Needs review",
+        "has_detail": True,
+        "has_contacts": False,
+        "last_updated": "2025-05-15",
+        "why_relevant": "Mid-sized food exporter with growing international sales team.",
+        "whats_hot": "Expanding into Benelux; new sales director hired Feb 2025.",
+        "whats_not_hot": "Ownership change pending — decision-making may be slow.",
+        "caller_angle": "Focus on onboarding efficiency for the new Benelux team.",
+        "evidence_summary": (
+            "LinkedIn: sales director profile updated Feb 2025. "
+            "Crunchbase: M&A activity flagged."
+        ),
+        "key_source_links": [
+            "https://linkedin.com/company/meridian-foods",
+        ],
+        "recommended_next_action": "Hold outreach until ownership situation is clearer.",
+        "warnings": ["Ownership change pending — verify decision-maker status first."],
+    },
+    {
+        "company_id": "alphastream-tech",
+        "company_name": "AlphaStream Technologies B.V.",
+        "domain": "alphastream.io",
+        "country": "Netherlands",
+        "industry": "SaaS / FinTech",
+        "employee_range": "10–50",
+        "commercial_fit_score": 6.1,
+        "commercial_tier": "Tier 2",
+        "outreach_readiness_status": "Ready",
+        "has_detail": False,
+        "has_contacts": False,
+        "last_updated": "2025-04-20",
+        "why_relevant": "Series-B fintech scaling a European sales team rapidly.",
+        "whats_hot": "30 % headcount growth YoY; new VP Sales hired Q4 2024.",
+        "whats_not_hot": "CRM appears to be custom-built — integration complexity.",
+        "caller_angle": "Lead with peer benchmarks from similar-stage FinTech scaleups.",
+        "evidence_summary": "LinkedIn headcount signal. Pitchbook Series B record.",
+        "key_source_links": [
+            "https://alphastream.io/about",
+            "https://pitchbook.com/profiles/company/alphastream",
+        ],
+        "recommended_next_action": "Request intro via shared VC connection.",
+        "warnings": [],
+    },
+]
+
+# Fast lookup by company_id
+_MOCK_BY_ID: dict[str, dict] = {c["company_id"]: c for c in _MOCK_COMPANIES}
+
+
+# ── Endpoints ─────────────────────────────────────────────────────────────────
+
+@app.get("/api/health")
+def health():
+    """Basic liveness check for the Lovable frontend."""
+    return {"status": "ok", "service": "myngle-api"}
+
+
+@app.get("/api/companies/light")
+def list_companies():
+    """
+    Return a lightweight list of all companies for the Company Hub overview.
+
+    MOCK DATA — will be replaced by a database query.
+    """
+    items = [
+        CompanyListItem(
+            company_id=c["company_id"],
+            company_name=c["company_name"],
+            domain=c["domain"],
+            country=c["country"],
+            industry=c["industry"],
+            employee_range=c["employee_range"],
+            commercial_fit_score=c["commercial_fit_score"],
+            commercial_tier=c["commercial_tier"],
+            outreach_readiness_status=c["outreach_readiness_status"],
+            has_detail=c["has_detail"],
+            has_contacts=c["has_contacts"],
+            last_updated=c["last_updated"],
+        )
+        for c in _MOCK_COMPANIES
+    ]
+    return {"companies": [i.model_dump() for i in items]}
+
+
+@app.get("/api/companies/{company_id}")
+def get_company(company_id: str):
+    """
+    Return full detail for a single company.
+
+    MOCK DATA — will be replaced by a database query.
+    """
+    c = _MOCK_BY_ID.get(company_id)
+    if not c:
+        raise HTTPException(status_code=404, detail=f"Company '{company_id}' not found.")
+    detail = CompanyDetail(
+        company_id=c["company_id"],
+        company_name=c["company_name"],
+        domain=c["domain"],
+        country=c["country"],
+        industry=c["industry"],
+        employee_range=c["employee_range"],
+        commercial_fit_score=c["commercial_fit_score"],
+        commercial_tier=c["commercial_tier"],
+        outreach_readiness_status=c["outreach_readiness_status"],
+        has_detail=c["has_detail"],
+        has_contacts=c["has_contacts"],
+        last_updated=c["last_updated"],
+        why_relevant=c["why_relevant"],
+        whats_hot=c["whats_hot"],
+        whats_not_hot=c["whats_not_hot"],
+        caller_angle=c["caller_angle"],
+        evidence_summary=c["evidence_summary"],
+        key_source_links=c["key_source_links"],
+        recommended_next_action=c["recommended_next_action"],
+        warnings=c["warnings"],
+    )
+    return {"company": detail.model_dump()}
