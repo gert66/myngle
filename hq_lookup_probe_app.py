@@ -150,6 +150,9 @@ PROBE_COLS = [
     "brand_hq_top_result_snippet",
     "brand_hq_evidence_found",
     "brand_hq_evidence_quote",
+    "brand_hq_top_result_domain",
+    "brand_hq_top_result_is_official_domain",
+    "brand_hq_result_selection_reason",
 ]
 
 # Token columns tracked internally but NOT exported to Excel/CSV visible columns.
@@ -1259,6 +1262,9 @@ def _mimic_google_hq_check(
         "brand_hq_top_result_snippet":        "",
         "brand_hq_evidence_found":            False,
         "brand_hq_evidence_quote":            "",
+        "brand_hq_top_result_domain":         "",
+        "brand_hq_top_result_is_official_domain": False,
+        "brand_hq_result_selection_reason":   "",
         # Internal
         "_mimic_serper_calls":      0,
         "_mimic_queries":           [],
@@ -1403,9 +1409,33 @@ def _mimic_google_hq_check(
                 if country or city:
                     out["brand_hq_evidence_found"]   = True
                     out["brand_hq_evidence_quote"]   = q
-                    top_r = next((r for r in b_org if not _is_directory_url(r.get("link",""))), b_org[0] if b_org else {})
+                    # Prefer official/input domain result over directories or unrelated domains
+                    from urllib.parse import urlparse as _up
+                    _official_netloc = (fetch_domain or domain or "").lstrip("www.").lower()
+                    _plain_official  = out.get("plain_company_official_domain", "").lstrip("www.").lower()
+                    def _brand_rank(r: dict) -> int:
+                        lnk = r.get("link", "")
+                        nl  = _up(lnk).netloc.lstrip("www.").lower()
+                        if _is_directory_url(lnk):
+                            return 10
+                        if _official_netloc and (nl == _official_netloc or nl.endswith("." + _official_netloc)):
+                            return 0
+                        if _plain_official and (nl == _plain_official or nl.endswith("." + _plain_official)):
+                            return 1
+                        return 5
+                    sorted_org = sorted(b_org, key=_brand_rank) if b_org else []
+                    top_r = sorted_org[0] if sorted_org else {}
+                    top_nl = _up(top_r.get("link", "")).netloc.lstrip("www.").lower() if top_r else ""
+                    _is_off = bool(_official_netloc and (top_nl == _official_netloc or top_nl.endswith("." + _official_netloc)))
+                    _sel_reason = (
+                        "input_domain_match" if _is_off
+                        else ("plain_official_match" if _plain_official and top_nl == _plain_official else "best_non_directory")
+                    )
                     out["brand_hq_top_result_url"]     = top_r.get("link", "")
                     out["brand_hq_top_result_snippet"] = top_r.get("snippet", "")
+                    out["brand_hq_top_result_domain"]              = top_nl
+                    out["brand_hq_top_result_is_official_domain"]  = _is_off
+                    out["brand_hq_result_selection_reason"]        = _sel_reason
                     if strength in ("Strong", "Medium") and not out["_mimic_hq_evidence"]:
                         out["_mimic_hq_evidence"] = {
                             "hq_detected_city":    city,
@@ -1479,6 +1509,7 @@ def probe_company(
 
     # --- Manual Google Mimic HQ Check (runs before narrow queries) ---
     _mimic_audit: dict = {}
+    _mimic_evidence: dict = {}
     if use_mimic_check and serper_key:
         _mimic_result = _mimic_google_hq_check(
             company_name, domain, input_country, serper_key, cache
@@ -1652,6 +1683,33 @@ def probe_company(
     result["anthropic_web_search_queries"]   = ""
     result["anthropic_web_search_result_count"] = 0
 
+    # ---- Merge mimic audit columns (before Anthropic so we can inspect evidence) ----
+    for _k, _v in _mimic_audit.items():
+        if _k in result:
+            result[_k] = _v
+
+    # Suppress Anthropic when official page evidence is already strong and unambiguous
+    _has_strong_official = (
+        result.get("official_page_hq_evidence_strength") == "Strong"
+        and result.get("official_page_hq_country")
+    )
+    _has_strong_brand = (
+        result.get("brand_hq_evidence_found")
+        and _mimic_evidence.get("hq_confidence") == "High"
+        and _mimic_evidence.get("hq_detected_country")
+    )
+    if _has_strong_official or _has_strong_brand:
+        _ev_src = "official_page_mimic_check" if _has_strong_official else "brand_hq_mimic_check"
+        result["needs_anthropic_hq_review"] = "No"
+        result["anthropic_hq_review_used"]  = "No"
+        result["anthropic_web_search_used"] = "No"
+        result["anthropic_review_evidence_mode"] = ""
+        result["sig_foreign_hq_review_source"] = _ev_src
+        if _has_strong_official:
+            result["sig_foreign_hq_review_evidence_url"]   = result.get("official_page_fetch_url", "")
+            result["sig_foreign_hq_review_evidence_quote"] = result.get("official_page_hq_evidence_quote", "")
+        needs_adj = False
+
     # Optional Anthropic HQ adjudication
     if use_anthropic_review and needs_adj and anthropic_key:
         adj = _anthropic_hq_adjudicate(
@@ -1686,11 +1744,6 @@ def probe_company(
             _adj_err = adj["probe_error"]
             _anthr_errors.append(_adj_err)
             result["probe_error"] = (result["probe_error"] + "; " + _adj_err).lstrip("; ") if result.get("probe_error") else _adj_err
-
-    # ---- Merge mimic audit columns ----
-    for _k, _v in _mimic_audit.items():
-        if _k in result:
-            result[_k] = _v
 
     # ---- Populate usage columns ----
     result["serper_calls_used"]   = _serper_calls
@@ -1911,9 +1964,6 @@ def _build_workbook(
         ("website_fetches_attempted",  _ru.get("website_fetches", "")),
         ("anthropic_reviews_used",     _ru.get("anthropic_reviews_used", "")),
         ("anthropic_web_search_used",  _ru.get("anthropic_web_search_used", "")),
-        ("anthropic_input_tokens",     _ru.get("anthropic_input_tokens", "")),
-        ("anthropic_output_tokens",    _ru.get("anthropic_output_tokens", "")),
-        ("anthropic_total_tokens",     _ru.get("anthropic_total_tokens", "")),
         ("anthropic_errors",           _ru.get("anthropic_errors", "")),
         ("", ""),
         ("── options used ──", ""),
