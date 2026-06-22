@@ -1546,6 +1546,87 @@ _SUBSIDIARY_SIGNAL_RE = re.compile(
     re.IGNORECASE,
 )
 
+# ── Score-3 eligibility helper ────────────────────────────────────────────────
+_S3_HQ_PHRASE_RE = re.compile(
+    r"\b(?:headquarters?|headquartered|head\s+office|global\s+hq|"
+    r"corporate\s+(?:headquarters?|hq)|group\s+(?:headquarters?|hq)|"
+    r"international\s+(?:headquarters?|hq)|world\s+headquarters?|"
+    r"principal\s+(?:office|place\s+of\s+business))\b",
+    re.IGNORECASE,
+)
+_S3_BIO_REJECT_RE = re.compile(
+    r"\b(?:brigadier\s+general|biography|military|officer|commander|colonel|"
+    r"lieutenant|sergeant|captain|admiral|general(?:\s+of)?|born\s+in|"
+    r"graduated|university|professor|physician|surgeon|director\s+of\s+(?:the\s+)?(?:national|state)|"
+    r"politician|senator|minister\s+of|secretary\s+of\s+state)\b",
+    re.IGNORECASE,
+)
+_S3_BRANCH_REJECT_RE = re.compile(
+    r"\b(?:branch\s+(?:in|office|at)|office\s+in|regional\s+office|"
+    r"sales\s+office|service\s+(?:center|centre)|distribution\s+center|"
+    r"north\s+america(?:n)?(?:\s+hq)?|subsidiary|affiliate|"
+    r"get\s+directions?|Holland,?\s+Michigan|MI\b)\b"
+    r"|Holland,\s*MI",
+    re.IGNORECASE,
+)
+_S3_DIRECTORY_REJECT_RE = re.compile(
+    r"\b(?:company\s+profile|business\s+directory|yellow\s+pages?|"
+    r"dnb\.com|bloomberg\.com\/company|zoominfo\.com|crunchbase\.com|"
+    r"opencorporates\.com|companies\s+house)\b",
+    re.IGNORECASE,
+)
+
+
+def _is_score3_eligible_hq_evidence(
+    quote: str,
+    detected_country: str,
+    input_country: str,
+    evidence_url: str,
+) -> tuple[bool, str]:
+    """Return (eligible, reason). Score 3 requires a clear HQ phrase and no hard-reject signals."""
+    q = quote or ""
+    url = evidence_url or ""
+
+    if _S3_BIO_REJECT_RE.search(q):
+        return False, "biography_or_personal_evidence"
+    if _S3_BRANCH_REJECT_RE.search(q):
+        return False, "branch_subsidiary_or_regional_hq"
+    if _S3_DIRECTORY_REJECT_RE.search(q) or _S3_DIRECTORY_REJECT_RE.search(url):
+        return False, "directory_source"
+    if not _S3_HQ_PHRASE_RE.search(q):
+        return False, "no_clear_hq_phrase_in_evidence"
+    return True, ""
+
+
+# ── Country correction map for simple-mode evidence quotes ────────────────────
+_S3_CITY_COUNTRY_CORRECTIONS: list[tuple[re.Pattern, str]] = [
+    (re.compile(r"\bHolland,?\s+Michigan\b|\bHolland,?\s+MI\b", re.I), "United States"),
+    (re.compile(r"\b(?:Göteborg|Gothenburg)\b", re.I), "Sweden"),
+    (re.compile(r"\bStockholm\b", re.I), "Sweden"),
+    (re.compile(r"\bMälmo|Malmö\b", re.I), "Sweden"),
+    (re.compile(r"\bHelsinki\b", re.I), "Finland"),
+    (re.compile(r"\bOslo\b", re.I), "Norway"),
+    (re.compile(r"\bCopenhagen|København\b", re.I), "Denmark"),
+    (re.compile(r"\b(?:Nogara|Veneto)\b.*\bIT\b|\bNaz-?Sciaves\b|\bTrentino\b", re.I), "Italy"),
+    (re.compile(r"\b(?:Sant'Agata\s+de\s+Goti|Savigno|Valsamoggia)\b", re.I), "Italy"),
+    (re.compile(r"\b(?:Modena|Ancona|Osimo|Senigallia|Bergamo|Milano|Milan|"
+                r"Brescia|Bologna|Torino|Turin|Firenze|Florence|Napoli|Naples|"
+                r"Roma|Rome|Venezia|Venice|Genova|Genoa|Padova|Padua|"
+                r"Verona|Vicenza|Perugia|Trieste|Palermo|Catania)\b", re.I), "Italy"),
+    (re.compile(r"\bheadquarters?\s+(?:in\s+)?France\b|\bFrance\s+headquarters?\b", re.I), "France"),
+    (re.compile(r"\bheadquarters?\s+(?:in\s+)?Germany\b|\bGermany\s+headquarters?\b", re.I), "Germany"),
+    (re.compile(r"\bheadquarters?\s+(?:in\s+)?Spain\b|\bSpain\s+headquarters?\b", re.I), "Spain"),
+]
+
+
+def _correct_country_from_quote(quote: str, detected_country: str) -> str:
+    """Apply city/phrase-based country corrections to catch common parser errors."""
+    for pattern, correct_country in _S3_CITY_COUNTRY_CORRECTIONS:
+        if pattern.search(quote):
+            return correct_country
+    return detected_country
+
+
 # Text markers that indicate we've entered a "locations list" section
 _LOCATION_SECTION_RE = re.compile(
     r"\b(?:locations?|get\s+directions?|other\s+offices?|all\s+offices?|"
@@ -2294,6 +2375,12 @@ def probe_company(
             if _s_country or _s_city:
                 _s_country_std = _std_country(_s_country)
                 _s_input_std   = _std_country(input_country or "Italy")
+
+                # Apply city/phrase-based country corrections before deciding foreign
+                _s_country_corrected = _correct_country_from_quote(_s_quote, _s_country_std)
+                if _s_country_corrected != _s_country_std:
+                    _s_country_std = _s_country_corrected
+
                 _s_is_foreign  = bool(_s_country_std and
                                       _s_country_std.lower() != _s_input_std.lower())
                 _s_conf = ("High"   if _s_strength == "Strong"
@@ -2393,10 +2480,21 @@ def probe_company(
                         f"identifies {_s_country_std} as HQ"
                     )
                     result["sig_foreign_hq_review_confidence"] = _s_conf
-                    if _s_untrusted:
-                        # Evidence not trusted — keep score at 0, require manual review
+                    _score3_ok, _score3_reason = _is_score3_eligible_hq_evidence(
+                        quote=_s_quote,
+                        detected_country=_s_country_std,
+                        input_country=_s_input_std,
+                        evidence_url=_s_best_url,
+                    )
+                    if _s_untrusted or not _score3_ok:
+                        # Evidence not trusted or fails eligibility — score 0, manual review
                         result["sig_foreign_hq_score_reviewed"] = 0
                         result["review_foreign_parent_score"]   = 0
+                        result["hq_confidence"] = "Low"
+                        if _score3_reason and not result.get("domain_root_hq_rejected_evidence_reason"):
+                            result["domain_root_hq_rejected_evidence_reason"] = _score3_reason
+                        _reason_mr = _s_trust_reason or _score3_reason or "score3_ineligible"
+                        _set_manual_review(result, "Yes", _reason_mr)
                     else:
                         result["sig_foreign_hq_score_reviewed"] = 3
                         result["review_foreign_parent_score"]   = 3
