@@ -89,6 +89,7 @@ PROBE_COLS = [
     "hq_detected_country",
     "hq_confidence",
     "foreign_hq_simple",
+    "input_country_used",
     "needs_manual_review",
     "hq_reason",
     "hq_evidence_url",
@@ -473,6 +474,21 @@ def _resolve_city_country(text: str) -> tuple[str, str]:
     # Italian CAP (5-digit postal code) → Italy
     if _ITALIAN_CAP_RE.search(text):
         return "", "Italy"
+    # Italian fiscal / VAT identifiers → Italy
+    _ITALIAN_FISCAL_RE = re.compile(
+        r"\b(p\.?\s*iva|partita\s+iva|codice\s+fiscale|c\.f\.)\b", re.IGNORECASE
+    )
+    if _ITALIAN_FISCAL_RE.search(text):
+        return "", "Italy"
+    # Italian address language → Italy
+    _ITALIAN_ADDR_PHRASES = (
+        "sede legale", "sede principale", "sede amministrativa", "sede operativa",
+        "ufficio", "uffici", "registered office in italy", "registered in italy",
+        "incorporata in italia", "societa italiana", "società italiana",
+    )
+    for phrase in _ITALIAN_ADDR_PHRASES:
+        if phrase in text_lc:
+            return "", "Italy"
     # International cities
     for alias, (city, country) in _INTL_CITIES.items():
         if alias in text_lc:
@@ -482,6 +498,27 @@ def _resolve_city_country(text: str) -> tuple[str, str]:
         if alias in text_lc:
             return "", country
     return "", ""
+
+
+def resolve_country_from_location(location_text: str) -> tuple[str, str]:
+    """
+    Public helper: given free-form location/address/HQ text, return (country, city).
+
+    Returns ("Italy", city) for any recognised Italian city, province abbreviation,
+    region, postal code (CAP), or Italian address language.
+    Returns (country, city) for other recognised international cities.
+    Returns ("", "") when nothing is recognised.
+
+    Examples:
+        resolve_country_from_location("Milano")              -> ("Italy", "Milano")
+        resolve_country_from_location("Milan")               -> ("Italy", "Milan")
+        resolve_country_from_location("Bentivoglio (BO)")    -> ("Italy", "Bentivoglio")
+        resolve_country_from_location("Prato, Tuscany")      -> ("Italy", "Prato")
+        resolve_country_from_location("registered office in Milano, Italy")
+                                                             -> ("Italy", "Milano")
+    """
+    city, country = _resolve_city_country(location_text)
+    return country, city
 
 
 def _has_group_context(text: str) -> bool:
@@ -846,6 +883,7 @@ def probe_company(
         all_organic,
     )
     result["foreign_hq_simple"]     = foreign_str
+    result["input_country_used"]    = _COUNTRY_ALIASES.get(input_country.strip().lower(), input_country)
     result["needs_manual_review"]   = "Yes" if needs_review else "No"
 
     if errors:
@@ -1275,6 +1313,48 @@ def _self_test() -> None:
     # FARMACIE PRATESI: domain phoenixpharmaitalia.it is part of German PHOENIX group,
     # but the company itself has sede/registered office in Bentivoglio (Bologna), Italy.
     # Group context snippets must NOT cause a false foreign HQ detection.
+    # resolve_country_from_location tests (public API)
+    print("[self-test] resolve_country_from_location tests...")
+    loc_tests = [
+        ("Milano",                                    "Italy"),
+        ("Milan",                                     "Italy"),
+        ("Bentivoglio (BO)",                          "Italy"),
+        ("Prato, Tuscany",                            "Italy"),
+        ("registered office in Milano, Italy",        "Italy"),
+        ("sede legale in Roma",                       "Italy"),
+        ("Bologna",                                   "Italy"),
+        ("Bergamo",                                   "Italy"),
+        ("Brescia",                                   "Italy"),
+        ("Verona",                                    "Italy"),
+        ("Padova",                                    "Italy"),
+        ("Vicenza",                                   "Italy"),
+        ("Treviso",                                   "Italy"),
+        ("Modena",                                    "Italy"),
+        ("Parma",                                     "Italy"),
+        ("Genova",                                    "Italy"),
+        ("Genoa",                                     "Italy"),
+        ("Turin",                                     "Italy"),
+        ("Torino",                                    "Italy"),
+        ("Naples",                                    "Italy"),
+        ("Rome",                                      "Italy"),
+        ("P.IVA 01234567890",                         "Italy"),
+        ("40010 Bentivoglio",                         "Italy"),
+        ("Berlin, Germany",                           "Germany"),
+        ("",                                          ""),
+    ]
+    loc_failures = 0
+    for loc_text, exp_country in loc_tests:
+        got_country, _ = resolve_country_from_location(loc_text)
+        ok = got_country == exp_country
+        status = "PASS" if ok else "FAIL"
+        print(f"  [{status}] {loc_text!r:50s} → {got_country!r}")
+        if not ok:
+            loc_failures += 1
+    if loc_failures:
+        print(f"  {loc_failures} location test(s) FAILED")
+    else:
+        print("  All location tests passed.")
+
     print("[self-test] FARMACIE PRATESI false-foreign regression...")
     fp_snippets = [
         {
