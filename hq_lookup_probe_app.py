@@ -326,6 +326,16 @@ _ITALY_CITIES: dict[str, tuple[str, str]] = {
     "campobasso":     ("Campobasso",     "Italy"),
     "potenza":        ("Potenza",        "Italy"),
     "matera":         ("Matera",         "Italy"),
+    # Marche / Abruzzo / Campania small cities needed for recovery tests
+    "osimo":          ("Osimo",          "Italy"),
+    "senigallia":     ("Senigallia",     "Italy"),
+    "san benedetto del tronto": ("San Benedetto del Tronto", "Italy"),
+    "san benedetto":  ("San Benedetto del Tronto", "Italy"),
+    "nusco":          ("Nusco",          "Italy"),
+    "avellino":       ("Avellino",       "Italy"),
+    "jesi":           ("Jesi",           "Italy"),
+    "fabriano":       ("Fabriano",       "Italy"),
+    "civitanova marche": ("Civitanova Marche", "Italy"),
 }
 
 _INTL_CITIES: dict[str, tuple[str, str]] = {
@@ -3884,11 +3894,63 @@ elif _app_mode == "recovery":
                 use_simple_hq_mode=True,
             )
 
-            # Sanity guard
+            # ── Domestic-safety guard (must run before score columns are set) ──
+            # Two triggers:
+            # 1. hq_detected_country == input_country (covers Modena/Ancona/Osimo
+            #    because _resolve_city_country maps them to country="Italy")
+            # 2. Evidence quotes mention Italian location but detected country is
+            #    misclassified as foreign (e.g. US Serper KG for a distributor)
             _rec_det = _std_country(_rec_probe.get("hq_detected_country") or "")
-            _rec_inp = _std_country(_rec_probe.get("input_country_used") or "")
-            if _rec_det and _rec_inp and _rec_det.lower() == _rec_inp.lower():
-                _rec_probe["foreign_hq_simple"] = "False"
+            _rec_inp = _std_country(_rec_probe.get("input_country_used") or _rec_country or "")
+            _rec_ev_quotes = " ".join(filter(None, [
+                _rec_probe.get("hq_evidence_quote", ""),
+                _rec_probe.get("domain_root_hq_evidence_quote", ""),
+                _rec_probe.get("brand_root_hq_evidence_quote", ""),
+                _rec_probe.get("official_page_hq_evidence_quote", ""),
+                _rec_probe.get("sig_foreign_hq_review_evidence_quote", ""),
+            ]))
+            import re as _re_g
+            _REC_ITALY_TOKENS = _re_g.compile(
+                r"\b(?:Italy|Italia|Italian|Modena|Ancona|Osimo|Senigallia|"
+                r"San\s+Benedetto|Nusco|Avellino|Venezia|Venice|Milano|Milan|"
+                r"Roma|Rome|Torino|Turin|Firenze|Florence|Bologna|Napoli|Naples|"
+                r"Bergamo|Brescia|Padova|Verona|Perugia|Bari|Palermo|Cagliari|"
+                r"Macerata|Pesaro|Jesi|Fabriano|Civitanova)\b",
+                _re_g.IGNORECASE,
+            )
+            _rec_quote_has_italy = bool(_REC_ITALY_TOKENS.search(_rec_ev_quotes))
+            _rec_italy_inp = _rec_inp.lower() in ("italy", "italia")
+            _rec_quote_overrides = (
+                _rec_italy_inp
+                and _rec_quote_has_italy
+                and _rec_det
+                and _rec_det.lower() not in ("italy", "italia")
+            )
+            _rec_is_domestic = (
+                (_rec_det and _rec_inp and _rec_det.lower() == _rec_inp.lower())
+                or _rec_quote_overrides
+            )
+            if _rec_is_domestic:
+                _dom = _rec_inp or "Italy"
+                _rec_probe["foreign_hq_simple"]             = "False"
+                _rec_probe["hq_structure_type"]             = "domestic"
+                _rec_probe["sig_foreign_hq_score_reviewed"] = 0
+                _rec_probe["parent_group_hq_country"]       = _dom
+                _rec_probe["parent_group_hq_city"]          = _rec_probe.get("hq_detected_city", "")
+                _rec_probe["review_foreign_parent_score"]   = 0
+                _rec_probe["review_global_network_score"]   = 0
+                _rec_probe["hq_detected_country"]           = _dom
+                if _rec_probe.get("hq_confidence") in ("High", "Medium"):
+                    _rec_probe["needs_manual_review"] = "No"
+                _guard_reason = (
+                    "quote_contains_italy_location_overrides_foreign"
+                    if _rec_quote_overrides
+                    else f"hq_detected={_rec_det}==input={_rec_inp}"
+                )
+                _rec_probe["sig_foreign_hq_review_reason"] = (
+                    "domestic_hq_matches_input_country"
+                    f" [{_guard_reason}]"
+                )
 
             # Recovery-specific columns
             _rec_probe["hq_recovery_selected"]           = "Yes"
@@ -3901,13 +3963,13 @@ elif _app_mode == "recovery":
             _rec_probe["sig_foreign_hq_score_original_before_recovery"] = (
                 _rec_row.get("sig_foreign_hq_score", "")
             )
-            # Score for next scoring: use reviewed score if trusted, else original
+            # Score for next scoring: use reviewed score (already 0 if domestic-guard fired)
             _rec_reviewed = _rec_probe.get("sig_foreign_hq_score_reviewed", 0)
             _rec_trusted  = (
                 str(_rec_probe.get("needs_manual_review", "")).lower() != "yes"
             )
             _rec_probe["sig_foreign_hq_score_for_next_scoring"] = (
-                int(_rec_reviewed) if _rec_trusted and _rec_reviewed else
+                int(_rec_reviewed) if _rec_trusted else
                 _rec_row.get("sig_foreign_hq_score", 0)
             )
             # Competitor signal: exclude from next scoring
