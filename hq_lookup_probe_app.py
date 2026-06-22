@@ -114,17 +114,27 @@ PROBE_COLS = [
     "sig_foreign_hq_review_evidence_quote",
     "needs_anthropic_hq_review",
     "anthropic_hq_review_used",
-    # Usage / cost audit columns
+    "anthropic_web_search_used",
+    "anthropic_review_evidence_mode",
+    "anthropic_web_search_queries",
+    "anthropic_web_search_result_count",
+    "anthropic_error",
+    # Serper usage audit
     "serper_calls_used",
     "serper_queries_used",
     "serper_cache_hit",
+    # Website fetch
     "website_fetch_count",
+]
+
+# Token columns tracked internally but NOT exported to Excel/CSV visible columns.
+# They are stored per-row only for the Run Summary sheet aggregation.
+_INTERNAL_TOKEN_COLS = [
     "anthropic_model_used",
     "anthropic_input_tokens",
     "anthropic_output_tokens",
     "anthropic_total_tokens",
     "anthropic_stop_reason",
-    "anthropic_error",
 ]
 
 # ---------------------------------------------------------------------------
@@ -419,11 +429,19 @@ _HQ_PATTERNS = [
 # ---------------------------------------------------------------------------
 
 _GLOBAL_STRUCTURE_TERMS = re.compile(
-    r"\b(?:group|gruppo|international|worldwide|global|locations"
-    r"|subsidiar(?:y|ies)|offices?\s+worldwide|holding|parent\s+company"
-    r"|member\s+firm|member\s+of|network|global\s+network|head\s+office"
-    r"|headquarters|corporate\s+headquarters|GmbH|Corporation|Corp\.)\b"
-    r"|(?<!\w)(?:AG|SA|Ltd)(?!\w)",
+    r"\b(?:"
+    # Strong parent/ownership signals
+    r"parent\s+company|owned\s+by|controlled\s+by|part\s+of\s+\w"
+    r"|member\s+firm|member\s+of\s+\w"
+    r"|global\s+network|international\s+network"
+    r"|subsidiar(?:y|ies)"
+    r"|offices\s+worldwide|worldwide\s+presence|global\s+offices"
+    r"|group\s+headquarters|group\s+hq\b"
+    r"|belongs?\s+to\s+\w"
+    # HQ in foreign location (must be followed by location, checked contextually)
+    r"|head\s+office\s+in\s+[A-Z]|headquartered\s+in\s+[A-Z]"
+    r"|corporate\s+headquarters\s+in\s+[A-Z]|hq\s+in\s+[A-Z]"
+    r")\b",
     re.IGNORECASE,
 )
 
@@ -597,9 +615,18 @@ def detect_global_structure(
     return out
 
 
-_HQ_NEAR_TERMS_RE = re.compile(
-    r"\b(?:head\s+office|headquarters|parent|group|network)\b", re.IGNORECASE
+# Strong HQ-related patterns that point to a specific foreign location
+_FOREIGN_HQ_NEAR_RE = re.compile(
+    r"\b(?:head\s+office\s+in|headquartered\s+in|headquarters\s+(?:is\s+)?in"
+    r"|corporate\s+(?:hq|headquarters)\s+in|hq\s+in|main\s+office\s+in"
+    r"|parent\s+company\s+(?:is\s+)?(?:in|based|located)"
+    r"|owned\s+by|controlled\s+by|subsidiary\s+of|part\s+of\s+the\s+\w"
+    r")\b",
+    re.IGNORECASE,
 )
+
+# Short all-caps company name risk (e.g. IET, BEA)
+_SHORT_ACRONYM_RE = re.compile(r"^[A-Z]{2,4}$")
 
 
 def compute_review_trigger(
@@ -607,43 +634,82 @@ def compute_review_trigger(
     input_row: dict,
     multilingual: dict,
     global_struct: dict,
+    company_name: str = "",
 ) -> tuple[str, bool]:
-    """Returns (hq_review_trigger, needs_anthropic_hq_review)."""
+    """Returns (hq_review_trigger, needs_anthropic_hq_review).
+
+    Only returns True when at least one *strong* condition is met.
+    Generic profile labels (Headquarters: Milan, Locations, Founded) do not qualify.
+    """
     triggers: list[str] = []
 
-    det_country = _std_country(probe.get("hq_detected_country") or "")
+    det_country  = _std_country(probe.get("hq_detected_country") or "")
     inp_country  = _std_country(probe.get("input_country_used") or "")
     confidence   = probe.get("hq_confidence", "")
+    lang_count   = int(multilingual.get("website_language_count") or 0)
 
-    if multilingual.get("has_multilingual_site") and det_country and det_country.lower() == inp_country.lower():
-        triggers.append("multilingual_domestic_hq")
-
+    # 1. Strong parent/group/network signal from detect_global_structure
     if global_struct.get("has_global_structure_signal"):
-        triggers.append("global_structure_signal")
+        triggers.append("strong_parent_group_signal")
 
-    # Foreign country near HQ terms in organic snippets
+    # 2. Foreign country explicitly mentioned near real HQ-intent phrases in organic snippets
     all_snip = " ".join(
         f"{probe.get(f'top_organic_title_{i}', '')} {probe.get(f'top_organic_snippet_{i}', '')}"
         for i in range(1, 4)
     ).lower()
-    if _HQ_NEAR_TERMS_RE.search(all_snip):
+    if _FOREIGN_HQ_NEAR_RE.search(all_snip):
         for alias, country in _COUNTRY_ALIASES.items():
             if alias in all_snip and _std_country(country).lower() != inp_country.lower():
-                triggers.append("foreign_country_near_hq_terms")
+                triggers.append("conflicting_hq_evidence")
                 break
 
-    if confidence in ("Medium", "Low", ""):
-        if any(_safe_float(input_row.get(col)) > 0 for col in _HIGH_INTL_COLS if col in input_row):
-            triggers.append("low_confidence_with_intl_signals")
+    # 3. HQ detected as foreign (non-input country) with any confidence
+    if det_country and inp_country and det_country.lower() != inp_country.lower():
+        triggers.append("conflicting_hq_evidence")
 
+    # Deduplicate conflicting_hq_evidence if added twice
+    triggers = list(dict.fromkeys(triggers))
+
+    # 4. Multilingual + high international signals (language count >= 2 required,
+    #    but alone is NOT enough — need additional international signal from input row)
+    has_high_intl = any(
+        _safe_float(input_row.get(col)) > 0 for col in _HIGH_INTL_COLS if col in input_row
+    )
+    if lang_count >= 4 and has_high_intl:
+        triggers.append("multilingual_plus_high_international_signals")
+    elif lang_count >= 2 and has_high_intl and global_struct.get("has_global_structure_signal"):
+        triggers.append("multilingual_plus_high_international_signals")
+
+    # 5. Low/medium confidence + global/parent/multilingual signals present
+    if confidence in ("Medium", "Low", ""):
+        has_any_signal = (
+            global_struct.get("has_global_structure_signal")
+            or lang_count >= 3
+            or bool(triggers)
+        )
+        if has_any_signal and has_high_intl:
+            triggers.append("medium_confidence_plus_global_signal")
+
+    # 6. Old score = 0/blank but multiple high international signals
     try:
         old_score = float(input_row.get("sig_foreign_hq_score") or 0)
     except (TypeError, ValueError):
         old_score = 0.0
-    if old_score == 0 and any(
-        _safe_float(input_row.get(col)) > 0 for col in _HIGH_INTL_COLS if col in input_row
-    ):
-        triggers.append("zero_fhq_score_but_intl_signals")
+    high_intl_count = sum(
+        1 for col in _HIGH_INTL_COLS
+        if col in input_row and _safe_float(input_row.get(col)) > 0
+    )
+    if old_score == 0 and high_intl_count >= 2:
+        triggers.append("zero_fhq_score_multiple_intl_signals")
+
+    # 7. Short acronym with ambiguous/low evidence
+    name = (company_name or "").strip()
+    if _SHORT_ACRONYM_RE.match(name) and confidence in ("Low", ""):
+        triggers.append("short_acronym_ambiguous_evidence")
+
+    # Deduplicate
+    seen_t: set[str] = set()
+    triggers = [t for t in triggers if not (t in seen_t or seen_t.add(t))]  # type: ignore[func-returns-value]
 
     return "; ".join(triggers), bool(triggers)
 
@@ -1156,10 +1222,16 @@ def probe_company(
     result.update(gs_result)
 
     # HQ review trigger
-    trigger_str, needs_adj = compute_review_trigger(result, _irow, ml_result, gs_result)
-    result["hq_review_trigger"]        = trigger_str
-    result["needs_anthropic_hq_review"] = "Yes" if needs_adj else "No"
-    result["anthropic_hq_review_used"]  = "No"
+    trigger_str, needs_adj = compute_review_trigger(
+        result, _irow, ml_result, gs_result, company_name=company_name
+    )
+    result["hq_review_trigger"]              = trigger_str
+    result["needs_anthropic_hq_review"]      = "Yes" if needs_adj else "No"
+    result["anthropic_hq_review_used"]       = "No"
+    result["anthropic_web_search_used"]      = "No"
+    result["anthropic_review_evidence_mode"] = ""
+    result["anthropic_web_search_queries"]   = ""
+    result["anthropic_web_search_result_count"] = 0
 
     # Optional Anthropic HQ adjudication
     if use_anthropic_review and needs_adj and anthropic_key:
@@ -1189,6 +1261,8 @@ def probe_company(
             result["sig_foreign_hq_review_evidence_url"]   = adj.get("evidence_url", "")
             result["sig_foreign_hq_review_evidence_quote"] = adj.get("evidence_quote", "")
             result["anthropic_hq_review_used"]             = "Yes"
+            result["anthropic_web_search_used"]            = "No"
+            result["anthropic_review_evidence_mode"]       = "serper_evidence_only"
         else:
             _adj_err = adj["probe_error"]
             _anthr_errors.append(_adj_err)
@@ -1197,14 +1271,20 @@ def probe_company(
     # ---- Populate usage columns ----
     result["serper_calls_used"]   = _serper_calls
     result["serper_queries_used"] = " | ".join(_queries_attempted)
-    result["serper_cache_hit"]    = _serper_cache_hits > 0
+    if _serper_calls > 0 and _serper_cache_hits > 0:
+        result["serper_cache_hit"] = "partial"
+    elif _serper_cache_hits > 0:
+        result["serper_cache_hit"] = "True"
+    else:
+        result["serper_cache_hit"] = "False"
     result["website_fetch_count"] = ml_result.get("website_fetch_count", 0)
-    result["anthropic_model_used"]    = _anthr_model
-    result["anthropic_input_tokens"]  = _anthr_input_tok
-    result["anthropic_output_tokens"] = _anthr_output_tok
-    result["anthropic_total_tokens"]  = _anthr_total_tok
-    result["anthropic_stop_reason"]   = _anthr_stop
-    result["anthropic_error"]         = "; ".join(_anthr_errors)
+    result["anthropic_error"]     = "; ".join(_anthr_errors)
+    # Internal token tracking (for run-summary aggregation only, not in Excel rows)
+    result["_anthr_model"]        = _anthr_model
+    result["_anthr_input_tok"]    = _anthr_input_tok
+    result["_anthr_output_tok"]   = _anthr_output_tok
+    result["_anthr_total_tok"]    = _anthr_total_tok
+    result["_anthr_stop"]         = _anthr_stop
 
     return result
 
@@ -1402,13 +1482,15 @@ def _build_workbook(
         ("rows_processed",      len(probe_results)),
         ("", ""),
         ("── API usage ──", ""),
-        ("serper_calls_used",   _ru.get("serper_calls_used", "")),
-        ("website_fetches_attempted", _ru.get("website_fetches", "")),
-        ("anthropic_reviews_used",    _ru.get("anthropic_reviews_used", "")),
-        ("anthropic_input_tokens",    _ru.get("anthropic_input_tokens", "")),
-        ("anthropic_output_tokens",   _ru.get("anthropic_output_tokens", "")),
-        ("anthropic_total_tokens",    _ru.get("anthropic_total_tokens", "")),
-        ("anthropic_errors",          _ru.get("anthropic_errors", "")),
+        ("serper_calls_used",          _ru.get("serper_calls_used", "")),
+        ("rows_with_serper_cache_hit", _ru.get("rows_with_cache_hit", "")),
+        ("website_fetches_attempted",  _ru.get("website_fetches", "")),
+        ("anthropic_reviews_used",     _ru.get("anthropic_reviews_used", "")),
+        ("anthropic_web_search_used",  _ru.get("anthropic_web_search_used", "")),
+        ("anthropic_input_tokens",     _ru.get("anthropic_input_tokens", "")),
+        ("anthropic_output_tokens",    _ru.get("anthropic_output_tokens", "")),
+        ("anthropic_total_tokens",     _ru.get("anthropic_total_tokens", "")),
+        ("anthropic_errors",           _ru.get("anthropic_errors", "")),
         ("", ""),
         ("── options used ──", ""),
         ("multilingual_check_enabled", qa_meta.get("use_multilingual_check", "")),
@@ -1823,14 +1905,16 @@ if run_btn:
 
     # Run-level usage aggregation
     run_usage = {
-        "rows_processed":         len(probe_results),
-        "serper_calls_used":      sum(int(p.get("serper_calls_used") or 0) for p in probe_results),
-        "website_fetches":        sum(int(p.get("website_fetch_count") or 0) for p in probe_results),
-        "anthropic_reviews_used": sum(1 for p in probe_results if p.get("anthropic_hq_review_used") == "Yes" or p.get("anthropic_model_used")),
-        "anthropic_input_tokens": sum(int(p.get("anthropic_input_tokens") or 0) for p in probe_results),
-        "anthropic_output_tokens":sum(int(p.get("anthropic_output_tokens") or 0) for p in probe_results),
-        "anthropic_total_tokens": sum(int(p.get("anthropic_total_tokens") or 0) for p in probe_results),
-        "anthropic_errors":       sum(1 for p in probe_results if p.get("anthropic_error")),
+        "rows_processed":           len(probe_results),
+        "serper_calls_used":        sum(int(p.get("serper_calls_used") or 0) for p in probe_results),
+        "rows_with_cache_hit":      sum(1 for p in probe_results if p.get("serper_cache_hit") in ("True", "partial")),
+        "website_fetches":          sum(int(p.get("website_fetch_count") or 0) for p in probe_results),
+        "anthropic_reviews_used":   sum(1 for p in probe_results if p.get("anthropic_hq_review_used") == "Yes"),
+        "anthropic_web_search_used":sum(1 for p in probe_results if p.get("anthropic_web_search_used") == "Yes"),
+        "anthropic_input_tokens":   sum(int(p.get("_anthr_input_tok") or 0) for p in probe_results),
+        "anthropic_output_tokens":  sum(int(p.get("_anthr_output_tok") or 0) for p in probe_results),
+        "anthropic_total_tokens":   sum(int(p.get("_anthr_total_tok") or 0) for p in probe_results),
+        "anthropic_errors":         sum(1 for p in probe_results if p.get("anthropic_error")),
     }
 
     # Store in session state
@@ -1896,15 +1980,17 @@ r3.metric("Needs Anthropic review",  needs_adj_cnt)
 
 if run_usage:
     with st.expander("Usage / API call summary", expanded=False):
-        u1, u2, u3, u4 = st.columns(4)
-        u1.metric("Serper calls",          run_usage.get("serper_calls_used", 0))
-        u2.metric("Website fetches",       run_usage.get("website_fetches", 0))
-        u3.metric("Anthropic reviews run", run_usage.get("anthropic_reviews_used", 0))
-        u4.metric("Anthropic errors",      run_usage.get("anthropic_errors", 0))
-        t1, t2, t3 = st.columns(3)
-        t1.metric("Anthropic input tokens",  run_usage.get("anthropic_input_tokens", 0))
-        t2.metric("Anthropic output tokens", run_usage.get("anthropic_output_tokens", 0))
-        t3.metric("Anthropic total tokens",  run_usage.get("anthropic_total_tokens", 0))
+        u1, u2, u3, u4, u5 = st.columns(5)
+        u1.metric("Serper calls",              run_usage.get("serper_calls_used", 0))
+        u2.metric("Rows with cache hit",       run_usage.get("rows_with_cache_hit", 0))
+        u3.metric("Website fetches",           run_usage.get("website_fetches", 0))
+        u4.metric("Anthropic reviews used",    run_usage.get("anthropic_reviews_used", 0))
+        u5.metric("Anthropic web search used", run_usage.get("anthropic_web_search_used", 0))
+        t1, t2, t3, t4 = st.columns(4)
+        t1.metric("Anthropic input tokens",    run_usage.get("anthropic_input_tokens", 0))
+        t2.metric("Anthropic output tokens",   run_usage.get("anthropic_output_tokens", 0))
+        t3.metric("Anthropic total tokens",    run_usage.get("anthropic_total_tokens", 0))
+        t4.metric("Anthropic errors",          run_usage.get("anthropic_errors", 0))
 
 # Display columns
 _KEY_VIEW_COLS_RAW = [
@@ -1923,8 +2009,11 @@ _KEY_VIEW_COLS_RAW = [
     "has_global_structure_signal", "global_structure_evidence",
     "hq_review_trigger",
     "needs_anthropic_hq_review", "anthropic_hq_review_used",
+    "anthropic_web_search_used", "anthropic_review_evidence_mode",
+    "anthropic_error",
     "sig_foreign_hq_review_reason",
     "sig_foreign_hq_review_evidence_url",
+    "serper_calls_used", "serper_cache_hit",
     "hq_reason", "hq_evidence_url", "hq_evidence_quote", "hq_query_used",
 ]
 _seen_kvc: set[str] = set()
