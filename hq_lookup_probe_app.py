@@ -1555,24 +1555,27 @@ _S3_HQ_PHRASE_RE = re.compile(
     re.IGNORECASE,
 )
 _S3_BIO_REJECT_RE = re.compile(
-    r"\b(?:brigadier\s+general|biography|military|officer|commander|colonel|"
-    r"lieutenant|sergeant|captain|admiral|general(?:\s+of)?|born\s+in|"
-    r"graduated|university|professor|physician|surgeon|director\s+of\s+(?:the\s+)?(?:national|state)|"
+    r"\b(?:brigadier\s+general|national\s+guard\s+biography|biography|military|"
+    r"officer|commander|colonel|lieutenant|sergeant|captain|admiral|"
+    r"general(?:\s+of)?|born\s+in|graduated|university|professor|physician|"
+    r"surgeon|director\s+of\s+(?:the\s+)?(?:national|state)|"
     r"politician|senator|minister\s+of|secretary\s+of\s+state)\b",
     re.IGNORECASE,
 )
 _S3_BRANCH_REJECT_RE = re.compile(
-    r"\b(?:branch\s+(?:in|office|at)|office\s+in|regional\s+office|"
-    r"sales\s+office|service\s+(?:center|centre)|distribution\s+center|"
-    r"north\s+america(?:n)?(?:\s+hq)?|subsidiary|affiliate|"
-    r"get\s+directions?|Holland,?\s+Michigan|MI\b)\b"
-    r"|Holland,\s*MI",
+    r"\b(?:branch\s+(?:in|opens?|office|at)|office\s+in|regional\s+office|"
+    r"sales\s+office|service\s+(?:center|centre)|service\s+branch|"
+    r"distribution\s+(?:center|centre)|north\s+america(?:n)?(?:\s+(?:hq|inc\.?|headquarters?))?|"
+    r"us[a]?\s+subsidiary|subsidiary|affiliate|"
+    r"get\s+directions?|locations\s+primary|primary\s+location)\b"
+    r"|Holland,?\s*Michigan|Holland,?\s*MI\b",
     re.IGNORECASE,
 )
 _S3_DIRECTORY_REJECT_RE = re.compile(
     r"\b(?:company\s+profile|business\s+directory|yellow\s+pages?|"
-    r"dnb\.com|bloomberg\.com\/company|zoominfo\.com|crunchbase\.com|"
-    r"opencorporates\.com|companies\s+house)\b",
+    r"contact\s+details?|address\s+and\s+phone|jidipi|"
+    r"dnb\.com|bloomberg\.com|zoominfo\.com|crunchbase\.com|"
+    r"opencorporates\.com|companies\s+house|directory)\b",
     re.IGNORECASE,
 )
 
@@ -1587,6 +1590,16 @@ def _is_score3_eligible_hq_evidence(
     q = quote or ""
     url = evidence_url or ""
 
+    # Must have a detected country
+    if not (detected_country or "").strip():
+        return False, "no_detected_country"
+
+    # Domestic: detected == input country
+    _det_n = _normalize_country_for_hq(detected_country)
+    _inp_n = _normalize_country_for_hq(input_country)
+    if _det_n and _inp_n and _det_n == _inp_n:
+        return False, "domestic_hq_not_foreign"
+
     if _S3_BIO_REJECT_RE.search(q):
         return False, "biography_or_personal_evidence"
     if _S3_BRANCH_REJECT_RE.search(q):
@@ -1600,22 +1613,32 @@ def _is_score3_eligible_hq_evidence(
 
 # ── Country correction map for simple-mode evidence quotes ────────────────────
 _S3_CITY_COUNTRY_CORRECTIONS: list[tuple[re.Pattern, str]] = [
-    (re.compile(r"\bHolland,?\s+Michigan\b|\bHolland,?\s+MI\b", re.I), "United States"),
-    (re.compile(r"\b(?:Göteborg|Gothenburg)\b", re.I), "Sweden"),
+    # Michigan / US city that looks like Netherlands
+    (re.compile(r"Holland,?\s*Michigan|Holland,?\s*MI\b", re.I), "United States"),
+    # Sweden cities
+    (re.compile(r"\b(?:Göteborg|Gothenburg|Goeteborg)\b", re.I), "Sweden"),
     (re.compile(r"\bStockholm\b", re.I), "Sweden"),
-    (re.compile(r"\bMälmo|Malmö\b", re.I), "Sweden"),
+    (re.compile(r"\bM[aä]lm[oö]\b", re.I), "Sweden"),
+    # Nordic capitals
     (re.compile(r"\bHelsinki\b", re.I), "Finland"),
     (re.compile(r"\bOslo\b", re.I), "Norway"),
-    (re.compile(r"\bCopenhagen|København\b", re.I), "Denmark"),
-    (re.compile(r"\b(?:Nogara|Veneto)\b.*\bIT\b|\bNaz-?Sciaves\b|\bTrentino\b", re.I), "Italy"),
-    (re.compile(r"\b(?:Sant'Agata\s+de\s+Goti|Savigno|Valsamoggia)\b", re.I), "Italy"),
-    (re.compile(r"\b(?:Modena|Ancona|Osimo|Senigallia|Bergamo|Milano|Milan|"
-                r"Brescia|Bologna|Torino|Turin|Firenze|Florence|Napoli|Naples|"
-                r"Roma|Rome|Venezia|Venice|Genova|Genoa|Padova|Padua|"
-                r"Verona|Vicenza|Perugia|Trieste|Palermo|Catania)\b", re.I), "Italy"),
-    (re.compile(r"\bheadquarters?\s+(?:in\s+)?France\b|\bFrance\s+headquarters?\b", re.I), "France"),
+    (re.compile(r"\bCopenhagen|K[øo]benhavn\b", re.I), "Denmark"),
+    # Italian regions / small cities that the parser mislabels
+    (re.compile(r"\bNogara\b|\bVeneto\b.*\bIT\b|\bNaz-?Sciaves\b|\bTrentino(?:-Alto\s+Adige)?\b", re.I), "Italy"),
+    (re.compile(r"\bSant[''`]?Agata\s+de\s+Goti\b|\bSavigno\b|\bValsamoggia\b", re.I), "Italy"),
+    (re.compile(r"\b(?:Modena|Ancona|Osimo|Senigallia|San\s+Benedetto\s+del\s+Tronto|"
+                r"Bergamo|Milano|Milan|Brescia|Bologna|Torino|Turin|Firenze|Florence|"
+                r"Napoli|Naples|Roma|Rome|Venezia|Venice|Genova|Genoa|Padova|Padua|"
+                r"Verona|Vicenza|Perugia|Trieste|Palermo|Catania|Reggio\s+Emilia|"
+                r"Parma|Piacenza|Ravenna|Ferrara|Rimini|Forlì|Cesena|"
+                r"Jesi|Fabriano|Civitanova\s+Marche|Avellino|Nusco)\b", re.I), "Italy"),
+    # Explicit country phrases in quote
+    (re.compile(r"\bheadquarters?\s+(?:in\s+)?France\b|\bFRANCE\s+HEADQUARTERS?\b|\bFrance\s+headquarters?\b", re.I), "France"),
     (re.compile(r"\bheadquarters?\s+(?:in\s+)?Germany\b|\bGermany\s+headquarters?\b", re.I), "Germany"),
     (re.compile(r"\bheadquarters?\s+(?:in\s+)?Spain\b|\bSpain\s+headquarters?\b", re.I), "Spain"),
+    (re.compile(r"\bheadquarters?\s+(?:in\s+)?Netherlands\b|\bNetherlands\s+headquarters?\b", re.I), "Netherlands"),
+    (re.compile(r"\bheadquarters?\s+(?:in\s+)?Switzerland\b|\bSwitzerland\s+headquarters?\b", re.I), "Switzerland"),
+    (re.compile(r"\bheadquarters?\s+(?:in\s+)?United\s+Kingdom\b|\bUK\s+headquarters?\b", re.I), "United Kingdom"),
 ]
 
 
