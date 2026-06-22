@@ -340,6 +340,10 @@ _INTL_CITIES: dict[str, tuple[str, str]] = {
     "bern": ("Bern", "Switzerland"), "basel": ("Basel", "Switzerland"),
     "london": ("London", "United Kingdom"), "manchester": ("Manchester", "United Kingdom"),
     "birmingham": ("Birmingham", "United Kingdom"), "edinburgh": ("Edinburgh", "United Kingdom"),
+    "macclesfield": ("Macclesfield", "United Kingdom"),
+    "cheshire": ("Cheshire", "United Kingdom"),
+    "leeds": ("Leeds", "United Kingdom"), "bristol": ("Bristol", "United Kingdom"),
+    "glasgow": ("Glasgow", "United Kingdom"), "sheffield": ("Sheffield", "United Kingdom"),
     "vienna": ("Vienna", "Austria"), "wien": ("Wien", "Austria"),
     "graz": ("Graz", "Austria"), "salzburg": ("Salzburg", "Austria"),
     "brussels": ("Brussels", "Belgium"), "bruxelles": ("Bruxelles", "Belgium"),
@@ -347,6 +351,7 @@ _INTL_CITIES: dict[str, tuple[str, str]] = {
     "new york": ("New York", "United States"), "san francisco": ("San Francisco", "United States"),
     "chicago": ("Chicago", "United States"), "boston": ("Boston", "United States"),
     "los angeles": ("Los Angeles", "United States"), "seattle": ("Seattle", "United States"),
+    "armonk": ("Armonk", "United States"),
     "stockholm": ("Stockholm", "Sweden"), "oslo": ("Oslo", "Norway"),
     "copenhagen": ("Copenhagen", "Denmark"), "helsinki": ("Helsinki", "Finland"),
     "tokyo": ("Tokyo", "Japan"), "beijing": ("Beijing", "China"),
@@ -354,6 +359,8 @@ _INTL_CITIES: dict[str, tuple[str, str]] = {
     "dublin": ("Dublin", "Ireland"), "warsaw": ("Warsaw", "Poland"),
     "lisbon": ("Lisbon", "Portugal"), "lisboa": ("Lisboa", "Portugal"),
     "luxembourg": ("Luxembourg", "Luxembourg"),
+    "bertrange": ("Bertrange", "Luxembourg"),
+    "altdorf": ("Altdorf", "Switzerland"), "poschiavo": ("Poschiavo", "Switzerland"),
 }
 
 _COUNTRY_ALIASES: dict[str, str] = {
@@ -1410,6 +1417,35 @@ def _scan_for_hq(text: str) -> tuple[str, str, str, str]:
     return "", "", "", ""
 
 
+_HQ_SIGNAL_RE = re.compile(
+    r"\b(?:head\s+office|headquarters?|hq)\b",
+    re.IGNORECASE,
+)
+
+
+def _scan_hq_title_snippet(organic: list[dict]) -> tuple[str, str, str, str]:
+    """Scan organic result titles/snippets for HQ evidence without requiring
+    an explicit 'in/at' preposition.
+
+    Handles cases like:
+      title="Bodycote Macclesfield Head Office"
+      snippet="Macclesfield, Cheshire, United Kingdom"
+
+    Returns (quote, country, city, strength).  Strength is always "Medium".
+    """
+    for item in organic[:5]:
+        title   = item.get("title", "")
+        snippet = item.get("snippet", "")
+        combined = f"{title} {snippet}"
+        if not _HQ_SIGNAL_RE.search(combined):
+            continue
+        city, country = _resolve_city_country(combined)
+        if country or city:
+            quote = combined[:300].strip()
+            return quote, country, city, "Medium"
+    return "", "", "", ""
+
+
 # Known global brands: brand_root_token (lowercase) → type
 # "corporate"      = single parent company with a clear HQ country
 # "global_network" = federated professional-services network of member firms
@@ -2054,6 +2090,11 @@ def probe_company(
                 *[f"{p.get('title','')} {p.get('address','')}" for p in _s_places[:3]],
             ])
             _s_quote, _s_country, _s_city, _s_strength = _scan_for_hq(_s_all)
+
+            # Fallback: detect HQ evidence from title/snippet signal words
+            # (handles "Bodycote Macclesfield Head Office" in title without "in X")
+            if not (_s_country or _s_city):
+                _s_quote, _s_country, _s_city, _s_strength = _scan_hq_title_snippet(_s_org)
 
             if _s_country or _s_city:
                 _s_country_std = _std_country(_s_country)
