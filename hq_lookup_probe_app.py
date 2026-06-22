@@ -391,8 +391,11 @@ _INTL_CITIES: dict[str, tuple[str, str]] = {
 
 _COUNTRY_ALIASES: dict[str, str] = {
     "italy": "Italy", "italia": "Italy", "italian": "Italy",
+    "it": "Italy", "ita": "Italy",
     "germany": "Germany", "deutschland": "Germany", "german": "Germany",
+    "de": "Germany", "deu": "Germany",
     "france": "France", "french": "France",
+    "fr": "France", "fra": "France",
     "spain": "Spain", "españa": "Spain", "spanish": "Spain",
     "netherlands": "Netherlands", "holland": "Netherlands", "dutch": "Netherlands",
     "belgium": "Belgium", "belgian": "Belgium",
@@ -633,6 +636,60 @@ def _italy_in_text(text: str) -> bool:
 def _std_country(raw: str) -> str:
     """Normalise a country string via aliases."""
     return _COUNTRY_ALIASES.get(raw.strip().lower(), raw.strip())
+
+
+def _normalize_country_for_hq(value: object) -> str:
+    """Robust country normalizer for domestic-guard comparisons.
+
+    Handles ISO-2 (IT, DE, FR, UK, US, CH, …), ISO-3, full names, and
+    common aliases. Returns a lowercase canonical key so == comparisons work.
+    """
+    text = re.sub(r"\s+", " ", re.sub(r"\.", "", str(value or "").strip().lower()))
+    _MAP = {
+        "it": "italy", "ita": "italy", "italia": "italy",
+        "italy": "italy", "italian": "italy",
+        "de": "germany", "deu": "germany",
+        "germany": "germany", "deutschland": "germany", "german": "germany",
+        "fr": "france", "fra": "france",
+        "france": "france", "french": "france",
+        "uk": "united kingdom", "gb": "united kingdom", "gbr": "united kingdom",
+        "united kingdom": "united kingdom", "great britain": "united kingdom",
+        "england": "united kingdom", "scotland": "united kingdom",
+        "wales": "united kingdom",
+        "us": "united states", "usa": "united states",
+        "united states": "united states",
+        "united states of america": "united states",
+        "ch": "switzerland", "che": "switzerland",
+        "switzerland": "switzerland", "swiss": "switzerland",
+        "lu": "luxembourg", "lux": "luxembourg", "luxembourg": "luxembourg",
+        "nl": "netherlands", "nld": "netherlands",
+        "netherlands": "netherlands", "holland": "netherlands",
+        "dk": "denmark", "dnk": "denmark",
+        "denmark": "denmark", "danish": "denmark",
+        "se": "sweden", "swe": "sweden",
+        "sweden": "sweden", "swedish": "sweden",
+        "no": "norway", "nor": "norway",
+        "norway": "norway", "norwegian": "norway",
+        "at": "austria", "aut": "austria",
+        "austria": "austria", "austrian": "austria",
+        "es": "spain", "esp": "spain",
+        "spain": "spain", "españa": "spain", "spanish": "spain",
+        "be": "belgium", "bel": "belgium",
+        "belgium": "belgium", "belgian": "belgium",
+        "pl": "poland", "pol": "poland",
+        "poland": "poland", "polish": "poland",
+        "pt": "portugal", "prt": "portugal",
+        "portugal": "portugal", "portuguese": "portugal",
+        "ie": "ireland", "irl": "ireland",
+        "ireland": "ireland", "irish": "ireland",
+        "fi": "finland", "fin": "finland",
+        "finland": "finland", "finnish": "finland",
+        "jp": "japan", "jpn": "japan",
+        "japan": "japan", "japanese": "japan",
+        "cn": "china", "chn": "china",
+        "china": "china", "chinese": "china",
+    }
+    return _MAP.get(text, text)
 
 
 def _set_manual_review(result: dict, value: str, reason: str = "") -> None:
@@ -2375,7 +2432,7 @@ def probe_company(
 
         _irow = input_row or {}
         result["sig_foreign_hq_score_original"] = _safe_float(_irow.get("sig_foreign_hq_score"))
-        if not result.get("sig_foreign_hq_score_reviewed"):
+        if result.get("sig_foreign_hq_score_reviewed") in ("", None):
             result["sig_foreign_hq_score_reviewed"] = _safe_float(_irow.get("sig_foreign_hq_score"))
 
         return result
@@ -2754,8 +2811,12 @@ def probe_company(
     #    hq_detected_country was misclassified as a foreign country
     #    (e.g. "emmegi headquarters" snippet says "Modena" but Serper KG
     #     shows a US address for a different entity)
-    _final_det = _std_country(result.get("hq_detected_country") or "")
-    _final_inp = _std_country(result.get("input_country_used") or input_country or "")
+    # Use display values for output, normalised values for equality comparisons.
+    # _normalize_country_for_hq handles IT/ITA/Italia/Italy all as "italy".
+    _final_det_display = _std_country(result.get("hq_detected_country") or "")
+    _final_inp_display = _std_country(result.get("input_country_used") or input_country or "")
+    _final_det_norm    = _normalize_country_for_hq(result.get("hq_detected_country"))
+    _final_inp_norm    = _normalize_country_for_hq(result.get("input_country_used") or input_country)
 
     # Build a combined evidence string from all collected quotes
     _ev_quotes = " ".join(filter(None, [
@@ -2766,31 +2827,30 @@ def probe_company(
         result.get("sig_foreign_hq_review_evidence_quote", ""),
     ]))
 
-    # Italian location tokens that should indicate domestic Italy HQ
+    # Italian location tokens that indicate domestic Italy HQ
     _ITALY_LOCATION_TOKENS = re.compile(
         r"\b(?:Italy|Italia|Italian|Modena|Ancona|Osimo|Senigallia|Venezia|Venice|"
         r"Milano|Milan|Roma|Rome|Torino|Turin|Firenze|Florence|Bologna|Napoli|Naples|"
         r"Bergamo|Brescia|Padova|Padua|Verona|Perugia|Bari|Catania|Palermo|Cagliari|"
-        r"Reggio|Emilia|Toscana|Lombardia|Veneto|Lazio|Campania|Puglia|Sicilia)\b",
+        r"Reggio|Emilia|Toscana|Lombardia|Veneto|Lazio|Campania|Puglia|Sicilia|"
+        r"Avellino|Nusco|San\s+Benedetto|Jesi|Fabriano|Civitanova)\b",
         re.IGNORECASE,
     )
-    # Simplified: if quote contains Italy tokens AND detected country is NOT Italy → override
     _quote_has_italy = bool(_ITALY_LOCATION_TOKENS.search(_ev_quotes))
-    _italy_inp = _final_inp.lower() in ("italy", "italia")
     _quote_overrides_foreign = (
-        _italy_inp
+        _final_inp_norm == "italy"
         and _quote_has_italy
-        and _final_det
-        and _final_det.lower() not in ("italy", "italia")
+        and _final_det_norm
+        and _final_det_norm != "italy"
     )
 
     _is_domestic = (
-        (_final_det and _final_inp and _final_det.lower() == _final_inp.lower())
+        (_final_det_norm and _final_inp_norm and _final_det_norm == _final_inp_norm)
         or _quote_overrides_foreign
     )
 
     if _is_domestic:
-        _dom_country = _final_inp or "Italy"
+        _dom_country = _final_inp_display or "Italy"
         result["foreign_hq_simple"]             = "False"
         result["hq_structure_type"]             = "domestic"
         result["sig_foreign_hq_score_reviewed"] = 0
@@ -2804,7 +2864,7 @@ def probe_company(
         _guard_reason = (
             "quote_contains_italy_location_overrides_foreign"
             if _quote_overrides_foreign
-            else f"hq_detected_country={_final_det} == input_country={_final_inp}"
+            else f"hq_detected={_final_det_display}({_final_det_norm})==input={_final_inp_display}({_final_inp_norm})"
         )
         result["sig_foreign_hq_review_reason"] = (
             (result.get("sig_foreign_hq_review_reason") or "")
@@ -3464,12 +3524,12 @@ if run_btn:
             run_mode=run_mode,
         )
 
-        # Sanity guard handled inside probe_company (domestic-safety guard).
-        # This outer guard is kept as a belt-and-suspenders fallback.
-        det = _std_country(probe.get("hq_detected_country") or "")
-        inp = _std_country(probe.get("input_country_used") or "")
-        if det and inp and det.lower() == inp.lower():
+        # Belt-and-suspenders fallback (main guard is inside probe_company).
+        _fb_det = _normalize_country_for_hq(probe.get("hq_detected_country"))
+        _fb_inp = _normalize_country_for_hq(probe.get("input_country_used"))
+        if _fb_det and _fb_inp and _fb_det == _fb_inp:
             probe["foreign_hq_simple"] = "False"
+            probe["sig_foreign_hq_score_reviewed"] = 0
             probe["sig_foreign_hq_score_for_next_scoring"] = 0
 
         probe_results.append(probe)
@@ -3895,13 +3955,16 @@ elif _app_mode == "recovery":
             )
 
             # ── Domestic-safety guard (must run before score columns are set) ──
+            # Uses _normalize_country_for_hq so IT/ITA/Italia/Italy all match.
             # Two triggers:
-            # 1. hq_detected_country == input_country (covers Modena/Ancona/Osimo
-            #    because _resolve_city_country maps them to country="Italy")
-            # 2. Evidence quotes mention Italian location but detected country is
-            #    misclassified as foreign (e.g. US Serper KG for a distributor)
-            _rec_det = _std_country(_rec_probe.get("hq_detected_country") or "")
-            _rec_inp = _std_country(_rec_probe.get("input_country_used") or _rec_country or "")
+            # 1. norm(hq_detected_country) == norm(input_country)
+            # 2. Evidence quotes mention Italian location but detected country is foreign
+            _rec_det_display = _std_country(_rec_probe.get("hq_detected_country") or "")
+            _rec_inp_display = _std_country(_rec_probe.get("input_country_used") or _rec_country or "")
+            _rec_det_norm = _normalize_country_for_hq(_rec_probe.get("hq_detected_country"))
+            _rec_inp_norm = _normalize_country_for_hq(
+                _rec_probe.get("input_country_used") or _rec_country
+            )
             _rec_ev_quotes = " ".join(filter(None, [
                 _rec_probe.get("hq_evidence_quote", ""),
                 _rec_probe.get("domain_root_hq_evidence_quote", ""),
@@ -3909,29 +3972,27 @@ elif _app_mode == "recovery":
                 _rec_probe.get("official_page_hq_evidence_quote", ""),
                 _rec_probe.get("sig_foreign_hq_review_evidence_quote", ""),
             ]))
-            import re as _re_g
-            _REC_ITALY_TOKENS = _re_g.compile(
+            _REC_ITALY_TOKENS = re.compile(
                 r"\b(?:Italy|Italia|Italian|Modena|Ancona|Osimo|Senigallia|"
                 r"San\s+Benedetto|Nusco|Avellino|Venezia|Venice|Milano|Milan|"
                 r"Roma|Rome|Torino|Turin|Firenze|Florence|Bologna|Napoli|Naples|"
                 r"Bergamo|Brescia|Padova|Verona|Perugia|Bari|Palermo|Cagliari|"
                 r"Macerata|Pesaro|Jesi|Fabriano|Civitanova)\b",
-                _re_g.IGNORECASE,
+                re.IGNORECASE,
             )
             _rec_quote_has_italy = bool(_REC_ITALY_TOKENS.search(_rec_ev_quotes))
-            _rec_italy_inp = _rec_inp.lower() in ("italy", "italia")
             _rec_quote_overrides = (
-                _rec_italy_inp
+                _rec_inp_norm == "italy"
                 and _rec_quote_has_italy
-                and _rec_det
-                and _rec_det.lower() not in ("italy", "italia")
+                and _rec_det_norm
+                and _rec_det_norm != "italy"
             )
             _rec_is_domestic = (
-                (_rec_det and _rec_inp and _rec_det.lower() == _rec_inp.lower())
+                (_rec_det_norm and _rec_inp_norm and _rec_det_norm == _rec_inp_norm)
                 or _rec_quote_overrides
             )
             if _rec_is_domestic:
-                _dom = _rec_inp or "Italy"
+                _dom = _rec_inp_display or "Italy"
                 _rec_probe["foreign_hq_simple"]             = "False"
                 _rec_probe["hq_structure_type"]             = "domestic"
                 _rec_probe["sig_foreign_hq_score_reviewed"] = 0
@@ -3945,7 +4006,7 @@ elif _app_mode == "recovery":
                 _guard_reason = (
                     "quote_contains_italy_location_overrides_foreign"
                     if _rec_quote_overrides
-                    else f"hq_detected={_rec_det}==input={_rec_inp}"
+                    else f"hq_detected={_rec_det_display}({_rec_det_norm})==input={_rec_inp_display}({_rec_inp_norm})"
                 )
                 _rec_probe["sig_foreign_hq_review_reason"] = (
                     "domestic_hq_matches_input_country"
