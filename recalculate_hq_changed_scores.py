@@ -208,9 +208,9 @@ _COMPETITOR_TERMS_RE = _re.compile(
     r"\b(?:competitor|competing|rivalry|rival|alternative\s+brand|competitive\s+threat)\b",
     _re.IGNORECASE,
 )
-_FOREIGN_HQ_HOT_RE = _re.compile(
+_FOREIGN_HQ_CLAIM_RE = _re.compile(
     r"\b(?:foreign\s+hq|international\s+hq|global\s+hq|headquartered\s+abroad|"
-    r"headquarters?\s+(?:in|based\s+in)|hq\s+in\s+\w+)\b",
+    r"hq\s+(?:in|confirmed|detected)|confirmed\s+(?:foreign|international)\s+hq)\b",
     _re.IGNORECASE,
 )
 
@@ -223,140 +223,277 @@ def _v(row: dict, *keys: str) -> str:
     return ""
 
 
-def _build_hot_tags(row: dict, hq_score: float, suppress_competitor: bool) -> list[str]:
-    tags: list[str] = []
-    existing = _v(row, "top_positive_signals", "what_is_hot_app")
-    if existing:
-        for p in [x.strip() for x in existing.split("|") if x.strip()]:
-            if suppress_competitor and _COMPETITOR_TERMS_RE.search(p):
-                continue
-            if not _FOREIGN_HQ_HOT_RE.search(p):
-                tags.append(p)
-    if hq_score and hq_score >= 3:
-        country = _v(row, "sig_foreign_hq_country", "foreign_hq_country_app")
-        hq_tag = f"Foreign HQ: {country}" if country else "Foreign HQ detected"
-        if hq_tag not in tags:
-            tags.append(hq_tag)
-    return tags
+def _strip_sentences(text: str, pattern: _re.Pattern) -> tuple[str, bool]:
+    """Remove sentences matching pattern. Returns (cleaned_text, was_changed)."""
+    if not text:
+        return text, False
+    sentences = [s.strip() for s in text.split(".") if s.strip()]
+    clean = [s for s in sentences if not pattern.search(s)]
+    changed = len(clean) < len(sentences)
+    return ". ".join(clean) + ("." if clean else ""), changed
 
 
-def _build_not_tags(row: dict, hq_score: float) -> list[str]:
-    existing = _v(row, "gaps_missing_signals", "what_is_not_app")
-    tags = [p.strip() for p in existing.split("|") if p.strip()] if existing else []
-    hq_not_tag = "No foreign HQ signal"
-    if hq_score and hq_score >= 3:
-        tags = [t for t in tags if t != hq_not_tag]
-    elif hq_not_tag not in tags:
-        tags.append(hq_not_tag)
-    return tags
+def _hqr_country(hqr_row: dict) -> str:
+    return _v(hqr_row,
+              "hq_detected_country", "sig_foreign_hq_country",
+              "detected_country", "hq_country", "country_reviewed", "reviewed_country")
 
 
-def _collect_source_links(row: dict, suppress_competitor: bool, max_links: int = 8) -> str:
+def _hqr_city(hqr_row: dict) -> str:
+    return _v(hqr_row,
+              "hq_detected_city", "sig_foreign_hq_city",
+              "detected_city", "hq_city", "city_reviewed", "reviewed_city")
+
+
+def _hqr_evidence_url(hqr_row: dict) -> str:
+    return _v(hqr_row,
+              "hq_evidence_url", "sig_foreign_hq_evidence_url",
+              "evidence_url", "hq_url")
+
+
+def _score_input(score_out: dict, enr_row: dict, out_key: str, enr_key: str) -> float:
+    v = _safe_float(score_out.get(out_key))
+    if v is not None:
+        return v
+    v = _safe_float(enr_row.get(enr_key))
+    return v if v is not None else 0.0
+
+
+def _build_final_signal_state(
+    enr_row: dict,
+    hqr_row: dict,
+    score_out: dict,
+    hq_eligible: bool,
+    competitor_eligible: bool,
+    hq_reviewed_val: float | None,
+    hq_original_val: float | None,
+) -> dict:
+    """Return the definitive signal state dict used for all app-text construction."""
+    hq_new = (hq_reviewed_val if hq_eligible and hq_reviewed_val is not None
+              else _safe_float(enr_row.get("sig_foreign_hq_score")) or 0.0)
+    hq_old = hq_original_val if hq_original_val is not None else 0.0
+
+    # HQ location: prefer HQR columns if eligible (reviewed data), else fall back to enr
+    if hq_eligible:
+        country = _hqr_country(hqr_row)
+        city    = _hqr_city(hqr_row)
+    else:
+        country = _v(enr_row, "sig_foreign_hq_country", "foreign_hq_country_app")
+        city    = _v(enr_row, "sig_foreign_hq_city",    "foreign_hq_city_app")
+    ev_url = _hqr_evidence_url(hqr_row) or _v(enr_row, "sig_foreign_hq_evidence_url")
+
+    cfs  = _safe_float(score_out.get("final_commercial_fit_score")) or 0.0
+    tier = score_out.get("commercial_tier") or _v(enr_row, "commercial_tier")
+
+    return {
+        "hq_score":           hq_new,
+        "hq_score_old":       hq_old,
+        "foreign_hq_active":  hq_new >= 3,
+        "hq_upgraded":        hq_old < 3 and hq_new >= 3,
+        "hq_downgraded":      hq_old >= 3 and hq_new < 3,
+        "hq_country":         country,
+        "hq_city":            city,
+        "hq_evidence_url":    ev_url,
+        "competitor_suppressed": competitor_eligible,
+        "cfs":                cfs,
+        "tier":               str(tier).strip() if tier else "",
+        # Scoring signal strengths for what_is_hot / what_is_not construction
+        "sig_explicit_lnd":      _score_input(score_out, enr_row, "score_input_explicit_lnd",      "sig_explicit_lnd_score"),
+        "sig_intl_footprint":    _score_input(score_out, enr_row, "score_input_intl_footprint",    "sig_intl_footprint_score"),
+        "sig_employer_branding": _score_input(score_out, enr_row, "score_input_employer_branding", "sig_employer_branding_score"),
+        "sig_lnd_onboarding":    _score_input(score_out, enr_row, "score_input_lnd_onboarding",    "sig_lnd_onboarding_score"),
+        "ti_onboarding":         _score_input(score_out, enr_row, "score_input_ti_onboarding",     "ti_onboarding_score"),
+        "sig_rapid_growth":      _score_input(score_out, enr_row, "score_input_rapid_growth",      "sig_rapid_growth_score"),
+    }
+
+
+def _build_lovable_app_fields(
+    enr_row: dict,
+    hqr_row: dict,
+    score_out: dict,
+    state: dict,
+) -> tuple[dict, bool]:
+    """Build all Lovable app-facing fields from the final signal state.
+
+    Returns (app_fields_dict, conflict_removed_flag).
+    """
+    out: dict = {}
+    conflict_removed = False
+
+    # ── commercial score / tier ───────────────────────────────────────────────
+    out["commercial_fit_score_app"] = f"{state['cfs']:.4f}"
+    out["commercial_tier_app"] = state["tier"]
+
+    # ── what_is_hot_app — built from active signals ───────────────────────────
+    hot: list[str] = []
+    if state["foreign_hq_active"]:
+        tag = (f"Foreign HQ: {state['hq_country']}"
+               if state["hq_country"] else "Foreign HQ confirmed")
+        hot.append(tag)
+    for sig_key, label in [
+        ("sig_explicit_lnd",      "Explicit L&D signal"),
+        ("sig_intl_footprint",    "International footprint"),
+        ("sig_employer_branding", "Employer branding"),
+        ("sig_lnd_onboarding",    "L&D / onboarding signal"),
+        ("ti_onboarding",         "Onboarding signal"),
+    ]:
+        if state.get(sig_key, 0) > 0:
+            hot.append(label)
+    if state["tier"].upper() in ("A", "B"):
+        hot.append(f"Commercial tier: {state['tier'].upper()}")
+    out["what_is_hot_app"] = " | ".join(hot)
+
+    # ── what_is_not_app — built from missing/weak/suppressed signals ──────────
+    not_tags: list[str] = []
+    if not state["foreign_hq_active"]:
+        not_tags.append("No confirmed foreign HQ after review")
+    lnd_present = (state.get("sig_explicit_lnd", 0) > 0
+                   or state.get("sig_lnd_onboarding", 0) > 0
+                   or state.get("ti_onboarding", 0) > 0)
+    if not lnd_present:
+        not_tags.append("No clear L&D/onboarding signal")
+    if state.get("sig_intl_footprint", 0) == 0:
+        not_tags.append("No international footprint detected")
+    if state["competitor_suppressed"]:
+        not_tags.append("Competitor signal suppressed (low reliability)")
+    out["what_is_not_app"] = " | ".join(not_tags)
+
+    # ── why_relevant_app ──────────────────────────────────────────────────────
+    base = _v(enr_row, "icp_why_relevant", "why_relevant_app")
+    if state["competitor_suppressed"]:
+        base, chg = _strip_sentences(base, _COMPETITOR_TERMS_RE)
+        if chg:
+            conflict_removed = True
+    if state["hq_upgraded"]:
+        hq_loc = state["hq_country"]
+        if state["hq_city"] and hq_loc:
+            hq_loc = f"{state['hq_city']}, {hq_loc}"
+        elif state["hq_city"]:
+            hq_loc = state["hq_city"]
+        prefix = f"Confirmed foreign HQ ({hq_loc}). " if hq_loc else "Confirmed foreign HQ. "
+        base = prefix + base if base else prefix.strip()
+    elif state["hq_downgraded"]:
+        base, chg = _strip_sentences(base, _FOREIGN_HQ_CLAIM_RE)
+        if chg:
+            conflict_removed = True
+    out["why_relevant_app"] = base
+
+    # ── caller_angle_app ──────────────────────────────────────────────────────
+    base = _v(enr_row, "caller_angle", "caller_angle_app")
+    if state["competitor_suppressed"]:
+        base, chg = _strip_sentences(base, _COMPETITOR_TERMS_RE)
+        if chg:
+            conflict_removed = True
+    if state["hq_upgraded"] and state["hq_country"]:
+        if state["hq_country"].lower() not in base.lower():
+            base = (base.rstrip(". ") + f". HQ confirmed in {state['hq_country']}.") if base else f"HQ confirmed in {state['hq_country']}."
+    out["caller_angle_app"] = base
+
+    # ── call_starter_app ──────────────────────────────────────────────────────
+    base = _v(enr_row, "icp_buying_signals", "call_starter_app")
+    if state["competitor_suppressed"]:
+        base, chg = _strip_sentences(base, _COMPETITOR_TERMS_RE)
+        if chg:
+            conflict_removed = True
+    out["call_starter_app"] = base
+
+    # ── caution_app ───────────────────────────────────────────────────────────
+    base = _v(enr_row, "scoring_notes", "caution_app")
+    if state["competitor_suppressed"]:
+        base, chg = _strip_sentences(base, _COMPETITOR_TERMS_RE)
+        if chg:
+            conflict_removed = True
+    if state.get("sig_rapid_growth", 0) > 0:
+        growth_note = "Growth signal present — may indicate cost sensitivity."
+        if growth_note not in base:
+            base = (base + " " + growth_note).strip() if base else growth_note
+    out["caution_app"] = base
+
+    # ── evidence_summary_app ──────────────────────────────────────────────────
+    base = _v(enr_row, "icp_evidence", "raw_evidence_summary", "evidence_summary_app")
+    if state["competitor_suppressed"]:
+        base, chg = _strip_sentences(base, _COMPETITOR_TERMS_RE)
+        if chg:
+            conflict_removed = True
+    if state["foreign_hq_active"]:
+        hq_note = "Foreign HQ signal confirmed"
+        if state["hq_country"]:
+            hq_note += f": {state['hq_country']}"
+        if state["hq_city"]:
+            hq_note += f" ({state['hq_city']})"
+        hq_note += "."
+        if hq_note.rstrip(".").lower() not in base.lower():
+            base = (base + " " + hq_note).strip() if base else hq_note
+    out["evidence_summary_app"] = base
+
+    # ── key_source_links_app ──────────────────────────────────────────────────
     links: list[str] = []
-    for i in range(1, 6):
-        url = _v(row, f"google_snippet_{i}_url")
+    for i in range(1, 7):
+        url = _v(enr_row, f"google_snippet_{i}_url")
         if url and url not in links:
-            if suppress_competitor and _COMPETITOR_TERMS_RE.search(_v(row, f"google_snippet_{i}")):
+            snippet_text = _v(enr_row, f"google_snippet_{i}")
+            if state["competitor_suppressed"] and _COMPETITOR_TERMS_RE.search(snippet_text):
                 continue
             links.append(url)
-        if len(links) >= max_links:
+        if len(links) >= 8:
             break
-    hq_url = _v(row, "sig_foreign_hq_evidence_url")
-    if hq_url and hq_url not in links:
-        links.append(hq_url)
-    return " | ".join(links[:max_links])
+    if state["hq_evidence_url"] and state["hq_evidence_url"] not in links:
+        links.append(state["hq_evidence_url"])
+    out["key_source_links_app"] = " | ".join(links[:8])
 
+    # ── advanced_notes_app ────────────────────────────────────────────────────
+    notes: list[str] = []
+    if state["hq_score"] != state["hq_score_old"]:
+        country_str = state["hq_country"] or "unknown"
+        notes.append(
+            f"HQ score updated: {state['hq_score_old']:.0f} → {state['hq_score']:.0f}"
+            f" (country: {country_str})"
+        )
+    if state["competitor_suppressed"]:
+        notes.append(
+            "Competitor signal suppressed in final app export due to low reliability."
+        )
+    out["advanced_notes_app"] = " | ".join(notes)
 
-def _build_evidence_summary(
-    row: dict, hq_score: float, suppress_competitor: bool, hqr_row: dict
-) -> str:
-    parts: list[str] = []
-    base = _v(row, "icp_evidence", "raw_evidence_summary", "evidence_summary_app")
-    if base:
-        if suppress_competitor:
-            sentences = [s.strip() for s in base.split(".") if s.strip()]
-            sentences = [s for s in sentences if not _COMPETITOR_TERMS_RE.search(s)]
-            base = ". ".join(sentences) + ("." if sentences else "")
-        parts.append(base)
-    if hq_score and hq_score >= 3:
-        country = _v(hqr_row, "sig_foreign_hq_country", "detected_country")
-        city    = _v(hqr_row, "sig_foreign_hq_city",    "detected_city")
-        hq_note = "Foreign HQ signal confirmed"
-        if country:
-            hq_note += f": {country}"
-        if city:
-            hq_note += f" ({city})"
-        parts.append(hq_note + ".")
-    return " ".join(parts).strip()
+    # ── meta flags ────────────────────────────────────────────────────────────
+    out["foreign_hq_signal_used_in_app"] = "Yes" if state["foreign_hq_active"] else "No"
+    out["foreign_hq_country_app"] = state["hq_country"] if state["foreign_hq_active"] else ""
+    out["foreign_hq_city_app"]    = state["hq_city"]    if state["foreign_hq_active"] else ""
+    out["competitor_signal_used_in_app"] = (
+        "No" if state["competitor_suppressed"]
+        else ("Yes" if _has_competitor_signal(enr_row) else "No")
+    )
+
+    return out, conflict_removed
 
 
 def _refresh_app_text(
     row_out: dict,
     enr_row: dict,
     hqr_row: dict,
-    hq_new_score: float,
-    hq_old_score: float,
     suppress_competitor: bool,
     score_out: dict,
+    hq_eligible: bool,
+    hq_reviewed_val: float | None,
+    hq_original_val: float | None,
 ) -> dict:
-    """Refresh Lovable app-facing text fields. Returns audit flag dict."""
-    hq_note_added   = False
-    comp_note_added = False
-    conflict_removed = False
+    """Build all Lovable app-facing fields and write them to row_out.
 
-    new_cfs = _safe_float(score_out.get("final_commercial_fit_score")) or 0.0
-    row_out["commercial_fit_score_app"] = f"{new_cfs:.4f}"
-    tier = score_out.get("commercial_tier") or _v(row_out, "commercial_tier")
-    row_out["commercial_tier_app"] = str(tier) if tier else ""
-
-    hot_old = _v(row_out, "what_is_hot_app")
-    hot_tags = _build_hot_tags(row_out, hq_new_score, suppress_competitor)
-    if suppress_competitor and _COMPETITOR_TERMS_RE.search(hot_old):
-        conflict_removed = True
-    if hq_new_score >= 3 and hq_new_score != hq_old_score:
-        hq_note_added = True
-    row_out["what_is_hot_app"] = " | ".join(hot_tags)
-    row_out["what_is_not_app"] = " | ".join(_build_not_tags(row_out, hq_new_score))
-    row_out["why_relevant_app"] = _v(enr_row, "icp_why_relevant", "why_relevant_app")
-    row_out["evidence_summary_app"] = _build_evidence_summary(
-        row_out, hq_new_score, suppress_competitor, hqr_row
+    Returns audit flag dict: {hq_note_added, comp_note_added, conflict_removed}.
+    """
+    state = _build_final_signal_state(
+        enr_row, hqr_row, score_out,
+        hq_eligible=hq_eligible,
+        competitor_eligible=suppress_competitor,
+        hq_reviewed_val=hq_reviewed_val,
+        hq_original_val=hq_original_val,
     )
-    row_out["key_source_links_app"] = _collect_source_links(row_out, suppress_competitor)
-    row_out["caller_angle_app"]  = _v(enr_row, "caller_angle",      "caller_angle_app")
-    row_out["call_starter_app"]  = _v(enr_row, "icp_buying_signals", "call_starter_app")
-
-    caution = _v(enr_row, "scoring_notes", "caution_app")
-    if suppress_competitor:
-        sentences = [s.strip() for s in caution.split(".") if s.strip()]
-        sentences = [s for s in sentences if not _COMPETITOR_TERMS_RE.search(s)]
-        caution = ". ".join(sentences) + ("." if sentences else "")
-        comp_note_added = True
-    row_out["caution_app"] = caution
-
-    notes_parts: list[str] = []
-    if hq_new_score != hq_old_score:
-        notes_parts.append(
-            f"HQ score updated: {hq_old_score} → {hq_new_score} "
-            f"(country: {_v(hqr_row, 'sig_foreign_hq_country', 'detected_country') or 'unknown'})"
-        )
-    if suppress_competitor:
-        notes_parts.append("Competitor signal suppressed from scoring.")
-    row_out["advanced_notes_app"] = " | ".join(notes_parts)
-
-    row_out["foreign_hq_signal_used_in_app"] = "Yes" if hq_new_score >= 3 else "No"
-    row_out["foreign_hq_country_app"] = (
-        _v(hqr_row, "sig_foreign_hq_country", "detected_country") if hq_new_score >= 3 else ""
-    )
-    row_out["foreign_hq_city_app"] = (
-        _v(hqr_row, "sig_foreign_hq_city", "detected_city") if hq_new_score >= 3 else ""
-    )
-    row_out["competitor_signal_used_in_app"] = (
-        "No" if suppress_competitor else ("Yes" if _has_competitor_signal(enr_row) else "No")
-    )
+    app_fields, conflict_removed = _build_lovable_app_fields(enr_row, hqr_row, score_out, state)
+    row_out.update(app_fields)
 
     return {
-        "hq_note_added":    hq_note_added,
-        "comp_note_added":  comp_note_added,
+        "hq_note_added":    state["hq_upgraded"],
+        "comp_note_added":  suppress_competitor,
         "conflict_removed": conflict_removed,
     }
 
@@ -510,6 +647,13 @@ def _build_output_wb(
              round(summary.get("avg_competitor_after", 0.0), 4))
         _add("Note: competitor fields are NOT in LEAN_COEFFICIENTS",
              "final_commercial_fit_score delta will be 0 unless model changes")
+
+    if summary.get("app_text_refreshed"):
+        _section("Lovable app text refresh")
+        _add("App text rows refreshed",     summary.get("n_app_text_refreshed", 0))
+        _add("HQ notes added",              summary.get("n_hq_notes", 0))
+        _add("Competitor notes added",      summary.get("n_comp_notes", 0))
+        _add("Conflicting text removed",    summary.get("n_conflict_removed", 0))
 
     if deltas:
         _section("Score delta statistics")
@@ -757,14 +901,13 @@ def recalculate_hq_changed_scores_workbook(
 
             # ── App-text refresh ──────────────────────────────────────────
             if refresh_app_text:
-                _hq_new = hq_reviewed_val if hq_eligible and hq_reviewed_val is not None else (hq_original_val or 0.0)
-                _hq_old = hq_original_val or 0.0
-                _flags  = _refresh_app_text(
+                _flags = _refresh_app_text(
                     row_out, enr_row, hqr_row,
-                    hq_new_score=_hq_new,
-                    hq_old_score=_hq_old,
                     suppress_competitor=competitor_eligible,
                     score_out=score_out,
+                    hq_eligible=hq_eligible,
+                    hq_reviewed_val=hq_reviewed_val,
+                    hq_original_val=hq_original_val,
                 )
                 row_out["app_text_refresh_applied"] = "Yes"
                 row_out["app_text_refresh_reason"]  = (
@@ -814,6 +957,7 @@ def recalculate_hq_changed_scores_workbook(
         "n_competitor_skipped_limit": n_competitor_skipped_limit,
         "avg_competitor_before":     round(avg_comp_before, 4),
         "avg_competitor_after":      0.0,
+        "app_text_refreshed":        refresh_app_text and n_app_text_refreshed > 0,
         "n_app_text_refreshed":      n_app_text_refreshed,
         "n_hq_notes":                n_hq_notes,
         "n_comp_notes":              n_comp_notes,
