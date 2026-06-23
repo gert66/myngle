@@ -9,6 +9,8 @@ Run with:
 """
 
 import io
+from datetime import datetime
+
 import streamlit as st
 
 from recalculate_hq_changed_scores import (
@@ -62,20 +64,43 @@ run_btn = st.button(
 # ── Run ───────────────────────────────────────────────────────────────────────
 
 if run_btn:
-    with st.spinner("Running recalculation…"):
-        try:
-            excel_bytes, summary = recalculate_hq_changed_scores_workbook(
-                io.BytesIO(f_enriched.read()),
-                io.BytesIO(f_hqr.read()),
-                sheet_name=sheet_name,
-            )
-        except Exception as exc:
-            st.error(f"Unexpected error: {exc}")
-            st.stop()
+    # Clear any previous result so the UI is fresh
+    for _k in ("_recalc_excel_bytes", "_recalc_summary", "_recalc_filename"):
+        st.session_state.pop(_k, None)
+
+    _status = st.status("Running recalculation…", expanded=True)
+    try:
+        _status.write("Files loaded ✓")
+        _status.write("Running recalculation…")
+        excel_bytes, summary = recalculate_hq_changed_scores_workbook(
+            io.BytesIO(f_enriched.getvalue()),
+            io.BytesIO(f_hqr.getvalue()),
+            sheet_name=sheet_name,
+        )
+        _status.write("Building output workbook ✓")
+        _status.write("Done ✓")
+        _status.update(label="Recalculation complete", state="complete", expanded=False)
+    except Exception as exc:
+        _status.update(label="Error", state="error", expanded=True)
+        st.error(f"Unexpected error: {exc}")
+        st.stop()
 
     if summary.get("error"):
         st.error(summary["error"])
         st.stop()
+
+    ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+    enr_stem = f_enriched.name.replace(".xlsx", "")
+    st.session_state["_recalc_excel_bytes"] = excel_bytes
+    st.session_state["_recalc_summary"]     = summary
+    st.session_state["_recalc_filename"]    = f"{enr_stem}_hq_recalculated_{ts}.xlsx"
+
+# ── Results (persisted in session_state across reruns) ───────────────────────
+
+if "_recalc_excel_bytes" in st.session_state:
+    excel_bytes = st.session_state["_recalc_excel_bytes"]
+    summary     = st.session_state["_recalc_summary"]
+    out_name    = st.session_state["_recalc_filename"]
 
     # ── Metrics ───────────────────────────────────────────────────────────────
     st.subheader("Summary")
@@ -135,8 +160,6 @@ if run_btn:
 
     # ── Download ──────────────────────────────────────────────────────────────
     st.subheader("Download")
-    enr_stem = f_enriched.name.replace(".xlsx", "")
-    out_name = f"{enr_stem}_hq_recalculated.xlsx"
     st.download_button(
         label=f"⬇ Download {out_name}",
         data=excel_bytes,

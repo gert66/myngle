@@ -18,6 +18,7 @@ from typing import Any
 
 from openpyxl import load_workbook, Workbook
 from openpyxl.styles import Font, PatternFill
+from openpyxl.utils import get_column_letter
 
 from commercial_fit_scoring import SCORE_OUTPUT_COLS, score_company
 
@@ -136,10 +137,17 @@ def _build_output_wb(
     for cell in ws_data[1]:
         cell.font = _hdr_font
         cell.fill = _hdr_fill
-    for col_cells in ws_data.columns:
-        col_letter = col_cells[0].column_letter
-        max_len = max((len(str(c.value or "")) for c in col_cells), default=8)
-        ws_data.column_dimensions[col_letter].width = min(max_len + 2, 50)
+    _MAX_WIDTH = 50
+    _SAMPLE_ROWS = 25
+    if ws_data.max_column <= 250:
+        for col_idx in range(1, ws_data.max_column + 1):
+            header = ws_data.cell(row=1, column=col_idx).value
+            max_len = len(str(header or ""))
+            for row_idx in range(2, min(ws_data.max_row, _SAMPLE_ROWS + 1) + 1):
+                v = ws_data.cell(row=row_idx, column=col_idx).value
+                if v is not None:
+                    max_len = max(max_len, min(len(str(v)), _MAX_WIDTH))
+            ws_data.column_dimensions[get_column_letter(col_idx)].width = min(max_len + 2, _MAX_WIDTH)
 
     ws_sum = wb_out.create_sheet(SUMMARY_SHEET)
     bold = Font(bold=True)
