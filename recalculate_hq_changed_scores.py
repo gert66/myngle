@@ -12,12 +12,12 @@ Scoring profile used: italy_register_icp_only
 """
 
 import argparse
+import io
 import sys
 from typing import Any
 
-from openpyxl import load_workbook
-from openpyxl.styles import Font, PatternFill
-from openpyxl.utils import get_column_letter
+from openpyxl import load_workbook, Workbook
+from openpyxl.styles import Font
 
 from commercial_fit_scoring import SCORE_OUTPUT_COLS, score_company
 
@@ -43,8 +43,7 @@ AUDIT_COLS = [
 
 def _safe_float(v: Any) -> float | None:
     try:
-        f = float(v)
-        return f
+        return float(v)
     except Exception:
         return None
 
@@ -60,10 +59,6 @@ def _wb_to_rows(wb, sheet_name: str) -> tuple[list[str], list[dict]]:
     if not rows:
         return [], []
     headers = [str(c or "").strip() for c in rows[0]]
-    data = [{headers[i]: rows[i + 1][i] if i < len(rows[i + 1]) else None
-             for i in range(len(headers))}
-            for _ in range(0)  # placeholder
-            ]
     data = []
     for row in rows[1:]:
         data.append({headers[i]: (row[i] if i < len(row) else None)
@@ -77,9 +72,6 @@ def _build_match_index(
     has_company: bool,
     has_country: bool,
 ) -> tuple[dict, str]:
-    """Build a lookup dict from match-key → row-index.
-    Returns (index, strategy_name).
-    """
     if has_domain and has_company and has_country:
         strategy = "domain+company_name+input_country"
         idx: dict[str, int] = {}
@@ -90,7 +82,6 @@ def _build_match_index(
                 + "|" + _norm_key(r.get("input_country_used") or r.get("country"))
             )
             idx.setdefault(k, i)
-        # If too many collisions try simpler key
         if len(idx) >= len(rows) * 0.9:
             return idx, strategy
 
@@ -108,10 +99,7 @@ def _build_match_index(
     return {}, "row_order_fallback"
 
 
-def _match_key_for_row(
-    r: dict,
-    strategy: str,
-) -> str:
+def _match_key_for_row(r: dict, strategy: str) -> str:
     if "input_country" in strategy:
         return (
             _norm_key(r.get("domain"))
@@ -126,41 +114,95 @@ def _match_key_for_row(
     return ""
 
 
-# ── main ──────────────────────────────────────────────────────────────────────
+def _build_output_wb(
+    out_headers: list[str],
+    out_rows: list[dict],
+    sheet_name: str,
+    summary: dict,
+    deltas: list[tuple],
+) -> Workbook:
+    wb_out = Workbook()
+    ws_data = wb_out.active
+    ws_data.title = sheet_name
+    ws_data.append(out_headers)
+    for r in out_rows:
+        ws_data.append([r.get(h) for h in out_headers])
+    ws_data.freeze_panes = "A2"
 
-def main() -> None:
-    ap = argparse.ArgumentParser(description=__doc__)
-    ap.add_argument("--enriched-workbook",    required=True)
-    ap.add_argument("--hq-recovery-workbook", required=True)
-    ap.add_argument("--output",               required=True)
-    ap.add_argument("--sheet",                default=DEFAULT_SHEET)
-    args = ap.parse_args()
+    ws_sum = wb_out.create_sheet(SUMMARY_SHEET)
+    bold = Font(bold=True)
 
-    sheet_name = args.sheet
+    def _add(label: str, value: Any) -> None:
+        ws_sum.append([label, value])
 
-    print(f"\n{'='*72}")
-    print(f"HQ Score Recalculation")
-    print(f"  enriched   : {args.enriched_workbook}")
-    print(f"  hq-recovery: {args.hq_recovery_workbook}")
-    print(f"  output     : {args.output}")
-    print(f"  sheet      : {sheet_name}")
-    print(f"  profile    : {SCORING_PROFILE}")
-    print(f"{'='*72}\n")
+    ws_sum.append(["HQ Score Recalculation Summary"])
+    ws_sum["A1"].font = Font(bold=True, size=12)
+    ws_sum.append([])
+    _add("Sheet",               sheet_name)
+    _add("Scoring profile",     SCORING_PROFILE)
+    _add("Matching strategy",   summary["strategy"])
+    ws_sum.append([])
+    _add("Total enriched rows",       summary["n_enr"])
+    _add("Total HQ Recovery rows",    summary["n_hqr"])
+    _add("Matched rows",              summary["n_matched"])
+    _add("Eligible (score changed)",  summary["n_eligible"])
+    _add("Recalculated rows",         summary["n_recalculated"])
+    _add("Upgrades  0/blank → 3",     summary["n_upgrades"])
+    _add("Downgrades 3 → 0",          summary["n_downgrades"])
+    _add("Other numeric changes",     summary["n_other"])
+    _add("Unchanged rows",            summary["n_enr"] - summary["n_recalculated"])
 
-    # ── Load workbooks ────────────────────────────────────────────────────────
-    print("Loading enriched workbook…")
-    wb_enr = load_workbook(args.enriched_workbook, read_only=True, data_only=True)
+    if deltas:
+        ws_sum.append([])
+        ws_sum.append(["Score delta statistics"])
+        ws_sum.cell(ws_sum.max_row, 1).font = bold
+        all_d = [x[4] for x in deltas]
+        _add("Max positive delta",  max(all_d))
+        _add("Max negative delta",  min(all_d))
+        _add("Mean delta",          round(sum(all_d) / len(all_d), 4))
+
+    top_positive = sorted(deltas, key=lambda x: -x[4])[:20]
+    top_negative = sorted(deltas, key=lambda x:  x[4])[:20]
+
+    for title, subset in [
+        ("Top 20 positive score deltas (biggest increase)", top_positive),
+        ("Top 20 negative score deltas (biggest decrease)", top_negative),
+    ]:
+        if subset:
+            ws_sum.append([])
+            ws_sum.append([title])
+            ws_sum.cell(ws_sum.max_row, 1).font = bold
+            ws_sum.append(["company", "domain", "cfs_before", "cfs_after", "delta"])
+            for company, domain, before, after, delta in subset:
+                ws_sum.append([company, domain,
+                                round(before, 4), round(after, 4), round(delta, 4)])
+
+    ws_sum.column_dimensions["A"].width = 40
+    ws_sum.column_dimensions["B"].width = 50
+    return wb_out
+
+
+# ── core logic (reusable) ─────────────────────────────────────────────────────
+
+def recalculate_hq_changed_scores_workbook(
+    enriched_workbook_file,
+    hq_recovery_workbook_file,
+    sheet_name: str = DEFAULT_SHEET,
+) -> tuple[bytes, dict]:
+    """Process two workbook file-like objects (or paths) and return
+    (excel_bytes, summary_dict).
+
+    summary_dict keys: strategy, n_enr, n_hqr, n_matched, n_eligible,
+    n_recalculated, n_upgrades, n_downgrades, n_other, deltas, error.
+    """
+    wb_enr = load_workbook(enriched_workbook_file, read_only=True, data_only=True)
     enr_headers, enr_rows = _wb_to_rows(wb_enr, sheet_name)
     wb_enr.close()
-    print(f"  {len(enr_rows)} rows, {len(enr_headers)} columns")
 
-    print("Loading HQ Recovery workbook…")
-    wb_hqr = load_workbook(args.hq_recovery_workbook, read_only=True, data_only=True)
+    wb_hqr = load_workbook(hq_recovery_workbook_file, read_only=True, data_only=True)
     hqr_headers, hqr_rows = _wb_to_rows(wb_hqr, sheet_name)
     wb_hqr.close()
-    print(f"  {len(hqr_rows)} rows, {len(hqr_headers)} columns")
 
-    # ── Build match index ─────────────────────────────────────────────────────
     hqr_has_domain  = "domain" in hqr_headers
     hqr_has_company = ("company_name" in hqr_headers or "name" in hqr_headers)
     hqr_has_country = ("input_country_used" in hqr_headers or "country" in hqr_headers)
@@ -168,102 +210,69 @@ def main() -> None:
     hqr_index, strategy = _build_match_index(
         hqr_rows, hqr_has_domain, hqr_has_company, hqr_has_country
     )
-
     use_row_order = (strategy == "row_order_fallback")
-    if use_row_order:
-        if len(enr_rows) != len(hqr_rows):
-            print(
-                f"ERROR: Cannot use row-order fallback — "
-                f"enriched has {len(enr_rows)} rows, HQ Recovery has {len(hqr_rows)} rows."
-            )
-            sys.exit(1)
-        print(f"  Matching strategy : row_order_fallback (row counts match)")
-    else:
-        print(f"  Matching strategy : {strategy}")
 
-    # ── Process rows ──────────────────────────────────────────────────────────
-    # Determine output columns: enriched headers + audit cols (appended if missing)
-    all_audit_set = set(AUDIT_COLS)
+    if use_row_order and len(enr_rows) != len(hqr_rows):
+        return b"", {
+            "error": (
+                f"Cannot use row-order fallback: enriched has {len(enr_rows)} rows, "
+                f"HQ Recovery has {len(hqr_rows)} rows."
+            ),
+        }
+
     out_headers = list(enr_headers)
     for ac in AUDIT_COLS:
         if ac not in out_headers:
             out_headers.append(ac)
-    # Also ensure SCORE_OUTPUT_COLS exist
     for sc in SCORE_OUTPUT_COLS:
         if sc not in out_headers:
             out_headers.append(sc)
 
     out_rows: list[dict] = []
-
-    n_matched      = 0
-    n_eligible     = 0
-    n_recalculated = 0
-    n_upgrades     = 0   # 0/blank → 3
-    n_downgrades   = 0   # 3 → 0
-    n_other        = 0
-    deltas: list[tuple[str, str, float, float, float]] = []  # company, domain, before, after, delta
+    n_matched = n_eligible = n_recalculated = n_upgrades = n_downgrades = n_other = 0
+    deltas: list[tuple[str, str, float, float, float]] = []
 
     for i, enr_row in enumerate(enr_rows):
         row_out = dict(enr_row)
 
-        # Find matching HQ Recovery row
         if use_row_order:
-            hqr_row = hqr_rows[i]
-            matched = True
+            hqr_row, matched = hqr_rows[i], True
         else:
-            mk = _match_key_for_row(enr_row, strategy)
-            hqr_idx = hqr_index.get(mk)
+            hqr_idx = hqr_index.get(_match_key_for_row(enr_row, strategy))
             if hqr_idx is None:
-                matched = False
-                hqr_row = {}
+                hqr_row, matched = {}, False
             else:
-                hqr_row = hqr_rows[hqr_idx]
-                matched = True
+                hqr_row, matched = hqr_rows[hqr_idx], True
 
         if matched:
             n_matched += 1
 
-        # Check eligibility
-        eligible      = False
-        recalc_reason = ""
+        eligible, recalc_reason = False, ""
         if matched:
-            reviewed_raw  = hqr_row.get("sig_foreign_hq_score_reviewed")
-            original_raw  = (
+            reviewed_raw = hqr_row.get("sig_foreign_hq_score_reviewed")
+            original_raw = (
                 enr_row.get("sig_foreign_hq_score")
                 or hqr_row.get("sig_foreign_hq_score_original")
                 or hqr_row.get("sig_foreign_hq_score_original_before_recovery")
             )
-            reviewed_val  = _safe_float(reviewed_raw)
-            original_val  = _safe_float(original_raw)
-
-            if reviewed_raw is not None and reviewed_raw != "":
-                if reviewed_val != original_val:
-                    eligible = True
-                    recalc_reason = (
-                        f"HQ Recovery changed score "
-                        f"{original_val!r} → {reviewed_val!r}"
-                    )
+            reviewed_val = _safe_float(reviewed_raw)
+            original_val = _safe_float(original_raw)
+            if reviewed_raw is not None and reviewed_raw != "" and reviewed_val != original_val:
+                eligible = True
+                recalc_reason = f"HQ Recovery changed score {original_val!r} → {reviewed_val!r}"
 
         if eligible:
             n_eligible += 1
-
-            # Read old scoring fields for audit
             old_cfs   = _safe_float(row_out.get("final_commercial_fit_score")) or 0.0
             old_score = original_val or 0.0
             new_score = reviewed_val if reviewed_val is not None else 0.0
 
-            # Build row copy with updated HQ score
             row_copy = dict(row_out)
-            row_copy["sig_foreign_hq_score"]               = new_score
+            row_copy["sig_foreign_hq_score"]                  = new_score
             row_copy["sig_foreign_hq_score_for_next_scoring"] = new_score
 
-            # Run scoring
             try:
-                score_out = score_company(
-                    row_copy,
-                    {"scoring_profile": SCORING_PROFILE},
-                )
-                # Write scoring fields back
+                score_out = score_company(row_copy, {"scoring_profile": SCORING_PROFILE})
                 for col in SCORE_OUTPUT_COLS:
                     if col in score_out:
                         row_out[col] = score_out[col]
@@ -271,20 +280,20 @@ def main() -> None:
                 new_cfs = _safe_float(score_out.get("final_commercial_fit_score")) or 0.0
                 delta   = round(new_cfs - old_cfs, 4)
 
-                # Audit columns
-                row_out["hq_recalc_applied"]   = "Yes"
-                row_out["hq_recalc_reason"]    = recalc_reason
-                row_out["hq_score_before_recalc"] = old_score
-                row_out["hq_score_after_recalc"]  = new_score
-                row_out["commercial_fit_score_before_hq_recalc"]       = old_cfs
-                row_out["commercial_fit_score_after_hq_recalc"]        = new_cfs
-                row_out["commercial_fit_score_delta_hq_recalc"]        = delta
-                row_out["final_commercial_fit_score_before_hq_recalc"] = old_cfs
-                row_out["final_commercial_fit_score_after_hq_recalc"]  = new_cfs
-                row_out["final_commercial_fit_score_delta_hq_recalc"]  = delta
-                # Also update sig_foreign_hq_score in output
-                row_out["sig_foreign_hq_score"]               = new_score
-                row_out["sig_foreign_hq_score_for_next_scoring"] = new_score
+                row_out.update({
+                    "hq_recalc_applied":                          "Yes",
+                    "hq_recalc_reason":                           recalc_reason,
+                    "hq_score_before_recalc":                     old_score,
+                    "hq_score_after_recalc":                      new_score,
+                    "commercial_fit_score_before_hq_recalc":      old_cfs,
+                    "commercial_fit_score_after_hq_recalc":       new_cfs,
+                    "commercial_fit_score_delta_hq_recalc":       delta,
+                    "final_commercial_fit_score_before_hq_recalc": old_cfs,
+                    "final_commercial_fit_score_after_hq_recalc":  new_cfs,
+                    "final_commercial_fit_score_delta_hq_recalc":  delta,
+                    "sig_foreign_hq_score":                       new_score,
+                    "sig_foreign_hq_score_for_next_scoring":      new_score,
+                })
 
                 n_recalculated += 1
                 deltas.append((
@@ -292,10 +301,9 @@ def main() -> None:
                     str(enr_row.get("domain") or "?"),
                     old_cfs, new_cfs, delta,
                 ))
-
-                if old_score in (0, None) and new_score == 3:
+                if old_score in (0.0, None) and new_score == 3.0:
                     n_upgrades += 1
-                elif old_score == 3 and new_score in (0, None):
+                elif old_score == 3.0 and new_score in (0.0, None):
                     n_downgrades += 1
                 else:
                     n_other += 1
@@ -308,96 +316,68 @@ def main() -> None:
 
         out_rows.append(row_out)
 
-    # ── Sort deltas ───────────────────────────────────────────────────────────
-    top_positive = sorted(deltas, key=lambda x: -x[4])[:20]
-    top_negative = sorted(deltas, key=lambda x: x[4])[:20]
+    summary = {
+        "error":          "",
+        "strategy":       strategy,
+        "n_enr":          len(enr_rows),
+        "n_hqr":          len(hqr_rows),
+        "n_matched":      n_matched,
+        "n_eligible":     n_eligible,
+        "n_recalculated": n_recalculated,
+        "n_upgrades":     n_upgrades,
+        "n_downgrades":   n_downgrades,
+        "n_other":        n_other,
+        "deltas":         deltas,
+    }
 
-    # ── Write output workbook ─────────────────────────────────────────────────
-    print(f"\nWriting output workbook: {args.output}")
-    from openpyxl import Workbook as _WB
-    wb_out = _WB()
+    wb_out = _build_output_wb(out_headers, out_rows, sheet_name, summary, deltas)
+    buf = io.BytesIO()
+    wb_out.save(buf)
+    return buf.getvalue(), summary
 
-    # Sheet 1: updated data
-    ws_data = wb_out.active
-    ws_data.title = sheet_name
 
-    ws_data.append(out_headers)
-    for r in out_rows:
-        ws_data.append([r.get(h) for h in out_headers])
+# ── CLI entry point ───────────────────────────────────────────────────────────
 
-    # Freeze header row
-    ws_data.freeze_panes = "A2"
+def main() -> None:
+    ap = argparse.ArgumentParser(description=__doc__)
+    ap.add_argument("--enriched-workbook",    required=True)
+    ap.add_argument("--hq-recovery-workbook", required=True)
+    ap.add_argument("--output",               required=True)
+    ap.add_argument("--sheet",                default=DEFAULT_SHEET)
+    args = ap.parse_args()
 
-    # Sheet 2: summary
-    ws_sum = wb_out.create_sheet(SUMMARY_SHEET)
-    _h = Font(bold=True)
-
-    def _add(label: str, value: Any) -> None:
-        ws_sum.append([label, value])
-
-    ws_sum.append(["HQ Score Recalculation Summary"])
-    ws_sum["A1"].font = Font(bold=True, size=12)
-    ws_sum.append([])
-    _add("Enriched workbook",          args.enriched_workbook)
-    _add("HQ Recovery workbook",       args.hq_recovery_workbook)
-    _add("Sheet",                      sheet_name)
-    _add("Scoring profile",            SCORING_PROFILE)
-    _add("Matching strategy",          strategy)
-    ws_sum.append([])
-    _add("Total enriched rows",        len(enr_rows))
-    _add("Total HQ Recovery rows",     len(hqr_rows))
-    _add("Matched rows",               n_matched)
-    _add("Eligible (score changed)",   n_eligible)
-    _add("Recalculated rows",          n_recalculated)
-    _add("Upgrades  0/blank → 3",      n_upgrades)
-    _add("Downgrades 3 → 0",           n_downgrades)
-    _add("Other numeric changes",      n_other)
-    _add("Unchanged rows",             len(enr_rows) - n_recalculated)
-
-    if deltas:
-        ws_sum.append([])
-        ws_sum.append(["Score delta statistics"])
-        ws_sum[-1][0].font = _h
-        all_d = [x[4] for x in deltas]
-        _add("Max positive delta",     max(all_d))
-        _add("Max negative delta",     min(all_d))
-        _add("Mean delta",             round(sum(all_d) / len(all_d), 4))
-
-    if top_positive:
-        ws_sum.append([])
-        ws_sum.append(["Top 20 positive score deltas (biggest increase)"])
-        ws_sum[-1][0].font = _h
-        ws_sum.append(["company", "domain", "cfs_before", "cfs_after", "delta"])
-        for company, domain, before, after, delta in top_positive:
-            ws_sum.append([company, domain, round(before, 4), round(after, 4), round(delta, 4)])
-
-    if top_negative:
-        ws_sum.append([])
-        ws_sum.append(["Top 20 negative score deltas (biggest decrease)"])
-        ws_sum[-1][0].font = _h
-        ws_sum.append(["company", "domain", "cfs_before", "cfs_after", "delta"])
-        for company, domain, before, after, delta in top_negative:
-            ws_sum.append([company, domain, round(before, 4), round(after, 4), round(delta, 4)])
-
-    # Column widths
-    ws_sum.column_dimensions["A"].width = 40
-    ws_sum.column_dimensions["B"].width = 50
-
-    wb_out.save(args.output)
-    print("Done.")
-
-    # ── Console report ────────────────────────────────────────────────────────
     print(f"\n{'='*72}")
-    print(f"RESULTS")
-    print(f"  Input enriched       : {args.enriched_workbook}")
-    print(f"  Input HQ Recovery    : {args.hq_recovery_workbook}")
-    print(f"  Matching strategy    : {strategy}")
-    print(f"  Rows matched         : {n_matched} / {len(enr_rows)}")
-    print(f"  Eligible (changed)   : {n_eligible}")
-    print(f"  Recalculated         : {n_recalculated}")
-    print(f"  Upgrades  0→3        : {n_upgrades}")
-    print(f"  Downgrades 3→0       : {n_downgrades}")
-    print(f"  Other changes        : {n_other}")
+    print(f"HQ Score Recalculation")
+    print(f"  enriched   : {args.enriched_workbook}")
+    print(f"  hq-recovery: {args.hq_recovery_workbook}")
+    print(f"  output     : {args.output}")
+    print(f"  sheet      : {args.sheet}")
+    print(f"  profile    : {SCORING_PROFILE}")
+    print(f"{'='*72}\n")
+
+    excel_bytes, summary = recalculate_hq_changed_scores_workbook(
+        args.enriched_workbook,
+        args.hq_recovery_workbook,
+        sheet_name=args.sheet,
+    )
+
+    if summary.get("error"):
+        print(f"ERROR: {summary['error']}")
+        sys.exit(1)
+
+    with open(args.output, "wb") as fh:
+        fh.write(excel_bytes)
+
+    deltas = summary["deltas"]
+    print(f"\n{'='*72}")
+    print("RESULTS")
+    print(f"  Matching strategy    : {summary['strategy']}")
+    print(f"  Rows matched         : {summary['n_matched']} / {summary['n_enr']}")
+    print(f"  Eligible (changed)   : {summary['n_eligible']}")
+    print(f"  Recalculated         : {summary['n_recalculated']}")
+    print(f"  Upgrades  0→3        : {summary['n_upgrades']}")
+    print(f"  Downgrades 3→0       : {summary['n_downgrades']}")
+    print(f"  Other changes        : {summary['n_other']}")
     if deltas:
         all_d = [x[4] for x in deltas]
         print(f"  Biggest increase     : +{max(all_d):.4f}")
