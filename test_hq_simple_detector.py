@@ -5,7 +5,7 @@ from hq_simple_detector import build_simple_hq_query, derive_domain_root, detect
 
 
 # ---------------------------------------------------------------------------
-# derive_domain_root
+# derive_domain_root — standard cases
 # ---------------------------------------------------------------------------
 
 @pytest.mark.parametrize("input_domain, expected", [
@@ -21,6 +21,34 @@ from hq_simple_detector import build_simple_hq_query, derive_domain_root, detect
     ("   ", ""),
 ])
 def test_derive_domain_root(input_domain, expected):
+    assert derive_domain_root(input_domain) == expected
+
+
+# ---------------------------------------------------------------------------
+# derive_domain_root — public suffix / pseudo-TLD edge cases (Step 2C)
+# ---------------------------------------------------------------------------
+
+@pytest.mark.parametrize("input_domain, expected", [
+    # .co.uk — registrable label is one level above the pseudo-TLD
+    ("example.co.uk", "example"),
+    ("www.example.co.uk", "example"),
+    ("https://www.example.co.uk/about", "example"),
+    ("subdomain.example.co.uk", "example"),
+    # .com.au
+    ("example.com.au", "example"),
+    ("www.example.com.au", "example"),
+    # .co.jp
+    ("example.co.jp", "example"),
+    ("www.example.co.jp", "example"),
+    # Simple single-level ccTLDs — two-part domain, no pseudo-TLD
+    ("subdomain.example.de/path", "example"),   # subdomain stripped, .de is simple TLD
+    ("example.fr", "example"),
+    ("example.it", "example"),
+    # Subdomain with simple ccTLD
+    ("corporate.acme.de", "acme"),
+    ("www.acme.fr", "acme"),
+])
+def test_derive_domain_root_public_suffix(input_domain, expected):
     assert derive_domain_root(input_domain) == expected
 
 
@@ -300,3 +328,221 @@ def test_places_fallback_foreign_hq():
     )
     assert result.hq_detected_country == "Switzerland"
     assert result.foreign_hq_simple is True
+
+
+# ---------------------------------------------------------------------------
+# Step 2C — false-positive fixture tests
+# These scenarios must NEVER produce an automatic score-3 foreign HQ signal.
+# ---------------------------------------------------------------------------
+
+# ── A. Regional HQ only ───────────────────────────────────────────────────────
+
+def test_fp_a_european_headquarters_no_score3():
+    """'European headquarters in Milan' → regional guard fires, score 0, manual review."""
+    payload = {
+        "organic": [
+            {
+                "title": "GlobalCo European Headquarters - Milan",
+                "snippet": (
+                    "GlobalCo has established its European headquarters in Milan, "
+                    "Italy to serve the EMEA region."
+                ),
+                "link": "https://www.globalco.com/about",
+            }
+        ],
+    }
+    result = detect_hq_from_serper_payload(
+        company_name="GlobalCo",
+        domain="globalco.com",
+        input_country="Italy",
+        serper_payload=payload,
+    )
+    assert result.sig_foreign_hq_score_for_next_scoring == 0.0
+    assert result.needs_manual_review is True
+
+
+def test_fp_a_emea_hq_no_score3():
+    """Explicit 'EMEA headquarters' → regional guard fires, score 0."""
+    payload = {
+        "organic": [
+            {
+                "title": "Acme EMEA Headquarters",
+                "snippet": "Acme EMEA headquarters is located in Zurich, Switzerland.",
+                "link": "https://www.acme.com/emea",
+            }
+        ],
+    }
+    result = detect_hq_from_serper_payload(
+        company_name="Acme",
+        domain="acme.com",
+        input_country="Italy",
+        serper_payload=payload,
+    )
+    assert result.sig_foreign_hq_score_for_next_scoring == 0.0
+    assert result.needs_manual_review is True
+
+
+# ── B. Sales office / branch office ──────────────────────────────────────────
+
+def test_fp_b_sales_office_no_score3():
+    """Sales office mention produces no score 3."""
+    payload = {
+        "organic": [
+            {
+                "title": "CompanyX Sales Office Milan",
+                "snippet": "CompanyX operates a sales office in Milan, Italy.",
+                "link": "https://www.companyx.com/italy",
+            }
+        ],
+    }
+    result = detect_hq_from_serper_payload(
+        company_name="CompanyX",
+        domain="companyx.com",
+        input_country="Germany",
+        serper_payload=payload,
+    )
+    assert result.sig_foreign_hq_score_for_next_scoring != 3.0
+    # Either no evidence found (manual review) or not foreign
+    assert result.needs_manual_review is True or result.foreign_hq_simple is not True
+
+
+def test_fp_b_branch_office_triggers_regional_guard():
+    """Branch office phrase alongside headquarters triggers regional guard."""
+    payload = {
+        "organic": [
+            {
+                "title": "CompanyX UK Branch Office",
+                "snippet": (
+                    "CompanyX has a branch office headquartered in London, "
+                    "United Kingdom."
+                ),
+                "link": "https://www.companyx.com/uk",
+            }
+        ],
+    }
+    result = detect_hq_from_serper_payload(
+        company_name="CompanyX",
+        domain="companyx.com",
+        input_country="Italy",
+        serper_payload=payload,
+    )
+    assert result.sig_foreign_hq_score_for_next_scoring != 3.0
+    assert result.needs_manual_review is True or result.foreign_hq_simple is not True
+
+
+# ── C. Directory-only evidence ────────────────────────────────────────────────
+
+def test_fp_c_linkedin_only_no_score3():
+    """Only LinkedIn organic result → directory-only guard, no score 3."""
+    payload = {
+        "organic": [
+            {
+                "title": "Acme Corp - LinkedIn",
+                "snippet": "Acme Corp is headquartered in Zurich, Switzerland.",
+                "link": "https://www.linkedin.com/company/acme-corp",
+            }
+        ],
+    }
+    result = detect_hq_from_serper_payload(
+        company_name="Acme Corp",
+        domain="acme.com",
+        input_country="Italy",
+        serper_payload=payload,
+    )
+    assert result.sig_foreign_hq_score_for_next_scoring != 3.0
+    assert result.needs_manual_review is True
+
+
+def test_fp_c_zoominfo_only_no_score3():
+    """Only ZoomInfo organic result → directory-only guard, no score 3."""
+    payload = {
+        "organic": [
+            {
+                "title": "Bodycote International - ZoomInfo",
+                "snippet": "Bodycote is headquartered in Macclesfield, United Kingdom.",
+                "link": "https://www.zoominfo.com/c/bodycote",
+            }
+        ],
+    }
+    result = detect_hq_from_serper_payload(
+        company_name="Bodycote",
+        domain="bodycote.com",
+        input_country="Italy",
+        serper_payload=payload,
+    )
+    assert result.sig_foreign_hq_score_for_next_scoring != 3.0
+    assert result.needs_manual_review is True
+
+
+# ── D. Unrelated-domain evidence ─────────────────────────────────────────────
+
+def test_fp_d_unrelated_domain_no_score3():
+    """Evidence from an unrelated domain → domain-mismatch guard, needs_manual_review."""
+    payload = {
+        "organic": [
+            {
+                "title": "Bodycote Group - Corporate Profile",
+                "snippet": "Bodycote is headquartered in Macclesfield, United Kingdom.",
+                "link": "https://www.unrelated-example.com/bodycote",
+            }
+        ],
+    }
+    result = detect_hq_from_serper_payload(
+        company_name="Bodycote",
+        domain="bodycote.com",
+        input_country="Italy",
+        serper_payload=payload,
+    )
+    assert result.sig_foreign_hq_score_for_next_scoring != 3.0
+    assert result.needs_manual_review is True
+    # Reason must mention domain mismatch
+    assert result.hq_reason is not None
+    assert "unrelated_domain" in (result.hq_reason or "")
+
+
+# ── E. Same-country KG ────────────────────────────────────────────────────────
+
+def test_fp_e_same_country_germany_kg():
+    """KG headquarters Berlin, Germany with input_country Germany → not foreign."""
+    payload = {
+        "knowledgeGraph": {
+            "headquarters": "Berlin, Germany",
+        },
+        "organic": [],
+    }
+    result = detect_hq_from_serper_payload(
+        company_name="GermanCo",
+        domain="germanCo.de",
+        input_country="Germany",
+        serper_payload=payload,
+    )
+    assert result.foreign_hq_simple is False
+    assert result.sig_foreign_hq_score_for_next_scoring == 0.0
+
+
+# ── F. Foreign HQ with official-domain evidence → score 3, no manual review ──
+
+def test_fp_f_official_domain_evidence_score3():
+    """Official domain result with clear HQ phrase → foreign score 3, no manual review."""
+    payload = {
+        "organic": [
+            {
+                "title": "Bodycote - About Us",
+                "snippet": (
+                    "Bodycote is the world's largest provider of heat treatment. "
+                    "Headquartered in Macclesfield, United Kingdom."
+                ),
+                "link": "https://www.bodycote.com/about-us/",
+            }
+        ],
+    }
+    result = detect_hq_from_serper_payload(
+        company_name="Bodycote",
+        domain="bodycote.com",
+        input_country="Italy",
+        serper_payload=payload,
+    )
+    assert result.foreign_hq_simple is True
+    assert result.sig_foreign_hq_score_for_next_scoring == 3.0
+    assert result.needs_manual_review is False
+    assert result.hq_detected_country == "United Kingdom"

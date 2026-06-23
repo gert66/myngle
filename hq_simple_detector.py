@@ -80,11 +80,56 @@ _LEGAL_SUFFIXES_RE = re.compile(
     re.IGNORECASE | re.VERBOSE,
 )
 
+# Public second-level TLDs that look like TLDs but are actually
+# "<registrable-label>.<pseudo-tld>" — e.g. example.co.uk → root is "example".
+# Kept small and explicit; no external dependency required.
+_PSEUDO_TLDS = frozenset({
+    # United Kingdom
+    "co.uk", "org.uk", "me.uk", "net.uk", "ltd.uk", "plc.uk",
+    "ac.uk", "gov.uk", "sch.uk",
+    # Australia
+    "com.au", "net.au", "org.au", "edu.au", "gov.au", "asn.au",
+    # Japan
+    "co.jp", "ne.jp", "or.jp", "ac.jp", "go.jp", "ed.jp",
+    # New Zealand
+    "co.nz", "org.nz", "net.nz", "govt.nz",
+    # South Africa
+    "co.za", "org.za", "net.za", "gov.za",
+    # Brazil
+    "com.br", "org.br", "net.br", "gov.br", "edu.br",
+    # Argentina
+    "com.ar", "org.ar", "net.ar",
+    # Mexico
+    "com.mx", "org.mx", "net.mx",
+    # India
+    "co.in", "org.in", "net.in", "gov.in",
+    # Hong Kong
+    "com.hk", "org.hk", "net.hk",
+    # Singapore
+    "com.sg", "org.sg", "net.sg",
+    # Malaysia
+    "com.my", "org.my", "net.my",
+    # Philippines
+    "com.ph", "org.ph",
+    # Indonesia
+    "co.id", "or.id",
+    # South Korea
+    "co.kr", "or.kr",
+    # Turkey
+    "com.tr", "org.tr",
+    # Vietnam
+    "com.vn", "org.vn",
+    # Pakistan
+    "com.pk", "org.pk",
+})
+
 
 def derive_domain_root(domain: str) -> str:
     """Return the registrable label of a domain (no TLD, no subdomains).
 
     Handles common messy inputs without crashing on blanks or malformed values.
+    Recognises pseudo-TLDs (co.uk, com.au, co.jp, …) so the registrable label
+    is always one level above the effective TLD.
 
     >>> derive_domain_root("ibm.com")
     'ibm'
@@ -94,6 +139,14 @@ def derive_domain_root(domain: str) -> str:
     'nadara'
     >>> derive_domain_root("http://www.datwyler.com")
     'datwyler'
+    >>> derive_domain_root("example.co.uk")
+    'example'
+    >>> derive_domain_root("www.example.co.uk")
+    'example'
+    >>> derive_domain_root("example.com.au")
+    'example'
+    >>> derive_domain_root("example.co.jp")
+    'example'
     >>> derive_domain_root("")
     ''
     """
@@ -120,9 +173,12 @@ def derive_domain_root(domain: str) -> str:
     if not d:
         return ""
 
-    # Drop subdomains: keep the second-to-last label before the TLD.
-    # This handles www.example.com → example, corporate.ibm.com → ibm, etc.
+    # Drop subdomains: keep the registrable label before the TLD.
+    # For pseudo-TLDs like .co.uk, .com.au, .co.jp the last TWO labels form the
+    # effective TLD, so the registrable label is parts[-3].
     parts = [p for p in d.split(".") if p]
+    if len(parts) >= 3 and ".".join(parts[-2:]) in _PSEUDO_TLDS:
+        return parts[-3]
     if len(parts) >= 2:
         return parts[-2]
     return parts[0] if parts else ""
@@ -183,6 +239,9 @@ def build_simple_hq_query(
 # ---------------------------------------------------------------------------
 
 # ── Location lookup tables (subset extracted from probe app) ─────────────────
+# TODO: future step — move country-specific location rules (_INTL_CITIES,
+#       _COUNTRY_ALIASES, _ITALY_PROVINCE_CODES, _ITALY_*) into a dedicated
+#       lead_country_config.py module so hq_simple_detector stays thin.
 
 _INTL_CITIES: dict[str, tuple[str, str]] = {
     "berlin": ("Berlin", "Germany"), "munich": ("Munich", "Germany"),
@@ -702,6 +761,15 @@ def detect_hq_from_serper_payload(
     # ── Pick best evidence URL ───────────────────────────────────────────────
     best_url = _pick_best_evidence_url(organic, domain)
 
+    # ── Directory-only evidence guard ────────────────────────────────────────
+    # If every organic link is a known directory domain (linkedin, zoominfo, …)
+    # and no non-directory URL could be found, the evidence is untrustworthy.
+    organic_links = [r.get("link", "") for r in organic if r.get("link", "")]
+    all_links_are_dirs = bool(
+        organic_links
+        and all(_is_directory_url(lnk) for lnk in organic_links)
+    )
+
     # ── Domain mismatch guard ────────────────────────────────────────────────
     domain_mismatch = False
     if best_url and input_netloc:
@@ -723,10 +791,14 @@ def detect_hq_from_serper_payload(
 
     needs_review = False
     trust_reason = ""
+    if all_links_are_dirs:
+        confidence = "Low"
+        needs_review = True
+        trust_reason = "directory_only_evidence"
     if domain_mismatch:
         confidence = "Low"
         needs_review = True
-        trust_reason = "unrelated_domain"
+        trust_reason = (trust_reason + ";unrelated_domain") if trust_reason else "unrelated_domain"
     if is_subsidiary:
         confidence = "Low"
         needs_review = True
