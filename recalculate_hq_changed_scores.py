@@ -16,19 +16,6 @@ import io
 import sys
 from typing import Any
 
-# Guard: if accidentally run with `streamlit run`, show a helpful message.
-try:
-    from streamlit.runtime.scriptrunner import get_script_run_ctx as _get_ctx
-    if _get_ctx() is not None:
-        import streamlit as _st
-        _st.error(
-            "This is the command-line backend script. "
-            "Please run `streamlit run hq_score_recalc_app.py` for the browser UI."
-        )
-        _st.stop()
-except Exception:
-    pass
-
 from openpyxl import load_workbook, Workbook
 from openpyxl.styles import Font, PatternFill
 from openpyxl.utils import get_column_letter
@@ -421,5 +408,20 @@ def main() -> None:
     print(f"{'='*72}\n")
 
 
+def _running_under_streamlit() -> bool:
+    try:
+        from streamlit.runtime.scriptrunner import get_script_run_ctx
+        return get_script_run_ctx() is not None
+    except Exception:
+        return False
+
+
 if __name__ == "__main__":
+    if _running_under_streamlit():
+        import streamlit as st
+        st.error(
+            "This is the command-line backend script. "
+            "Please run `streamlit run hq_score_recalc_app.py` for the browser UI."
+        )
+        st.stop()
     main()
