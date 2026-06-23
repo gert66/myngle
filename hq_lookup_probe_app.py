@@ -4040,6 +4040,7 @@ if _app_mode == "probe":
         total = len(input_rows)
         cache: dict = {}
         error_rows: list[str] = []
+        _haiku_calls_counter: list[int] = [0]  # mutable counter shared across rows
 
         for i, row in enumerate(input_rows):
             company = str(row.get(company_col) or "").strip()
