@@ -1650,6 +1650,123 @@ def _correct_country_from_quote(quote: str, detected_country: str) -> str:
     return detected_country
 
 
+# ── Haiku HQ review helper ────────────────────────────────────────────────────
+_HAIKU_MODEL = "claude-3-5-haiku-20241022"
+
+_HAIKU_SYSTEM = (
+    "You are an expert B2B data analyst specialising in corporate ownership structures. "
+    "You receive evidence from a web search about a company's headquarters and must decide "
+    "whether the evidence clearly shows a GENUINE GLOBAL PARENT headquartered in a specific "
+    "foreign country. Answer ONLY with a JSON object — no prose, no markdown fences."
+)
+
+_HAIKU_PROMPT_TMPL = """\
+Company: {company_name}
+Domain: {domain}
+Input country (company registered in): {input_country}
+Detected country from evidence: {detected_country}
+Detected city: {detected_city}
+Evidence URL: {evidence_url}
+Evidence quote (from Serper): {evidence_quote}
+Additional context (answer box / top organic snippets): {context}
+
+Task:
+Decide if the evidence CLEARLY shows that this company has a genuine global parent
+headquartered in {detected_country} (which is different from {input_country}).
+
+Return exactly this JSON (no other text):
+{{
+  "verdict": "score3" | "score0" | "uncertain",
+  "confidence": "High" | "Medium" | "Low",
+  "detected_country_corrected": "<country name or empty string if no correction>",
+  "reason": "<one sentence>"
+}}
+
+Rules:
+- verdict "score3": evidence unambiguously shows a real global/international HQ in a foreign country
+- verdict "score0": evidence is domestic, a branch/subsidiary, biography, directory, or irrelevant
+- verdict "uncertain": evidence is ambiguous; human review needed
+- detected_country_corrected: if evidence actually points to a different country than {detected_country}, put the correct country; otherwise leave empty
+- Do not use web search. Judge only the evidence provided.
+"""
+
+
+def _review_hq_with_haiku(
+    *,
+    company_name: str,
+    domain: str,
+    input_country: str,
+    detected_country: str,
+    detected_city: str,
+    evidence_quote: str,
+    evidence_url: str,
+    answer_box: str = "",
+    organic_titles_snippets: list[str] | None = None,
+    anthropic_key: str,
+) -> dict[str, Any]:
+    """Call Haiku to review uncertain HQ evidence. Returns a result dict with keys:
+    haiku_verdict, haiku_confidence, haiku_country_corrected, haiku_reason,
+    haiku_input_tokens, haiku_output_tokens, haiku_error.
+    Never raises — on any error returns haiku_error with details.
+    """
+    out: dict[str, Any] = {
+        "haiku_verdict": "",
+        "haiku_confidence": "",
+        "haiku_country_corrected": "",
+        "haiku_reason": "",
+        "haiku_input_tokens": 0,
+        "haiku_output_tokens": 0,
+        "haiku_error": "",
+    }
+    if not anthropic_key:
+        out["haiku_error"] = "no_api_key"
+        return out
+
+    context_parts: list[str] = []
+    if answer_box:
+        context_parts.append(f"[answerBox] {answer_box[:300]}")
+    for snip in (organic_titles_snippets or [])[:5]:
+        context_parts.append(snip[:200])
+    context = " | ".join(context_parts) if context_parts else "(none)"
+
+    prompt = _HAIKU_PROMPT_TMPL.format(
+        company_name=company_name or "?",
+        domain=domain or "?",
+        input_country=input_country or "?",
+        detected_country=detected_country or "?",
+        detected_city=detected_city or "?",
+        evidence_url=evidence_url or "",
+        evidence_quote=(evidence_quote or "")[:400],
+        context=context,
+    )
+
+    try:
+        import anthropic as _anthropic_mod
+        _client = _anthropic_mod.Anthropic(api_key=anthropic_key)
+        _msg = _client.messages.create(
+            model=_HAIKU_MODEL,
+            max_tokens=256,
+            system=_HAIKU_SYSTEM,
+            messages=[{"role": "user", "content": prompt}],
+        )
+        raw = (_msg.content[0].text or "").strip()
+        out["haiku_input_tokens"]  = _msg.usage.input_tokens
+        out["haiku_output_tokens"] = _msg.usage.output_tokens
+        # Parse JSON response
+        import json as _json_mod
+        # Strip markdown fences if present
+        _clean = re.sub(r"^```[a-z]*\n?|```$", "", raw, flags=re.M).strip()
+        _parsed = _json_mod.loads(_clean)
+        out["haiku_verdict"]            = str(_parsed.get("verdict", "")).strip()
+        out["haiku_confidence"]         = str(_parsed.get("confidence", "")).strip()
+        out["haiku_country_corrected"]  = str(_parsed.get("detected_country_corrected", "")).strip()
+        out["haiku_reason"]             = str(_parsed.get("reason", "")).strip()
+    except Exception as _he:
+        out["haiku_error"] = str(_he)[:200]
+
+    return out
+
+
 # Text markers that indicate we've entered a "locations list" section
 _LOCATION_SECTION_RE = re.compile(
     r"\b(?:locations?|get\s+directions?|other\s+offices?|all\s+offices?|"
@@ -2272,6 +2389,9 @@ def probe_company(
     use_mimic_check: bool = True,
     run_mode: str = "fast",
     use_simple_hq_mode: bool = True,
+    use_haiku_uncertain: bool = False,
+    haiku_calls_counter: "list[int] | None" = None,
+    haiku_max_calls: int = 25,
 ) -> dict[str, Any]:
     """Run all queries for one company; return probe column dict."""
     import time as _time_mod
@@ -2509,6 +2629,86 @@ def probe_company(
                         input_country=_s_input_std,
                         evidence_url=_s_best_url,
                     )
+                    # ── Optional Haiku review for uncertain score-3 candidates ──
+                    _haiku_used = False
+                    _haiku_result: dict[str, Any] = {}
+                    _haiku_eligible = (
+                        use_haiku_uncertain
+                        and anthropic_key
+                        and _score3_ok           # only when det. logic would say score 3
+                        and not _s_untrusted
+                        and (
+                            _s_conf in ("Medium", "Low")
+                            or not _s_is_official_domain
+                        )
+                        and (haiku_calls_counter is None
+                             or haiku_calls_counter[0] < haiku_max_calls)
+                    )
+                    if _haiku_eligible:
+                        # Gather top organic snippets for context
+                        _hk_snips = [
+                            f"{r.get('title','')} — {r.get('snippet','')}"
+                            for r in _s_org[:5]
+                        ]
+                        _hk_ab = str(_s_data.get("answerBox", {}).get("snippet", "")
+                                     or _s_data.get("answerBox", {}).get("answer", ""))
+                        _haiku_result = _review_hq_with_haiku(
+                            company_name=company_name,
+                            domain=domain,
+                            input_country=_s_input_std,
+                            detected_country=_s_country_std,
+                            detected_city=_s_city,
+                            evidence_quote=_s_quote,
+                            evidence_url=_s_best_url,
+                            answer_box=_hk_ab,
+                            organic_titles_snippets=_hk_snips,
+                            anthropic_key=anthropic_key,
+                        )
+                        if haiku_calls_counter is not None and not _haiku_result.get("haiku_error"):
+                            haiku_calls_counter[0] += 1
+                        _haiku_used = not bool(_haiku_result.get("haiku_error"))
+                        # Apply country correction from Haiku if provided
+                        _hk_cc = (_haiku_result.get("haiku_country_corrected") or "").strip()
+                        if _hk_cc and _hk_cc.lower() not in ("", "none"):
+                            _s_country_std = _std_country(_hk_cc)
+                            result["hq_detected_country"]     = _s_country_std
+                            result["domain_root_hq_country"]  = _s_country_std
+                            result["parent_group_hq_country"] = _s_country_std
+                            # Re-check foreign after Haiku correction
+                            _s_is_foreign = bool(
+                                _s_country_std
+                                and _s_country_std.lower() != _s_input_std.lower()
+                            )
+                        # Override score decision if Haiku is confident
+                        _hk_verdict = _haiku_result.get("haiku_verdict", "")
+                        if _hk_verdict == "score0":
+                            _score3_ok = False
+                            _score3_reason = (
+                                f"haiku_override_score0: {_haiku_result.get('haiku_reason','')}"
+                            )
+                        elif _hk_verdict == "score3":
+                            _score3_ok = True
+                            _score3_reason = ""
+
+                    if _haiku_used:
+                        result["anthropic_hq_review_used"]        = "Yes"
+                        result["anthropic_review_evidence_mode"]  = "serper_evidence_only"
+                        result["anthropic_web_search_used"]       = "No"
+                        result["_anthr_model"]       = _HAIKU_MODEL
+                        result["_anthr_input_tok"]   = _haiku_result.get("haiku_input_tokens", 0)
+                        result["_anthr_output_tok"]  = _haiku_result.get("haiku_output_tokens", 0)
+                        result["_anthr_total_tok"]   = (
+                            _haiku_result.get("haiku_input_tokens", 0)
+                            + _haiku_result.get("haiku_output_tokens", 0)
+                        )
+                        if _haiku_result.get("haiku_error"):
+                            result["anthropic_error"] = _haiku_result["haiku_error"]
+                        result["sig_foreign_hq_review_reason"] = (
+                            result.get("sig_foreign_hq_review_reason", "")
+                            + f" [haiku:{_haiku_result.get('haiku_verdict','')}:"
+                            f"{_haiku_result.get('haiku_reason','')[:80]}]"
+                        )
+
                     if _s_untrusted or not _score3_ok:
                         # Evidence not trusted or fails eligibility — score 0, manual review
                         result["sig_foreign_hq_score_reviewed"] = 0
@@ -3525,8 +3725,26 @@ with st.sidebar:
         help="Calls Claude to adjudicate hq_structure_type for rows with needs_anthropic_hq_review=Yes. Auto-enabled in Deep/Debug mode.",
     )
 
+    use_haiku_uncertain = st.checkbox(
+        "Use Haiku for uncertain HQ cases",
+        value=False,
+        help="Only reviews ambiguous score-3 candidates using existing Serper evidence. No extra web search.",
+        key="use_haiku_uncertain_cb",
+    )
+    haiku_max_calls = 25
+    if use_haiku_uncertain:
+        haiku_max_calls = st.number_input(
+            "Max Haiku calls per run",
+            min_value=1,
+            max_value=200,
+            value=25,
+            step=5,
+            help="Limits total Haiku API calls per batch run.",
+            key="haiku_max_calls_input",
+        )
+
     anthropic_key = ""
-    if use_model or use_anthropic_review:
+    if use_model or use_anthropic_review or use_haiku_uncertain:
         anthropic_key = st.text_input(
             "Anthropic API key",
             value=os.environ.get("ANTHROPIC_API_KEY", ""),
@@ -3620,6 +3838,7 @@ if run_btn:
     total = len(input_rows)
     cache: dict = {}
     error_rows: list[str] = []
+    _haiku_calls_counter: list[int] = [0]  # mutable counter shared across rows
 
     for i, row in enumerate(input_rows):
         company = str(row.get(company_col) or "").strip()
@@ -3643,6 +3862,9 @@ if run_btn:
             use_anthropic_review=use_anthropic_review,
             use_mimic_check=use_mimic_check,
             run_mode=run_mode,
+            use_haiku_uncertain=use_haiku_uncertain,
+            haiku_calls_counter=_haiku_calls_counter,
+            haiku_max_calls=haiku_max_calls,
         )
 
         # Belt-and-suspenders fallback (main guard is inside probe_company).
@@ -3842,6 +4064,9 @@ if _app_mode == "probe":
                 use_mimic_check=use_mimic_check,
                 run_mode=run_mode,
                 use_simple_hq_mode=use_simple_hq_mode,
+                use_haiku_uncertain=use_haiku_uncertain,
+                haiku_calls_counter=_haiku_calls_counter,
+                haiku_max_calls=haiku_max_calls,
             )
 
             # Sanity guard: if detected country == input country, force foreign_hq_simple = False
