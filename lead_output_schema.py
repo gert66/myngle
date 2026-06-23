@@ -17,12 +17,18 @@ class LeadInput:
 class HQDetectionResult:
     hq_detected_country: Optional[str] = None
     hq_detected_city: Optional[str] = None
-    hq_confidence: Optional[str] = None          # e.g. "high", "medium", "low"
+    hq_confidence: Optional[str] = None          # "High" | "Medium" | "Low"
     foreign_hq_simple: Optional[bool] = None
     needs_manual_review: bool = False
     hq_reason: Optional[str] = None
     hq_evidence_url: Optional[str] = None
     hq_evidence_quote: Optional[str] = None
+    # Parser provenance
+    domain_root: Optional[str] = None
+    query_used: Optional[str] = None
+    parser_source: Optional[str] = None          # e.g. "knowledge_graph", "answer_box", "organic_1"
+    # Scoring signal
+    sig_foreign_hq_score_for_next_scoring: Optional[float] = None
 
 
 @dataclass
