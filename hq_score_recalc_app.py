@@ -68,6 +68,21 @@ fast_output = st.checkbox(
          "Uncheck only if you want auto-fitted column widths in the downloaded file.",
 )
 
+_test_mode = st.checkbox(
+    "Test mode (limit eligible rows)",
+    value=False,
+    help="Process only the first N eligible rows. Use to verify output on a small subset.",
+)
+max_eligible_rows = 0
+if _test_mode:
+    max_eligible_rows = st.number_input(
+        "Max eligible rows to recalculate",
+        min_value=1,
+        max_value=9999,
+        value=10,
+        step=1,
+    )
+
 run_btn = st.button(
     "Recalculate HQ-changed scores",
     type="primary",
@@ -92,6 +107,7 @@ if run_btn:
             io.BytesIO(f_hqr.getvalue()),
             sheet_name=sheet_name,
             fast_output=fast_output,
+            max_eligible_rows=int(max_eligible_rows),
         )
         _t1 = time.monotonic()
         _status.write(f"Recalculation done — {_t1 - _t0:.1f}s elapsed")
@@ -149,30 +165,39 @@ if "_recalc_excel_bytes" in st.session_state:
 
         import pandas as pd
 
-        _cols = ["company", "domain", "cfs_before", "cfs_after", "delta"]
+        _cols = [
+            "company",
+            "domain",
+            "score_before_recalc",
+            "score_after_recalc",
+            "score_delta",
+        ]
 
-        top_pos = sorted(deltas, key=lambda x: -x[4])[:20]
-        top_neg = sorted(deltas, key=lambda x:  x[4])[:20]
+        top_pos = sorted([d for d in deltas if d[4] > 0],  key=lambda x: -x[4])[:20]
+        top_neg = sorted([d for d in deltas if d[4] < 0],  key=lambda x:  x[4])[:20]
 
+        _fmt = {"score_before_recalc": "{:.4f}", "score_after_recalc": "{:.4f}", "score_delta": "{:+.4f}"}
         ta, tb = st.columns(2)
         with ta:
-            st.markdown("**Top 20 biggest increases**")
-            st.dataframe(
-                pd.DataFrame(top_pos, columns=_cols).style.format(
-                    {"cfs_before": "{:.4f}", "cfs_after": "{:.4f}", "delta": "{:+.4f}"}
-                ),
-                use_container_width=True,
-                hide_index=True,
-            )
+            st.markdown(f"**Top 20 biggest increases** ({len(top_pos)} rows)")
+            if top_pos:
+                st.dataframe(
+                    pd.DataFrame(top_pos, columns=_cols).style.format(_fmt),
+                    use_container_width=True,
+                    hide_index=True,
+                )
+            else:
+                st.info("No increases found.")
         with tb:
-            st.markdown("**Top 20 biggest decreases**")
-            st.dataframe(
-                pd.DataFrame(top_neg, columns=_cols).style.format(
-                    {"cfs_before": "{:.4f}", "cfs_after": "{:.4f}", "delta": "{:+.4f}"}
-                ),
-                use_container_width=True,
-                hide_index=True,
-            )
+            st.markdown(f"**Top 20 biggest decreases** ({len(top_neg)} rows)")
+            if top_neg:
+                st.dataframe(
+                    pd.DataFrame(top_neg, columns=_cols).style.format(_fmt),
+                    use_container_width=True,
+                    hide_index=True,
+                )
+            else:
+                st.info("No decreases found.")
     else:
         st.info("No rows with HQ score changes found — nothing was recalculated.")
 

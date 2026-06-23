@@ -37,6 +37,7 @@ AUDIT_COLS = [
     "final_commercial_fit_score_before_hq_recalc",
     "final_commercial_fit_score_after_hq_recalc",
     "final_commercial_fit_score_delta_hq_recalc",
+    "cfs_source_col_used",
 ]
 
 
@@ -47,6 +48,23 @@ def _safe_float(v: Any) -> float | None:
         return float(v)
     except Exception:
         return None
+
+
+def _get_existing_commercial_fit_score(row: dict) -> tuple[float, str]:
+    """Return (score, column_name) from the first populated CFS column found."""
+    for col in (
+        "final_commercial_fit_score",
+        "commercial_fit_score",
+        "commercial_fit_score_final",
+        "Commercial Fit Score",
+        "cfs",
+        "score",
+    ):
+        if col in row:
+            v = _safe_float(row.get(col))
+            if v is not None:
+                return v, col
+    return 0.0, ""
 
 
 def _norm_key(s: Any) -> str:
@@ -210,6 +228,7 @@ def recalculate_hq_changed_scores_workbook(
     hq_recovery_workbook_file,
     sheet_name: str = DEFAULT_SHEET,
     fast_output: bool = True,
+    max_eligible_rows: int = 0,
 ) -> tuple[bytes, dict]:
     """Process two workbook file-like objects (or paths) and return
     (excel_bytes, summary_dict).
@@ -285,7 +304,12 @@ def recalculate_hq_changed_scores_workbook(
 
         if eligible:
             n_eligible += 1
-            old_cfs   = _safe_float(row_out.get("final_commercial_fit_score")) or 0.0
+            # Honour test-mode row cap: mark excess rows as skipped
+            if max_eligible_rows > 0 and n_eligible > max_eligible_rows:
+                row_out["hq_recalc_applied"] = "Skipped (test mode limit)"
+                out_rows.append(row_out)
+                continue
+            old_cfs, _cfs_col = _get_existing_commercial_fit_score(row_out)
             old_score = original_val or 0.0
             new_score = reviewed_val if reviewed_val is not None else 0.0
 
@@ -313,6 +337,7 @@ def recalculate_hq_changed_scores_workbook(
                     "final_commercial_fit_score_before_hq_recalc": old_cfs,
                     "final_commercial_fit_score_after_hq_recalc":  new_cfs,
                     "final_commercial_fit_score_delta_hq_recalc":  delta,
+                    "cfs_source_col_used":                        _cfs_col,
                     "sig_foreign_hq_score":                       new_score,
                     "sig_foreign_hq_score_for_next_scoring":      new_score,
                 })
@@ -349,7 +374,8 @@ def recalculate_hq_changed_scores_workbook(
         "n_upgrades":     n_upgrades,
         "n_downgrades":   n_downgrades,
         "n_other":        n_other,
-        "deltas":         deltas,
+        "deltas":              deltas,
+        "max_eligible_rows":   max_eligible_rows,
     }
 
     wb_out = _build_output_wb(out_headers, out_rows, sheet_name, summary, deltas, fast_output=fast_output)
