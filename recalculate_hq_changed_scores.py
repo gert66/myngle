@@ -816,7 +816,189 @@ def _build_output_wb(
 
     ws_sum.column_dimensions["A"].width = 50
     ws_sum.column_dimensions["B"].width = 50
-    return wb_out
+
+    # ── Lovable App Export sheet ───────────────────────────────────────────────
+    lov_stats = _append_lovable_export_sheet(wb_out, out_rows, out_headers)
+
+    # Legend in summary sheet
+    _section("Lovable App Export — row color legend")
+    ws_sum.append(["Light blue  (DDEBF7)", "HQ recalculated"])
+    ws_sum.append(["Light orange (FCE4D6)", "Competitor suppressed"])
+    ws_sum.append(["Light purple (EADCF8)", "Both HQ and competitor applied"])
+
+    _section("Lovable App Export metrics")
+    _add("Lovable App Export columns",            lov_stats["n_cols"])
+    _add("Lovable App Export rows",               lov_stats["n_rows"])
+    _add("HQ-colored rows",                       lov_stats["n_hq"])
+    _add("Competitor-colored rows",               lov_stats["n_comp"])
+    _add("Both-colored rows",                     lov_stats["n_both"])
+
+    return wb_out, lov_stats
+
+
+# ---------------------------------------------------------------------------
+# Lovable App Export helpers
+# ---------------------------------------------------------------------------
+
+LOVABLE_EXPORT_SHEET = "Lovable App Export"
+
+# Ordered column blueprint — only those present in out_headers are written
+_LOVABLE_COL_ORDER = [
+    # Identification
+    "company_name", "name", "domain", "website", "homepage_url",
+    "input_country_used", "country", "city", "employee_range", "industry", "sector",
+    # Score
+    "commercial_fit_score_app", "commercial_tier_app",
+    "final_commercial_fit_score", "commercial_fit_score",
+    "recalc_scope_applied", "app_text_refresh_applied", "app_text_refresh_reason",
+    # Main app-facing text
+    "what_is_hot_app", "what_is_not_app", "why_relevant_app",
+    "caller_angle_app", "call_starter_app", "caution_app",
+    "evidence_summary_app", "key_source_links_app",
+    # Contact / call prep
+    "how_to_contact_app", "contact_angle_app", "sales_action_hint_app", "sales_action_hint",
+    # HQ status
+    "foreign_hq_signal_used_in_app", "foreign_hq_country_app", "foreign_hq_city_app",
+    "sig_foreign_hq_score",
+    "hq_recalc_applied", "hq_recalc_reason",
+    "hq_score_before_recalc", "hq_score_after_recalc",
+    # Competitor status
+    "competitor_signal_used_in_app", "competitor_signal_suppressed",
+    "competitor_signal_used_for_scoring", "competitor_recalc_applied", "competitor_recalc_reason",
+    "competitor_provider_detected", "competitor_attention_provider_detected",
+    "competitor_signal_strength", "competitor_attention_strength",
+    "competitor_signal_excluded_from_next_scoring",
+    # Important signals (explicit, in coefficient order)
+    "sig_foreign_hq_score",      # already above but deduplicated below
+    "sig_explicit_lnd_score", "sig_intl_footprint_score",
+    "sig_employer_branding_score", "sig_lnd_onboarding_score",
+    "ti_onboarding_score", "sig_rapid_growth_score",
+    # Snippets
+    "google_snippet_1", "google_snippet_1_url",
+    "google_snippet_2", "google_snippet_2_url",
+    "google_snippet_3", "google_snippet_3_url",
+    "google_snippet_4", "google_snippet_4_url",
+    "google_snippet_5", "google_snippet_5_url",
+    "google_snippet_6", "google_snippet_6_url",
+    "google_snippet_7", "google_snippet_7_url",
+    "google_snippet_8", "google_snippet_8_url",
+    "google_snippet_9", "google_snippet_9_url",
+    "google_snippet_10", "google_snippet_10_url",
+    # Advanced / audit
+    "advanced_notes_app",
+    "app_text_hq_note_added", "app_text_competitor_note_added",
+    "app_text_conflicting_text_removed",
+]
+
+_FILL_HQ   = PatternFill("solid", fgColor="DDEBF7")   # light blue
+_FILL_COMP = PatternFill("solid", fgColor="FCE4D6")    # light orange
+_FILL_BOTH = PatternFill("solid", fgColor="EADCF8")    # light purple
+_FILL_CELL_CONFLICT = PatternFill("solid", fgColor="FFF2CC")  # yellow — conflict removed
+_FILL_CELL_HQ_YES   = PatternFill("solid", fgColor="E2F0D9")  # green  — HQ used
+_FILL_CELL_COMP_SUP = PatternFill("solid", fgColor="FCE4D6")  # orange — competitor suppressed
+
+
+def _build_lovable_export_headers(all_headers: list[str]) -> list[str]:
+    """Return ordered, deduplicated export columns that exist in all_headers."""
+    present = set(all_headers)
+    seen: set[str] = set()
+    result: list[str] = []
+    # 1. Explicit blueprint columns
+    for col in _LOVABLE_COL_ORDER:
+        if col in present and col not in seen:
+            result.append(col)
+            seen.add(col)
+    # 2. Remaining sig_* / ti_* columns not already included
+    for col in all_headers:
+        if col not in seen and (col.startswith("sig_") or col.startswith("ti_")):
+            result.append(col)
+            seen.add(col)
+    return result
+
+
+def _append_lovable_export_sheet(
+    wb_out: Workbook,
+    out_rows: list[dict],
+    out_headers: list[str],
+) -> dict:
+    """Create the Lovable App Export sheet and return coloring statistics."""
+    lov_headers = _build_lovable_export_headers(out_headers)
+    ws = wb_out.create_sheet(LOVABLE_EXPORT_SHEET)
+
+    _hdr_fill = PatternFill("solid", fgColor="D9EAF7")
+    _hdr_font = Font(bold=True)
+
+    # Header row
+    ws.append(lov_headers)
+    ws.freeze_panes = "A2"
+    ws.auto_filter.ref = ws.dimensions
+    ws.row_dimensions[1].height = 22
+    for cell in ws[1]:
+        cell.font = _hdr_font
+        cell.fill = _hdr_fill
+
+    # Pre-compute column indexes for special cell highlights
+    col_idx = {h: idx + 1 for idx, h in enumerate(lov_headers)}
+    ci_conflict = col_idx.get("app_text_conflicting_text_removed")
+    ci_hq_used  = col_idx.get("foreign_hq_signal_used_in_app")
+    ci_comp_sup = col_idx.get("competitor_signal_suppressed")
+
+    # Column widths — capped at 50
+    _MAX_W = 50
+    _SAMPLE = 30
+    col_widths: dict[int, int] = {
+        i + 1: min(len(str(h)), _MAX_W) for i, h in enumerate(lov_headers)
+    }
+
+    n_hq = n_comp = n_both = 0
+
+    for row_idx, r in enumerate(out_rows, start=2):
+        ws.append([r.get(h) for h in lov_headers])
+
+        hq_yes   = str(r.get("hq_recalc_applied",   "")).strip() == "Yes"
+        comp_yes = str(r.get("competitor_recalc_applied", "")).strip() == "Yes"
+
+        if hq_yes and comp_yes:
+            row_fill = _FILL_BOTH
+            n_both += 1
+        elif hq_yes:
+            row_fill = _FILL_HQ
+            n_hq += 1
+        elif comp_yes:
+            row_fill = _FILL_COMP
+            n_comp += 1
+        else:
+            row_fill = None
+
+        if row_fill is not None:
+            for cell in ws[row_idx]:
+                cell.fill = row_fill
+
+        # Optional cell-level highlights (applied on top of row fill)
+        if ci_conflict and str(r.get("app_text_conflicting_text_removed", "")) == "Yes":
+            ws.cell(row_idx, ci_conflict).fill = _FILL_CELL_CONFLICT
+        if ci_hq_used and str(r.get("foreign_hq_signal_used_in_app", "")) == "Yes":
+            ws.cell(row_idx, ci_hq_used).fill = _FILL_CELL_HQ_YES
+        if ci_comp_sup and str(r.get("competitor_signal_suppressed", "")) == "Yes":
+            ws.cell(row_idx, ci_comp_sup).fill = _FILL_CELL_COMP_SUP
+
+        # Sample-based column width tracking
+        if row_idx <= _SAMPLE + 1:
+            for ci, h in enumerate(lov_headers, start=1):
+                v = r.get(h)
+                if v is not None:
+                    col_widths[ci] = min(max(col_widths[ci], len(str(v))), _MAX_W)
+
+    for ci, width in col_widths.items():
+        ws.column_dimensions[get_column_letter(ci)].width = min(width + 2, _MAX_W)
+
+    return {
+        "n_cols": len(lov_headers),
+        "n_rows": len(out_rows),
+        "n_hq":   n_hq,
+        "n_comp": n_comp,
+        "n_both": n_both,
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -1139,9 +1321,10 @@ def recalculate_hq_changed_scores_workbook(
         "max_recalculated_rows":     _limit,
     }
 
-    wb_out = _build_output_wb(
+    wb_out, lov_stats = _build_output_wb(
         out_headers, out_rows, sheet_name, summary, deltas, fast_output=fast_output
     )
+    summary["lovable_export"] = lov_stats
     buf = io.BytesIO()
     wb_out.save(buf)
     return buf.getvalue(), summary

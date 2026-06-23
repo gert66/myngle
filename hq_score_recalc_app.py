@@ -315,6 +315,18 @@ if summary.get("n_app_text_refreshed", 0) > 0:
     at3.metric("Competitor notes added", summary.get("n_comp_notes", 0))
     at4.metric("Conflicting text rmvd",  summary.get("n_conflict_removed", 0))
 
+# ── Lovable App Export sheet metrics ─────────────────────────────────────────
+_lov = summary.get("lovable_export", {})
+if _lov:
+    st.subheader("Lovable App Export sheet")
+    lv1, lv2, lv3 = st.columns(3)
+    lv1.metric("Columns",              _lov.get("n_cols", 0))
+    lv2.metric("Rows",                 _lov.get("n_rows", 0))
+    lv3.metric("HQ-colored rows",      _lov.get("n_hq", 0))
+    lv4, lv5, _ = st.columns(3)
+    lv4.metric("Competitor-colored",   _lov.get("n_comp", 0))
+    lv5.metric("Both-colored",         _lov.get("n_both", 0))
+
 # ── Score delta tables ────────────────────────────────────────────────────────
 deltas = summary["deltas"]
 if deltas:
