@@ -1,8 +1,14 @@
 """
-Streamlit UI for HQ Score Recalculation.
+Streamlit UI for Score Recalculation.
 
-Recalculates commercial fit scores only for rows where HQ Recovery
-changed sig_foreign_hq_score.
+Supports three modes:
+- HQ changes only
+- Competitor signal removal only
+- Both HQ changes and competitor signal removal
+
+Scoring note: competitor_signal_strength_score and language_competitor_strength_score
+are NOT in LEAN_COEFFICIENTS, so competitor removal does not change
+final_commercial_fit_score directly.
 
 Run with:
     streamlit run hq_score_recalc_app.py
@@ -16,30 +22,37 @@ import streamlit as st
 
 from recalculate_hq_changed_scores import (
     DEFAULT_SHEET,
+    SCOPE_BOTH,
+    SCOPE_COMPETITOR,
+    SCOPE_HQ,
     SCORING_PROFILE,
     recalculate_hq_changed_scores_workbook,
 )
 
+# ---------------------------------------------------------------------------
+# Page config
+# ---------------------------------------------------------------------------
+
 st.set_page_config(
-    page_title="HQ Score Recalculation",
+    page_title="Score Recalculation",
     page_icon="🔁",
     layout="wide",
 )
 
-st.title("🔁 HQ Score Recalculation")
+st.title("🔁 Score Recalculation")
 st.caption(
-    "Recalculates commercial fit scores only for rows where HQ Recovery "
-    "changed `sig_foreign_hq_score`. Uses scoring profile: "
-    f"`{SCORING_PROFILE}`."
+    f"Recalculates commercial fit scores. Scoring profile: `{SCORING_PROFILE}`."
 )
 st.info(
     "**Large workbooks can take several minutes.** "
-    "The app reads both files, recalculates changed HQ rows, and writes a new "
+    "The app reads both files, recalculates eligible rows, and writes a new "
     "Excel workbook before the download appears.",
     icon="⏱",
 )
 
-# ── Inputs ────────────────────────────────────────────────────────────────────
+# ---------------------------------------------------------------------------
+# File uploaders
+# ---------------------------------------------------------------------------
 
 col_a, col_b = st.columns(2)
 with col_a:
@@ -55,45 +68,82 @@ with col_b:
         key="hqr_upload",
     )
 
+# ---------------------------------------------------------------------------
+# Options
+# ---------------------------------------------------------------------------
+
 sheet_name = st.text_input(
     "Sheet name",
     value=DEFAULT_SHEET,
     help="Sheet to read from both workbooks. Falls back to first sheet if not found.",
 )
 
+_SCOPE_LABELS = {
+    "HQ changes only":                              SCOPE_HQ,
+    "Competitor signal removal only":               SCOPE_COMPETITOR,
+    "Both HQ changes and competitor signal removal": SCOPE_BOTH,
+}
+_SCOPE_HELP = {
+    "HQ changes only": (
+        "Recalculates rows where HQ Recovery changed `sig_foreign_hq_score`."
+    ),
+    "Competitor signal removal only": (
+        "Recalculates rows with competitor signal, setting "
+        "`competitor_signal_strength_score` and `language_competitor_strength_score` "
+        "to 0 in the scoring copy.\n\n"
+        "⚠️ Note: these fields are NOT in LEAN_COEFFICIENTS, so "
+        "`final_commercial_fit_score` will not change unless the model is updated."
+    ),
+    "Both HQ changes and competitor signal removal": (
+        "Applies reviewed HQ score where changed AND neutralizes competitor signal. "
+        "`score_company` is called only once per row."
+    ),
+}
+
+scope_label = st.radio(
+    "Recalculation scope",
+    options=list(_SCOPE_LABELS.keys()),
+    index=0,
+    help="Select which rows and signals to recalculate.",
+)
+scope = _SCOPE_LABELS[scope_label]
+st.caption(_SCOPE_HELP[scope_label])
+
 fast_output = st.checkbox(
     "Fast output mode (skip column-width formatting)",
     value=True,
     help="Keeps freeze panes and autofilter but skips column-width calculation. "
-         "Uncheck only if you want auto-fitted column widths in the downloaded file.",
+         "Uncheck only if you want auto-fitted column widths.",
 )
 
 _test_mode = st.checkbox(
-    "Test mode (limit eligible rows)",
+    "Test mode (limit recalculated rows)",
     value=False,
-    help="Process only the first N eligible rows. Use to verify output on a small subset.",
+    help="Process only the first N eligible rows to verify output on a small subset.",
 )
-max_eligible_rows = 0
+max_recalculated_rows = 0
 if _test_mode:
-    max_eligible_rows = st.number_input(
-        "Max eligible rows to recalculate",
-        min_value=1,
-        max_value=9999,
-        value=10,
-        step=1,
-    )
+    max_recalculated_rows = int(st.number_input(
+        "Max recalculated rows",
+        min_value=1, max_value=9999, value=10, step=1,
+    ))
+
+# ---------------------------------------------------------------------------
+# Run button
+# ---------------------------------------------------------------------------
 
 run_btn = st.button(
-    "Recalculate HQ-changed scores",
+    "▶ Recalculate scores",
     type="primary",
     disabled=(f_enriched is None or f_hqr is None),
     key="recalc_run_button",
 )
 
-# ── Run ───────────────────────────────────────────────────────────────────────
+# ---------------------------------------------------------------------------
+# Run
+# ---------------------------------------------------------------------------
 
 if run_btn:
-    # Clear any previous result so the UI is fresh
     for _k in ("_recalc_excel_bytes", "_recalc_summary", "_recalc_filename"):
         st.session_state.pop(_k, None)
 
@@ -101,18 +151,20 @@ if run_btn:
     try:
         _t0 = time.monotonic()
         _status.write(f"Files loaded ✓  ({datetime.now().strftime('%H:%M:%S')})")
+        _status.write(f"Scope: **{scope_label}**  |  Profile: `{SCORING_PROFILE}`")
         _status.write("Running recalculation…")
+
         excel_bytes, summary = recalculate_hq_changed_scores_workbook(
             io.BytesIO(f_enriched.getvalue()),
             io.BytesIO(f_hqr.getvalue()),
             sheet_name=sheet_name,
             fast_output=fast_output,
-            max_eligible_rows=int(max_eligible_rows),
+            max_recalculated_rows=max_recalculated_rows,
+            scope=scope,
         )
         _t1 = time.monotonic()
-        _status.write(f"Recalculation done — {_t1 - _t0:.1f}s elapsed")
+        _status.write(f"Recalculation done — {_t1 - _t0:.1f}s")
         _status.write(f"Output workbook ready — {_t1 - _t0:.1f}s total")
-        _status.write("Done ✓")
         _status.update(label=f"Complete ({_t1 - _t0:.1f}s)", state="complete", expanded=False)
     except Exception as exc:
         _status.update(label="Error", state="error", expanded=True)
@@ -127,86 +179,111 @@ if run_btn:
     enr_stem = f_enriched.name.replace(".xlsx", "")
     st.session_state["_recalc_excel_bytes"] = excel_bytes
     st.session_state["_recalc_summary"]     = summary
-    st.session_state["_recalc_filename"]    = f"{enr_stem}_hq_recalculated_{ts}.xlsx"
+    st.session_state["_recalc_filename"]    = f"{enr_stem}_recalculated_{ts}.xlsx"
 
-# ── Results (persisted in session_state across reruns) ───────────────────────
+# ---------------------------------------------------------------------------
+# Results (persisted in session_state across reruns)
+# ---------------------------------------------------------------------------
 
-if "_recalc_excel_bytes" in st.session_state:
-    excel_bytes = st.session_state["_recalc_excel_bytes"]
-    summary     = st.session_state["_recalc_summary"]
-    out_name    = st.session_state["_recalc_filename"]
+if "_recalc_excel_bytes" not in st.session_state:
+    st.stop()
 
-    # ── Metrics ───────────────────────────────────────────────────────────────
-    st.subheader("Summary")
+excel_bytes = st.session_state["_recalc_excel_bytes"]
+summary     = st.session_state["_recalc_summary"]
+out_name    = st.session_state["_recalc_filename"]
+_scope      = summary.get("scope", SCOPE_HQ)
 
-    m1, m2, m3, m4 = st.columns(4)
-    m1.metric("Enriched rows",         summary["n_enr"])
-    m2.metric("Matched rows",          summary["n_matched"])
-    m3.metric("Eligible (HQ changed)", summary["n_eligible"])
-    m4.metric("Recalculated",          summary["n_recalculated"])
+st.success("Recalculation complete.")
 
-    m5, m6, m7, m8 = st.columns(4)
-    m5.metric("Upgrades 0→3",       summary["n_upgrades"])
-    m6.metric("Downgrades 3→0",     summary["n_downgrades"])
-    m7.metric("Other changes",      summary["n_other"])
-    m8.metric("Unchanged rows",     summary["n_enr"] - summary["n_recalculated"])
+# ── General metrics ───────────────────────────────────────────────────────────
+st.subheader("Summary")
+g1, g2, g3, g4 = st.columns(4)
+g1.metric("Enriched rows",     summary["n_enr"])
+g2.metric("Matched rows",      summary["n_matched"])
+g3.metric("Recalculated",      summary["n_recalculated"])
+g4.metric("Skipped (limit)",   summary["skipped_by_recalc_limit"])
+st.caption(
+    f"Scope: **{scope_label}**  |  "
+    f"Strategy: **{summary['strategy']}**  |  "
+    f"Test mode: {'Yes — limit ' + str(summary['max_recalculated_rows']) if summary['test_mode_active'] else 'No'}"
+)
 
-    st.caption(f"Matching strategy: **{summary['strategy']}**")
+# ── HQ metrics ────────────────────────────────────────────────────────────────
+if _scope in (SCOPE_HQ, SCOPE_BOTH):
+    st.subheader("HQ changes")
+    h1, h2, h3, h4 = st.columns(4)
+    h1.metric("HQ eligible rows",  summary["n_hq_eligible"])
+    h2.metric("Upgrades 0→3",      summary["n_upgrades"])
+    h3.metric("Downgrades 3→0",    summary["n_downgrades"])
+    h4.metric("Other HQ changes",  summary["n_other"])
 
-    # ── Delta tables ──────────────────────────────────────────────────────────
-    deltas = summary["deltas"]
-    if deltas:
-        all_d = [x[4] for x in deltas]
-        st.subheader("Score delta statistics")
-        d1, d2, d3 = st.columns(3)
-        d1.metric("Max increase", f"+{max(all_d):.4f}")
-        d2.metric("Max decrease", f"{min(all_d):.4f}")
-        d3.metric("Mean delta",   f"{sum(all_d)/len(all_d):.4f}")
-
-        import pandas as pd
-
-        _cols = [
-            "company",
-            "domain",
-            "score_before_recalc",
-            "score_after_recalc",
-            "score_delta",
-        ]
-
-        top_pos = sorted([d for d in deltas if d[4] > 0],  key=lambda x: -x[4])[:20]
-        top_neg = sorted([d for d in deltas if d[4] < 0],  key=lambda x:  x[4])[:20]
-
-        _fmt = {"score_before_recalc": "{:.4f}", "score_after_recalc": "{:.4f}", "score_delta": "{:+.4f}"}
-        ta, tb = st.columns(2)
-        with ta:
-            st.markdown(f"**Top 20 biggest increases** ({len(top_pos)} rows)")
-            if top_pos:
-                st.dataframe(
-                    pd.DataFrame(top_pos, columns=_cols).style.format(_fmt),
-                    use_container_width=True,
-                    hide_index=True,
-                )
-            else:
-                st.info("No increases found.")
-        with tb:
-            st.markdown(f"**Top 20 biggest decreases** ({len(top_neg)} rows)")
-            if top_neg:
-                st.dataframe(
-                    pd.DataFrame(top_neg, columns=_cols).style.format(_fmt),
-                    use_container_width=True,
-                    hide_index=True,
-                )
-            else:
-                st.info("No decreases found.")
-    else:
-        st.info("No rows with HQ score changes found — nothing was recalculated.")
-
-    # ── Download ──────────────────────────────────────────────────────────────
-    st.subheader("Download")
-    st.download_button(
-        label=f"⬇ Download {out_name}",
-        data=excel_bytes,
-        file_name=out_name,
-        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-        key="recalc_download_button",
+# ── Competitor metrics ────────────────────────────────────────────────────────
+if _scope in (SCOPE_COMPETITOR, SCOPE_BOTH):
+    st.subheader("Competitor signal removal")
+    c1, c2, c3 = st.columns(3)
+    c1.metric("Competitor rows detected",    summary["n_competitor_detected"])
+    c2.metric("Competitor rows recalculated", summary["n_competitor_recalculated"])
+    c3.metric("Avg signal before (non-zero)", f"{summary['avg_competitor_before']:.4f}")
+    st.caption(
+        "⚠️ `competitor_signal_strength_score` and `language_competitor_strength_score` "
+        "are **not** in LEAN_COEFFICIENTS — setting them to 0 does not change "
+        "`final_commercial_fit_score` unless the model is updated."
     )
+
+# ── Score delta tables ────────────────────────────────────────────────────────
+deltas = summary["deltas"]
+if deltas:
+    all_d = [x[4] for x in deltas]
+    pos_d = [d for d in all_d if d > 0]
+    neg_d = [d for d in all_d if d < 0]
+
+    st.subheader("Score delta statistics")
+    sd1, sd2, sd3 = st.columns(3)
+    sd1.metric("Score increases", len(pos_d))
+    sd2.metric("Score decreases", len(neg_d))
+    sd3.metric("Mean delta",      f"{sum(all_d)/len(all_d):+.4f}")
+
+    import pandas as pd
+
+    _cols = ["company", "domain", "score_before", "score_after", "score_delta"]
+    _fmt  = {"score_before": "{:.4f}", "score_after": "{:.4f}", "score_delta": "{:+.4f}"}
+
+    top_pos = sorted([d for d in deltas if d[4] > 0], key=lambda x: -x[4])[:20]
+    top_neg = sorted([d for d in deltas if d[4] < 0], key=lambda x:  x[4])[:20]
+
+    ta, tb = st.columns(2)
+    with ta:
+        st.markdown(f"**Top 20 biggest increases** ({len(top_pos)} rows)")
+        if top_pos:
+            st.dataframe(
+                pd.DataFrame(top_pos, columns=_cols).style.format(_fmt),
+                use_container_width=True, hide_index=True,
+            )
+        else:
+            st.info("No score increases found.")
+    with tb:
+        st.markdown(f"**Top 20 biggest decreases** ({len(top_neg)} rows)")
+        if top_neg:
+            st.dataframe(
+                pd.DataFrame(top_neg, columns=_cols).style.format(_fmt),
+                use_container_width=True, hide_index=True,
+            )
+        else:
+            st.info("No score decreases found.")
+
+    st.caption(
+        "Score = Commercial Fit Score. "
+        f"Recalculated with scoring profile `{SCORING_PROFILE}`."
+    )
+else:
+    st.info("No rows were recalculated — no score deltas to show.")
+
+# ── Download ──────────────────────────────────────────────────────────────────
+st.subheader("Download")
+st.download_button(
+    label=f"⬇ Download {out_name}",
+    data=excel_bytes,
+    file_name=out_name,
+    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    key="recalc_download_button",
+)
