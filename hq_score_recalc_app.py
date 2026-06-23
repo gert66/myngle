@@ -159,11 +159,72 @@ if run_btn:
         st.session_state.pop(_k, None)
 
     _status = st.status("Running recalculation…", expanded=True)
+
+    # ── Live progress widgets (inside the status container) ───────────────────
+    with _status:
+        _prog_bar   = st.progress(0.0)
+        _prog_text  = st.empty()   # "Processing row X / Y"
+        _eta_text   = st.empty()   # "Elapsed | Remaining | Finish"
+        _met_cols   = st.columns(4)
+        _met_matched    = _met_cols[0].empty()
+        _met_eligible   = _met_cols[1].empty()
+        _met_recalc     = _met_cols[2].empty()
+        _met_skipped    = _met_cols[3].empty()
+
+    _ui_start = time.monotonic()
+
+    def _fmt_duration(seconds: float) -> str:
+        seconds = max(0, int(seconds))
+        h, r = divmod(seconds, 3600)
+        m, s = divmod(r, 60)
+        return f"{h:02d}:{m:02d}:{s:02d}" if h else f"{m:02d}:{s:02d}"
+
+    def _progress_cb(payload: dict) -> None:
+        total   = payload["total_rows"]
+        current = payload["row_index"]
+        frac    = current / total if total > 0 else 0.0
+        elapsed = payload["elapsed_seconds"]
+        recalc  = payload["recalculated_rows"]
+        limit   = payload["limit"]
+
+        _prog_bar.progress(min(frac, 1.0))
+
+        if payload["done"]:
+            _prog_text.markdown(
+                f"**Completed** — {total:,} rows scanned, "
+                f"{recalc:,} recalculated  ✓"
+            )
+        else:
+            limit_note = f"  *(test limit: {limit})*" if limit > 0 else ""
+            _prog_text.markdown(
+                f"Processing row **{current:,}** / {total:,}{limit_note}"
+            )
+
+        # ETA (only meaningful after a few rows)
+        if elapsed > 0 and current > 0 and not payload["done"]:
+            rps       = current / elapsed
+            remaining = (total - current) / rps if rps > 0 else 0
+            finish_dt = datetime.now() + __import__("datetime").timedelta(seconds=remaining)
+            _eta_text.caption(
+                f"Elapsed: {_fmt_duration(elapsed)}  |  "
+                f"Est. remaining: {_fmt_duration(remaining)}  |  "
+                f"Est. finish: {finish_dt.strftime('%H:%M')}"
+            )
+        elif payload["done"]:
+            _eta_text.caption(
+                f"Total elapsed: {_fmt_duration(elapsed)}  |  "
+                f"Finished: {datetime.now().strftime('%H:%M:%S')}"
+            )
+
+        _met_matched.metric("Matched",     payload["matched_rows"])
+        _met_eligible.metric("Eligible",   payload["eligible_rows_seen"])
+        _met_recalc.metric("Recalculated", recalc)
+        _met_skipped.metric("Skipped",     payload["skipped_by_limit"])
+
     try:
         _t0 = time.monotonic()
         _status.write(f"Files loaded ✓  ({datetime.now().strftime('%H:%M:%S')})")
         _status.write(f"Scope: **{scope_label}**  |  Profile: `{SCORING_PROFILE}`")
-        _status.write("Running recalculation…")
 
         excel_bytes, summary = recalculate_hq_changed_scores_workbook(
             io.BytesIO(f_enriched.getvalue()),
@@ -173,9 +234,9 @@ if run_btn:
             max_recalculated_rows=max_recalculated_rows,
             scope=scope,
             refresh_app_text=refresh_app_text,
+            progress_callback=_progress_cb,
         )
         _t1 = time.monotonic()
-        _status.write(f"Recalculation done — {_t1 - _t0:.1f}s")
         _status.write(f"Output workbook ready — {_t1 - _t0:.1f}s total")
         _status.update(label=f"Complete ({_t1 - _t0:.1f}s)", state="complete", expanded=False)
     except Exception as exc:

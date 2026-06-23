@@ -802,12 +802,14 @@ def recalculate_hq_changed_scores_workbook(
     max_recalculated_rows: int = 0,
     scope: str = SCOPE_HQ,
     refresh_app_text: bool = True,
+    progress_callback=None,
 ) -> tuple[bytes, dict]:
     """Process two workbook file-like objects (or paths) and return (excel_bytes, summary).
 
     scope: "hq" | "competitor" | "both"
     max_recalculated_rows: 0 = unlimited
     refresh_app_text: regenerate Lovable app-facing text fields for recalculated rows
+    progress_callback: optional callable(dict) called periodically during the row loop
     """
     if scope not in VALID_SCOPES:
         scope = SCOPE_HQ
@@ -851,6 +853,7 @@ def recalculate_hq_changed_scores_workbook(
                 out_headers.append(c)
 
     # ── Row loop ──────────────────────────────────────────────────────────────
+    import time as _time
     out_rows: list[dict] = []
     n_matched = 0
     n_hq_eligible = n_upgrades = n_downgrades = n_other_hq = 0
@@ -862,6 +865,26 @@ def recalculate_hq_changed_scores_workbook(
     competitor_before_vals: list[float] = []
     competitor_after_vals:  list[float] = []
     deltas: list[tuple[str, str, float, float, float]] = []
+    _total_rows = len(enr_rows)
+    _loop_start = _time.monotonic()
+
+    def _emit_progress(done: bool = False) -> None:
+        if progress_callback is None:
+            return
+        elapsed = _time.monotonic() - _loop_start
+        progress_callback({
+            "phase":              "complete" if done else "processing",
+            "row_index":          i + 1,
+            "total_rows":         _total_rows,
+            "matched_rows":       n_matched,
+            "eligible_rows_seen": n_hq_eligible + n_competitor_detected,
+            "recalculated_rows":  n_recalculated,
+            "skipped_by_limit":   n_skipped_limit,
+            "scope":              scope,
+            "limit":              _limit,
+            "elapsed_seconds":    elapsed,
+            "done":               done,
+        })
 
     for i, enr_row in enumerate(enr_rows):
         row_out = dict(enr_row)
@@ -1040,6 +1063,18 @@ def recalculate_hq_changed_scores_workbook(
             row_out["recalc_scope_applied"]       = f"Error: {exc}"
 
         out_rows.append(row_out)
+
+        # Emit progress: every 100 rows, every recalculated row for the first 20,
+        # and whenever a recalculation just happened (cheap gate).
+        if progress_callback is not None:
+            _just_recalculated = (
+                row_out.get("recalc_scope_applied") not in (None, "No", "Skipped (test row limit)")
+                and not str(row_out.get("recalc_scope_applied", "")).startswith("Error")
+            )
+            if (i % 100 == 0) or (_just_recalculated and n_recalculated <= 20):
+                _emit_progress()
+
+    _emit_progress(done=True)
 
     avg_comp_before = (sum(competitor_before_vals) / len(competitor_before_vals)
                        if competitor_before_vals else 0.0)
