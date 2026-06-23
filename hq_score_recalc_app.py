@@ -116,6 +116,17 @@ fast_output = st.checkbox(
          "Uncheck only if you want auto-fitted column widths.",
 )
 
+refresh_app_text = st.checkbox(
+    "Refresh Lovable app text fields",
+    value=True,
+    key="refresh_app_text_cb",
+    help=(
+        "Regenerates what_is_hot_app, what_is_not_app, evidence_summary_app, "
+        "key_source_links_app, caution_app, advanced_notes_app and related fields "
+        "for recalculated rows."
+    ),
+)
+
 _test_mode = st.checkbox(
     "Test mode (limit recalculated rows)",
     value=False,
@@ -161,6 +172,7 @@ if run_btn:
             fast_output=fast_output,
             max_recalculated_rows=max_recalculated_rows,
             scope=scope,
+            refresh_app_text=refresh_app_text,
         )
         _t1 = time.monotonic()
         _status.write(f"Recalculation done — {_t1 - _t0:.1f}s")
@@ -229,6 +241,15 @@ if _scope in (SCOPE_COMPETITOR, SCOPE_BOTH):
         "are **not** in LEAN_COEFFICIENTS — setting them to 0 does not change "
         "`final_commercial_fit_score` unless the model is updated."
     )
+
+# ── App text metrics ─────────────────────────────────────────────────────────
+if summary.get("n_app_text_refreshed", 0) > 0:
+    st.subheader("Lovable app text refresh")
+    at1, at2, at3, at4 = st.columns(4)
+    at1.metric("App text refreshed",     summary.get("n_app_text_refreshed", 0))
+    at2.metric("HQ notes added",         summary.get("n_hq_notes", 0))
+    at3.metric("Competitor notes added", summary.get("n_comp_notes", 0))
+    at4.metric("Conflicting text rmvd",  summary.get("n_conflict_removed", 0))
 
 # ── Score delta tables ────────────────────────────────────────────────────────
 deltas = summary["deltas"]

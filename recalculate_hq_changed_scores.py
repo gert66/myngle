@@ -152,6 +152,192 @@ def _has_competitor_signal(row: dict) -> bool:
 
 
 # ---------------------------------------------------------------------------
+# App-text refresh helpers
+# ---------------------------------------------------------------------------
+
+import re as _re
+
+APP_TEXT_COLS = [
+    "commercial_fit_score_app",
+    "commercial_tier_app",
+    "what_is_hot_app",
+    "what_is_not_app",
+    "why_relevant_app",
+    "caller_angle_app",
+    "call_starter_app",
+    "caution_app",
+    "evidence_summary_app",
+    "key_source_links_app",
+    "advanced_notes_app",
+    "foreign_hq_signal_used_in_app",
+    "foreign_hq_country_app",
+    "foreign_hq_city_app",
+    "competitor_signal_used_in_app",
+    "app_text_refresh_applied",
+    "app_text_refresh_reason",
+    "app_text_hq_note_added",
+    "app_text_competitor_note_added",
+    "app_text_conflicting_text_removed",
+]
+
+_COMPETITOR_TERMS_RE = _re.compile(
+    r"\b(?:competitor|competing|rivalry|rival|alternative\s+brand|competitive\s+threat)\b",
+    _re.IGNORECASE,
+)
+_FOREIGN_HQ_HOT_RE = _re.compile(
+    r"\b(?:foreign\s+hq|international\s+hq|global\s+hq|headquartered\s+abroad|"
+    r"headquarters?\s+(?:in|based\s+in)|hq\s+in\s+\w+)\b",
+    _re.IGNORECASE,
+)
+
+
+def _v(row: dict, *keys: str) -> str:
+    for k in keys:
+        val = row.get(k)
+        if val is not None and str(val).strip():
+            return str(val).strip()
+    return ""
+
+
+def _build_hot_tags(row: dict, hq_score: float, suppress_competitor: bool) -> list[str]:
+    tags: list[str] = []
+    existing = _v(row, "top_positive_signals", "what_is_hot_app")
+    if existing:
+        for p in [x.strip() for x in existing.split("|") if x.strip()]:
+            if suppress_competitor and _COMPETITOR_TERMS_RE.search(p):
+                continue
+            if not _FOREIGN_HQ_HOT_RE.search(p):
+                tags.append(p)
+    if hq_score and hq_score >= 3:
+        country = _v(row, "sig_foreign_hq_country", "foreign_hq_country_app")
+        hq_tag = f"Foreign HQ: {country}" if country else "Foreign HQ detected"
+        if hq_tag not in tags:
+            tags.append(hq_tag)
+    return tags
+
+
+def _build_not_tags(row: dict, hq_score: float) -> list[str]:
+    existing = _v(row, "gaps_missing_signals", "what_is_not_app")
+    tags = [p.strip() for p in existing.split("|") if p.strip()] if existing else []
+    hq_not_tag = "No foreign HQ signal"
+    if hq_score and hq_score >= 3:
+        tags = [t for t in tags if t != hq_not_tag]
+    elif hq_not_tag not in tags:
+        tags.append(hq_not_tag)
+    return tags
+
+
+def _collect_source_links(row: dict, suppress_competitor: bool, max_links: int = 8) -> str:
+    links: list[str] = []
+    for i in range(1, 6):
+        url = _v(row, f"google_snippet_{i}_url")
+        if url and url not in links:
+            if suppress_competitor and _COMPETITOR_TERMS_RE.search(_v(row, f"google_snippet_{i}")):
+                continue
+            links.append(url)
+        if len(links) >= max_links:
+            break
+    hq_url = _v(row, "sig_foreign_hq_evidence_url")
+    if hq_url and hq_url not in links:
+        links.append(hq_url)
+    return " | ".join(links[:max_links])
+
+
+def _build_evidence_summary(
+    row: dict, hq_score: float, suppress_competitor: bool, hqr_row: dict
+) -> str:
+    parts: list[str] = []
+    base = _v(row, "icp_evidence", "raw_evidence_summary", "evidence_summary_app")
+    if base:
+        if suppress_competitor:
+            sentences = [s.strip() for s in base.split(".") if s.strip()]
+            sentences = [s for s in sentences if not _COMPETITOR_TERMS_RE.search(s)]
+            base = ". ".join(sentences) + ("." if sentences else "")
+        parts.append(base)
+    if hq_score and hq_score >= 3:
+        country = _v(hqr_row, "sig_foreign_hq_country", "detected_country")
+        city    = _v(hqr_row, "sig_foreign_hq_city",    "detected_city")
+        hq_note = "Foreign HQ signal confirmed"
+        if country:
+            hq_note += f": {country}"
+        if city:
+            hq_note += f" ({city})"
+        parts.append(hq_note + ".")
+    return " ".join(parts).strip()
+
+
+def _refresh_app_text(
+    row_out: dict,
+    enr_row: dict,
+    hqr_row: dict,
+    hq_new_score: float,
+    hq_old_score: float,
+    suppress_competitor: bool,
+    score_out: dict,
+) -> dict:
+    """Refresh Lovable app-facing text fields. Returns audit flag dict."""
+    hq_note_added   = False
+    comp_note_added = False
+    conflict_removed = False
+
+    new_cfs = _safe_float(score_out.get("final_commercial_fit_score")) or 0.0
+    row_out["commercial_fit_score_app"] = f"{new_cfs:.4f}"
+    tier = score_out.get("commercial_tier") or _v(row_out, "commercial_tier")
+    row_out["commercial_tier_app"] = str(tier) if tier else ""
+
+    hot_old = _v(row_out, "what_is_hot_app")
+    hot_tags = _build_hot_tags(row_out, hq_new_score, suppress_competitor)
+    if suppress_competitor and _COMPETITOR_TERMS_RE.search(hot_old):
+        conflict_removed = True
+    if hq_new_score >= 3 and hq_new_score != hq_old_score:
+        hq_note_added = True
+    row_out["what_is_hot_app"] = " | ".join(hot_tags)
+    row_out["what_is_not_app"] = " | ".join(_build_not_tags(row_out, hq_new_score))
+    row_out["why_relevant_app"] = _v(enr_row, "icp_why_relevant", "why_relevant_app")
+    row_out["evidence_summary_app"] = _build_evidence_summary(
+        row_out, hq_new_score, suppress_competitor, hqr_row
+    )
+    row_out["key_source_links_app"] = _collect_source_links(row_out, suppress_competitor)
+    row_out["caller_angle_app"]  = _v(enr_row, "caller_angle",      "caller_angle_app")
+    row_out["call_starter_app"]  = _v(enr_row, "icp_buying_signals", "call_starter_app")
+
+    caution = _v(enr_row, "scoring_notes", "caution_app")
+    if suppress_competitor:
+        sentences = [s.strip() for s in caution.split(".") if s.strip()]
+        sentences = [s for s in sentences if not _COMPETITOR_TERMS_RE.search(s)]
+        caution = ". ".join(sentences) + ("." if sentences else "")
+        comp_note_added = True
+    row_out["caution_app"] = caution
+
+    notes_parts: list[str] = []
+    if hq_new_score != hq_old_score:
+        notes_parts.append(
+            f"HQ score updated: {hq_old_score} → {hq_new_score} "
+            f"(country: {_v(hqr_row, 'sig_foreign_hq_country', 'detected_country') or 'unknown'})"
+        )
+    if suppress_competitor:
+        notes_parts.append("Competitor signal suppressed from scoring.")
+    row_out["advanced_notes_app"] = " | ".join(notes_parts)
+
+    row_out["foreign_hq_signal_used_in_app"] = "Yes" if hq_new_score >= 3 else "No"
+    row_out["foreign_hq_country_app"] = (
+        _v(hqr_row, "sig_foreign_hq_country", "detected_country") if hq_new_score >= 3 else ""
+    )
+    row_out["foreign_hq_city_app"] = (
+        _v(hqr_row, "sig_foreign_hq_city", "detected_city") if hq_new_score >= 3 else ""
+    )
+    row_out["competitor_signal_used_in_app"] = (
+        "No" if suppress_competitor else ("Yes" if _has_competitor_signal(enr_row) else "No")
+    )
+
+    return {
+        "hq_note_added":    hq_note_added,
+        "comp_note_added":  comp_note_added,
+        "conflict_removed": conflict_removed,
+    }
+
+
+# ---------------------------------------------------------------------------
 # Excel I/O helpers
 # ---------------------------------------------------------------------------
 
@@ -344,11 +530,13 @@ def recalculate_hq_changed_scores_workbook(
     max_eligible_rows: int = 0,   # kept for backwards compat; alias of max_recalculated_rows
     max_recalculated_rows: int = 0,
     scope: str = SCOPE_HQ,
+    refresh_app_text: bool = True,
 ) -> tuple[bytes, dict]:
     """Process two workbook file-like objects (or paths) and return (excel_bytes, summary).
 
     scope: "hq" | "competitor" | "both"
     max_recalculated_rows: 0 = unlimited
+    refresh_app_text: regenerate Lovable app-facing text fields for recalculated rows
     """
     if scope not in VALID_SCOPES:
         scope = SCOPE_HQ
@@ -383,7 +571,10 @@ def recalculate_hq_changed_scores_workbook(
 
     # ── Build output header list ──────────────────────────────────────────────
     out_headers = list(enr_headers)
-    for cols in (GENERAL_AUDIT_COLS, HQ_AUDIT_COLS, COMPETITOR_AUDIT_COLS, SCORE_OUTPUT_COLS):
+    _extra = (GENERAL_AUDIT_COLS, HQ_AUDIT_COLS, COMPETITOR_AUDIT_COLS, SCORE_OUTPUT_COLS)
+    if refresh_app_text:
+        _extra = _extra + (APP_TEXT_COLS,)
+    for cols in _extra:
         for c in cols:
             if c not in out_headers:
                 out_headers.append(c)
@@ -395,6 +586,7 @@ def recalculate_hq_changed_scores_workbook(
     n_competitor_detected = 0
     n_recalculated = n_skipped_limit = 0
     n_competitor_recalculated = n_competitor_skipped_limit = 0
+    n_app_text_refreshed = n_hq_notes = n_comp_notes = n_conflict_removed = 0
     competitor_before_vals: list[float] = []
     competitor_after_vals:  list[float] = []
     deltas: list[tuple[str, str, float, float, float]] = []
@@ -539,6 +731,30 @@ def recalculate_hq_changed_scores_workbook(
             else:
                 row_out["competitor_recalc_applied"] = "No"
 
+            # ── App-text refresh ──────────────────────────────────────────
+            if refresh_app_text:
+                _hq_new = hq_reviewed_val if hq_eligible and hq_reviewed_val is not None else (hq_original_val or 0.0)
+                _hq_old = hq_original_val or 0.0
+                _flags  = _refresh_app_text(
+                    row_out, enr_row, hqr_row,
+                    hq_new_score=_hq_new,
+                    hq_old_score=_hq_old,
+                    suppress_competitor=competitor_eligible,
+                    score_out=score_out,
+                )
+                row_out["app_text_refresh_applied"] = "Yes"
+                row_out["app_text_refresh_reason"]  = (
+                    ("HQ changed" if hq_eligible else "")
+                    + (" + competitor suppressed" if competitor_eligible else "")
+                ).strip(" +")
+                row_out["app_text_hq_note_added"]            = "Yes" if _flags["hq_note_added"]    else "No"
+                row_out["app_text_competitor_note_added"]    = "Yes" if _flags["comp_note_added"]  else "No"
+                row_out["app_text_conflicting_text_removed"] = "Yes" if _flags["conflict_removed"] else "No"
+                n_app_text_refreshed += 1
+                if _flags["hq_note_added"]:    n_hq_notes      += 1
+                if _flags["comp_note_added"]:  n_comp_notes    += 1
+                if _flags["conflict_removed"]: n_conflict_removed += 1
+
             n_recalculated += 1
             deltas.append((
                 str(enr_row.get("company_name") or enr_row.get("name") or "?"),
@@ -574,6 +790,10 @@ def recalculate_hq_changed_scores_workbook(
         "n_competitor_skipped_limit": n_competitor_skipped_limit,
         "avg_competitor_before":     round(avg_comp_before, 4),
         "avg_competitor_after":      0.0,
+        "n_app_text_refreshed":      n_app_text_refreshed,
+        "n_hq_notes":                n_hq_notes,
+        "n_comp_notes":              n_comp_notes,
+        "n_conflict_removed":        n_conflict_removed,
         "deltas":                    deltas,
         "test_mode_active":          _limit > 0,
         "max_recalculated_rows":     _limit,
