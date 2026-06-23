@@ -224,10 +224,13 @@ st.caption(
 if _scope in (SCOPE_HQ, SCOPE_BOTH):
     st.subheader("HQ changes")
     h1, h2, h3, h4 = st.columns(4)
-    h1.metric("HQ eligible rows",  summary["n_hq_eligible"])
-    h2.metric("Upgrades 0→3",      summary["n_upgrades"])
-    h3.metric("Downgrades 3→0",    summary["n_downgrades"])
-    h4.metric("Other HQ changes",  summary["n_other"])
+    h1.metric("HQ eligible rows",       summary["n_hq_eligible"])
+    h2.metric("HQ rows recalculated",   summary.get("n_hq_recalculated", 0))
+    h3.metric("HQ skipped (limit)",     summary.get("n_hq_skipped_limit", 0))
+    h4.metric("Upgrades 0→3",           summary["n_upgrades"])
+    hh1, hh2 = st.columns(2)
+    hh1.metric("Downgrades 3→0",        summary["n_downgrades"])
+    hh2.metric("Other HQ changes",      summary["n_other"])
 
 # ── Competitor metrics ────────────────────────────────────────────────────────
 if _scope in (SCOPE_COMPETITOR, SCOPE_BOTH):

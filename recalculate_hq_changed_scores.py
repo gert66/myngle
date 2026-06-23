@@ -208,9 +208,22 @@ _COMPETITOR_TERMS_RE = _re.compile(
     r"\b(?:competitor|competing|rivalry|rival|alternative\s+brand|competitive\s+threat)\b",
     _re.IGNORECASE,
 )
+
+# Known language-training competitor / provider names — used when competitor is suppressed
+_COMPETITOR_PROVIDERS_RE = _re.compile(
+    r"\b(?:Berlitz|Speexx|Learnlight|Babbel|Busuu|Rosetta\s+Stone|"
+    r"EF\s+(?:Education|English|Corporate|Language)|Wall\s+Street\s+English|"
+    r"goFLUENT|Preply|Cambly|Duolingo|Pearson(?:\s+English)?|"
+    r"Linguarama|Hult\s+EF|Global\s+LT)\b",
+    _re.IGNORECASE,
+)
+
 _FOREIGN_HQ_CLAIM_RE = _re.compile(
     r"\b(?:foreign\s+hq|international\s+hq|global\s+hq|headquartered\s+abroad|"
-    r"hq\s+(?:in|confirmed|detected)|confirmed\s+(?:foreign|international)\s+hq)\b",
+    r"hq\s+(?:in|confirmed|detected)|confirmed\s+(?:foreign|international)\s+hq|"
+    r"headquarters?\s+(?:in|based\s+in|located\s+in)|"
+    r"parent\s+company\s+(?:is\s+)?(?:located|based|headquartered)|"
+    r"group\s+structure.*foreign|foreign.*group\s+structure)\b",
     _re.IGNORECASE,
 )
 
@@ -231,6 +244,94 @@ def _strip_sentences(text: str, pattern: _re.Pattern) -> tuple[str, bool]:
     clean = [s for s in sentences if not pattern.search(s)]
     changed = len(clean) < len(sentences)
     return ". ".join(clean) + ("." if clean else ""), changed
+
+
+def _remove_suppressed_competitor_claims(text: str) -> tuple[str, bool]:
+    """Remove sentences that mention competitor terms or known provider names.
+
+    Applied to all app-facing commercial fields when competitor is suppressed.
+    Returns (cleaned_text, was_changed).
+    """
+    if not text:
+        return text, False
+    sentences = [s.strip() for s in text.split(".") if s.strip()]
+    clean = [
+        s for s in sentences
+        if not _COMPETITOR_TERMS_RE.search(s) and not _COMPETITOR_PROVIDERS_RE.search(s)
+    ]
+    changed = len(clean) < len(sentences)
+    return ". ".join(clean) + ("." if clean else ""), changed
+
+
+def _remove_unconfirmed_hq_claims(text: str) -> tuple[str, bool]:
+    """Remove sentences that assert a foreign HQ when HQ is not confirmed.
+
+    Preserves neutral group-structure or parent-company mentions that do not
+    imply a confirmed foreign headquarters.
+    Returns (cleaned_text, was_changed).
+    """
+    if not text:
+        return text, False
+    sentences = [s.strip() for s in text.split(".") if s.strip()]
+    clean = [s for s in sentences if not _FOREIGN_HQ_CLAIM_RE.search(s)]
+    changed = len(clean) < len(sentences)
+    return ". ".join(clean) + ("." if clean else ""), changed
+
+
+def _collect_source_links(
+    enr_row: dict,
+    hqr_row: dict,
+    state: dict,
+    max_links: int = 8,
+) -> str:
+    """Collect deduplicated evidence URLs from all available columns."""
+    links: list[str] = []
+
+    def _add(url: str) -> None:
+        url = url.strip()
+        if url and url not in links and len(links) < max_links:
+            links.append(url)
+
+    # HQ evidence URL first when HQ is confirmed
+    if state["foreign_hq_active"] and state["hq_evidence_url"]:
+        _add(state["hq_evidence_url"])
+
+    # Google snippets (up to 10) — skip competitor-tainted ones when suppressed
+    for i in range(1, 11):
+        url = _v(enr_row, f"google_snippet_{i}_url")
+        if not url:
+            continue
+        if state["competitor_suppressed"]:
+            snippet_text = _v(enr_row, f"google_snippet_{i}")
+            if (_COMPETITOR_TERMS_RE.search(snippet_text)
+                    or _COMPETITOR_PROVIDERS_RE.search(snippet_text)):
+                continue
+        _add(url)
+
+    # Additional URL columns from enriched workbook
+    for col in (
+        "sig_foreign_hq_evidence_url",
+        "source_url", "homepage_url",
+        "competitor_evidence_url",
+        "competitor_attention_url",
+        "evidence_url",
+    ):
+        url = _v(enr_row, col)
+        if not url:
+            continue
+        # Skip competitor evidence URLs when suppressed
+        if state["competitor_suppressed"] and col in (
+            "competitor_evidence_url", "competitor_attention_url"
+        ):
+            continue
+        _add(url)
+
+    # HQR evidence URL as fallback
+    hqr_ev = _hqr_evidence_url(hqr_row)
+    if hqr_ev:
+        _add(hqr_ev)
+
+    return " | ".join(links)
 
 
 def _hqr_country(hqr_row: dict) -> str:
@@ -361,7 +462,7 @@ def _build_lovable_app_fields(
     # ── why_relevant_app ──────────────────────────────────────────────────────
     base = _v(enr_row, "icp_why_relevant", "why_relevant_app")
     if state["competitor_suppressed"]:
-        base, chg = _strip_sentences(base, _COMPETITOR_TERMS_RE)
+        base, chg = _remove_suppressed_competitor_claims(base)
         if chg:
             conflict_removed = True
     if state["hq_upgraded"]:
@@ -372,8 +473,8 @@ def _build_lovable_app_fields(
             hq_loc = state["hq_city"]
         prefix = f"Confirmed foreign HQ ({hq_loc}). " if hq_loc else "Confirmed foreign HQ. "
         base = prefix + base if base else prefix.strip()
-    elif state["hq_downgraded"]:
-        base, chg = _strip_sentences(base, _FOREIGN_HQ_CLAIM_RE)
+    elif not state["foreign_hq_active"]:
+        base, chg = _remove_unconfirmed_hq_claims(base)
         if chg:
             conflict_removed = True
     out["why_relevant_app"] = base
@@ -381,7 +482,11 @@ def _build_lovable_app_fields(
     # ── caller_angle_app ──────────────────────────────────────────────────────
     base = _v(enr_row, "caller_angle", "caller_angle_app")
     if state["competitor_suppressed"]:
-        base, chg = _strip_sentences(base, _COMPETITOR_TERMS_RE)
+        base, chg = _remove_suppressed_competitor_claims(base)
+        if chg:
+            conflict_removed = True
+    if not state["foreign_hq_active"]:
+        base, chg = _remove_unconfirmed_hq_claims(base)
         if chg:
             conflict_removed = True
     if state["hq_upgraded"] and state["hq_country"]:
@@ -392,7 +497,11 @@ def _build_lovable_app_fields(
     # ── call_starter_app ──────────────────────────────────────────────────────
     base = _v(enr_row, "icp_buying_signals", "call_starter_app")
     if state["competitor_suppressed"]:
-        base, chg = _strip_sentences(base, _COMPETITOR_TERMS_RE)
+        base, chg = _remove_suppressed_competitor_claims(base)
+        if chg:
+            conflict_removed = True
+    if not state["foreign_hq_active"]:
+        base, chg = _remove_unconfirmed_hq_claims(base)
         if chg:
             conflict_removed = True
     out["call_starter_app"] = base
@@ -400,7 +509,7 @@ def _build_lovable_app_fields(
     # ── caution_app ───────────────────────────────────────────────────────────
     base = _v(enr_row, "scoring_notes", "caution_app")
     if state["competitor_suppressed"]:
-        base, chg = _strip_sentences(base, _COMPETITOR_TERMS_RE)
+        base, chg = _remove_suppressed_competitor_claims(base)
         if chg:
             conflict_removed = True
     if state.get("sig_rapid_growth", 0) > 0:
@@ -412,7 +521,11 @@ def _build_lovable_app_fields(
     # ── evidence_summary_app ──────────────────────────────────────────────────
     base = _v(enr_row, "icp_evidence", "raw_evidence_summary", "evidence_summary_app")
     if state["competitor_suppressed"]:
-        base, chg = _strip_sentences(base, _COMPETITOR_TERMS_RE)
+        base, chg = _remove_suppressed_competitor_claims(base)
+        if chg:
+            conflict_removed = True
+    if not state["foreign_hq_active"]:
+        base, chg = _remove_unconfirmed_hq_claims(base)
         if chg:
             conflict_removed = True
     if state["foreign_hq_active"]:
@@ -427,19 +540,7 @@ def _build_lovable_app_fields(
     out["evidence_summary_app"] = base
 
     # ── key_source_links_app ──────────────────────────────────────────────────
-    links: list[str] = []
-    for i in range(1, 7):
-        url = _v(enr_row, f"google_snippet_{i}_url")
-        if url and url not in links:
-            snippet_text = _v(enr_row, f"google_snippet_{i}")
-            if state["competitor_suppressed"] and _COMPETITOR_TERMS_RE.search(snippet_text):
-                continue
-            links.append(url)
-        if len(links) >= 8:
-            break
-    if state["hq_evidence_url"] and state["hq_evidence_url"] not in links:
-        links.append(state["hq_evidence_url"])
-    out["key_source_links_app"] = " | ".join(links[:8])
+    out["key_source_links_app"] = _collect_source_links(enr_row, hqr_row, state)
 
     # ── advanced_notes_app ────────────────────────────────────────────────────
     notes: list[str] = []
@@ -631,16 +732,18 @@ def _build_output_wb(
 
     if summary.get("scope") in (SCOPE_HQ, SCOPE_BOTH):
         _section("HQ changes")
-        _add("Eligible HQ-changed rows",    summary.get("n_hq_eligible", 0))
-        _add("HQ upgrades  0/blank → 3",    summary.get("n_upgrades", 0))
-        _add("HQ downgrades 3 → 0",         summary.get("n_downgrades", 0))
-        _add("Other HQ numeric changes",    summary.get("n_other", 0))
+        _add("Eligible HQ-changed rows",          summary.get("n_hq_eligible", 0))
+        _add("HQ rows recalculated",              summary.get("n_hq_recalculated", 0))
+        _add("HQ rows skipped by test limit",     summary.get("n_hq_skipped_limit", 0))
+        _add("HQ upgrades  0/blank → 3",          summary.get("n_upgrades", 0))
+        _add("HQ downgrades 3 → 0",               summary.get("n_downgrades", 0))
+        _add("Other HQ numeric changes",          summary.get("n_other", 0))
 
     if summary.get("scope") in (SCOPE_COMPETITOR, SCOPE_BOTH):
         _section("Competitor signal")
         _add("Competitor-signal rows detected",      summary.get("n_competitor_detected", 0))
         _add("Competitor rows recalculated",         summary.get("n_competitor_recalculated", 0))
-        _add("Competitor rows skipped by limit",     summary.get("n_competitor_skipped_limit", 0))
+        _add("Competitor rows skipped by test limit", summary.get("n_competitor_skipped_limit", 0))
         _add("Avg competitor signal before (non-zero rows)",
              round(summary.get("avg_competitor_before", 0.0), 4))
         _add("Avg competitor signal after  (should be 0)",
@@ -751,6 +854,7 @@ def recalculate_hq_changed_scores_workbook(
     out_rows: list[dict] = []
     n_matched = 0
     n_hq_eligible = n_upgrades = n_downgrades = n_other_hq = 0
+    n_hq_recalculated = n_hq_skipped_limit = 0
     n_competitor_detected = 0
     n_recalculated = n_skipped_limit = 0
     n_competitor_recalculated = n_competitor_skipped_limit = 0
@@ -812,7 +916,7 @@ def recalculate_hq_changed_scores_workbook(
             n_skipped_limit += 1
             if hq_eligible:
                 row_out["hq_recalc_applied"] = "No - skipped by test row limit"
-                n_competitor_skipped_limit += 1 if competitor_eligible else 0
+                n_hq_skipped_limit += 1
             if competitor_eligible:
                 row_out["competitor_recalc_applied"] = "No - skipped by test row limit"
                 n_competitor_skipped_limit += 1
@@ -869,6 +973,7 @@ def recalculate_hq_changed_scores_workbook(
                     "sig_foreign_hq_score":                        new_hq,
                     "sig_foreign_hq_score_for_next_scoring":       new_hq,
                 })
+                n_hq_recalculated += 1
                 if old_hq in (0.0, None) and new_hq == 3.0:
                     n_upgrades += 1
                 elif old_hq == 3.0 and new_hq in (0.0, None):
@@ -947,6 +1052,8 @@ def recalculate_hq_changed_scores_workbook(
         "n_hqr":                     len(hqr_rows),
         "n_matched":                 n_matched,
         "n_hq_eligible":             n_hq_eligible,
+        "n_hq_recalculated":         n_hq_recalculated,
+        "n_hq_skipped_limit":        n_hq_skipped_limit,
         "n_competitor_detected":     n_competitor_detected,
         "n_recalculated":            n_recalculated,
         "skipped_by_recalc_limit":   n_skipped_limit,
