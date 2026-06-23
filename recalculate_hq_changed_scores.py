@@ -54,21 +54,36 @@ SCOPE_COMPETITOR = "competitor"
 SCOPE_BOTH       = "both"
 VALID_SCOPES     = (SCOPE_HQ, SCOPE_COMPETITOR, SCOPE_BOTH)
 
-# Competitor numeric fields zeroed in the scoring row copy when
-# competitor removal is active.
+# Numeric fields zeroed in the scoring row copy when competitor removal is active.
 # NOTE: these are NOT in LEAN_COEFFICIENTS, so zeroing them does not
 # change final_commercial_fit_score unless the model is updated.
 _COMPETITOR_NUMERIC_FIELDS = (
     "competitor_signal_strength_score",
     "language_competitor_strength_score",
+    "competitor_signal_strength",
+    "competitor_attention_strength",
 )
 
-# Text/evidence fields used to *detect* competitor signal (not zeroed).
+# Text/evidence fields used to *detect* competitor signal (not zeroed in scoring copy).
 _COMPETITOR_TEXT_FIELDS = (
+    # original columns
     "competitor_customer_match",
     "competitor_customer_evidence",
     "competitor_signal",
     "competitor_mentions",
+    # real workbook columns
+    "competitor_customer_signal",
+    "competitor_provider_detected",
+    "competitor_evidence_url",
+    "competitive_switch_opportunity",
+    "sales_action_hint",
+    "competitor_attention_signal",
+    "competitor_attention_provider_detected",
+    "competitor_attention_type",
+    "competitor_attention_evidence",
+    "competitor_attention_url",
+    "competitor_attention_needs_review",
+    "competitor_signal_excluded_from_next_scoring",
 )
 
 HQ_AUDIT_COLS = [
@@ -115,6 +130,15 @@ def _safe_float(v: Any) -> float | None:
         return float(v)
     except Exception:
         return None
+
+
+def _first_numeric(row: dict, cols: tuple) -> float:
+    """Return the first non-None numeric value from cols, or 0.0."""
+    for col in cols:
+        v = _safe_float(row.get(col))
+        if v is not None:
+            return v
+    return 0.0
 
 
 def _get_existing_commercial_fit_score(row: dict) -> tuple[float, str]:
@@ -715,7 +739,7 @@ def recalculate_hq_changed_scores_workbook(
                 row_out.update({
                     "competitor_recalc_applied":               "Yes",
                     "competitor_recalc_reason":                "Competitor signal neutralized for scoring",
-                    "competitor_signal_before_recalc":         comp_before.get("competitor_signal_strength_score", 0.0),
+                    "competitor_signal_before_recalc":         _first_numeric(comp_before, ("competitor_signal_strength", "competitor_attention_strength", "competitor_signal_strength_score")),
                     "competitor_signal_after_recalc":          0.0,
                     "language_competitor_signal_before_recalc": comp_before.get("language_competitor_strength_score", 0.0),
                     "language_competitor_signal_after_recalc": 0.0,
