@@ -1559,13 +1559,18 @@ _S3_BIO_REJECT_RE = re.compile(
     r"officer|commander|colonel|lieutenant|sergeant|captain|admiral|"
     r"general(?:\s+of)?|born\s+in|graduated|university|professor|physician|"
     r"surgeon|director\s+of\s+(?:the\s+)?(?:national|state)|"
-    r"politician|senator|minister\s+of|secretary\s+of\s+state)\b",
+    r"politician|senator|minister\s+of|secretary\s+of\s+state|"
+    r"linkedin\.com/in/|personal\s+profile|contact\s+page|"
+    r"\bmohd\b|\bhata\b|profile\s+of\b)\b",
     re.IGNORECASE,
 )
 _S3_BRANCH_REJECT_RE = re.compile(
     r"\b(?:branch\s+(?:in|opens?|office|at)|office\s+in|regional\s+office|"
-    r"sales\s+office|service\s+(?:center|centre)|service\s+branch|"
-    r"distribution\s+(?:center|centre)|north\s+america(?:n)?(?:\s+(?:hq|inc\.?|headquarters?))?|"
+    r"sales\s+(?:office|headquarters?|hq)|"
+    r"service\s+(?:center|centre|branch|headquarters?|hq)|"
+    r"sales\s+(?:and\s+service|&\s*service)\s+(?:headquarters?|hq|center|centre)|"
+    r"distribution\s+(?:center|centre)|"
+    r"north\s+america(?:n)?(?:\s+(?:hq|inc\.?|headquarters?))?|"
     r"us[a]?\s+subsidiary|subsidiary|affiliate|"
     r"get\s+directions?|locations\s+primary|primary\s+location)\b"
     r"|Holland,?\s*Michigan|Holland,?\s*MI\b",
@@ -1622,7 +1627,8 @@ _S3_CITY_COUNTRY_CORRECTIONS: list[tuple[re.Pattern, str]] = [
     # Nordic capitals
     (re.compile(r"\bHelsinki\b", re.I), "Finland"),
     (re.compile(r"\bOslo\b", re.I), "Norway"),
-    (re.compile(r"\bCopenhagen|K[øo]benhavn\b", re.I), "Denmark"),
+    (re.compile(r"\bCopenhagen\b|\bK[øo]benhavn\b|\bSmørum\b|\bSmorum\b|\bAarhus\b|\bBrande\b", re.I), "Denmark"),
+    (re.compile(r"\bheadquarters?\s+(?:in\s+)?Denmark\b|\bDenmark\s+headquarters?\b|\bDanish\s+headquarters?\b", re.I), "Denmark"),
     # Italian regions / small cities that the parser mislabels
     (re.compile(r"\bNogara\b|\bVeneto\b.*\bIT\b|\bNaz-?Sciaves\b|\bTrentino(?:-Alto\s+Adige)?\b", re.I), "Italy"),
     (re.compile(r"\bSant[''`]?Agata\s+de\s+Goti\b|\bSavigno\b|\bValsamoggia\b", re.I), "Italy"),
@@ -3259,6 +3265,33 @@ def read_input_from_fileobj(
     return rows
 
 # ---------------------------------------------------------------------------
+# Excel formatting helper
+# ---------------------------------------------------------------------------
+
+_REVIEW_HEADER_FILL = PatternFill("solid", fgColor="D9EAF7")
+_REVIEW_HEADER_FONT = Font(bold=True, color="000000")
+
+
+def _format_excel_sheet_for_review(ws, max_col_width: int = 50) -> None:
+    """Apply freeze, autofilter, bold header, light fill, and sensible column widths."""
+    if ws.max_row < 1 or ws.max_column < 1:
+        return
+    ws.freeze_panes = "A2"
+    ws.auto_filter.ref = ws.dimensions
+    ws.row_dimensions[1].height = 22
+    for cell in ws[1]:
+        cell.font = _REVIEW_HEADER_FONT
+        cell.fill = _REVIEW_HEADER_FILL
+    for col_cells in ws.columns:
+        col_letter = col_cells[0].column_letter
+        max_len = max(
+            (len(str(c.value or "")) for c in col_cells),
+            default=8,
+        )
+        ws.column_dimensions[col_letter].width = min(max_len + 2, max_col_width)
+
+
+# ---------------------------------------------------------------------------
 # Output builder
 # ---------------------------------------------------------------------------
 
@@ -4594,7 +4627,7 @@ elif _app_mode == "recovery":
                 if col_name in _new_col_set and val not in ("", None):
                     cell.fill = _new_fill
 
-        ws.freeze_panes = "A2"
+        ws.auto_filter.ref = ws.dimensions
 
         # ── Sheet 2: Run Summary ────────────────────────────────────────────
         ws2 = wb.create_sheet("Recovery Run Summary")

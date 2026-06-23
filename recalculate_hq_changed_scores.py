@@ -17,7 +17,7 @@ import sys
 from typing import Any
 
 from openpyxl import load_workbook, Workbook
-from openpyxl.styles import Font
+from openpyxl.styles import Font, PatternFill
 
 from commercial_fit_scoring import SCORE_OUTPUT_COLS, score_company
 
@@ -121,6 +121,9 @@ def _build_output_wb(
     summary: dict,
     deltas: list[tuple],
 ) -> Workbook:
+    _hdr_fill = PatternFill("solid", fgColor="D9EAF7")
+    _hdr_font = Font(bold=True)
+
     wb_out = Workbook()
     ws_data = wb_out.active
     ws_data.title = sheet_name
@@ -128,6 +131,15 @@ def _build_output_wb(
     for r in out_rows:
         ws_data.append([r.get(h) for h in out_headers])
     ws_data.freeze_panes = "A2"
+    ws_data.auto_filter.ref = ws_data.dimensions
+    ws_data.row_dimensions[1].height = 22
+    for cell in ws_data[1]:
+        cell.font = _hdr_font
+        cell.fill = _hdr_fill
+    for col_cells in ws_data.columns:
+        col_letter = col_cells[0].column_letter
+        max_len = max((len(str(c.value or "")) for c in col_cells), default=8)
+        ws_data.column_dimensions[col_letter].width = min(max_len + 2, 50)
 
     ws_sum = wb_out.create_sheet(SUMMARY_SHEET)
     bold = Font(bold=True)
