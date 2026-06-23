@@ -2397,7 +2397,7 @@ def probe_company(
     use_simple_hq_mode: bool = True,
     use_haiku_uncertain: bool = False,
     haiku_calls_counter: "list[int] | None" = None,
-    haiku_max_calls: int = 25,
+    haiku_max_calls: "int | None" = None,
 ) -> dict[str, Any]:
     """Run all queries for one company; return probe column dict."""
     import time as _time_mod
@@ -2648,6 +2648,7 @@ def probe_company(
                             or not _s_is_official_domain
                         )
                         and (haiku_calls_counter is None
+                             or haiku_max_calls is None
                              or haiku_calls_counter[0] < haiku_max_calls)
                     )
                     if _haiku_eligible:
@@ -3690,7 +3691,15 @@ with st.sidebar:
 
     st.header("Options")
 
-    limit = st.number_input("Row limit", min_value=1, max_value=2000, value=50, step=50)
+    limit_raw = st.number_input(
+        "Row limit",
+        min_value=0,
+        max_value=10000,
+        value=0,
+        step=50,
+        help="Maximum rows to process in HQ Recovery. 0 = unlimited / process all selected rows.",
+    )
+    limit = None if int(limit_raw or 0) == 0 else int(limit_raw)
 
     only_fhq_signal = st.checkbox(
         "Only rows with old foreign HQ signal",
@@ -3764,17 +3773,18 @@ with st.sidebar:
         help="Only reviews ambiguous score-3 candidates using existing Serper evidence. No extra web search.",
         key="use_haiku_uncertain_cb",
     )
-    haiku_max_calls = 25
+    haiku_max_calls = None  # None = unlimited
     if use_haiku_uncertain:
-        haiku_max_calls = st.number_input(
+        haiku_max_raw = st.number_input(
             "Max Haiku calls per run",
-            min_value=1,
-            max_value=200,
-            value=25,
-            step=5,
-            help="Limits total Haiku API calls per batch run.",
+            min_value=0,
+            max_value=10000,
+            value=0,
+            step=25,
+            help="Maximum Haiku API calls per batch run. 0 = unlimited.",
             key="haiku_max_calls_input",
         )
+        haiku_max_calls = None if int(haiku_max_raw or 0) == 0 else int(haiku_max_raw)
 
     anthropic_key = ""
     if use_model or use_anthropic_review or use_haiku_uncertain:
@@ -3798,7 +3808,7 @@ st.markdown(
     f"**Mode: {_mode_label}** — up to **{_mode_max} Serper calls/row**"
     + (", + 1 website fetch for multilingual detection" if use_multilingual_check else "")
     + (", + Anthropic review for ambiguous rows" if use_anthropic_review else "")
-    + f". With limit={int(limit)}, that is up to **{int(limit) * _mode_max:,} Serper calls**."
+    + f". With limit={( limit if limit is not None else 50000)}, that is up to **{( limit if limit is not None else 50000) * _mode_max:,} Serper calls**."
     + (" Early stopping is active: rows with clear official HQ evidence skip further queries." if run_mode == "fast" else "")
 )
 
@@ -3813,12 +3823,12 @@ if run_btn:
             if file_source == "upload":
                 uploaded_file.seek(0)
                 input_rows = read_input_from_fileobj(
-                    uploaded_file, file_suffix, limit=int(limit), sheet_name=selected_sheet,
+                    uploaded_file, file_suffix, limit=( limit if limit is not None else 50000), sheet_name=selected_sheet,
                 )
             else:
                 with open(local_path_str.strip(), "rb") as f:
                     input_rows = read_input_from_fileobj(
-                        f, file_suffix, limit=int(limit), sheet_name=selected_sheet,
+                        f, file_suffix, limit=( limit if limit is not None else 50000), sheet_name=selected_sheet,
                     )
         except Exception as exc:
             st.error(f"Failed to read input: {exc}")
@@ -3944,7 +3954,7 @@ if run_btn:
         "use_model":              use_model,
         "model":                  "claude-haiku-4-5-20251001" if (use_model or use_anthropic_review) else "",
         "serper_available":       bool(serper_key),
-        "limit":                  int(limit),
+        "limit":                  ( limit if limit is not None else 50000),
         "use_multilingual_check": use_multilingual_check,
         "use_anthropic_review":   use_anthropic_review,
         "use_mimic_check":        use_mimic_check,
@@ -3993,14 +4003,14 @@ if _app_mode == "probe":
         st.warning("Simple mode uses 1 Serper call per row when a domain is present.")
         st.markdown(
             f"**Simple HQ mode** — 1 Serper call/row (domain-root query). "
-            f"With limit={int(limit)}, that is up to **{int(limit):,} Serper calls**."
+            f"With limit={( limit if limit is not None else 50000)}, that is up to **{( limit if limit is not None else 50000):,} Serper calls**."
         )
     else:
         st.markdown(
             f"**Mode: {_mode_label}** — up to **{_mode_max} Serper calls/row**"
             + (", + 1 website fetch for multilingual detection" if use_multilingual_check else "")
             + (", + Anthropic review for ambiguous rows" if use_anthropic_review else "")
-            + f". With limit={int(limit)}, that is up to **{int(limit) * _mode_max:,} Serper calls**."
+            + f". With limit={( limit if limit is not None else 50000)}, that is up to **{( limit if limit is not None else 50000) * _mode_max:,} Serper calls**."
             + (" Early stopping is active: rows with clear official HQ evidence skip further queries." if run_mode == "fast" else "")
         )
 
@@ -4015,12 +4025,12 @@ if _app_mode == "probe":
                 if file_source == "upload":
                     uploaded_file.seek(0)
                     input_rows = read_input_from_fileobj(
-                        uploaded_file, file_suffix, limit=int(limit), sheet_name=selected_sheet,
+                        uploaded_file, file_suffix, limit=( limit if limit is not None else 50000), sheet_name=selected_sheet,
                     )
                 else:
                     with open(local_path_str.strip(), "rb") as f:
                         input_rows = read_input_from_fileobj(
-                            f, file_suffix, limit=int(limit), sheet_name=selected_sheet,
+                            f, file_suffix, limit=( limit if limit is not None else 50000), sheet_name=selected_sheet,
                         )
             except Exception as exc:
                 st.error(f"Failed to read input: {exc}")
@@ -4145,7 +4155,7 @@ if _app_mode == "probe":
             "use_model":              use_model,
             "model":                  "claude-haiku-4-5-20251001" if (use_model or use_anthropic_review) else "",
             "serper_available":       bool(serper_key),
-            "limit":                  int(limit),
+            "limit":                  ( limit if limit is not None else 50000),
             "use_multilingual_check": use_multilingual_check,
             "use_anthropic_review":   use_anthropic_review,
             "use_mimic_check":        use_mimic_check,
@@ -4259,9 +4269,9 @@ elif _app_mode == "recovery":
     _rec_selected_idx    = sorted(set(_rec_sanitized_idx) | set(_rec_highscore_idx))
     _rec_selected_full   = len(_rec_selected_idx)
 
-    # Apply row limit (uses the same sidebar `limit` variable as the probe tab)
-    _rec_row_limit = int(limit) if limit and int(limit) > 0 else 0
-    if _rec_row_limit > 0:
+    # Apply row limit (limit is None = unlimited, or a positive int)
+    _rec_row_limit = limit  # None or positive int
+    if _rec_row_limit:
         _rec_to_process_idx = _rec_selected_idx[:_rec_row_limit]
     else:
         _rec_to_process_idx = _rec_selected_idx
@@ -4280,10 +4290,10 @@ elif _app_mode == "recovery":
     _rc6.metric("Skipped by row limit",     len(_rec_skipped_idx))
     _rc7.metric("Rows left unchanged",      len(_rec_unchanged_idx))
 
-    if _rec_row_limit > 0 and _rec_selected_full > _rec_row_limit:
+    if _rec_row_limit and _rec_selected_full > _rec_row_limit:
         st.caption(
             f"Row limit {_rec_row_limit} applied — processing first {len(_rec_to_process_idx)} "
-            f"of {_rec_selected_full} selected rows. Adjust 'Row limit' in the sidebar to change."
+            f"of {_rec_selected_full} selected rows. Set 'Row limit' to 0 in the sidebar for unlimited."
         )
 
     if not _rec_to_process_idx:
