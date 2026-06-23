@@ -205,7 +205,15 @@ APP_TEXT_COLS = [
 ]
 
 _COMPETITOR_TERMS_RE = _re.compile(
-    r"\b(?:competitor|competing|rivalry|rival|alternative\s+brand|competitive\s+threat)\b",
+    r"\b(?:"
+    r"competitor|competing|rivalry|rival|alternative\s+brand|competitive\s+threat|"
+    r"competitive\s+switch(?:\s+opportunity)?|"
+    r"competitive\s+pressure|"
+    r"competitor\s+signal|competitor\s+provider|"
+    r"already\s+buys?\s+(?:the\s+)?language\s+training(?:\s+category)?|"
+    r"language\s+training\s+category\s+buyer|"
+    r"treat\s+as\s+a\s+competitive\s+switch\s+opportunity"
+    r")\b",
     _re.IGNORECASE,
 )
 
@@ -219,11 +227,20 @@ _COMPETITOR_PROVIDERS_RE = _re.compile(
 )
 
 _FOREIGN_HQ_CLAIM_RE = _re.compile(
-    r"\b(?:foreign\s+hq|international\s+hq|global\s+hq|headquartered\s+abroad|"
-    r"hq\s+(?:in|confirmed|detected)|confirmed\s+(?:foreign|international)\s+hq|"
+    r"\b(?:"
+    r"foreign\s+hq|"
+    r"foreign\s+headquarters(?:\s+or\s+group\s+ownership)?|"
+    r"foreign\s+headquarters[/\\]parent\s+company|"
+    r"foreign\s+parent\s+company|"
+    r"foreign\s+group\s+ownership|"
+    r"international\s+hq|global\s+hq|"
+    r"headquartered\s+abroad|"
+    r"hq\s+(?:in|confirmed|detected)|"
+    r"confirmed\s+(?:foreign|international)\s+hq|"
     r"headquarters?\s+(?:in|based\s+in|located\s+in)|"
     r"parent\s+company\s+(?:is\s+)?(?:located|based|headquartered)|"
-    r"group\s+structure.*foreign|foreign.*group\s+structure)\b",
+    r"group\s+structure.*foreign|foreign.*group\s+structure"
+    r")\b",
     _re.IGNORECASE,
 )
 
@@ -246,36 +263,49 @@ def _strip_sentences(text: str, pattern: _re.Pattern) -> tuple[str, bool]:
     return ". ".join(clean) + ("." if clean else ""), changed
 
 
-def _remove_suppressed_competitor_claims(text: str) -> tuple[str, bool]:
-    """Remove sentences that mention competitor terms or known provider names.
+def _clean_pipe_or_sentence(text: str, *patterns: _re.Pattern) -> tuple[str, bool]:
+    """Remove items from pipe-separated OR sentence-separated text matching any pattern.
 
-    Applied to all app-facing commercial fields when competitor is suppressed.
+    Handles both "tag1 | tag2 | tag3" and "Sentence one. Sentence two." formats.
     Returns (cleaned_text, was_changed).
     """
     if not text:
         return text, False
+
+    def _matches(s: str) -> bool:
+        return any(p.search(s) for p in patterns)
+
+    # Pipe-separated (what_is_hot_app / what_is_not_app style)
+    if "|" in text:
+        parts = [p.strip() for p in text.split("|")]
+        clean = [p for p in parts if p and not _matches(p)]
+        changed = len(clean) < len([p for p in parts if p])
+        return " | ".join(clean), changed
+
+    # Sentence-separated
     sentences = [s.strip() for s in text.split(".") if s.strip()]
-    clean = [
-        s for s in sentences
-        if not _COMPETITOR_TERMS_RE.search(s) and not _COMPETITOR_PROVIDERS_RE.search(s)
-    ]
+    clean = [s for s in sentences if not _matches(s)]
     changed = len(clean) < len(sentences)
     return ". ".join(clean) + ("." if clean else ""), changed
 
 
+def _remove_suppressed_competitor_claims(text: str) -> tuple[str, bool]:
+    """Remove items/sentences that mention competitor terms or known provider names.
+
+    Applied to all app-facing commercial fields when competitor is suppressed.
+    Returns (cleaned_text, was_changed).
+    """
+    return _clean_pipe_or_sentence(text, _COMPETITOR_TERMS_RE, _COMPETITOR_PROVIDERS_RE)
+
+
 def _remove_unconfirmed_hq_claims(text: str) -> tuple[str, bool]:
-    """Remove sentences that assert a foreign HQ when HQ is not confirmed.
+    """Remove items/sentences that assert a foreign HQ when HQ is not confirmed.
 
     Preserves neutral group-structure or parent-company mentions that do not
     imply a confirmed foreign headquarters.
     Returns (cleaned_text, was_changed).
     """
-    if not text:
-        return text, False
-    sentences = [s.strip() for s in text.split(".") if s.strip()]
-    clean = [s for s in sentences if not _FOREIGN_HQ_CLAIM_RE.search(s)]
-    changed = len(clean) < len(sentences)
-    return ". ".join(clean) + ("." if clean else ""), changed
+    return _clean_pipe_or_sentence(text, _FOREIGN_HQ_CLAIM_RE)
 
 
 def _collect_source_links(
