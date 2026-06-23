@@ -16,6 +16,19 @@ import io
 import sys
 from typing import Any
 
+# Guard: if accidentally run with `streamlit run`, show a helpful message.
+try:
+    from streamlit.runtime.scriptrunner import get_script_run_ctx as _get_ctx
+    if _get_ctx() is not None:
+        import streamlit as _st
+        _st.error(
+            "This is the command-line backend script. "
+            "Please run `streamlit run hq_score_recalc_app.py` for the browser UI."
+        )
+        _st.stop()
+except Exception:
+    pass
+
 from openpyxl import load_workbook, Workbook
 from openpyxl.styles import Font, PatternFill
 from openpyxl.utils import get_column_letter
@@ -121,6 +134,7 @@ def _build_output_wb(
     sheet_name: str,
     summary: dict,
     deltas: list[tuple],
+    fast_output: bool = True,
 ) -> Workbook:
     _hdr_fill = PatternFill("solid", fgColor="D9EAF7")
     _hdr_font = Font(bold=True)
@@ -137,9 +151,9 @@ def _build_output_wb(
     for cell in ws_data[1]:
         cell.font = _hdr_font
         cell.fill = _hdr_fill
-    _MAX_WIDTH = 50
-    _SAMPLE_ROWS = 25
-    if ws_data.max_column <= 250:
+    if not fast_output and ws_data.max_column <= 250:
+        _MAX_WIDTH = 50
+        _SAMPLE_ROWS = 25
         for col_idx in range(1, ws_data.max_column + 1):
             header = ws_data.cell(row=1, column=col_idx).value
             max_len = len(str(header or ""))
@@ -208,6 +222,7 @@ def recalculate_hq_changed_scores_workbook(
     enriched_workbook_file,
     hq_recovery_workbook_file,
     sheet_name: str = DEFAULT_SHEET,
+    fast_output: bool = True,
 ) -> tuple[bytes, dict]:
     """Process two workbook file-like objects (or paths) and return
     (excel_bytes, summary_dict).
@@ -350,7 +365,7 @@ def recalculate_hq_changed_scores_workbook(
         "deltas":         deltas,
     }
 
-    wb_out = _build_output_wb(out_headers, out_rows, sheet_name, summary, deltas)
+    wb_out = _build_output_wb(out_headers, out_rows, sheet_name, summary, deltas, fast_output=fast_output)
     buf = io.BytesIO()
     wb_out.save(buf)
     return buf.getvalue(), summary

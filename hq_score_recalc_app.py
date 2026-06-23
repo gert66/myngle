@@ -9,6 +9,7 @@ Run with:
 """
 
 import io
+import time
 from datetime import datetime
 
 import streamlit as st
@@ -30,6 +31,12 @@ st.caption(
     "Recalculates commercial fit scores only for rows where HQ Recovery "
     "changed `sig_foreign_hq_score`. Uses scoring profile: "
     f"`{SCORING_PROFILE}`."
+)
+st.info(
+    "**Large workbooks can take several minutes.** "
+    "The app reads both files, recalculates changed HQ rows, and writes a new "
+    "Excel workbook before the download appears.",
+    icon="⏱",
 )
 
 # ── Inputs ────────────────────────────────────────────────────────────────────
@@ -54,6 +61,13 @@ sheet_name = st.text_input(
     help="Sheet to read from both workbooks. Falls back to first sheet if not found.",
 )
 
+fast_output = st.checkbox(
+    "Fast output mode (skip column-width formatting)",
+    value=True,
+    help="Keeps freeze panes and autofilter but skips column-width calculation. "
+         "Uncheck only if you want auto-fitted column widths in the downloaded file.",
+)
+
 run_btn = st.button(
     "Recalculate HQ-changed scores",
     type="primary",
@@ -70,16 +84,20 @@ if run_btn:
 
     _status = st.status("Running recalculation…", expanded=True)
     try:
-        _status.write("Files loaded ✓")
+        _t0 = time.monotonic()
+        _status.write(f"Files loaded ✓  ({datetime.now().strftime('%H:%M:%S')})")
         _status.write("Running recalculation…")
         excel_bytes, summary = recalculate_hq_changed_scores_workbook(
             io.BytesIO(f_enriched.getvalue()),
             io.BytesIO(f_hqr.getvalue()),
             sheet_name=sheet_name,
+            fast_output=fast_output,
         )
-        _status.write("Building output workbook ✓")
+        _t1 = time.monotonic()
+        _status.write(f"Recalculation done — {_t1 - _t0:.1f}s elapsed")
+        _status.write(f"Output workbook ready — {_t1 - _t0:.1f}s total")
         _status.write("Done ✓")
-        _status.update(label="Recalculation complete", state="complete", expanded=False)
+        _status.update(label=f"Complete ({_t1 - _t0:.1f}s)", state="complete", expanded=False)
     except Exception as exc:
         _status.update(label="Error", state="error", expanded=True)
         st.error(f"Unexpected error: {exc}")
