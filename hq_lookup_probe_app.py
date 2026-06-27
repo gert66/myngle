@@ -210,6 +210,18 @@ PROBE_COLS = [
     "ai_hq_reason",
     "ai_hq_error",
     "ai_hq_raw_json",
+    # Location parser debug columns
+    "location_parser_raw_capture",
+    "location_parser_country_before_correction",
+    "location_parser_country_after_correction",
+    "location_parser_rule_fired",
+    # AI call audit columns
+    "ai_call_attempted",
+    "ai_call_success",
+    # Domain mismatch debug columns
+    "input_domain_body",
+    "evidence_domain_body",
+    "domain_mismatch_type",
     # HQ Recovery workflow columns
     "hq_recovery_selected",
     "hq_recovery_selection_reason",
@@ -590,30 +602,86 @@ _HIGH_INTL_COLS = [
 # Core location / country resolution
 # ---------------------------------------------------------------------------
 
-def _resolve_city_country(text: str) -> tuple[str, str]:
-    """Given a location string, identify city and country. Returns ("", "") if unrecognised."""
+def _has_italian_context(text: str) -> bool:
+    """Return True only when text contains real Italian context beyond a bare 5-digit number."""
+    text_lc = text.lower()
+    if "italy" in text_lc or "italia" in text_lc or "italian" in text_lc:
+        return True
+    for alias in _ITALY_CITIES:
+        if alias in text_lc:
+            return True
+    m = _PROVINCE_CODE_RE.search(text)
+    if m and m.group(1) in _ITALY_PROVINCE_CODES:
+        return True
+    if _ITALIAN_FISCAL_RE.search(text):
+        return True
+    for phrase in _ITALIAN_ADDR_PHRASES:
+        if phrase in text_lc:
+            return True
+    return False
+
+
+def _resolve_city_country(text: str, _debug: "dict | None" = None) -> tuple[str, str]:
+    """Given a location string, identify city and country. Returns ("", "") if unrecognised.
+
+    Priority order (highest wins):
+    1. Explicit international country aliases (United States, USA, Switzerland, …)
+    2. International city lookup (_INTL_CITIES)
+    3. Italian city lookup (_ITALY_CITIES)
+    4. Italian province code
+    5. Italian fiscal / address phrases
+    6. Italian CAP (5-digit) — only when Italian context is present in the same text
+    """
     text_lc = text.lower().strip(" ,.")
+
+    def _dbg(rule: str, city: str, country: str) -> tuple[str, str]:
+        if _debug is not None:
+            _debug["rule"] = rule
+            _debug["city"] = city
+            _debug["country"] = country
+        return city, country
+
+    # ── 1. Explicit international country alias (highest priority) ────────────
+    # Check full country names first so "United States" beats "state" fragments.
+    _sorted_aliases = sorted(_COUNTRY_ALIASES.items(), key=lambda kv: -len(kv[0]))
+    for alias, country in _sorted_aliases:
+        if alias in text_lc:
+            # Don't let a two-letter ISO code like "it" or "de" fire alone —
+            # require it to be a word boundary match or part of a well-known phrase.
+            if len(alias) <= 2:
+                import re as _re2
+                if not _re2.search(r"\b" + re.escape(alias) + r"\b", text_lc):
+                    continue
+            return _dbg(f"country_alias:{alias}", "", country)
+
+    # ── 2. International cities ───────────────────────────────────────────────
+    for alias, (city, country) in _INTL_CITIES.items():
+        if alias in text_lc:
+            return _dbg(f"intl_city:{alias}", city, country)
+
+    # ── 3. Italian cities ─────────────────────────────────────────────────────
     for alias, (city, country) in _ITALY_CITIES.items():
         if alias in text_lc:
-            return city, country
+            return _dbg(f"italy_city:{alias}", city, country)
+
+    # ── 4. Italian province code ──────────────────────────────────────────────
     for m in _PROVINCE_CODE_RE.finditer(text):
         code = m.group(1)
         if code in _ITALY_PROVINCE_CODES:
-            return _ITALY_PROVINCE_CODES[code]
-    if _ITALIAN_CAP_RE.search(text):
-        return "", "Italy"
+            return _dbg(f"province_code:{code}", *_ITALY_PROVINCE_CODES[code])
+
+    # ── 5. Italian fiscal / address phrases ───────────────────────────────────
     if _ITALIAN_FISCAL_RE.search(text):
-        return "", "Italy"
+        return _dbg("italian_fiscal", "", "Italy")
     for phrase in _ITALIAN_ADDR_PHRASES:
         if phrase in text_lc:
-            return "", "Italy"
-    for alias, (city, country) in _INTL_CITIES.items():
-        if alias in text_lc:
-            return city, country
-    for alias, country in _COUNTRY_ALIASES.items():
-        if alias in text_lc:
-            return "", country
-    return "", ""
+            return _dbg(f"italian_phrase:{phrase}", "", "Italy")
+
+    # ── 6. Italian CAP — only when Italian context is present ─────────────────
+    if _ITALIAN_CAP_RE.search(text) and _has_italian_context(text):
+        return _dbg("italian_cap_with_context", "", "Italy")
+
+    return _dbg("no_match", "", "")
 
 
 def resolve_country_from_location(location_text: str) -> tuple[str, str]:
@@ -635,18 +703,7 @@ def _has_group_context(text: str) -> bool:
 
 
 def _italy_in_text(text: str) -> bool:
-    text_lc = text.lower()
-    if "italy" in text_lc or "italia" in text_lc:
-        return True
-    for alias in _ITALY_CITIES:
-        if alias in text_lc:
-            return True
-    m = _PROVINCE_CODE_RE.search(text)
-    if m and m.group(1) in _ITALY_PROVINCE_CODES:
-        return True
-    if _ITALIAN_CAP_RE.search(text):
-        return True
-    return False
+    return _has_italian_context(text)
 
 
 def _std_country(raw: str) -> str:
@@ -2665,13 +2722,21 @@ def probe_company(
             _s_quote = _s_country = _s_city = _s_strength = ""
             _s_evidence_rank = ""
             _s_rejected_reasons: list[str] = []
+            _s_parser_raw: str = ""
+            _s_parser_rule: str = ""
 
             def _try_source(text: str, label: str) -> bool:
                 nonlocal _s_quote, _s_country, _s_city, _s_strength, _s_evidence_rank
+                nonlocal _s_parser_raw, _s_parser_rule
                 q, co, ci, st = _scan_for_hq(text)
                 if co or ci:
                     _s_quote, _s_country, _s_city, _s_strength = q, co, ci, st
                     _s_evidence_rank = label
+                    # Capture parser debug: re-run resolve on the actual captured text
+                    _dbg: dict = {}
+                    _resolve_city_country(q or text, _dbg)
+                    _s_parser_raw  = q[:200]
+                    _s_parser_rule = _dbg.get("rule", "")
                     return True
                 return False
 
@@ -2706,10 +2771,17 @@ def probe_company(
                 _s_country_std = _std_country(_s_country)
                 _s_input_std   = _std_country(input_country or "Italy")
 
+                # Populate location-parser debug fields
+                result["location_parser_raw_capture"]              = _s_parser_raw
+                result["location_parser_country_before_correction"] = _s_country_std
+                result["location_parser_rule_fired"]               = _s_parser_rule
+
                 # Apply city/phrase-based country corrections before deciding foreign
                 _s_country_corrected = _correct_country_from_quote(_s_quote, _s_country_std)
                 if _s_country_corrected != _s_country_std:
                     _s_country_std = _s_country_corrected
+
+                result["location_parser_country_after_correction"] = _s_country_std
 
                 _s_is_foreign  = bool(_s_country_std and
                                       _s_country_std.lower() != _s_input_std.lower())
@@ -2755,6 +2827,19 @@ def probe_company(
                     re.sub(r"^www\.", "", _up_s(_s_best_url).netloc.lower())
                     if _s_best_url else ""
                 )
+
+                # Extract body (SLD without ccTLD) for plausible-parent check
+                # e.g. burgerking.it → burgerking, bk.com → bk, burgerking.com → burgerking
+                def _domain_body(d: str) -> str:
+                    parts = d.rsplit(".", 2)
+                    return parts[-2] if len(parts) >= 2 else d
+
+                _s_input_body    = _domain_body(_s_input_nl) if _s_input_nl else ""
+                _s_evidence_body = _domain_body(_s_evidence_domain) if _s_evidence_domain else ""
+
+                result["input_domain_body"]    = _s_input_body
+                result["evidence_domain_body"] = _s_evidence_body
+
                 _s_is_official_domain = bool(
                     _s_evidence_domain and _s_input_nl
                     and (_s_evidence_domain == _s_input_nl
@@ -2762,12 +2847,40 @@ def probe_company(
                 )
                 _s_is_known_brand = bool(_dr_root and _dr_root in _KNOWN_GLOBAL_BRANDS)
 
+                # Plausible global parent: input is local ccTLD (e.g. burgerking.it)
+                # and evidence domain shares the same body (e.g. burgerking.com or bk.com
+                # where brand_root matches).
+                _s_is_plausible_global = bool(
+                    _s_input_body and _s_evidence_body
+                    and not _s_is_official_domain
+                    and (
+                        _s_input_body == _s_evidence_body
+                        or (_dr_root and (
+                            _dr_root == _s_evidence_body
+                            or _s_evidence_body.startswith(_dr_root)
+                            or _dr_root.startswith(_s_evidence_body)
+                        ))
+                    )
+                )
+
+                # Record domain mismatch type for debugging
+                if _s_is_official_domain:
+                    result["domain_mismatch_type"] = "same_domain"
+                elif _s_is_plausible_global:
+                    result["domain_mismatch_type"] = "plausible_global_parent_domain"
+                elif _s_evidence_domain:
+                    result["domain_mismatch_type"] = "unrelated_domain"
+                else:
+                    result["domain_mismatch_type"] = ""
+
                 # Domain mismatch: best URL is from a different, non-directory domain
+                # Plausible global parent domains are NOT treated as mismatch
                 _s_domain_mismatch = bool(
                     _s_evidence_domain and _s_input_nl
                     and not _s_is_official_domain
                     and not _is_directory_url(_s_best_url)
                     and not _s_is_known_brand
+                    and not _s_is_plausible_global
                 )
 
                 # Subsidiary/regional signal in evidence quote
@@ -2956,6 +3069,8 @@ def probe_company(
                 or ai_hq_calls_counter[0] < ai_hq_max_calls
             )
         )
+        result["ai_call_attempted"] = "Yes" if _ai_eligible else "No"
+        result["ai_call_success"]   = "No"
         if _ai_eligible:
             _ai_res = _ai_interpret_hq_from_serper(
                 company_name=company_name,
@@ -2982,6 +3097,7 @@ def probe_company(
 
             if _ai_err or _ai_clf == "unclear":
                 # Keep whatever simple mode decided; mark for review
+                result["ai_call_success"] = "No"
                 _set_manual_review(result, "Yes", "ai_hq_unclear_or_error")
                 # Ensure for_next_scoring is never blank
                 result["sig_foreign_hq_score_for_next_scoring"] = result.get(
@@ -2989,6 +3105,7 @@ def probe_company(
                 ) or _orig_score
 
             elif _ai_clf == "foreign_parent" and _ai_rec == 3:
+                result["ai_call_success"] = "Yes"
                 _ai_country = _std_country(_ai_res.get("ai_parent_hq_country", ""))
                 _ai_city    = _ai_res.get("ai_parent_hq_city", "")
                 result["foreign_hq_simple"]                    = "True"
@@ -3008,6 +3125,7 @@ def probe_company(
                 _set_manual_review(result, _needs_rev, "ai_hq_low_confidence" if _needs_rev == "Yes" else "")
 
             elif _ai_clf in ("domestic", "regional_branch_only"):
+                result["ai_call_success"] = "Yes"
                 result["foreign_hq_simple"]                    = "False"
                 result["hq_structure_type"]                    = (
                     "domestic_italy" if _ai_clf == "domestic" else "regional_branch"
@@ -4062,15 +4180,30 @@ with st.sidebar:
             "AI becomes the main decision-maker. Useful for debugging and recovery quality."
         ),
     )
-    ai_hq_model = "claude-3-5-sonnet-20241022"
+    ai_hq_model = "claude-sonnet-4-6"
     ai_hq_max_calls: "int | None" = None
     if use_ai_hq_interpretation:
-        ai_hq_model = st.selectbox(
+        _ai_hq_model_preset = st.selectbox(
             "AI HQ model",
-            options=["claude-3-5-sonnet-20241022", "claude-3-5-haiku-20241022"],
+            options=[
+                "claude-sonnet-4-6",
+                "claude-haiku-4-5-20251001",
+                "claude-3-5-sonnet-20241022",
+                "claude-3-5-haiku-20241022",
+                "Custom…",
+            ],
             index=0,
             key="ai_hq_model_select",
         )
+        if _ai_hq_model_preset == "Custom…":
+            ai_hq_model = st.text_input(
+                "Custom Anthropic model ID",
+                value="",
+                key="ai_hq_model_custom",
+                placeholder="e.g. claude-opus-4-8",
+            ).strip() or "claude-sonnet-4-6"
+        else:
+            ai_hq_model = _ai_hq_model_preset
         _ai_hq_max_raw = st.number_input(
             "Max AI HQ interpretation calls",
             min_value=0,
