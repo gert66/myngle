@@ -3829,6 +3829,7 @@ def _build_workbook(
         ("domain_col",          domain_col),
         ("country_col",         country_col or "(default)"),
         ("rows_processed",      len(probe_results)),
+        ("exported_rows",       len(probe_results)),
         ("", ""),
         ("── detection summary ──", ""),
         ("detected_italy_hq",   detected_italy),
@@ -5202,29 +5203,35 @@ except ImportError:
 st.markdown("---")
 st.subheader("Download results")
 
+# Single source of truth: probe_results comes from st.session_state[_KEY_RESULTS]
+# The timestamp changes every run, so @st.cache_data always uses a fresh entry.
+_dl_ts  = qa_meta.get("timestamp", "")
+_dl_n   = len(probe_results)
+st.caption(f"Download will export **{_dl_n} rows** from current HQ Probe run ({_dl_ts}).")
+
 dl1, dl2 = st.columns(2)
 
 with dl1:
     @st.cache_data(show_spinner=False)
-    def _make_excel(_input_key: int, _probe_key: int) -> bytes:
+    def _make_excel(_ts: str) -> bytes:
+        # _ts is unique per run → cache always misses on a new run
         return build_excel_bytes(
-            input_rows=input_rows,
-            probe_results=probe_results,
-            present_old_cols=present_old_cols,
-            company_col=company_col_r,
-            domain_col=domain_col_r,
-            country_col=country_col_r,
-            qa_meta=qa_meta,
-            run_usage=run_usage,
+            input_rows=st.session_state[_KEY_INPUT_ROWS],
+            probe_results=st.session_state[_KEY_RESULTS],
+            present_old_cols=st.session_state[_KEY_OLD_COLS],
+            company_col=st.session_state[_KEY_COLS_CFG][0],
+            domain_col=st.session_state[_KEY_COLS_CFG][1],
+            country_col=st.session_state[_KEY_COLS_CFG][2],
+            qa_meta=st.session_state[_KEY_META],
+            run_usage=st.session_state.get("hq_probe_run_usage", {}),
         )
 
-    ts = qa_meta.get("timestamp", "")
     dl1.download_button(
         label="⬇️ Download Excel",
-        data=_make_excel(id(input_rows), id(probe_results)),
-        file_name=f"hq_probe_results_{ts}.xlsx",
+        data=_make_excel(_dl_ts),
+        file_name=f"hq_probe_results_{_dl_ts}.xlsx",
         mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-    key="hq_probe_download_excel_button",
+        key="hq_probe_download_excel_button",
     )
 
 with dl2:
@@ -5240,7 +5247,7 @@ with dl2:
     dl2.download_button(
         label="⬇️ Download CSV",
         data=_make_csv(),
-        file_name=f"hq_probe_results_{ts}.csv",
+        file_name=f"hq_probe_results_{_dl_ts}.csv",
         mime="text/csv",
-    key="hq_probe_download_csv_button",
+        key="hq_probe_download_csv_button",
     )
