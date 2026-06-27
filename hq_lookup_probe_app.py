@@ -2756,6 +2756,8 @@ def probe_company(
                 result["ai_call_success"]   = "No"
 
                 if not _ai_eligible:
+                    result["ai_call_attempted"] = "No"
+                    result["ai_hq_error"]       = "ai_hq_not_eligible: no API key or call limit reached"
                     _set_manual_review(result, "Yes", "ai_hq_not_eligible")
                 else:
                     _ai_res = _ai_interpret_hq_from_serper(
@@ -2774,46 +2776,80 @@ def probe_company(
                     for _k, _v in _ai_res.items():
                         result[_k] = _v
 
-                    _ai_clf  = _ai_res.get("ai_hq_classification", "")
-                    _ai_conf = _ai_res.get("ai_hq_confidence", "")
-                    _ai_rec  = _ai_res.get("ai_hq_score_recommendation", "")
-                    _ai_err  = _ai_res.get("ai_hq_error", "")
+                    _ai_clf     = _ai_res.get("ai_hq_classification", "")
+                    _ai_conf    = _ai_res.get("ai_hq_confidence", "")
+                    _ai_err     = _ai_res.get("ai_hq_error", "")
+                    _ai_country = _std_country(_ai_res.get("ai_parent_hq_country", ""))
+                    _ai_city    = _ai_res.get("ai_parent_hq_city", "")
+                    _inp_norm   = _normalize_country_for_hq(input_country or "Italy")
+                    _ai_norm    = _normalize_country_for_hq(_ai_country)
 
+                    # Always populate detected location fields from AI result
+                    if _ai_country:
+                        result["hq_detected_country"]   = _ai_country
+                        result["hq_detected_city"]      = _ai_city
+                        result["parent_group_hq_country"] = _ai_country
+                        result["parent_group_hq_city"]    = _ai_city
+                    result["hq_confidence"]   = _ai_conf
+                    result["hq_evidence_quote"] = _ai_res.get("ai_evidence_quote", "")
+                    result["hq_reason"]         = f"[ai-hq] {_ai_res.get('ai_hq_reason','')[:150]}"
+
+                    # ── Post-AI safety rule: country comparison decides score ──────
+                    # This is the only deterministic step in AI mode.
                     if _ai_err or _ai_clf == "unclear":
+                        # AI failed or couldn't decide
                         result["ai_call_success"] = "No"
                         _set_manual_review(result, "Yes", "ai_hq_unclear_or_error")
+                        result["sig_foreign_hq_score_for_next_scoring"] = _orig_score
 
-                    elif _ai_clf == "foreign_parent" and _ai_rec == 3:
-                        result["ai_call_success"] = "Yes"
-                        _ai_country = _std_country(_ai_res.get("ai_parent_hq_country", ""))
-                        _ai_city    = _ai_res.get("ai_parent_hq_city", "")
-                        result["foreign_hq_simple"]                     = "True"
-                        result["hq_structure_type"]                     = "foreign_parent"
-                        result["sig_foreign_hq_score_reviewed"]         = 3
-                        result["review_foreign_parent_score"]           = 3
-                        result["sig_foreign_hq_score_for_next_scoring"] = 3
-                        result["hq_confidence"]                         = _ai_conf
-                        result["hq_detected_country"]                   = _ai_country
-                        result["hq_detected_city"]                      = _ai_city
-                        result["parent_group_hq_country"]               = _ai_country
-                        result["parent_group_hq_city"]                  = _ai_city
-                        result["hq_evidence_quote"]                     = _ai_res.get("ai_evidence_quote", "")
-                        result["hq_reason"]                             = f"[ai-hq] {_ai_res.get('ai_hq_reason','')[:150]}"
-                        _needs_rev = "Yes" if _ai_conf == "Low" else "No"
-                        _set_manual_review(result, _needs_rev, "ai_hq_low_confidence" if _needs_rev == "Yes" else "")
+                    elif not _ai_country:
+                        # AI returned a classification but no country — treat as unclear
+                        result["ai_call_success"] = "No"
+                        _set_manual_review(result, "Yes", "ai_hq_blank_country")
+                        result["sig_foreign_hq_score_for_next_scoring"] = _orig_score
 
-                    elif _ai_clf in ("domestic", "regional_branch_only"):
-                        result["ai_call_success"] = "Yes"
+                    elif _ai_norm == _inp_norm:
+                        # AI found HQ in same country as input → domestic, regardless of classification
+                        result["ai_call_success"]                       = "Yes"
                         result["foreign_hq_simple"]                     = "False"
-                        result["hq_structure_type"]                     = (
-                            "domestic_italy" if _ai_clf == "domestic" else "regional_branch"
-                        )
+                        result["hq_structure_type"]                     = "domestic"
                         result["sig_foreign_hq_score_reviewed"]         = 0
                         result["review_foreign_parent_score"]           = 0
                         result["sig_foreign_hq_score_for_next_scoring"] = 0
-                        result["hq_reason"]                             = f"[ai-hq] {_ai_res.get('ai_hq_reason','')[:150]}"
                         _needs_rev = "Yes" if _ai_conf == "Low" else "No"
                         _set_manual_review(result, _needs_rev, "ai_hq_low_confidence" if _needs_rev == "Yes" else "")
+
+                    else:
+                        # HQ country differs from input country
+                        if _ai_clf == "foreign_parent" and _ai_conf in ("High", "Medium"):
+                            result["ai_call_success"]                       = "Yes"
+                            result["foreign_hq_simple"]                     = "True"
+                            result["hq_structure_type"]                     = "foreign_parent"
+                            result["sig_foreign_hq_score_reviewed"]         = 3
+                            result["review_foreign_parent_score"]           = 3
+                            result["sig_foreign_hq_score_for_next_scoring"] = 3
+                            _set_manual_review(result, "No")
+                        elif _ai_clf == "foreign_parent" and _ai_conf == "Low":
+                            # Foreign parent but low confidence — do not auto-score 3
+                            result["ai_call_success"]                       = "Yes"
+                            result["foreign_hq_simple"]                     = "True"
+                            result["hq_structure_type"]                     = "foreign_parent"
+                            result["sig_foreign_hq_score_reviewed"]         = 0
+                            result["review_foreign_parent_score"]           = 0
+                            result["sig_foreign_hq_score_for_next_scoring"] = _orig_score
+                            _set_manual_review(result, "Yes", "ai_hq_low_confidence")
+                        else:
+                            # regional_branch_only or unexpected classification with foreign country
+                            result["ai_call_success"]                       = "Yes"
+                            result["foreign_hq_simple"]                     = "False"
+                            result["hq_structure_type"]                     = (
+                                "regional_branch" if _ai_clf == "regional_branch_only" else _ai_clf
+                            )
+                            result["sig_foreign_hq_score_reviewed"]         = 0
+                            result["review_foreign_parent_score"]           = 0
+                            result["sig_foreign_hq_score_for_next_scoring"] = 0
+                            _needs_rev = "Yes" if _ai_conf == "Low" else "No"
+                            _set_manual_review(result, _needs_rev, "ai_hq_low_confidence" if _needs_rev == "Yes" else "")
 
             else:
                 # ── DETERMINISTIC PATH ───────────────────────────────────────────
@@ -4122,8 +4158,8 @@ with st.sidebar:
 
     use_multilingual_check = st.checkbox(
         "Detect multilingual website",
-        value=(run_mode != "fast"),
-        help="Fetches company homepage to detect language switchers and hreflang tags. Disabled by default in Fast mode.",
+        value=False,
+        help="Fetches company homepage to detect language switchers and hreflang tags.",
     )
 
     st.header("API keys")
@@ -4143,8 +4179,8 @@ with st.sidebar:
 
     use_anthropic_review = st.checkbox(
         "Use Anthropic HQ review for ambiguous/global cases",
-        value=(run_mode in ("deep", "debug")),
-        help="Calls Claude to adjudicate hq_structure_type for rows with needs_anthropic_hq_review=Yes. Auto-enabled in Deep/Debug mode.",
+        value=False,
+        help="Calls Claude to adjudicate hq_structure_type for rows with needs_anthropic_hq_review=Yes.",
     )
 
     use_haiku_uncertain = st.checkbox(
@@ -4169,23 +4205,23 @@ with st.sidebar:
     st.subheader("AI HQ interpretation")
     use_ai_hq_interpretation = st.checkbox(
         "Use AI-first HQ interpretation",
-        value=False,
+        value=True,
         key="use_ai_hq_interpretation_cb",
         help=(
-            "After the normal Serper step, sends evidence to Anthropic for HQ classification. "
-            "AI becomes the main decision-maker. Useful for debugging and recovery quality."
+            "Sends raw Serper evidence to Anthropic for HQ classification. "
+            "AI is the sole decision-maker; deterministic parsing is bypassed."
         ),
     )
-    ai_hq_model = "claude-sonnet-4-6"
+    ai_hq_model = "claude-3-5-haiku-20241022"
     ai_hq_max_calls: "int | None" = None
     if use_ai_hq_interpretation:
         _ai_hq_model_preset = st.selectbox(
             "AI HQ model",
             options=[
+                "claude-3-5-haiku-20241022",
                 "claude-sonnet-4-6",
                 "claude-haiku-4-5-20251001",
                 "claude-3-5-sonnet-20241022",
-                "claude-3-5-haiku-20241022",
                 "Custom…",
             ],
             index=0,
@@ -4197,7 +4233,7 @@ with st.sidebar:
                 value="",
                 key="ai_hq_model_custom",
                 placeholder="e.g. claude-opus-4-8",
-            ).strip() or "claude-sonnet-4-6"
+            ).strip() or "claude-3-5-haiku-20241022"
         else:
             ai_hq_model = _ai_hq_model_preset
         _ai_hq_max_raw = st.number_input(
@@ -4236,6 +4272,13 @@ st.markdown(
     + f". With limit={( limit if limit is not None else 50000)}, that is up to **{( limit if limit is not None else 50000) * _mode_max:,} Serper calls**."
     + (" Early stopping is active: rows with clear official HQ evidence skip further queries." if run_mode == "fast" else "")
 )
+
+if use_ai_hq_interpretation:
+    st.info(
+        f"**AI-first mode active:** `{{domain_core}} headquarters` → Serper → Anthropic "
+        f"(`{ai_hq_model}`) → score fields. Deterministic HQ parsing is bypassed.",
+        icon="🤖",
+    )
 
 run_btn = st.button("▶ Run HQ Probe", type="primary", disabled=(not serper_key), key="hq_probe_run_button_main")
 if not serper_key:
@@ -5145,17 +5188,42 @@ run_usage        = st.session_state.get("hq_probe_run_usage", {})
 
 st.markdown("---")
 st.subheader("Results")
-c1, c2, c3, c4, c5 = st.columns(5)
-c1.metric("Rows processed",    len(probe_results))
-c2.metric("Italy HQ detected", detected_italy)
-c3.metric("Foreign HQ",        detected_foreign)
-c4.metric("Unknown",           detected_unknown)
-c5.metric("Needs review",      needs_review_cnt)
 
-r1, r2, r3 = st.columns(3)
-r1.metric("Multilingual site",       multilingual_cnt)
-r2.metric("Global structure signal", global_net_cnt)
-r3.metric("Needs Anthropic review",  needs_adj_cnt)
+_used_ai_mode = any(p.get("ai_call_attempted") in ("Yes", "No") for p in probe_results)
+if _used_ai_mode:
+    _ai_foreign_cnt  = sum(1 for p in probe_results
+                           if p.get("ai_hq_classification") == "foreign_parent"
+                           and p.get("ai_call_success") == "Yes")
+    _ai_domestic_cnt = sum(1 for p in probe_results
+                           if p.get("ai_hq_classification") in ("domestic", "regional_branch_only")
+                           and p.get("ai_call_success") == "Yes")
+    _ai_unclear_cnt  = sum(1 for p in probe_results
+                           if p.get("ai_call_attempted") == "Yes"
+                           and p.get("ai_call_success") == "No")
+    _ai_scored3_cnt  = sum(1 for p in probe_results
+                           if p.get("sig_foreign_hq_score_reviewed") == 3)
+    ac1, ac2, ac3, ac4, ac5 = st.columns(5)
+    ac1.metric("Rows processed",     len(probe_results))
+    ac2.metric("AI foreign parent",  _ai_foreign_cnt)
+    ac3.metric("AI domestic HQ",     _ai_domestic_cnt)
+    ac4.metric("AI unclear / error", _ai_unclear_cnt)
+    ac5.metric("Needs review",       needs_review_cnt)
+    sc1, sc2, sc3 = st.columns(3)
+    sc1.metric("Auto-scored 3",      _ai_scored3_cnt)
+    sc2.metric("HQ found (any)",     len(probe_results) - detected_unknown)
+    sc3.metric("Unknown / no HQ",    detected_unknown)
+else:
+    c1, c2, c3, c4, c5 = st.columns(5)
+    c1.metric("Rows processed",    len(probe_results))
+    c2.metric("Italy HQ detected", detected_italy)
+    c3.metric("Foreign HQ",        detected_foreign)
+    c4.metric("Unknown",           detected_unknown)
+    c5.metric("Needs review",      needs_review_cnt)
+
+    r1, r2, r3 = st.columns(3)
+    r1.metric("Multilingual site",       multilingual_cnt)
+    r2.metric("Global structure signal", global_net_cnt)
+    r3.metric("Needs Anthropic review",  needs_adj_cnt)
 
 if run_usage:
     with st.expander("Usage / API call summary", expanded=False):
