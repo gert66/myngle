@@ -2633,7 +2633,7 @@ def probe_company(
     haiku_calls_counter: "list[int] | None" = None,
     haiku_max_calls: "int | None" = None,
     use_ai_hq_interpretation: bool = False,
-    ai_hq_model: str = "claude-4-5-haiku-20251001",
+    ai_hq_model: str = "claude-haiku-4-5-20251001",
     ai_hq_calls_counter: "list[int] | None" = None,
     ai_hq_max_calls: "int | None" = None,
 ) -> dict[str, Any]:
@@ -4218,13 +4218,13 @@ with st.sidebar:
             "AI is the sole decision-maker; deterministic parsing is bypassed."
         ),
     )
-    ai_hq_model = "claude-4-5-haiku-20251001"
+    ai_hq_model = "claude-haiku-4-5-20251001"
     ai_hq_max_calls: "int | None" = None
     if use_ai_hq_interpretation:
         _ai_hq_model_preset = st.selectbox(
             "AI HQ model",
             options=[
-                "claude-4-5-haiku-20251001",
+                "claude-haiku-4-5-20251001",
                 "claude-sonnet-4-6",
                 "claude-3-5-sonnet-20241022",
                 "Custom…",
@@ -4238,7 +4238,7 @@ with st.sidebar:
                 value="",
                 key="ai_hq_model_custom",
                 placeholder="e.g. claude-opus-4-8",
-            ).strip() or "claude-4-5-haiku-20251001"
+            ).strip() or "claude-haiku-4-5-20251001"
         else:
             ai_hq_model = _ai_hq_model_preset
         _ai_hq_max_raw = st.number_input(
@@ -4261,189 +4261,12 @@ with st.sidebar:
         )
 
 # ---------------------------------------------------------------------------
-# Main area
+# Main area — guard: file required
 # ---------------------------------------------------------------------------
 
 if not file_source:
     st.info("Upload a file or enter a local path in the sidebar to get started.")
     st.stop()
-
-_mode_max = 3 if run_mode == "fast" else 8
-_mode_label = {"fast": "Fast", "deep": "Deep", "debug": "Debug"}.get(run_mode, run_mode)
-st.markdown(
-    f"**Mode: {_mode_label}** — up to **{_mode_max} Serper calls/row**"
-    + (", + 1 website fetch for multilingual detection" if use_multilingual_check else "")
-    + (", + Anthropic review for ambiguous rows" if use_anthropic_review else "")
-    + f". With limit={( limit if limit is not None else 50000)}, that is up to **{( limit if limit is not None else 50000) * _mode_max:,} Serper calls**."
-    + (" Early stopping is active: rows with clear official HQ evidence skip further queries." if run_mode == "fast" else "")
-)
-
-if use_ai_hq_interpretation:
-    st.info(
-        f"**AI-first mode active:** `{{domain_core}} headquarters` → Serper → Anthropic "
-        f"(`{ai_hq_model}`) → score fields. Deterministic HQ parsing is bypassed.",
-        icon="🤖",
-    )
-
-run_btn = st.button("▶ Run HQ Probe", type="primary", disabled=(not serper_key), key="hq_probe_run_button_main")
-if not serper_key:
-    st.warning("Enter a Serper API key in the sidebar to enable the run button.")
-
-if run_btn:
-    # Load input rows
-    with st.spinner("Reading input file…"):
-        try:
-            if file_source == "upload":
-                uploaded_file.seek(0)
-                input_rows = read_input_from_fileobj(
-                    uploaded_file, file_suffix, limit=( limit if limit is not None else 50000), sheet_name=selected_sheet,
-                )
-            else:
-                with open(local_path_str.strip(), "rb") as f:
-                    input_rows = read_input_from_fileobj(
-                        f, file_suffix, limit=( limit if limit is not None else 50000), sheet_name=selected_sheet,
-                    )
-        except Exception as exc:
-            st.error(f"Failed to read input: {exc}")
-            st.stop()
-
-    if not input_rows:
-        st.warning("No rows found in the input file.")
-        st.stop()
-
-    # Old-FHQ signal filter
-    if only_fhq_signal:
-        def _has_fhq_signal(row: dict) -> bool:
-            score = row.get("sig_foreign_hq_score")
-            sanitized = str(row.get("foreign_hq_sanitized") or "").strip().lower()
-            try:
-                score_val = float(score)
-            except (TypeError, ValueError):
-                score_val = 0.0
-            return score_val > 0 or sanitized in {"true", "yes", "1"}
-
-        filtered = [r for r in input_rows if _has_fhq_signal(r)]
-        if filtered:
-            st.info(f"Old FHQ filter: {len(filtered)} / {len(input_rows)} rows have a signal.")
-            input_rows = filtered
-        else:
-            st.warning("No rows matched the old FHQ signal filter. Running on all rows.")
-
-    # Recovery candidates filter (zero/blank FHQ score)
-    if only_recovery:
-        def _is_recovery_candidate(row: dict) -> bool:
-            try:
-                return float(row.get("sig_foreign_hq_score") or 0) == 0
-            except (TypeError, ValueError):
-                return True
-
-        filtered_r = [r for r in input_rows if _is_recovery_candidate(r)]
-        if filtered_r:
-            st.info(f"Recovery filter: {len(filtered_r)} / {len(input_rows)} rows have zero/blank FHQ score.")
-            input_rows = filtered_r
-        else:
-            st.warning("No recovery candidates found (all rows have non-zero FHQ score). Running on all rows.")
-
-    # Detect old enrichment cols
-    sample_keys = set(input_rows[0].keys()) if input_rows else set()
-    present_old_cols = [c for c in OLD_ENRICHMENT_COLS if c in sample_keys]
-
-    # Run probe
-    progress_bar = st.progress(0.0, text="Starting…")
-    probe_results: list[dict] = []
-    total = len(input_rows)
-    cache: dict = {}
-    error_rows: list[str] = []
-    _haiku_calls_counter: list[int] = [0]  # mutable counter shared across rows
-    _ai_hq_calls_counter: list[int] = [0]
-
-    for i, row in enumerate(input_rows):
-        company = str(row.get(company_col) or "").strip()
-        domain  = str(row.get(domain_col)  or "").strip()
-        # Country: use column if selected and non-blank, else default
-        if country_col:
-            country = str(row.get(country_col) or "").strip() or default_country
-        else:
-            country = default_country
-
-        probe = probe_company(
-            company_name=company,
-            domain=domain,
-            input_country=country,
-            serper_key=serper_key,
-            use_model=use_model,
-            anthropic_key=anthropic_key,
-            cache=cache,
-            input_row=row,
-            use_multilingual_check=use_multilingual_check,
-            use_anthropic_review=use_anthropic_review,
-            use_mimic_check=use_mimic_check,
-            run_mode=run_mode,
-            use_haiku_uncertain=use_haiku_uncertain,
-            haiku_calls_counter=_haiku_calls_counter,
-            haiku_max_calls=haiku_max_calls,
-            use_ai_hq_interpretation=use_ai_hq_interpretation,
-            ai_hq_model=ai_hq_model,
-            ai_hq_calls_counter=_ai_hq_calls_counter,
-            ai_hq_max_calls=ai_hq_max_calls,
-        )
-
-        # Belt-and-suspenders fallback (main guard is inside probe_company).
-        _fb_det = _normalize_country_for_hq(probe.get("hq_detected_country"))
-        _fb_inp = _normalize_country_for_hq(probe.get("input_country_used"))
-        if _fb_det and _fb_inp and _fb_det == _fb_inp:
-            probe["foreign_hq_simple"] = "False"
-            probe["sig_foreign_hq_score_reviewed"] = 0
-            probe["sig_foreign_hq_score_for_next_scoring"] = 0
-
-        probe_results.append(probe)
-        if probe.get("probe_error"):
-            error_rows.append(f"Row {i+1} ({company}): {probe['probe_error']}")
-
-        pct = (i + 1) / total
-        country_hit = probe.get("hq_detected_country") or "…"
-        progress_bar.progress(pct, text=f"[{i+1}/{total}] {company[:45]} → {country_hit}")
-
-    progress_bar.empty()
-
-    # Run-level usage aggregation
-    run_usage = {
-        "rows_processed":           len(probe_results),
-        "serper_calls_used":        sum(int(p.get("serper_calls_used") or 0) for p in probe_results),
-        "rows_with_cache_hit":      sum(1 for p in probe_results if p.get("serper_cache_hit") in ("True", "partial")),
-        "website_fetches":          sum(int(p.get("website_fetch_count") or 0) for p in probe_results),
-        "anthropic_reviews_used":   sum(1 for p in probe_results if p.get("anthropic_hq_review_used") == "Yes"),
-        "anthropic_web_search_used":sum(1 for p in probe_results if p.get("anthropic_web_search_used") == "Yes"),
-        "anthropic_input_tokens":   sum(int(p.get("_anthr_input_tok") or 0) for p in probe_results),
-        "anthropic_output_tokens":  sum(int(p.get("_anthr_output_tok") or 0) for p in probe_results),
-        "anthropic_total_tokens":   sum(int(p.get("_anthr_total_tok") or 0) for p in probe_results),
-        "anthropic_errors":         sum(1 for p in probe_results if p.get("anthropic_error")),
-    }
-
-    # Store in session state
-    ts = datetime.now().strftime("%Y%m%d_%H%M%S")
-    st.session_state[_KEY_RESULTS]    = probe_results
-    st.session_state[_KEY_INPUT_ROWS] = input_rows
-    st.session_state[_KEY_OLD_COLS]   = present_old_cols
-    st.session_state[_KEY_COLS_CFG]   = (company_col, domain_col, country_col or "(default)")
-    st.session_state[_KEY_META] = {
-        "timestamp":              ts,
-        "input_file":             file_label,
-        "use_model":              use_model,
-        "model":                  "claude-haiku-4-5-20251001" if (use_model or use_anthropic_review) else "",
-        "serper_available":       bool(serper_key),
-        "limit":                  ( limit if limit is not None else 50000),
-        "use_multilingual_check": use_multilingual_check,
-        "use_anthropic_review":   use_anthropic_review,
-        "use_mimic_check":        use_mimic_check,
-        "run_mode":               run_mode,
-    }
-    st.session_state["hq_probe_run_usage"] = run_usage
-
-    if error_rows:
-        with st.expander(f"⚠️ {len(error_rows)} row error(s)", expanded=False):
-            for e in error_rows:
-                st.text(e)
 
 # ---------------------------------------------------------------------------
 # Workflow mode selector
@@ -4492,11 +4315,22 @@ if _app_mode == "probe":
             + (" Early stopping is active: rows with clear official HQ evidence skip further queries." if run_mode == "fast" else "")
         )
 
+    if use_ai_hq_interpretation:
+        st.info(
+            f"**AI-first mode active:** `{{domain_core}} headquarters` → Serper → Anthropic "
+            f"(`{ai_hq_model}`) → score fields. Deterministic HQ parsing is bypassed.",
+            icon="🤖",
+        )
+
     run_btn = st.button("▶ Run HQ Probe", type="primary", disabled=(not serper_key), key="hq_probe_run_button_tab")
     if not serper_key:
         st.warning("Enter a Serper API key in the sidebar to enable the run button.")
 
     if run_btn:
+        # Clear previous HQ Probe results so downloads can never serve stale data
+        for _k in (_KEY_RESULTS, _KEY_INPUT_ROWS, _KEY_OLD_COLS, _KEY_META,
+                   _KEY_COLS_CFG, "hq_probe_run_usage"):
+            st.session_state.pop(_k, None)
         # Load input rows
         with st.spinner("Reading input file…"):
             try:
@@ -4613,6 +4447,8 @@ if _app_mode == "probe":
         progress_bar.empty()
 
         # Run-level usage aggregation
+        _ai_attempted = sum(1 for p in probe_results if p.get("ai_call_attempted") == "Yes")
+        _ai_succeeded = sum(1 for p in probe_results if p.get("ai_call_success") == "Yes")
         run_usage = {
             "rows_processed":           len(probe_results),
             "serper_calls_used":        sum(int(p.get("serper_calls_used") or 0) for p in probe_results),
@@ -4624,6 +4460,9 @@ if _app_mode == "probe":
             "anthropic_output_tokens":  sum(int(p.get("_anthr_output_tok") or 0) for p in probe_results),
             "anthropic_total_tokens":   sum(int(p.get("_anthr_total_tok") or 0) for p in probe_results),
             "anthropic_errors":         sum(1 for p in probe_results if p.get("anthropic_error")),
+            "ai_hq_calls_attempted":    _ai_attempted,
+            "ai_hq_calls_succeeded":    _ai_succeeded,
+            "ai_hq_calls_failed":       _ai_attempted - _ai_succeeded,
         }
 
         # Store in session state
@@ -4637,6 +4476,7 @@ if _app_mode == "probe":
             "input_file":             file_label,
             "use_model":              use_model,
             "model":                  "claude-haiku-4-5-20251001" if (use_model or use_anthropic_review) else "",
+            "ai_hq_model":            ai_hq_model if use_ai_hq_interpretation else "",
             "serper_available":       bool(serper_key),
             "limit":                  ( limit if limit is not None else 50000),
             "use_multilingual_check": use_multilingual_check,
@@ -4644,6 +4484,7 @@ if _app_mode == "probe":
             "use_mimic_check":        use_mimic_check,
             "run_mode":               run_mode,
             "use_simple_hq_mode":     use_simple_hq_mode,
+            "use_ai_hq_interpretation": use_ai_hq_interpretation,
         }
         st.session_state["hq_probe_run_usage"] = run_usage
 
@@ -5232,6 +5073,13 @@ else:
 
 if run_usage:
     with st.expander("Usage / API call summary", expanded=False):
+        if run_usage.get("ai_hq_calls_attempted", 0) > 0:
+            st.markdown("**AI-first HQ calls**")
+            a1, a2, a3 = st.columns(3)
+            a1.metric("AI calls attempted", run_usage.get("ai_hq_calls_attempted", 0))
+            a2.metric("AI calls succeeded", run_usage.get("ai_hq_calls_succeeded", 0))
+            a3.metric("AI calls failed",    run_usage.get("ai_hq_calls_failed", 0))
+            st.markdown("---")
         u1, u2, u3, u4, u5 = st.columns(5)
         u1.metric("Serper calls",              run_usage.get("serper_calls_used", 0))
         u2.metric("Rows with cache hit",       run_usage.get("rows_with_cache_hit", 0))
