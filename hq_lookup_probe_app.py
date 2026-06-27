@@ -2715,323 +2715,401 @@ def probe_company(
                 result[f"top_organic_snippet_{_si}"] = _sitem.get("snippet", "")
                 result[f"top_organic_url_{_si}"]     = _sitem.get("link", "")
 
-            # Per-source scan in priority order — first hit wins.
-            # Priority: KG > answerBox > organic[0] > organic[1] > … > places
-            # This avoids concatenating all text (which causes Italian cities to
-            # match before a later-occurring foreign city).
-            _s_quote = _s_country = _s_city = _s_strength = ""
-            _s_evidence_rank = ""
-            _s_rejected_reasons: list[str] = []
-            _s_parser_raw: str = ""
-            _s_parser_rule: str = ""
-
-            def _try_source(text: str, label: str) -> bool:
-                nonlocal _s_quote, _s_country, _s_city, _s_strength, _s_evidence_rank
-                nonlocal _s_parser_raw, _s_parser_rule
-                q, co, ci, st = _scan_for_hq(text)
-                if co or ci:
-                    _s_quote, _s_country, _s_city, _s_strength = q, co, ci, st
-                    _s_evidence_rank = label
-                    # Capture parser debug: re-run resolve on the actual captured text
-                    _dbg: dict = {}
-                    _resolve_city_country(q or text, _dbg)
-                    _s_parser_raw  = q[:200]
-                    _s_parser_rule = _dbg.get("rule", "")
-                    return True
-                return False
-
-            if _s_kg_loc and not _try_source(_s_kg_loc, "knowledge_graph"):
-                _s_rejected_reasons.append(f"kg_loc='{_s_kg_loc[:80]}' no match")
-            if _s_ab_t and not (_s_country or _s_city) and not _try_source(_s_ab_t, "answer_box"):
-                _s_rejected_reasons.append(f"answer_box='{_s_ab_t[:80]}' no match")
-
-            for _s_rank_i, _s_r in enumerate(_s_org[:5], start=1):
-                if _s_country or _s_city:
-                    break
-                _s_r_text = f"{_s_r.get('title','')} {_s_r.get('snippet','')}"
-                if not _try_source(_s_r_text, f"organic_{_s_rank_i}"):
-                    # Try proximity/signal scan as fallback for this single result
-                    _fb_q, _fb_co, _fb_ci, _fb_st = _scan_hq_title_snippet([_s_r])
-                    if _fb_co or _fb_ci:
-                        _s_quote, _s_country, _s_city, _s_strength = _fb_q, _fb_co, _fb_ci, _fb_st
-                        _s_evidence_rank = f"organic_{_s_rank_i}_signal"
-                    else:
-                        _s_rejected_reasons.append(f"organic_{_s_rank_i}='{_s_r_text[:60]}' no match")
-
-            if not (_s_country or _s_city):
-                for _s_rank_p, _s_p in enumerate(_s_places[:3], start=1):
-                    _s_p_text = f"{_s_p.get('title','')} {_s_p.get('address','')}"
-                    if _try_source(_s_p_text, f"places_{_s_rank_p}"):
-                        break
-
-            result["domain_root_hq_evidence_rank"]            = _s_evidence_rank
-            result["domain_root_hq_rejected_evidence_reason"] = "; ".join(_s_rejected_reasons[:5])
-
-            if _s_country or _s_city:
-                _s_country_std = _std_country(_s_country)
-                _s_input_std   = _std_country(input_country or "Italy")
-
-                # Populate location-parser debug fields
-                result["location_parser_raw_capture"]              = _s_parser_raw
-                result["location_parser_country_before_correction"] = _s_country_std
-                result["location_parser_rule_fired"]               = _s_parser_rule
-
-                # Apply city/phrase-based country corrections before deciding foreign
-                _s_country_corrected = _correct_country_from_quote(_s_quote, _s_country_std)
-                if _s_country_corrected != _s_country_std:
-                    _s_country_std = _s_country_corrected
-
-                result["location_parser_country_after_correction"] = _s_country_std
-
-                _s_is_foreign  = bool(_s_country_std and
-                                      _s_country_std.lower() != _s_input_std.lower())
-                _s_conf = ("High"   if _s_strength == "Strong"
-                           else ("Medium" if _s_strength == "Medium" else "Low"))
-
-                result["hq_detected_country"]          = _s_country_std
-                result["hq_detected_city"]             = _s_city
-                result["hq_confidence"]                = _s_conf
-                result["hq_evidence_quote"]            = _s_quote
-                result["hq_reason"]                    = f"[simple-hq:{_dr_query}] {_s_quote[:150]}"
-                result["domain_root_hq_evidence_found"]  = True
-                result["domain_root_hq_evidence_quote"]  = _s_quote
-                result["domain_root_hq_country"]         = _s_country_std
-                result["domain_root_hq_city"]            = _s_city
-                result["domain_root_hq_confidence"]      = _s_conf
-
-                # Best evidence URL: prefer official domain, avoid directories
+            if use_ai_hq_interpretation:
+                # ── AI-FIRST PATH ────────────────────────────────────────────────
+                # No deterministic HQ parsing of any kind.  Raw Serper evidence
+                # goes directly to Anthropic; AI is the sole decision-maker.
+                # _scan_for_hq, _resolve_city_country, _correct_country_from_quote,
+                # _is_score3_eligible_hq_evidence, domestic safety guard, and domain
+                # mismatch rejection are all bypassed.
                 from urllib.parse import urlparse as _up_s
                 _s_input_nl = re.sub(
                     r"^www\.", "",
                     re.sub(r"^https?://", "", (domain or "").strip()).rstrip("/").lower()
                 )
-                _s_best_url = ""
-                for _sr in _s_org:
-                    _sl = _sr.get("link", "")
-                    if _is_directory_url(_sl):
-                        continue
-                    _snl = re.sub(r"^www\.", "", _up_s(_sl).netloc.lower())
-                    if _s_input_nl and (_snl == _s_input_nl or _snl.endswith("." + _s_input_nl)):
-                        _s_best_url = _sl
-                        break
-                if not _s_best_url:
-                    _s_best_url = next(
-                        (r.get("link", "") for r in _s_org if not _is_directory_url(r.get("link", ""))),
-                        "",
-                    )
-                result["hq_evidence_url"]             = _s_best_url
-                result["domain_root_hq_evidence_url"] = _s_best_url
-
-                # ── Evidence quality checks ──────────────────────────────────────
+                # Best URL for context only (no parsing decision)
+                _s_best_url = next(
+                    (r.get("link", "") for r in _s_org if not _is_directory_url(r.get("link", ""))),
+                    "",
+                )
                 _s_evidence_domain = (
                     re.sub(r"^www\.", "", _up_s(_s_best_url).netloc.lower())
                     if _s_best_url else ""
                 )
-
-                # Extract body (SLD without ccTLD) for plausible-parent check
-                # e.g. burgerking.it → burgerking, bk.com → bk, burgerking.com → burgerking
                 def _domain_body(d: str) -> str:
                     parts = d.rsplit(".", 2)
                     return parts[-2] if len(parts) >= 2 else d
+                result["input_domain_body"]    = _domain_body(_s_input_nl) if _s_input_nl else ""
+                result["evidence_domain_body"] = _domain_body(_s_evidence_domain) if _s_evidence_domain else ""
+                result["domain_mismatch_type"] = ""  # AI decides; no deterministic check
+                result["hq_evidence_url"]      = _s_best_url
 
-                _s_input_body    = _domain_body(_s_input_nl) if _s_input_nl else ""
-                _s_evidence_body = _domain_body(_s_evidence_domain) if _s_evidence_domain else ""
-
-                result["input_domain_body"]    = _s_input_body
-                result["evidence_domain_body"] = _s_evidence_body
-
-                _s_is_official_domain = bool(
-                    _s_evidence_domain and _s_input_nl
-                    and (_s_evidence_domain == _s_input_nl
-                         or _s_evidence_domain.endswith("." + _s_input_nl))
-                )
-                _s_is_known_brand = bool(_dr_root and _dr_root in _KNOWN_GLOBAL_BRANDS)
-
-                # Plausible global parent: input is local ccTLD (e.g. burgerking.it)
-                # and evidence domain shares the same body (e.g. burgerking.com or bk.com
-                # where brand_root matches).
-                _s_is_plausible_global = bool(
-                    _s_input_body and _s_evidence_body
-                    and not _s_is_official_domain
+                _ai_eligible = (
+                    anthropic_key
                     and (
-                        _s_input_body == _s_evidence_body
-                        or (_dr_root and (
-                            _dr_root == _s_evidence_body
-                            or _s_evidence_body.startswith(_dr_root)
-                            or _dr_root.startswith(_s_evidence_body)
-                        ))
+                        ai_hq_calls_counter is None
+                        or ai_hq_max_calls is None
+                        or ai_hq_calls_counter[0] < ai_hq_max_calls
                     )
                 )
+                result["ai_call_attempted"] = "Yes" if _ai_eligible else "No"
+                result["ai_call_success"]   = "No"
 
-                # Record domain mismatch type for debugging
-                if _s_is_official_domain:
-                    result["domain_mismatch_type"] = "same_domain"
-                elif _s_is_plausible_global:
-                    result["domain_mismatch_type"] = "plausible_global_parent_domain"
-                elif _s_evidence_domain:
-                    result["domain_mismatch_type"] = "unrelated_domain"
+                if not _ai_eligible:
+                    _set_manual_review(result, "Yes", "ai_hq_not_eligible")
                 else:
-                    result["domain_mismatch_type"] = ""
-
-                # Domain mismatch: best URL is from a different, non-directory domain
-                # Plausible global parent domains are NOT treated as mismatch
-                _s_domain_mismatch = bool(
-                    _s_evidence_domain and _s_input_nl
-                    and not _s_is_official_domain
-                    and not _is_directory_url(_s_best_url)
-                    and not _s_is_known_brand
-                    and not _s_is_plausible_global
-                )
-
-                # Subsidiary/regional signal in evidence quote
-                _s_is_subsidiary_regional = bool(_SUBSIDIARY_SIGNAL_RE.search(_s_quote))
-
-                # Aggregate untrusted flag
-                _s_untrusted = _s_domain_mismatch or _s_is_subsidiary_regional
-
-                # Build rejection/trigger reason
-                _s_trust_reason = ""
-                if _s_domain_mismatch:
-                    _s_trust_reason = f"unrelated_domain:{_s_evidence_domain}"
-                    result["domain_root_hq_rejected_evidence_reason"] = (
-                        f"evidence from {_s_evidence_domain}, not {_s_input_nl}"
+                    _ai_res = _ai_interpret_hq_from_serper(
+                        company_name=company_name,
+                        input_domain=domain or "",
+                        brand_root=_dr_root,
+                        input_country=_std_country(input_country or "Italy"),
+                        query=_dr_query,
+                        serper_data=_s_data,
+                        model=ai_hq_model,
+                        anthropic_key=anthropic_key,
                     )
-                if _s_is_subsidiary_regional:
-                    _s_sub_label = "subsidiary_or_regional_hq_evidence"
-                    _s_trust_reason = (
-                        (_s_trust_reason + "; " + _s_sub_label)
-                        if _s_trust_reason else _s_sub_label
-                    )
+                    if ai_hq_calls_counter is not None and not _ai_res.get("ai_hq_error"):
+                        ai_hq_calls_counter[0] += 1
 
-                if _s_untrusted:
-                    _s_conf = "Low"
-                    result["hq_confidence"]             = _s_conf
-                    result["domain_root_hq_confidence"] = _s_conf
-                    _set_manual_review(result, "Yes", _s_trust_reason)
+                    for _k, _v in _ai_res.items():
+                        result[_k] = _v
 
-                if _s_is_foreign:
-                    result["foreign_hq_simple"]                    = "True"
-                    result["hq_structure_type"]                    = "foreign_parent"
-                    result["parent_group_hq_country"]              = _s_country_std
-                    result["parent_group_hq_city"]                 = _s_city
-                    result["local_entity_hq_country"]              = _s_input_std
-                    result["sig_foreign_hq_review_source"]         = "simple_domain_root_hq_search"
-                    result["sig_foreign_hq_review_evidence_url"]   = _s_best_url
-                    result["sig_foreign_hq_review_evidence_quote"] = _s_quote
-                    result["sig_foreign_hq_review_reason"] = (
-                        f"Simple domain-root HQ search ('{_dr_query}') "
-                        f"identifies {_s_country_std} as HQ"
-                    )
-                    result["sig_foreign_hq_review_confidence"] = _s_conf
-                    _score3_ok, _score3_reason = _is_score3_eligible_hq_evidence(
-                        quote=_s_quote,
-                        detected_country=_s_country_std,
-                        input_country=_s_input_std,
-                        evidence_url=_s_best_url,
-                    )
-                    # ── Optional Haiku review for uncertain score-3 candidates ──
-                    _haiku_used = False
-                    _haiku_result: dict[str, Any] = {}
-                    _haiku_eligible = (
-                        use_haiku_uncertain
-                        and anthropic_key
-                        and _score3_ok           # only when det. logic would say score 3
-                        and not _s_untrusted
-                        and (
-                            _s_conf in ("Medium", "Low")
-                            or not _s_is_official_domain
+                    _ai_clf  = _ai_res.get("ai_hq_classification", "")
+                    _ai_conf = _ai_res.get("ai_hq_confidence", "")
+                    _ai_rec  = _ai_res.get("ai_hq_score_recommendation", "")
+                    _ai_err  = _ai_res.get("ai_hq_error", "")
+
+                    if _ai_err or _ai_clf == "unclear":
+                        result["ai_call_success"] = "No"
+                        _set_manual_review(result, "Yes", "ai_hq_unclear_or_error")
+
+                    elif _ai_clf == "foreign_parent" and _ai_rec == 3:
+                        result["ai_call_success"] = "Yes"
+                        _ai_country = _std_country(_ai_res.get("ai_parent_hq_country", ""))
+                        _ai_city    = _ai_res.get("ai_parent_hq_city", "")
+                        result["foreign_hq_simple"]                     = "True"
+                        result["hq_structure_type"]                     = "foreign_parent"
+                        result["sig_foreign_hq_score_reviewed"]         = 3
+                        result["review_foreign_parent_score"]           = 3
+                        result["sig_foreign_hq_score_for_next_scoring"] = 3
+                        result["hq_confidence"]                         = _ai_conf
+                        result["hq_detected_country"]                   = _ai_country
+                        result["hq_detected_city"]                      = _ai_city
+                        result["parent_group_hq_country"]               = _ai_country
+                        result["parent_group_hq_city"]                  = _ai_city
+                        result["hq_evidence_quote"]                     = _ai_res.get("ai_evidence_quote", "")
+                        result["hq_reason"]                             = f"[ai-hq] {_ai_res.get('ai_hq_reason','')[:150]}"
+                        _needs_rev = "Yes" if _ai_conf == "Low" else "No"
+                        _set_manual_review(result, _needs_rev, "ai_hq_low_confidence" if _needs_rev == "Yes" else "")
+
+                    elif _ai_clf in ("domestic", "regional_branch_only"):
+                        result["ai_call_success"] = "Yes"
+                        result["foreign_hq_simple"]                     = "False"
+                        result["hq_structure_type"]                     = (
+                            "domestic_italy" if _ai_clf == "domestic" else "regional_branch"
                         )
-                        and (haiku_calls_counter is None
-                             or haiku_max_calls is None
-                             or haiku_calls_counter[0] < haiku_max_calls)
-                    )
-                    if _haiku_eligible:
-                        # Gather top organic snippets for context
-                        _hk_snips = [
-                            f"{r.get('title','')} — {r.get('snippet','')}"
-                            for r in _s_org[:5]
-                        ]
-                        _hk_ab = str(_s_data.get("answerBox", {}).get("snippet", "")
-                                     or _s_data.get("answerBox", {}).get("answer", ""))
-                        _haiku_result = _review_hq_with_haiku(
-                            company_name=company_name,
-                            domain=domain,
-                            input_country=_s_input_std,
-                            detected_country=_s_country_std,
-                            detected_city=_s_city,
-                            evidence_quote=_s_quote,
-                            evidence_url=_s_best_url,
-                            answer_box=_hk_ab,
-                            organic_titles_snippets=_hk_snips,
-                            anthropic_key=anthropic_key,
-                        )
-                        if haiku_calls_counter is not None and not _haiku_result.get("haiku_error"):
-                            haiku_calls_counter[0] += 1
-                        _haiku_used = not bool(_haiku_result.get("haiku_error"))
-                        # Apply country correction from Haiku if provided
-                        _hk_cc = (_haiku_result.get("haiku_country_corrected") or "").strip()
-                        if _hk_cc and _hk_cc.lower() not in ("", "none"):
-                            _s_country_std = _std_country(_hk_cc)
-                            result["hq_detected_country"]     = _s_country_std
-                            result["domain_root_hq_country"]  = _s_country_std
-                            result["parent_group_hq_country"] = _s_country_std
-                            # Re-check foreign after Haiku correction
-                            _s_is_foreign = bool(
-                                _s_country_std
-                                and _s_country_std.lower() != _s_input_std.lower()
-                            )
-                        # Override score decision if Haiku is confident
-                        _hk_verdict = _haiku_result.get("haiku_verdict", "")
-                        if _hk_verdict == "score0":
-                            _score3_ok = False
-                            _score3_reason = (
-                                f"haiku_override_score0: {_haiku_result.get('haiku_reason','')}"
-                            )
-                        elif _hk_verdict == "score3":
-                            _score3_ok = True
-                            _score3_reason = ""
+                        result["sig_foreign_hq_score_reviewed"]         = 0
+                        result["review_foreign_parent_score"]           = 0
+                        result["sig_foreign_hq_score_for_next_scoring"] = 0
+                        result["hq_reason"]                             = f"[ai-hq] {_ai_res.get('ai_hq_reason','')[:150]}"
+                        _needs_rev = "Yes" if _ai_conf == "Low" else "No"
+                        _set_manual_review(result, _needs_rev, "ai_hq_low_confidence" if _needs_rev == "Yes" else "")
 
-                    if _haiku_used:
-                        result["anthropic_hq_review_used"]        = "Yes"
-                        result["anthropic_review_evidence_mode"]  = "serper_evidence_only"
-                        result["anthropic_web_search_used"]       = "No"
-                        result["_anthr_model"]       = _HAIKU_MODEL
-                        result["_anthr_input_tok"]   = _haiku_result.get("haiku_input_tokens", 0)
-                        result["_anthr_output_tok"]  = _haiku_result.get("haiku_output_tokens", 0)
-                        result["_anthr_total_tok"]   = (
-                            _haiku_result.get("haiku_input_tokens", 0)
-                            + _haiku_result.get("haiku_output_tokens", 0)
-                        )
-                        if _haiku_result.get("haiku_error"):
-                            result["anthropic_error"] = _haiku_result["haiku_error"]
-                        result["sig_foreign_hq_review_reason"] = (
-                            result.get("sig_foreign_hq_review_reason", "")
-                            + f" [haiku:{_haiku_result.get('haiku_verdict','')}:"
-                            f"{_haiku_result.get('haiku_reason','')[:80]}]"
-                        )
-
-                    if _s_untrusted or not _score3_ok:
-                        # Evidence not trusted or fails eligibility — score 0, manual review
-                        result["sig_foreign_hq_score_reviewed"] = 0
-                        result["review_foreign_parent_score"]   = 0
-                        result["hq_confidence"] = "Low"
-                        if _score3_reason and not result.get("domain_root_hq_rejected_evidence_reason"):
-                            result["domain_root_hq_rejected_evidence_reason"] = _score3_reason
-                        _reason_mr = _s_trust_reason or _score3_reason or "score3_ineligible"
-                        _set_manual_review(result, "Yes", _reason_mr)
-                    else:
-                        result["sig_foreign_hq_score_reviewed"] = 3
-                        result["review_foreign_parent_score"]   = 3
-                        _set_manual_review(result, "No")
-                else:
-                    result["foreign_hq_simple"]             = "False"
-                    result["hq_structure_type"]             = "domestic_italy"
-                    result["sig_foreign_hq_score_reviewed"] = 0
-                    if not _s_untrusted:
-                        _set_manual_review(result, "No")
             else:
-                _set_manual_review(result, "Yes")
-                result["hq_reason"] = f"No HQ location found for query: '{_dr_query}'"
+                # ── DETERMINISTIC PATH ───────────────────────────────────────────
+                # Per-source scan in priority order — first hit wins.
+                # Priority: KG > answerBox > organic[0] > organic[1] > … > places
+                # This avoids concatenating all text (which causes Italian cities to
+                # match before a later-occurring foreign city).
+                _s_quote = _s_country = _s_city = _s_strength = ""
+                _s_evidence_rank = ""
+                _s_rejected_reasons: list[str] = []
+                _s_parser_raw: str = ""
+                _s_parser_rule: str = ""
+
+                def _try_source(text: str, label: str) -> bool:
+                    nonlocal _s_quote, _s_country, _s_city, _s_strength, _s_evidence_rank
+                    nonlocal _s_parser_raw, _s_parser_rule
+                    q, co, ci, st = _scan_for_hq(text)
+                    if co or ci:
+                        _s_quote, _s_country, _s_city, _s_strength = q, co, ci, st
+                        _s_evidence_rank = label
+                        _dbg: dict = {}
+                        _resolve_city_country(q or text, _dbg)
+                        _s_parser_raw  = q[:200]
+                        _s_parser_rule = _dbg.get("rule", "")
+                        return True
+                    return False
+
+                if _s_kg_loc and not _try_source(_s_kg_loc, "knowledge_graph"):
+                    _s_rejected_reasons.append(f"kg_loc='{_s_kg_loc[:80]}' no match")
+                if _s_ab_t and not (_s_country or _s_city) and not _try_source(_s_ab_t, "answer_box"):
+                    _s_rejected_reasons.append(f"answer_box='{_s_ab_t[:80]}' no match")
+
+                for _s_rank_i, _s_r in enumerate(_s_org[:5], start=1):
+                    if _s_country or _s_city:
+                        break
+                    _s_r_text = f"{_s_r.get('title','')} {_s_r.get('snippet','')}"
+                    if not _try_source(_s_r_text, f"organic_{_s_rank_i}"):
+                        _fb_q, _fb_co, _fb_ci, _fb_st = _scan_hq_title_snippet([_s_r])
+                        if _fb_co or _fb_ci:
+                            _s_quote, _s_country, _s_city, _s_strength = _fb_q, _fb_co, _fb_ci, _fb_st
+                            _s_evidence_rank = f"organic_{_s_rank_i}_signal"
+                        else:
+                            _s_rejected_reasons.append(f"organic_{_s_rank_i}='{_s_r_text[:60]}' no match")
+
+                if not (_s_country or _s_city):
+                    for _s_rank_p, _s_p in enumerate(_s_places[:3], start=1):
+                        _s_p_text = f"{_s_p.get('title','')} {_s_p.get('address','')}"
+                        if _try_source(_s_p_text, f"places_{_s_rank_p}"):
+                            break
+
+                result["domain_root_hq_evidence_rank"]            = _s_evidence_rank
+                result["domain_root_hq_rejected_evidence_reason"] = "; ".join(_s_rejected_reasons[:5])
+
+                if _s_country or _s_city:
+                    _s_country_std = _std_country(_s_country)
+                    _s_input_std   = _std_country(input_country or "Italy")
+
+                    result["location_parser_raw_capture"]               = _s_parser_raw
+                    result["location_parser_country_before_correction"] = _s_country_std
+                    result["location_parser_rule_fired"]                = _s_parser_rule
+
+                    _s_country_corrected = _correct_country_from_quote(_s_quote, _s_country_std)
+                    if _s_country_corrected != _s_country_std:
+                        _s_country_std = _s_country_corrected
+
+                    result["location_parser_country_after_correction"] = _s_country_std
+
+                    _s_is_foreign = bool(_s_country_std and
+                                         _s_country_std.lower() != _s_input_std.lower())
+                    _s_conf = ("High"   if _s_strength == "Strong"
+                               else ("Medium" if _s_strength == "Medium" else "Low"))
+
+                    result["hq_detected_country"]           = _s_country_std
+                    result["hq_detected_city"]              = _s_city
+                    result["hq_confidence"]                 = _s_conf
+                    result["hq_evidence_quote"]             = _s_quote
+                    result["hq_reason"]                     = f"[simple-hq:{_dr_query}] {_s_quote[:150]}"
+                    result["domain_root_hq_evidence_found"] = True
+                    result["domain_root_hq_evidence_quote"] = _s_quote
+                    result["domain_root_hq_country"]        = _s_country_std
+                    result["domain_root_hq_city"]           = _s_city
+                    result["domain_root_hq_confidence"]     = _s_conf
+
+                    from urllib.parse import urlparse as _up_s
+                    _s_input_nl = re.sub(
+                        r"^www\.", "",
+                        re.sub(r"^https?://", "", (domain or "").strip()).rstrip("/").lower()
+                    )
+                    _s_best_url = ""
+                    for _sr in _s_org:
+                        _sl = _sr.get("link", "")
+                        if _is_directory_url(_sl):
+                            continue
+                        _snl = re.sub(r"^www\.", "", _up_s(_sl).netloc.lower())
+                        if _s_input_nl and (_snl == _s_input_nl or _snl.endswith("." + _s_input_nl)):
+                            _s_best_url = _sl
+                            break
+                    if not _s_best_url:
+                        _s_best_url = next(
+                            (r.get("link", "") for r in _s_org if not _is_directory_url(r.get("link", ""))),
+                            "",
+                        )
+                    result["hq_evidence_url"]             = _s_best_url
+                    result["domain_root_hq_evidence_url"] = _s_best_url
+
+                    _s_evidence_domain = (
+                        re.sub(r"^www\.", "", _up_s(_s_best_url).netloc.lower())
+                        if _s_best_url else ""
+                    )
+
+                    def _domain_body(d: str) -> str:
+                        parts = d.rsplit(".", 2)
+                        return parts[-2] if len(parts) >= 2 else d
+
+                    _s_input_body    = _domain_body(_s_input_nl) if _s_input_nl else ""
+                    _s_evidence_body = _domain_body(_s_evidence_domain) if _s_evidence_domain else ""
+
+                    result["input_domain_body"]    = _s_input_body
+                    result["evidence_domain_body"] = _s_evidence_body
+
+                    _s_is_official_domain = bool(
+                        _s_evidence_domain and _s_input_nl
+                        and (_s_evidence_domain == _s_input_nl
+                             or _s_evidence_domain.endswith("." + _s_input_nl))
+                    )
+                    _s_is_known_brand = bool(_dr_root and _dr_root in _KNOWN_GLOBAL_BRANDS)
+
+                    _s_is_plausible_global = bool(
+                        _s_input_body and _s_evidence_body
+                        and not _s_is_official_domain
+                        and (
+                            _s_input_body == _s_evidence_body
+                            or (_dr_root and (
+                                _dr_root == _s_evidence_body
+                                or _s_evidence_body.startswith(_dr_root)
+                                or _dr_root.startswith(_s_evidence_body)
+                            ))
+                        )
+                    )
+
+                    if _s_is_official_domain:
+                        result["domain_mismatch_type"] = "same_domain"
+                    elif _s_is_plausible_global:
+                        result["domain_mismatch_type"] = "plausible_global_parent_domain"
+                    elif _s_evidence_domain:
+                        result["domain_mismatch_type"] = "unrelated_domain"
+                    else:
+                        result["domain_mismatch_type"] = ""
+
+                    _s_domain_mismatch = bool(
+                        _s_evidence_domain and _s_input_nl
+                        and not _s_is_official_domain
+                        and not _is_directory_url(_s_best_url)
+                        and not _s_is_known_brand
+                        and not _s_is_plausible_global
+                    )
+
+                    _s_is_subsidiary_regional = bool(_SUBSIDIARY_SIGNAL_RE.search(_s_quote))
+                    _s_untrusted = _s_domain_mismatch or _s_is_subsidiary_regional
+
+                    _s_trust_reason = ""
+                    if _s_domain_mismatch:
+                        _s_trust_reason = f"unrelated_domain:{_s_evidence_domain}"
+                        result["domain_root_hq_rejected_evidence_reason"] = (
+                            f"evidence from {_s_evidence_domain}, not {_s_input_nl}"
+                        )
+                    if _s_is_subsidiary_regional:
+                        _s_sub_label = "subsidiary_or_regional_hq_evidence"
+                        _s_trust_reason = (
+                            (_s_trust_reason + "; " + _s_sub_label)
+                            if _s_trust_reason else _s_sub_label
+                        )
+
+                    if _s_untrusted:
+                        _s_conf = "Low"
+                        result["hq_confidence"]             = _s_conf
+                        result["domain_root_hq_confidence"] = _s_conf
+                        _set_manual_review(result, "Yes", _s_trust_reason)
+
+                    if _s_is_foreign:
+                        result["foreign_hq_simple"]                    = "True"
+                        result["hq_structure_type"]                    = "foreign_parent"
+                        result["parent_group_hq_country"]              = _s_country_std
+                        result["parent_group_hq_city"]                 = _s_city
+                        result["local_entity_hq_country"]              = _s_input_std
+                        result["sig_foreign_hq_review_source"]         = "simple_domain_root_hq_search"
+                        result["sig_foreign_hq_review_evidence_url"]   = _s_best_url
+                        result["sig_foreign_hq_review_evidence_quote"] = _s_quote
+                        result["sig_foreign_hq_review_reason"] = (
+                            f"Simple domain-root HQ search ('{_dr_query}') "
+                            f"identifies {_s_country_std} as HQ"
+                        )
+                        result["sig_foreign_hq_review_confidence"] = _s_conf
+                        _score3_ok, _score3_reason = _is_score3_eligible_hq_evidence(
+                            quote=_s_quote,
+                            detected_country=_s_country_std,
+                            input_country=_s_input_std,
+                            evidence_url=_s_best_url,
+                        )
+                        _haiku_used = False
+                        _haiku_result: dict[str, Any] = {}
+                        _haiku_eligible = (
+                            use_haiku_uncertain
+                            and anthropic_key
+                            and _score3_ok
+                            and not _s_untrusted
+                            and (
+                                _s_conf in ("Medium", "Low")
+                                or not _s_is_official_domain
+                            )
+                            and (haiku_calls_counter is None
+                                 or haiku_max_calls is None
+                                 or haiku_calls_counter[0] < haiku_max_calls)
+                        )
+                        if _haiku_eligible:
+                            _hk_snips = [
+                                f"{r.get('title','')} — {r.get('snippet','')}"
+                                for r in _s_org[:5]
+                            ]
+                            _hk_ab = str(_s_data.get("answerBox", {}).get("snippet", "")
+                                         or _s_data.get("answerBox", {}).get("answer", ""))
+                            _haiku_result = _review_hq_with_haiku(
+                                company_name=company_name,
+                                domain=domain,
+                                input_country=_s_input_std,
+                                detected_country=_s_country_std,
+                                detected_city=_s_city,
+                                evidence_quote=_s_quote,
+                                evidence_url=_s_best_url,
+                                answer_box=_hk_ab,
+                                organic_titles_snippets=_hk_snips,
+                                anthropic_key=anthropic_key,
+                            )
+                            if haiku_calls_counter is not None and not _haiku_result.get("haiku_error"):
+                                haiku_calls_counter[0] += 1
+                            _haiku_used = not bool(_haiku_result.get("haiku_error"))
+                            _hk_cc = (_haiku_result.get("haiku_country_corrected") or "").strip()
+                            if _hk_cc and _hk_cc.lower() not in ("", "none"):
+                                _s_country_std = _std_country(_hk_cc)
+                                result["hq_detected_country"]     = _s_country_std
+                                result["domain_root_hq_country"]  = _s_country_std
+                                result["parent_group_hq_country"] = _s_country_std
+                                _s_is_foreign = bool(
+                                    _s_country_std
+                                    and _s_country_std.lower() != _s_input_std.lower()
+                                )
+                            _hk_verdict = _haiku_result.get("haiku_verdict", "")
+                            if _hk_verdict == "score0":
+                                _score3_ok = False
+                                _score3_reason = (
+                                    f"haiku_override_score0: {_haiku_result.get('haiku_reason','')}"
+                                )
+                            elif _hk_verdict == "score3":
+                                _score3_ok = True
+                                _score3_reason = ""
+
+                        if _haiku_used:
+                            result["anthropic_hq_review_used"]        = "Yes"
+                            result["anthropic_review_evidence_mode"]  = "serper_evidence_only"
+                            result["anthropic_web_search_used"]       = "No"
+                            result["_anthr_model"]       = _HAIKU_MODEL
+                            result["_anthr_input_tok"]   = _haiku_result.get("haiku_input_tokens", 0)
+                            result["_anthr_output_tok"]  = _haiku_result.get("haiku_output_tokens", 0)
+                            result["_anthr_total_tok"]   = (
+                                _haiku_result.get("haiku_input_tokens", 0)
+                                + _haiku_result.get("haiku_output_tokens", 0)
+                            )
+                            if _haiku_result.get("haiku_error"):
+                                result["anthropic_error"] = _haiku_result["haiku_error"]
+                            result["sig_foreign_hq_review_reason"] = (
+                                result.get("sig_foreign_hq_review_reason", "")
+                                + f" [haiku:{_haiku_result.get('haiku_verdict','')}:"
+                                f"{_haiku_result.get('haiku_reason','')[:80]}]"
+                            )
+
+                        if _s_untrusted or not _score3_ok:
+                            result["sig_foreign_hq_score_reviewed"] = 0
+                            result["review_foreign_parent_score"]   = 0
+                            result["hq_confidence"] = "Low"
+                            if _score3_reason and not result.get("domain_root_hq_rejected_evidence_reason"):
+                                result["domain_root_hq_rejected_evidence_reason"] = _score3_reason
+                            _reason_mr = _s_trust_reason or _score3_reason or "score3_ineligible"
+                            _set_manual_review(result, "Yes", _reason_mr)
+                        else:
+                            result["sig_foreign_hq_score_reviewed"] = 3
+                            result["review_foreign_parent_score"]   = 3
+                            _set_manual_review(result, "No")
+                    else:
+                        result["foreign_hq_simple"]             = "False"
+                        result["hq_structure_type"]             = "domestic_italy"
+                        result["sig_foreign_hq_score_reviewed"] = 0
+                        if not _s_untrusted:
+                            _set_manual_review(result, "No")
+                else:
+                    _set_manual_review(result, "Yes")
+                    result["hq_reason"] = f"No HQ location found for query: '{_dr_query}'"
         else:
             result["needs_manual_review"] = "Yes"
             if _s_err:
@@ -3058,94 +3136,12 @@ def probe_company(
         if result.get("sig_foreign_hq_score_reviewed") in ("", None):
             result["sig_foreign_hq_score_reviewed"] = _orig_score
 
-        # ── AI-first HQ interpretation ────────────────────────────────────────
-        _ai_eligible = (
-            use_ai_hq_interpretation
-            and anthropic_key
-            and _s_data  # need Serper data
-            and (
-                ai_hq_calls_counter is None
-                or ai_hq_max_calls is None
-                or ai_hq_calls_counter[0] < ai_hq_max_calls
-            )
-        )
-        result["ai_call_attempted"] = "Yes" if _ai_eligible else "No"
-        result["ai_call_success"]   = "No"
-        if _ai_eligible:
-            _ai_res = _ai_interpret_hq_from_serper(
-                company_name=company_name,
-                input_domain=domain or "",
-                brand_root=_dr_root,
-                input_country=_std_country(input_country or "Italy"),
-                query=_dr_query,
-                serper_data=_s_data,
-                model=ai_hq_model,
-                anthropic_key=anthropic_key,
-            )
-            if ai_hq_calls_counter is not None and not _ai_res.get("ai_hq_error"):
-                ai_hq_calls_counter[0] += 1
-
-            # Store all AI debug columns
-            for _k, _v in _ai_res.items():
-                result[_k] = _v
-
-            # Override score fields from AI output
-            _ai_clf  = _ai_res.get("ai_hq_classification", "")
-            _ai_conf = _ai_res.get("ai_hq_confidence", "")
-            _ai_rec  = _ai_res.get("ai_hq_score_recommendation", "")
-            _ai_err  = _ai_res.get("ai_hq_error", "")
-
-            if _ai_err or _ai_clf == "unclear":
-                # Keep whatever simple mode decided; mark for review
-                result["ai_call_success"] = "No"
-                _set_manual_review(result, "Yes", "ai_hq_unclear_or_error")
-                # Ensure for_next_scoring is never blank
-                result["sig_foreign_hq_score_for_next_scoring"] = result.get(
-                    "sig_foreign_hq_score_reviewed"
-                ) or _orig_score
-
-            elif _ai_clf == "foreign_parent" and _ai_rec == 3:
-                result["ai_call_success"] = "Yes"
-                _ai_country = _std_country(_ai_res.get("ai_parent_hq_country", ""))
-                _ai_city    = _ai_res.get("ai_parent_hq_city", "")
-                result["foreign_hq_simple"]                    = "True"
-                result["hq_structure_type"]                    = "foreign_parent"
-                result["sig_foreign_hq_score_reviewed"]        = 3
-                result["review_foreign_parent_score"]          = 3
-                result["sig_foreign_hq_score_for_next_scoring"] = 3
-                result["hq_confidence"]                        = _ai_conf
-                result["hq_detected_country"]                  = _ai_country
-                result["hq_detected_city"]                     = _ai_city
-                result["parent_group_hq_country"]              = _ai_country
-                result["parent_group_hq_city"]                 = _ai_city
-                result["hq_evidence_url"]                      = _ai_res.get("ai_evidence_url", "")
-                result["hq_evidence_quote"]                    = _ai_res.get("ai_evidence_quote", "")
-                result["hq_reason"]                            = f"[ai-hq] {_ai_res.get('ai_hq_reason','')[:150]}"
-                _needs_rev = "Yes" if _ai_conf == "Low" else "No"
-                _set_manual_review(result, _needs_rev, "ai_hq_low_confidence" if _needs_rev == "Yes" else "")
-
-            elif _ai_clf in ("domestic", "regional_branch_only"):
-                result["ai_call_success"] = "Yes"
-                result["foreign_hq_simple"]                    = "False"
-                result["hq_structure_type"]                    = (
-                    "domestic_italy" if _ai_clf == "domestic" else "regional_branch"
-                )
-                result["sig_foreign_hq_score_reviewed"]        = 0
-                result["review_foreign_parent_score"]          = 0
-                result["sig_foreign_hq_score_for_next_scoring"] = 0
-                result["hq_reason"]                            = f"[ai-hq] {_ai_res.get('ai_hq_reason','')[:150]}"
-                _needs_rev = "Yes" if _ai_conf == "Low" else "No"
-                _set_manual_review(result, _needs_rev, "ai_hq_low_confidence" if _needs_rev == "Yes" else "")
-
-        # ── Bug fix: sig_foreign_hq_score_for_next_scoring must never be blank ─
-        if not use_ai_hq_interpretation:
+        # Ensure for_next_scoring is never blank (safety net for all paths)
+        if result.get("sig_foreign_hq_score_for_next_scoring") in ("", None):
             _reviewed = result.get("sig_foreign_hq_score_reviewed")
-            if result.get("needs_manual_review") == "Yes":
-                result["sig_foreign_hq_score_for_next_scoring"] = (
-                    _reviewed if _reviewed not in ("", None) else _orig_score
-                )
-            elif _reviewed not in ("", None):
-                result["sig_foreign_hq_score_for_next_scoring"] = _reviewed
+            result["sig_foreign_hq_score_for_next_scoring"] = (
+                _reviewed if _reviewed not in ("", None) else _orig_score
+            )
 
         return result
 
