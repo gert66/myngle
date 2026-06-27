@@ -194,6 +194,22 @@ PROBE_COLS = [
     # Simple HQ mode
     "simple_hq_mode_used",
     "simple_hq_query",
+    # AI-first HQ interpretation columns
+    "ai_hq_interpretation_used",
+    "ai_hq_model",
+    "ai_hq_query",
+    "ai_hq_classification",
+    "ai_hq_score_recommendation",
+    "ai_hq_confidence",
+    "ai_parent_company",
+    "ai_parent_hq_country",
+    "ai_parent_hq_city",
+    "ai_local_entity_country",
+    "ai_evidence_url",
+    "ai_evidence_quote",
+    "ai_hq_reason",
+    "ai_hq_error",
+    "ai_hq_raw_json",
     # HQ Recovery workflow columns
     "hq_recovery_selected",
     "hq_recovery_selection_reason",
@@ -2378,6 +2394,167 @@ def _build_queries(company_name: str, domain: str) -> list[str]:
     return queries
 
 # ---------------------------------------------------------------------------
+# AI-first HQ interpretation helper
+# ---------------------------------------------------------------------------
+
+def _ai_interpret_hq_from_serper(
+    *,
+    company_name: str,
+    input_domain: str,
+    brand_root: str,
+    input_country: str,
+    query: str,
+    serper_data: dict,
+    model: str,
+    anthropic_key: str,
+) -> "dict[str, Any]":
+    """Call Anthropic to classify HQ from Serper evidence.
+
+    Returns a dict with ai_hq_* fields.  Never raises — errors are in ai_hq_error.
+    """
+    _empty: "dict[str, Any]" = {
+        "ai_hq_interpretation_used":  "No",
+        "ai_hq_model":                model,
+        "ai_hq_query":                query,
+        "ai_hq_classification":       "",
+        "ai_hq_score_recommendation": "",
+        "ai_hq_confidence":           "",
+        "ai_parent_company":          "",
+        "ai_parent_hq_country":       "",
+        "ai_parent_hq_city":          "",
+        "ai_local_entity_country":    input_country,
+        "ai_evidence_url":            "",
+        "ai_evidence_quote":          "",
+        "ai_hq_reason":               "",
+        "ai_hq_error":                "",
+        "ai_hq_raw_json":             "",
+    }
+
+    try:
+        import anthropic as _anthropic_sdk
+    except ImportError:
+        _empty["ai_hq_error"] = "anthropic SDK not installed"
+        return _empty
+
+    # ── Build evidence block ──────────────────────────────────────────────────
+    kg     = serper_data.get("knowledgeGraph", {})
+    ab     = serper_data.get("answerBox", {})
+    org    = serper_data.get("organic", [])
+
+    kg_loc = (kg.get("address", "") or kg.get("headquarters", "")
+              or kg.get("location", "") or "")
+    ab_txt = (ab.get("answer", "") or ab.get("snippet", "") or "")
+
+    organic_lines: list[str] = []
+    for _i, _r in enumerate(org[:5], 1):
+        organic_lines.append(
+            f"Result {_i}: {_r.get('title','')}\n"
+            f"  Snippet: {_r.get('snippet','')}\n"
+            f"  URL: {_r.get('link','')}"
+        )
+    organic_block = "\n".join(organic_lines) if organic_lines else "(none)"
+
+    user_msg = f"""Company name: {company_name}
+Input domain: {input_domain}
+Brand root: {brand_root}
+Input country (local entity registered in): {input_country}
+Serper query used: {query}
+
+--- Evidence ---
+Knowledge Graph location/HQ: {kg_loc or '(none)'}
+Answer Box: {ab_txt or '(none)'}
+Top organic results:
+{organic_block}
+--- End evidence ---
+
+Classify and return valid JSON only (no markdown, no prose):
+{{
+  "classification": "foreign_parent" | "domestic" | "regional_branch_only" | "unclear",
+  "score_recommendation": 3 | 0 | "",
+  "confidence": "High" | "Medium" | "Low",
+  "parent_company": "",
+  "parent_hq_country": "",
+  "parent_hq_city": "",
+  "evidence_url": "",
+  "evidence_quote": "",
+  "reason": ""
+}}
+"""
+
+    sys_msg = (
+        "You are a B2B company data analyst. Your job is to decide whether an input "
+        "company registered in a given country is part of a foreign-headquartered "
+        "parent/global group, or whether it is domestic. "
+        "Distinguish global parent HQ from regional HQ, branch offices, sales offices, "
+        "local offices, and directories. "
+        "Decision rules: "
+        "'foreign_parent' = evidence indicates the local entity belongs to a parent/global group "
+        "headquartered outside the input country. "
+        "'domestic' = HQ or parent HQ is in the input country. "
+        "'regional_branch_only' = only a regional/branch/sales/local office HQ is shown, "
+        "not the global parent HQ. "
+        "'unclear' = insufficient or conflicting evidence. "
+        "Score recommendation: 3 only for foreign_parent with High or Medium confidence; "
+        "0 for domestic or regional_branch_only; empty string for unclear. "
+        "Evidence URL and quote must come from the provided Serper evidence — do not invent. "
+        "If multiple countries appear, choose the current global parent HQ country. "
+        "Return only valid JSON."
+    )
+
+    try:
+        _client = _anthropic_sdk.Anthropic(api_key=anthropic_key)
+        _resp = _client.messages.create(
+            model=model,
+            max_tokens=512,
+            system=sys_msg,
+            messages=[{"role": "user", "content": user_msg}],
+        )
+        _raw = (_resp.content[0].text or "").strip()
+    except Exception as _exc:
+        _empty["ai_hq_error"] = str(_exc)[:300]
+        return _empty
+
+    # Strip markdown fences if model wraps in ```json
+    _clean = re.sub(r"^```(?:json)?\s*", "", _raw, flags=re.I)
+    _clean = re.sub(r"\s*```$", "", _clean).strip()
+
+    try:
+        _parsed = json.loads(_clean)
+    except Exception:
+        _empty["ai_hq_error"]    = f"JSON parse error: {_raw[:200]}"
+        _empty["ai_hq_raw_json"] = _raw[:500]
+        return _empty
+
+    clf   = str(_parsed.get("classification", "")).strip()
+    if clf not in ("foreign_parent", "domestic", "regional_branch_only", "unclear"):
+        clf = "unclear"
+    conf  = str(_parsed.get("confidence", "")).strip()
+    if conf not in ("High", "Medium", "Low"):
+        conf = "Low"
+    score_rec = _parsed.get("score_recommendation", "")
+    if score_rec not in (3, 0, ""):
+        score_rec = ""
+
+    return {
+        "ai_hq_interpretation_used":  "Yes",
+        "ai_hq_model":                model,
+        "ai_hq_query":                query,
+        "ai_hq_classification":       clf,
+        "ai_hq_score_recommendation": score_rec,
+        "ai_hq_confidence":           conf,
+        "ai_parent_company":          str(_parsed.get("parent_company", "") or ""),
+        "ai_parent_hq_country":       str(_parsed.get("parent_hq_country", "") or ""),
+        "ai_parent_hq_city":          str(_parsed.get("parent_hq_city", "") or ""),
+        "ai_local_entity_country":    input_country,
+        "ai_evidence_url":            str(_parsed.get("evidence_url", "") or ""),
+        "ai_evidence_quote":          str(_parsed.get("evidence_quote", "") or ""),
+        "ai_hq_reason":               str(_parsed.get("reason", "") or ""),
+        "ai_hq_error":                "",
+        "ai_hq_raw_json":             _raw[:500],
+    }
+
+
+# ---------------------------------------------------------------------------
 # Per-company probe
 # ---------------------------------------------------------------------------
 
@@ -2398,6 +2575,10 @@ def probe_company(
     use_haiku_uncertain: bool = False,
     haiku_calls_counter: "list[int] | None" = None,
     haiku_max_calls: "int | None" = None,
+    use_ai_hq_interpretation: bool = False,
+    ai_hq_model: str = "claude-3-5-sonnet-20241022",
+    ai_hq_calls_counter: "list[int] | None" = None,
+    ai_hq_max_calls: "int | None" = None,
 ) -> dict[str, Any]:
     """Run all queries for one company; return probe column dict."""
     import time as _time_mod
@@ -2760,8 +2941,93 @@ def probe_company(
 
         _irow = input_row or {}
         result["sig_foreign_hq_score_original"] = _safe_float(_irow.get("sig_foreign_hq_score"))
+        _orig_score = _safe_float(_irow.get("sig_foreign_hq_score")) or 0.0
         if result.get("sig_foreign_hq_score_reviewed") in ("", None):
-            result["sig_foreign_hq_score_reviewed"] = _safe_float(_irow.get("sig_foreign_hq_score"))
+            result["sig_foreign_hq_score_reviewed"] = _orig_score
+
+        # ── AI-first HQ interpretation ────────────────────────────────────────
+        _ai_eligible = (
+            use_ai_hq_interpretation
+            and anthropic_key
+            and _s_data  # need Serper data
+            and (
+                ai_hq_calls_counter is None
+                or ai_hq_max_calls is None
+                or ai_hq_calls_counter[0] < ai_hq_max_calls
+            )
+        )
+        if _ai_eligible:
+            _ai_res = _ai_interpret_hq_from_serper(
+                company_name=company_name,
+                input_domain=domain or "",
+                brand_root=_dr_root,
+                input_country=_std_country(input_country or "Italy"),
+                query=_dr_query,
+                serper_data=_s_data,
+                model=ai_hq_model,
+                anthropic_key=anthropic_key,
+            )
+            if ai_hq_calls_counter is not None and not _ai_res.get("ai_hq_error"):
+                ai_hq_calls_counter[0] += 1
+
+            # Store all AI debug columns
+            for _k, _v in _ai_res.items():
+                result[_k] = _v
+
+            # Override score fields from AI output
+            _ai_clf  = _ai_res.get("ai_hq_classification", "")
+            _ai_conf = _ai_res.get("ai_hq_confidence", "")
+            _ai_rec  = _ai_res.get("ai_hq_score_recommendation", "")
+            _ai_err  = _ai_res.get("ai_hq_error", "")
+
+            if _ai_err or _ai_clf == "unclear":
+                # Keep whatever simple mode decided; mark for review
+                _set_manual_review(result, "Yes", "ai_hq_unclear_or_error")
+                # Ensure for_next_scoring is never blank
+                result["sig_foreign_hq_score_for_next_scoring"] = result.get(
+                    "sig_foreign_hq_score_reviewed"
+                ) or _orig_score
+
+            elif _ai_clf == "foreign_parent" and _ai_rec == 3:
+                _ai_country = _std_country(_ai_res.get("ai_parent_hq_country", ""))
+                _ai_city    = _ai_res.get("ai_parent_hq_city", "")
+                result["foreign_hq_simple"]                    = "True"
+                result["hq_structure_type"]                    = "foreign_parent"
+                result["sig_foreign_hq_score_reviewed"]        = 3
+                result["review_foreign_parent_score"]          = 3
+                result["sig_foreign_hq_score_for_next_scoring"] = 3
+                result["hq_confidence"]                        = _ai_conf
+                result["hq_detected_country"]                  = _ai_country
+                result["hq_detected_city"]                     = _ai_city
+                result["parent_group_hq_country"]              = _ai_country
+                result["parent_group_hq_city"]                 = _ai_city
+                result["hq_evidence_url"]                      = _ai_res.get("ai_evidence_url", "")
+                result["hq_evidence_quote"]                    = _ai_res.get("ai_evidence_quote", "")
+                result["hq_reason"]                            = f"[ai-hq] {_ai_res.get('ai_hq_reason','')[:150]}"
+                _needs_rev = "Yes" if _ai_conf == "Low" else "No"
+                _set_manual_review(result, _needs_rev, "ai_hq_low_confidence" if _needs_rev == "Yes" else "")
+
+            elif _ai_clf in ("domestic", "regional_branch_only"):
+                result["foreign_hq_simple"]                    = "False"
+                result["hq_structure_type"]                    = (
+                    "domestic_italy" if _ai_clf == "domestic" else "regional_branch"
+                )
+                result["sig_foreign_hq_score_reviewed"]        = 0
+                result["review_foreign_parent_score"]          = 0
+                result["sig_foreign_hq_score_for_next_scoring"] = 0
+                result["hq_reason"]                            = f"[ai-hq] {_ai_res.get('ai_hq_reason','')[:150]}"
+                _needs_rev = "Yes" if _ai_conf == "Low" else "No"
+                _set_manual_review(result, _needs_rev, "ai_hq_low_confidence" if _needs_rev == "Yes" else "")
+
+        # ── Bug fix: sig_foreign_hq_score_for_next_scoring must never be blank ─
+        if not use_ai_hq_interpretation:
+            _reviewed = result.get("sig_foreign_hq_score_reviewed")
+            if result.get("needs_manual_review") == "Yes":
+                result["sig_foreign_hq_score_for_next_scoring"] = (
+                    _reviewed if _reviewed not in ("", None) else _orig_score
+                )
+            elif _reviewed not in ("", None):
+                result["sig_foreign_hq_score_for_next_scoring"] = _reviewed
 
         return result
 
@@ -3786,8 +4052,38 @@ with st.sidebar:
         )
         haiku_max_calls = None if int(haiku_max_raw or 0) == 0 else int(haiku_max_raw)
 
+    st.subheader("AI HQ interpretation")
+    use_ai_hq_interpretation = st.checkbox(
+        "Use AI-first HQ interpretation",
+        value=False,
+        key="use_ai_hq_interpretation_cb",
+        help=(
+            "After the normal Serper step, sends evidence to Anthropic for HQ classification. "
+            "AI becomes the main decision-maker. Useful for debugging and recovery quality."
+        ),
+    )
+    ai_hq_model = "claude-3-5-sonnet-20241022"
+    ai_hq_max_calls: "int | None" = None
+    if use_ai_hq_interpretation:
+        ai_hq_model = st.selectbox(
+            "AI HQ model",
+            options=["claude-3-5-sonnet-20241022", "claude-3-5-haiku-20241022"],
+            index=0,
+            key="ai_hq_model_select",
+        )
+        _ai_hq_max_raw = st.number_input(
+            "Max AI HQ interpretation calls",
+            min_value=0,
+            max_value=10000,
+            value=50,
+            step=10,
+            key="ai_hq_max_calls_input",
+            help="Maximum AI calls per batch run. 0 = unlimited.",
+        )
+        ai_hq_max_calls = None if int(_ai_hq_max_raw or 0) == 0 else int(_ai_hq_max_raw)
+
     anthropic_key = ""
-    if use_model or use_anthropic_review or use_haiku_uncertain:
+    if use_model or use_anthropic_review or use_haiku_uncertain or use_ai_hq_interpretation:
         anthropic_key = st.text_input(
             "Anthropic API key",
             value=os.environ.get("ANTHROPIC_API_KEY", ""),
@@ -3882,6 +4178,7 @@ if run_btn:
     cache: dict = {}
     error_rows: list[str] = []
     _haiku_calls_counter: list[int] = [0]  # mutable counter shared across rows
+    _ai_hq_calls_counter: list[int] = [0]
 
     for i, row in enumerate(input_rows):
         company = str(row.get(company_col) or "").strip()
@@ -3908,6 +4205,10 @@ if run_btn:
             use_haiku_uncertain=use_haiku_uncertain,
             haiku_calls_counter=_haiku_calls_counter,
             haiku_max_calls=haiku_max_calls,
+            use_ai_hq_interpretation=use_ai_hq_interpretation,
+            ai_hq_model=ai_hq_model,
+            ai_hq_calls_counter=_ai_hq_calls_counter,
+            ai_hq_max_calls=ai_hq_max_calls,
         )
 
         # Belt-and-suspenders fallback (main guard is inside probe_company).
@@ -4084,6 +4385,7 @@ if _app_mode == "probe":
         cache: dict = {}
         error_rows: list[str] = []
         _haiku_calls_counter: list[int] = [0]  # mutable counter shared across rows
+        _ai_hq_calls_counter: list[int] = [0]
 
         for i, row in enumerate(input_rows):
             company = str(row.get(company_col) or "").strip()
@@ -4111,6 +4413,10 @@ if _app_mode == "probe":
                 use_haiku_uncertain=use_haiku_uncertain,
                 haiku_calls_counter=_haiku_calls_counter,
                 haiku_max_calls=haiku_max_calls,
+                use_ai_hq_interpretation=use_ai_hq_interpretation,
+                ai_hq_model=ai_hq_model,
+                ai_hq_calls_counter=_ai_hq_calls_counter,
+                ai_hq_max_calls=ai_hq_max_calls,
             )
 
             # Sanity guard: if detected country == input country, force foreign_hq_simple = False
