@@ -105,6 +105,7 @@ HQ_AUDIT_COLS = [
     "hq_recalc_evidence_quote",
     "hq_recalc_ai_reason",
     "old_sig_foreign_hq_evidence",
+    "hq_recalc_domain_mismatch_warning",
 ]
 
 # Columns to clear on rows where HQ recalc was NOT applied, to prevent stale
@@ -126,6 +127,7 @@ _HQ_STALE_CLEAR_COLS = (
     "hq_recalc_evidence_quote",
     "hq_recalc_ai_reason",
     "old_sig_foreign_hq_evidence",
+    "hq_recalc_domain_mismatch_warning",
 )
 
 COMPETITOR_AUDIT_COLS = [
@@ -281,6 +283,7 @@ _CONTRADICTORY_DOMESTIC_HQ_RE = _re.compile(
     r"|italian\s+(?:company\s+)?(?:headquarters?|hq)"
     r"|italian[- ]headquartered"
     r"|domestic\s+headquarters?"
+    r"|italy[- ]based\s+(?:parent\s+(?:company|group)|company|group)"
     r")\b"
     r"|headquartered?\s+in\s+\w[\w\s]*,?\s*Italy\b"
     r"|(?:parent|group)\s+(?:is\s+)?(?:based|located|headquartered)\s+in\s+\w[\w\s]*,?\s*Italy\b",
@@ -489,6 +492,10 @@ def _build_final_signal_state(
         "sig_lnd_onboarding":    _score_input(score_out, enr_row, "score_input_lnd_onboarding",    "sig_lnd_onboarding_score"),
         "ti_onboarding":         _score_input(score_out, enr_row, "score_input_ti_onboarding",     "ti_onboarding_score"),
         "sig_rapid_growth":      _score_input(score_out, enr_row, "score_input_rapid_growth",      "sig_rapid_growth_score"),
+        "domain_mismatch_warning": (
+            str(enr_row.get("possible_domain_mismatch") or "").strip().lower() in ("yes", "true", "1")
+            or str(hqr_row.get("possible_domain_mismatch") or "").strip().lower() in ("yes", "true", "1")
+        ),
     }
 
 
@@ -608,6 +615,10 @@ def _build_lovable_app_fields(
         growth_note = "Growth signal present — may indicate cost sensitivity."
         if growth_note not in base:
             base = (base + " " + growth_note).strip() if base else growth_note
+    if state.get("hq_upgraded") and state.get("domain_mismatch_warning"):
+        dm_note = "HQ was reviewed, but domain match was flagged. Verify before outreach."
+        if dm_note not in base:
+            base = (base + " " + dm_note).strip() if base else dm_note
     out["caution_app"] = base
 
     # ── evidence_summary_app ──────────────────────────────────────────────────
@@ -870,6 +881,14 @@ def _build_output_wb(
          summary.get("n_val_blank_final_score", 0))
     _add("Rows with recalculated HQ=3 but sig_foreign_hq_evidence still contradicts (should be 0)",
          summary.get("n_val_contradictory_evidence", 0))
+    _add("HQ recalculated rows with domain mismatch warning (verify before outreach)",
+         summary.get("n_val_domain_mismatch_warning", 0))
+    _add("HQ recalculated rows where app text still contains contradictory HQ wording (should be 0)",
+         summary.get("n_val_app_text_still_contradictory", 0))
+    _add("HQ recalculated rows with evidence URL populated",
+         summary.get("n_val_has_evidence_url", 0))
+    _add("HQ recalculated rows with evidence quote populated",
+         summary.get("n_val_has_evidence_quote", 0))
 
     if deltas:
         _section("Score delta statistics")
@@ -1346,6 +1365,19 @@ def recalculate_hq_changed_scores_workbook(
                     _ev_parts.append(f"Reason: {_rev_reason[:200]}")
                 _ev_parts.append("Previous HQ evidence superseded.")
                 row_out["sig_foreign_hq_evidence"] = " ".join(_ev_parts)
+
+                # Domain mismatch safety: flag rows where domain match was uncertain
+                _domain_mismatch = (
+                    str(enr_row.get("possible_domain_mismatch") or "").strip().lower() in ("yes", "true", "1")
+                    or str(hqr_row.get("possible_domain_mismatch") or "").strip().lower() in ("yes", "true", "1")
+                )
+                if _domain_mismatch:
+                    row_out["hq_recalc_domain_mismatch_warning"] = "Yes"
+                    if "needs_manual_review" in row_out:
+                        row_out["needs_manual_review"] = "Yes"
+                else:
+                    row_out["hq_recalc_domain_mismatch_warning"] = "No"
+
                 n_hq_recalculated += 1
                 if old_hq in (0.0, None) and new_hq == 3.0:
                     n_upgrades += 1
@@ -1457,6 +1489,26 @@ def recalculate_hq_changed_scores_workbook(
         and _CONTRADICTORY_DOMESTIC_HQ_RE.search(str(r.get("sig_foreign_hq_evidence") or ""))
     )
 
+    _hq_recalc_rows = [r for r in out_rows if str(r.get("hq_recalc_applied") or "") == "Yes"]
+    # Domain mismatch warning: HQ recalculated but possible domain mismatch detected
+    n_val_domain_mismatch_warning = sum(
+        1 for r in _hq_recalc_rows
+        if str(r.get("hq_recalc_domain_mismatch_warning") or "").strip() == "Yes"
+    )
+    # App text still contradictory after cleanup (any of the four main app text fields)
+    _app_text_check_cols = ("why_relevant_app", "caution_app", "evidence_summary_app", "what_is_hot_app")
+    n_val_app_text_still_contradictory = sum(
+        1 for r in _hq_recalc_rows
+        if any(_CONTRADICTORY_DOMESTIC_HQ_RE.search(str(r.get(c) or "")) for c in _app_text_check_cols)
+    )
+    # Evidence URL and quote coverage
+    n_val_has_evidence_url = sum(
+        1 for r in _hq_recalc_rows if str(r.get("hq_recalc_evidence_url") or "").strip()
+    )
+    n_val_has_evidence_quote = sum(
+        1 for r in _hq_recalc_rows if str(r.get("hq_recalc_evidence_quote") or "").strip()
+    )
+
     summary = {
         "error":                     "",
         "scope":                     scope,
@@ -1486,10 +1538,14 @@ def recalculate_hq_changed_scores_workbook(
         "test_mode_active":          _limit > 0,
         "max_recalculated_rows":     _limit,
         # Validation
-        "n_val_inconsistent_hq":        n_val_inconsistent_hq,
-        "n_val_recalc_missing_scores":  n_val_recalc_missing_scores,
-        "n_val_blank_final_score":      n_val_blank_final_score,
-        "n_val_contradictory_evidence": n_val_contradictory_evidence,
+        "n_val_inconsistent_hq":              n_val_inconsistent_hq,
+        "n_val_recalc_missing_scores":        n_val_recalc_missing_scores,
+        "n_val_blank_final_score":            n_val_blank_final_score,
+        "n_val_contradictory_evidence":       n_val_contradictory_evidence,
+        "n_val_domain_mismatch_warning":      n_val_domain_mismatch_warning,
+        "n_val_app_text_still_contradictory": n_val_app_text_still_contradictory,
+        "n_val_has_evidence_url":             n_val_has_evidence_url,
+        "n_val_has_evidence_quote":           n_val_has_evidence_quote,
     }
 
     wb_out, lov_stats = _build_output_wb(

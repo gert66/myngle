@@ -286,11 +286,17 @@ st.caption(
 )
 
 # ── Validation warnings ───────────────────────────────────────────────────────
-_n_inc  = summary.get("n_val_inconsistent_hq", 0)
-_n_mis  = summary.get("n_val_recalc_missing_scores", 0)
-_n_blnk = summary.get("n_val_blank_final_score", 0)
+_n_inc   = summary.get("n_val_inconsistent_hq", 0)
+_n_mis   = summary.get("n_val_recalc_missing_scores", 0)
+_n_blnk  = summary.get("n_val_blank_final_score", 0)
 _n_contr = summary.get("n_val_contradictory_evidence", 0)
-if _n_inc or _n_mis or _n_blnk or _n_contr:
+_n_dmm   = summary.get("n_val_domain_mismatch_warning", 0)
+_n_atxt  = summary.get("n_val_app_text_still_contradictory", 0)
+_n_evurl = summary.get("n_val_has_evidence_url", 0)
+_n_evqt  = summary.get("n_val_has_evidence_quote", 0)
+_n_hqr   = summary.get("n_hq_recalculated", 0)
+_has_errors = _n_inc or _n_mis or _n_blnk or _n_contr or _n_atxt
+if _has_errors or _n_dmm:
     with st.expander("⚠️ Validation warnings", expanded=True):
         if _n_inc:
             st.warning(
@@ -315,8 +321,33 @@ if _n_inc or _n_mis or _n_blnk or _n_contr:
                 "`hq_score_after_recalc = 3`, but `sig_foreign_hq_evidence` "
                 "still contains contradictory domestic/no-foreign HQ text."
             )
+        if _n_atxt:
+            st.warning(
+                f"**{_n_atxt} rows** have `hq_recalc_applied = Yes` but app text fields "
+                "(`why_relevant_app`, `caution_app`, `evidence_summary_app`, `what_is_hot_app`) "
+                "still contain contradictory HQ wording after cleanup."
+            )
+        if _n_dmm:
+            st.info(
+                f"**{_n_dmm} rows** were HQ-recalculated but have a domain mismatch warning "
+                "(`possible_domain_mismatch = Yes`). Verify domain ownership before outreach. "
+                "Column `hq_recalc_domain_mismatch_warning` is set to `Yes` for these rows."
+            )
+        st.divider()
+        st.caption(
+            f"Evidence coverage: **{_n_evurl}/{_n_hqr}** HQ-recalculated rows have an evidence URL · "
+            f"**{_n_evqt}/{_n_hqr}** have an evidence quote"
+        )
 else:
     st.success("Validation OK — no inconsistent audit rows detected.", icon="✅")
+    if _n_dmm:
+        st.info(
+            f"{_n_dmm} HQ-recalculated rows have a domain mismatch warning — verify before outreach."
+        )
+    st.caption(
+        f"Evidence coverage: **{_n_evurl}/{_n_hqr}** HQ-recalculated rows have an evidence URL · "
+        f"**{_n_evqt}/{_n_hqr}** have an evidence quote"
+    )
 
 # ── HQ metrics ────────────────────────────────────────────────────────────────
 if _scope in (SCOPE_HQ, SCOPE_BOTH):
