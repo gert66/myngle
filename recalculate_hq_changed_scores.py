@@ -98,7 +98,35 @@ HQ_AUDIT_COLS = [
     "final_commercial_fit_score_after_hq_recalc",
     "final_commercial_fit_score_delta_hq_recalc",
     "commercial_fit_score_before_source_column",
+    # Reviewed HQ evidence — only populated when hq_recalc_applied = Yes
+    "hq_recalc_reviewed_country",
+    "hq_recalc_reviewed_city",
+    "hq_recalc_evidence_url",
+    "hq_recalc_evidence_quote",
+    "hq_recalc_ai_reason",
+    "old_sig_foreign_hq_evidence",
 ]
+
+# Columns to clear on rows where HQ recalc was NOT applied, to prevent stale
+# values from a prior recalc run passing through as if they apply to this run.
+_HQ_STALE_CLEAR_COLS = (
+    "hq_recalc_reason",
+    "hq_score_before_recalc",
+    "hq_score_after_recalc",
+    "commercial_fit_score_before_hq_recalc",
+    "commercial_fit_score_after_hq_recalc",
+    "commercial_fit_score_delta_hq_recalc",
+    "final_commercial_fit_score_before_hq_recalc",
+    "final_commercial_fit_score_after_hq_recalc",
+    "final_commercial_fit_score_delta_hq_recalc",
+    "commercial_fit_score_before_source_column",
+    "hq_recalc_reviewed_country",
+    "hq_recalc_reviewed_city",
+    "hq_recalc_evidence_url",
+    "hq_recalc_evidence_quote",
+    "hq_recalc_ai_reason",
+    "old_sig_foreign_hq_evidence",
+)
 
 COMPETITOR_AUDIT_COLS = [
     "competitor_recalc_applied",
@@ -788,6 +816,19 @@ def _build_output_wb(
         _add("Competitor notes added",      summary.get("n_comp_notes", 0))
         _add("Conflicting text removed",    summary.get("n_conflict_removed", 0))
 
+    _section("Score columns — which is final")
+    _add("Authoritative final score column",  "final_commercial_fit_score")
+    _add("Legacy/original score column",      "commercial_fit_score  (original enriched value, not updated by recalc)")
+    _add("Note", "Downstream tools that read commercial_fit_score will see the pre-recalc score.")
+
+    _section("Validation checks (should all be 0)")
+    _add("Rows with hq_score_after_recalc=3 but hq_recalc_applied=No (inconsistency)",
+         summary.get("n_val_inconsistent_hq", 0))
+    _add("Rows with hq_recalc_applied=Yes but missing commercial score before/after",
+         summary.get("n_val_recalc_missing_scores", 0))
+    _add("Rows with hq_recalc_applied=Yes but final_commercial_fit_score blank",
+         summary.get("n_val_blank_final_score", 0))
+
     if deltas:
         _section("Score delta statistics")
         all_d = [x[4] for x in deltas]
@@ -795,8 +836,9 @@ def _build_output_wb(
         neg_d = [d for d in all_d if d < 0]
         _add("Score increases",  len(pos_d))
         _add("Score decreases",  len(neg_d))
-        _add("Max positive delta", max(all_d))
-        _add("Max negative delta", min(all_d))
+        _add("Max positive delta (biggest increase)", max(pos_d) if pos_d else "n/a")
+        _add("Min positive delta (smallest increase)", min(pos_d) if pos_d else "n/a")
+        _add("Max negative delta (biggest decrease)", min(neg_d) if neg_d else "n/a — no score decreases")
         _add("Mean delta",         round(sum(all_d) / len(all_d), 4))
 
         top_pos = sorted([d for d in deltas if d[4] > 0], key=lambda x: -x[4])[:20]
@@ -1117,12 +1159,27 @@ def recalculate_hq_changed_scores_workbook(
         hq_original_val  = None
         hq_reason        = ""
         if matched and scope in (SCOPE_HQ, SCOPE_BOTH):
-            reviewed_raw = hqr_row.get("sig_foreign_hq_score_reviewed")
-            original_raw = (
-                enr_row.get("sig_foreign_hq_score")
-                or hqr_row.get("sig_foreign_hq_score_original")
-                or hqr_row.get("sig_foreign_hq_score_original_before_recovery")
-            )
+            # Reviewed score: sig_foreign_hq_score_for_next_scoring is authoritative
+            # (written by the AI-first probe app); fall back to sig_foreign_hq_score_reviewed.
+            reviewed_raw = None
+            for _rev_col in ("sig_foreign_hq_score_for_next_scoring", "sig_foreign_hq_score_reviewed"):
+                _v_raw = hqr_row.get(_rev_col)
+                if _v_raw is not None and _v_raw != "":
+                    reviewed_raw = _v_raw
+                    break
+
+            # Original score: prefer HQR-tracked pre-recovery value so a previously
+            # recalculated enriched file (where sig_foreign_hq_score is already updated)
+            # does not make the row look like it was never changed.
+            original_raw = None
+            for _orig_col in ("sig_foreign_hq_score_original", "sig_foreign_hq_score_original_before_recovery"):
+                _o_raw = hqr_row.get(_orig_col)
+                if _o_raw is not None and _o_raw != "":
+                    original_raw = _o_raw
+                    break
+            if original_raw is None:
+                original_raw = enr_row.get("sig_foreign_hq_score")
+
             hq_reviewed_val = _safe_float(reviewed_raw)
             hq_original_val = _safe_float(original_raw)
             if reviewed_raw is not None and reviewed_raw != "" and hq_reviewed_val != hq_original_val:
@@ -1143,6 +1200,11 @@ def recalculate_hq_changed_scores_workbook(
             row_out["recalc_scope_applied"] = "No"
             row_out["hq_recalc_applied"]    = "No"
             row_out["competitor_recalc_applied"] = "No"
+            # Wipe stale HQ audit columns that may have carried over from a prior
+            # recalc run on the enriched workbook — prevents inconsistent state where
+            # hq_score_after_recalc=3 but hq_recalc_applied=No.
+            for _c in _HQ_STALE_CLEAR_COLS:
+                row_out[_c] = None
             out_rows.append(row_out)
             continue
 
@@ -1152,6 +1214,8 @@ def recalculate_hq_changed_scores_workbook(
             if hq_eligible:
                 row_out["hq_recalc_applied"] = "No - skipped by test row limit"
                 n_hq_skipped_limit += 1
+                for _c in _HQ_STALE_CLEAR_COLS:
+                    row_out[_c] = None
             if competitor_eligible:
                 row_out["competitor_recalc_applied"] = "No - skipped by test row limit"
                 n_competitor_skipped_limit += 1
@@ -1207,6 +1271,15 @@ def recalculate_hq_changed_scores_workbook(
                     "commercial_fit_score_before_source_column":   _cfs_col,
                     "sig_foreign_hq_score":                        new_hq,
                     "sig_foreign_hq_score_for_next_scoring":       new_hq,
+                    # Reviewed HQ evidence — prevent "no foreign parent" old evidence
+                    # from being the only visible proof when new HQ score = 3.
+                    "hq_recalc_reviewed_country": _hqr_country(hqr_row),
+                    "hq_recalc_reviewed_city":    _hqr_city(hqr_row),
+                    "hq_recalc_evidence_url":     _hqr_evidence_url(hqr_row),
+                    "hq_recalc_evidence_quote":   _v(hqr_row, "hq_evidence_quote", "ai_evidence_quote"),
+                    "hq_recalc_ai_reason":        _v(hqr_row, "hq_reason", "ai_hq_reason"),
+                    "old_sig_foreign_hq_evidence": _v(enr_row, "sig_foreign_hq_evidence",
+                                                      "sig_foreign_hq_evidence_url"),
                 })
                 n_hq_recalculated += 1
                 if old_hq in (0.0, None) and new_hq == 3.0:
@@ -1291,6 +1364,26 @@ def recalculate_hq_changed_scores_workbook(
     avg_comp_before = (sum(competitor_before_vals) / len(competitor_before_vals)
                        if competitor_before_vals else 0.0)
 
+    # ── Validation checks ─────────────────────────────────────────────────────
+    # These should all be 0 after the fixes; kept as safety net for future regressions.
+    n_val_inconsistent_hq = sum(
+        1 for r in out_rows
+        if _safe_float(r.get("hq_score_after_recalc")) == 3.0
+        and str(r.get("hq_recalc_applied") or "").startswith("No")
+        and str(r.get("hq_recalc_reason") or "")
+    )
+    n_val_recalc_missing_scores = sum(
+        1 for r in out_rows
+        if str(r.get("hq_recalc_applied") or "") == "Yes"
+        and (r.get("commercial_fit_score_before_hq_recalc") is None
+             or r.get("commercial_fit_score_after_hq_recalc") is None)
+    )
+    n_val_blank_final_score = sum(
+        1 for r in out_rows
+        if str(r.get("hq_recalc_applied") or "") == "Yes"
+        and r.get("final_commercial_fit_score") is None
+    )
+
     summary = {
         "error":                     "",
         "scope":                     scope,
@@ -1319,6 +1412,10 @@ def recalculate_hq_changed_scores_workbook(
         "deltas":                    deltas,
         "test_mode_active":          _limit > 0,
         "max_recalculated_rows":     _limit,
+        # Validation
+        "n_val_inconsistent_hq":     n_val_inconsistent_hq,
+        "n_val_recalc_missing_scores": n_val_recalc_missing_scores,
+        "n_val_blank_final_score":   n_val_blank_final_score,
     }
 
     wb_out, lov_stats = _build_output_wb(

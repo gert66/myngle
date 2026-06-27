@@ -280,6 +280,36 @@ st.caption(
     f"Strategy: **{summary['strategy']}**  |  "
     f"Test mode: {'Yes — limit ' + str(summary['max_recalculated_rows']) if summary['test_mode_active'] else 'No'}"
 )
+st.caption(
+    "**Final score column:** `final_commercial_fit_score`  |  "
+    "**Pre-recalc reference:** `commercial_fit_score` (not updated by this run)"
+)
+
+# ── Validation warnings ───────────────────────────────────────────────────────
+_n_inc  = summary.get("n_val_inconsistent_hq", 0)
+_n_mis  = summary.get("n_val_recalc_missing_scores", 0)
+_n_blnk = summary.get("n_val_blank_final_score", 0)
+if _n_inc or _n_mis or _n_blnk:
+    with st.expander("⚠️ Validation warnings", expanded=True):
+        if _n_inc:
+            st.warning(
+                f"**{_n_inc} rows** have `hq_score_after_recalc = 3` "
+                "but `hq_recalc_applied = No` with a non-empty reason — "
+                "inconsistent audit state."
+            )
+        if _n_mis:
+            st.warning(
+                f"**{_n_mis} rows** are marked `hq_recalc_applied = Yes` "
+                "but are missing `commercial_fit_score_before_hq_recalc` or "
+                "`commercial_fit_score_after_hq_recalc`."
+            )
+        if _n_blnk:
+            st.warning(
+                f"**{_n_blnk} rows** are marked `hq_recalc_applied = Yes` "
+                "but `final_commercial_fit_score` is blank."
+            )
+else:
+    st.success("Validation OK — no inconsistent audit rows detected.", icon="✅")
 
 # ── HQ metrics ────────────────────────────────────────────────────────────────
 if _scope in (SCOPE_HQ, SCOPE_BOTH):
@@ -339,6 +369,11 @@ if deltas:
     sd1.metric("Score increases", len(pos_d))
     sd2.metric("Score decreases", len(neg_d))
     sd3.metric("Mean delta",      f"{sum(all_d)/len(all_d):+.4f}")
+    st.caption(
+        "Score = `final_commercial_fit_score` (authoritative recalculated score). "
+        "The original `commercial_fit_score` column in the output is the pre-recalc value "
+        "and is **not** updated."
+    )
 
     import pandas as pd
 
@@ -369,8 +404,8 @@ if deltas:
             st.info("No score decreases found.")
 
     st.caption(
-        "Score = Commercial Fit Score. "
-        f"Recalculated with scoring profile `{SCORING_PROFILE}`."
+        f"`final_commercial_fit_score` delta — recalculated with profile `{SCORING_PROFILE}`. "
+        "The original `commercial_fit_score` column is preserved unchanged as the pre-recalc reference."
     )
 else:
     st.info("No rows were recalculated — no score deltas to show.")
