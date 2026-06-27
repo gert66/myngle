@@ -2633,7 +2633,7 @@ def probe_company(
     haiku_calls_counter: "list[int] | None" = None,
     haiku_max_calls: "int | None" = None,
     use_ai_hq_interpretation: bool = False,
-    ai_hq_model: str = "claude-3-5-sonnet-20241022",
+    ai_hq_model: str = "claude-4-5-haiku-20251001",
     ai_hq_calls_counter: "list[int] | None" = None,
     ai_hq_max_calls: "int | None" = None,
 ) -> dict[str, Any]:
@@ -4218,15 +4218,14 @@ with st.sidebar:
             "AI is the sole decision-maker; deterministic parsing is bypassed."
         ),
     )
-    ai_hq_model = "claude-3-5-haiku-20241022"
+    ai_hq_model = "claude-4-5-haiku-20251001"
     ai_hq_max_calls: "int | None" = None
     if use_ai_hq_interpretation:
         _ai_hq_model_preset = st.selectbox(
             "AI HQ model",
             options=[
-                "claude-3-5-haiku-20241022",
+                "claude-4-5-haiku-20251001",
                 "claude-sonnet-4-6",
-                "claude-haiku-4-5-20251001",
                 "claude-3-5-sonnet-20241022",
                 "Custom…",
             ],
@@ -4239,7 +4238,7 @@ with st.sidebar:
                 value="",
                 key="ai_hq_model_custom",
                 placeholder="e.g. claude-opus-4-8",
-            ).strip() or "claude-3-5-haiku-20241022"
+            ).strip() or "claude-4-5-haiku-20251001"
         else:
             ai_hq_model = _ai_hq_model_preset
         _ai_hq_max_raw = st.number_input(
