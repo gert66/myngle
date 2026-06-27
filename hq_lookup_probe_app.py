@@ -2661,6 +2661,11 @@ def probe_company(
     result["early_stop_used"]        = False
     result["early_stop_reason"]      = ""
 
+    # Define _orig_score here so every branch (AI-first, simple, deep) can use it
+    _irow       = input_row or {}
+    _orig_score = _safe_float(_irow.get("sig_foreign_hq_score")) or 0.0
+    result["sig_foreign_hq_score_original"] = _safe_float(_irow.get("sig_foreign_hq_score"))
+
     if not company_name.strip():
         result["probe_error"] = "blank company name"
         return result
@@ -2756,8 +2761,10 @@ def probe_company(
                 result["ai_call_success"]   = "No"
 
                 if not _ai_eligible:
-                    result["ai_call_attempted"] = "No"
-                    result["ai_hq_error"]       = "ai_hq_not_eligible: no API key or call limit reached"
+                    result["ai_call_attempted"]                     = "No"
+                    result["ai_hq_error"]                           = "ai_hq_not_eligible: no API key or call limit reached"
+                    result["sig_foreign_hq_score_reviewed"]         = _orig_score
+                    result["sig_foreign_hq_score_for_next_scoring"] = _orig_score
                     _set_manual_review(result, "Yes", "ai_hq_not_eligible")
                 else:
                     _ai_res = _ai_interpret_hq_from_serper(
@@ -2798,15 +2805,17 @@ def probe_company(
                     # This is the only deterministic step in AI mode.
                     if _ai_err or _ai_clf == "unclear":
                         # AI failed or couldn't decide
-                        result["ai_call_success"] = "No"
-                        _set_manual_review(result, "Yes", "ai_hq_unclear_or_error")
+                        result["ai_call_success"]                       = "No"
+                        result["sig_foreign_hq_score_reviewed"]         = _orig_score
                         result["sig_foreign_hq_score_for_next_scoring"] = _orig_score
+                        _set_manual_review(result, "Yes", "ai_hq_unclear_or_error")
 
                     elif not _ai_country:
                         # AI returned a classification but no country — treat as unclear
-                        result["ai_call_success"] = "No"
-                        _set_manual_review(result, "Yes", "ai_hq_blank_country")
+                        result["ai_call_success"]                       = "No"
+                        result["sig_foreign_hq_score_reviewed"]         = _orig_score
                         result["sig_foreign_hq_score_for_next_scoring"] = _orig_score
+                        _set_manual_review(result, "Yes", "ai_hq_blank_country")
 
                     elif _ai_norm == _inp_norm:
                         # AI found HQ in same country as input → domestic, regardless of classification
@@ -3166,9 +3175,6 @@ def probe_company(
         result["_anthr_total_tok"]    = 0
         result["_anthr_stop"]         = ""
 
-        _irow = input_row or {}
-        result["sig_foreign_hq_score_original"] = _safe_float(_irow.get("sig_foreign_hq_score"))
-        _orig_score = _safe_float(_irow.get("sig_foreign_hq_score")) or 0.0
         if result.get("sig_foreign_hq_score_reviewed") in ("", None):
             result["sig_foreign_hq_score_reviewed"] = _orig_score
 
