@@ -289,7 +289,8 @@ st.caption(
 _n_inc  = summary.get("n_val_inconsistent_hq", 0)
 _n_mis  = summary.get("n_val_recalc_missing_scores", 0)
 _n_blnk = summary.get("n_val_blank_final_score", 0)
-if _n_inc or _n_mis or _n_blnk:
+_n_contr = summary.get("n_val_contradictory_evidence", 0)
+if _n_inc or _n_mis or _n_blnk or _n_contr:
     with st.expander("⚠️ Validation warnings", expanded=True):
         if _n_inc:
             st.warning(
@@ -307,6 +308,12 @@ if _n_inc or _n_mis or _n_blnk:
             st.warning(
                 f"**{_n_blnk} rows** are marked `hq_recalc_applied = Yes` "
                 "but `final_commercial_fit_score` is blank."
+            )
+        if _n_contr:
+            st.warning(
+                f"**{_n_contr} rows** have `hq_recalc_applied = Yes` and "
+                "`hq_score_after_recalc = 3`, but `sig_foreign_hq_evidence` "
+                "still contains contradictory domestic/no-foreign HQ text."
             )
 else:
     st.success("Validation OK — no inconsistent audit rows detected.", icon="✅")

@@ -272,6 +272,21 @@ _FOREIGN_HQ_CLAIM_RE = _re.compile(
     _re.IGNORECASE,
 )
 
+# Sentences/items that claim the company has NO foreign HQ or a domestic HQ —
+# must be removed when HQ Recovery confirms a foreign HQ after recalculation.
+_CONTRADICTORY_DOMESTIC_HQ_RE = _re.compile(
+    r"\b(?:"
+    r"no\s+(?:evidence\s+of\s+)?foreign\s+(?:parent|hq|headquarters?)"
+    r"|not\s+outside\s+(?:the\s+)?input\s+country"
+    r"|italian\s+(?:company\s+)?(?:headquarters?|hq)"
+    r"|italian[- ]headquartered"
+    r"|domestic\s+headquarters?"
+    r")\b"
+    r"|headquartered?\s+in\s+\w[\w\s]*,?\s*Italy\b"
+    r"|(?:parent|group)\s+(?:is\s+)?(?:based|located|headquartered)\s+in\s+\w[\w\s]*,?\s*Italy\b",
+    _re.IGNORECASE,
+)
+
 
 def _v(row: dict, *keys: str) -> str:
     for k in keys:
@@ -334,6 +349,17 @@ def _remove_unconfirmed_hq_claims(text: str) -> tuple[str, bool]:
     Returns (cleaned_text, was_changed).
     """
     return _clean_pipe_or_sentence(text, _FOREIGN_HQ_CLAIM_RE)
+
+
+def _remove_contradictory_domestic_hq_claims(text: str) -> tuple[str, bool]:
+    """Remove items/sentences claiming domestic/no-foreign HQ when HQ IS confirmed.
+
+    Applied to app-text and evidence fields when hq_upgraded=True, to neutralise
+    stale evidence like "Italian headquarters" or "no foreign parent" that would
+    contradict the newly confirmed foreign HQ signal.
+    Returns (cleaned_text, was_changed).
+    """
+    return _clean_pipe_or_sentence(text, _CONTRADICTORY_DOMESTIC_HQ_RE)
 
 
 def _collect_source_links(
@@ -524,6 +550,10 @@ def _build_lovable_app_fields(
         if chg:
             conflict_removed = True
     if state["hq_upgraded"]:
+        # Strip old contradictory domestic/no-foreign HQ claims first
+        base, chg = _remove_contradictory_domestic_hq_claims(base)
+        if chg:
+            conflict_removed = True
         hq_loc = state["hq_country"]
         if state["hq_city"] and hq_loc:
             hq_loc = f"{state['hq_city']}, {hq_loc}"
@@ -570,6 +600,10 @@ def _build_lovable_app_fields(
         base, chg = _remove_suppressed_competitor_claims(base)
         if chg:
             conflict_removed = True
+    if state["hq_upgraded"]:
+        base, chg = _remove_contradictory_domestic_hq_claims(base)
+        if chg:
+            conflict_removed = True
     if state.get("sig_rapid_growth", 0) > 0:
         growth_note = "Growth signal present — may indicate cost sensitivity."
         if growth_note not in base:
@@ -582,7 +616,13 @@ def _build_lovable_app_fields(
         base, chg = _remove_suppressed_competitor_claims(base)
         if chg:
             conflict_removed = True
-    if not state["foreign_hq_active"]:
+    if state["hq_upgraded"]:
+        # Remove old "Italian headquarters" / "no foreign parent" claims before
+        # appending the confirmed foreign HQ note below.
+        base, chg = _remove_contradictory_domestic_hq_claims(base)
+        if chg:
+            conflict_removed = True
+    elif not state["foreign_hq_active"]:
         base, chg = _remove_unconfirmed_hq_claims(base)
         if chg:
             conflict_removed = True
@@ -828,6 +868,8 @@ def _build_output_wb(
          summary.get("n_val_recalc_missing_scores", 0))
     _add("Rows with hq_recalc_applied=Yes but final_commercial_fit_score blank",
          summary.get("n_val_blank_final_score", 0))
+    _add("Rows with recalculated HQ=3 but sig_foreign_hq_evidence still contradicts (should be 0)",
+         summary.get("n_val_contradictory_evidence", 0))
 
     if deltas:
         _section("Score delta statistics")
@@ -1281,6 +1323,29 @@ def recalculate_hq_changed_scores_workbook(
                     "old_sig_foreign_hq_evidence": _v(enr_row, "sig_foreign_hq_evidence",
                                                       "sig_foreign_hq_evidence_url"),
                 })
+                # Overwrite sig_foreign_hq_evidence with a clean reviewed statement so
+                # old contradictory text ("Italian headquarters", "no foreign parent")
+                # is no longer the visible HQ evidence for this row.
+                _rev_country = _hqr_country(hqr_row)
+                _rev_city    = _hqr_city(hqr_row)
+                _rev_url     = _hqr_evidence_url(hqr_row)
+                _rev_quote   = _v(hqr_row, "hq_evidence_quote", "ai_evidence_quote")
+                _rev_reason  = _v(hqr_row, "hq_reason", "ai_hq_reason")
+                _rev_loc     = (f"{_rev_city}, {_rev_country}" if _rev_city and _rev_country
+                                else _rev_country or _rev_city or "")
+                _ev_parts: list[str] = [
+                    f"HQ Recovery reviewed: foreign parent/group HQ in {_rev_loc}."
+                    if _rev_loc else
+                    "HQ Recovery reviewed: foreign parent/group HQ confirmed."
+                ]
+                if _rev_quote:
+                    _ev_parts.append(f'Evidence: "{_rev_quote[:200]}"')
+                if _rev_url:
+                    _ev_parts.append(f"Source: {_rev_url}")
+                if _rev_reason:
+                    _ev_parts.append(f"Reason: {_rev_reason[:200]}")
+                _ev_parts.append("Previous HQ evidence superseded.")
+                row_out["sig_foreign_hq_evidence"] = " ".join(_ev_parts)
                 n_hq_recalculated += 1
                 if old_hq in (0.0, None) and new_hq == 3.0:
                     n_upgrades += 1
@@ -1383,6 +1448,14 @@ def recalculate_hq_changed_scores_workbook(
         if str(r.get("hq_recalc_applied") or "") == "Yes"
         and r.get("final_commercial_fit_score") is None
     )
+    # Rows where HQ was recalculated to 3 but sig_foreign_hq_evidence still contains
+    # contradictory domestic/no-foreign claims — should be 0 after the evidence overwrite.
+    n_val_contradictory_evidence = sum(
+        1 for r in out_rows
+        if str(r.get("hq_recalc_applied") or "") == "Yes"
+        and _safe_float(r.get("hq_score_after_recalc")) == 3.0
+        and _CONTRADICTORY_DOMESTIC_HQ_RE.search(str(r.get("sig_foreign_hq_evidence") or ""))
+    )
 
     summary = {
         "error":                     "",
@@ -1413,9 +1486,10 @@ def recalculate_hq_changed_scores_workbook(
         "test_mode_active":          _limit > 0,
         "max_recalculated_rows":     _limit,
         # Validation
-        "n_val_inconsistent_hq":     n_val_inconsistent_hq,
-        "n_val_recalc_missing_scores": n_val_recalc_missing_scores,
-        "n_val_blank_final_score":   n_val_blank_final_score,
+        "n_val_inconsistent_hq":        n_val_inconsistent_hq,
+        "n_val_recalc_missing_scores":  n_val_recalc_missing_scores,
+        "n_val_blank_final_score":      n_val_blank_final_score,
+        "n_val_contradictory_evidence": n_val_contradictory_evidence,
     }
 
     wb_out, lov_stats = _build_output_wb(
