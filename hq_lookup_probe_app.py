@@ -2473,7 +2473,7 @@ def _ai_interpret_hq_from_serper(
         "ai_hq_interpretation_used":  "No",
         "ai_hq_model":                model,
         "ai_hq_query":                query,
-        "ai_hq_classification":       "",
+        "ai_hq_classification":       "uncertain",
         "ai_hq_score_recommendation": "",
         "ai_hq_confidence":           "",
         "ai_parent_company":          "",
@@ -2513,7 +2513,7 @@ def _ai_interpret_hq_from_serper(
 
     user_msg = f"""Company name: {company_name}
 Input domain: {input_domain}
-Brand root: {brand_root}
+Domain root: {brand_root}
 Input country (local entity registered in): {input_country}
 Serper query used: {query}
 
@@ -2526,36 +2526,53 @@ Top organic results:
 
 Classify and return valid JSON only (no markdown, no prose):
 {{
-  "classification": "foreign_parent" | "domestic" | "regional_branch_only" | "unclear",
-  "score_recommendation": 3 | 0 | "",
-  "confidence": "High" | "Medium" | "Low",
+  "classification": "foreign_parent_group | domestic_italian_company | italian_group_with_international_footprint | global_professional_network | local_branch_or_office_only | unrelated_or_domain_mismatch | uncertain",
+  "recommended_foreign_hq_score": 0,
+  "confidence": "High | Medium | Low",
   "parent_company": "",
   "parent_hq_country": "",
   "parent_hq_city": "",
-  "evidence_url": "",
+  "local_entity_country": "",
+  "local_entity_city": "",
+  "reason": "",
   "evidence_quote": "",
-  "reason": ""
+  "evidence_url": ""
 }}
 """
 
     sys_msg = (
-        "You are a B2B company data analyst. Your job is to decide whether an input "
-        "company registered in a given country is part of a foreign-headquartered "
-        "parent/global group, or whether it is domestic. "
-        "Distinguish global parent HQ from regional HQ, branch offices, sales offices, "
-        "local offices, and directories. "
-        "Decision rules: "
-        "'foreign_parent' = evidence indicates the local entity belongs to a parent/global group "
-        "headquartered outside the input country. "
-        "'domestic' = HQ or parent HQ is in the input country. "
-        "'regional_branch_only' = only a regional/branch/sales/local office HQ is shown, "
-        "not the global parent HQ. "
-        "'unclear' = insufficient or conflicting evidence. "
-        "Score recommendation: 3 only for foreign_parent with High or Medium confidence; "
-        "0 for domestic or regional_branch_only; empty string for unclear. "
-        "Evidence URL and quote must come from the provided Serper evidence — do not invent. "
-        "If multiple countries appear, choose the current global parent HQ country. "
-        "Return only valid JSON."
+        "You are a B2B company-ownership analyst for mYngle. Given Serper search evidence "
+        "about a company that is legally registered in a given input country, decide whether "
+        "that local entity is part of a FOREIGN parent company, foreign corporate group, or "
+        "foreign-controlled ownership structure.\n\n"
+        "CORE RULE: Clear evidence of a foreign parent or foreign corporate group is a POSITIVE "
+        "signal EVEN IF the local entity has its own registered office in the input country. You "
+        "do NOT need proof that HR, management, or decision-making happens abroad. Being a "
+        "subsidiary of a foreign group is NOT a reason to reject — it is exactly the signal we "
+        "want.\n\n"
+        "Classifications:\n"
+        "- foreign_parent_group: local entity belongs to a parent/group headquartered outside "
+        "the input country, for example \"BASF Italia is a subsidiary of German BASF SE\". Score 3.\n"
+        "- global_professional_network: local entity is the national member of a worldwide "
+        "professional network, for example KPMG, PwC, Deloitte, EY. Score 3.\n"
+        "- italian_group_with_international_footprint: an input-country company that exports or "
+        "operates internationally, but has no foreign parent/group. Score 0.\n"
+        "- domestic_italian_company: domestic company, including multilingual-website-only "
+        "evidence. Score 0.\n"
+        "- local_branch_or_office_only: only a local/regional/sales office is shown, with no "
+        "parent evidence. Score 0.\n"
+        "- unrelated_or_domain_mismatch: evidence appears to be about a different company/domain. "
+        "Score 0.\n"
+        "- uncertain: insufficient or conflicting evidence. Score 0.\n\n"
+        "Rules:\n"
+        "- recommended_foreign_hq_score must be 3 only for foreign_parent_group or "
+        "global_professional_network with High or Medium confidence.\n"
+        "- recommended_foreign_hq_score must be 0 for all other classifications.\n"
+        "- evidence_quote and evidence_url must come from the provided Serper evidence. Never "
+        "invent.\n"
+        "- If several countries appear, pick the ultimate global parent HQ country.\n"
+        "- Use only the supplied evidence.\n"
+        "- Return only valid JSON. No markdown. No prose."
     )
 
     try:
@@ -2578,19 +2595,38 @@ Classify and return valid JSON only (no markdown, no prose):
     try:
         _parsed = json.loads(_clean)
     except Exception:
-        _empty["ai_hq_error"]    = f"JSON parse error: {_raw[:200]}"
-        _empty["ai_hq_raw_json"] = _raw[:500]
+        _empty["ai_hq_error"]          = f"JSON parse error: {_raw[:200]}"
+        _empty["ai_hq_raw_json"]       = _raw[:500]
+        _empty["ai_hq_classification"] = "uncertain"
         return _empty
 
-    clf   = str(_parsed.get("classification", "")).strip()
-    if clf not in ("foreign_parent", "domestic", "regional_branch_only", "unclear"):
-        clf = "unclear"
-    conf  = str(_parsed.get("confidence", "")).strip()
+    _ALLOWED_CLF = (
+        "foreign_parent_group",
+        "domestic_italian_company",
+        "italian_group_with_international_footprint",
+        "global_professional_network",
+        "local_branch_or_office_only",
+        "unrelated_or_domain_mismatch",
+        "uncertain",
+    )
+    clf  = str(_parsed.get("classification", "")).strip()
+    conf = str(_parsed.get("confidence", "")).strip()
+    if clf not in _ALLOWED_CLF:
+        # Unknown / invalid classification → safest fallback
+        clf  = "uncertain"
+        conf = "Low"
     if conf not in ("High", "Medium", "Low"):
         conf = "Low"
-    score_rec = _parsed.get("score_recommendation", "")
-    if score_rec not in (3, 0, ""):
-        score_rec = ""
+
+    # Re-derive the score from classification + confidence — never trust the
+    # model's own number blindly.  Score 3 only for a confident foreign
+    # parent/group or global professional network; 0 for everything else.
+    score_rec = (
+        3
+        if clf in ("foreign_parent_group", "global_professional_network")
+        and conf in ("High", "Medium")
+        else 0
+    )
 
     return {
         "ai_hq_interpretation_used":  "Yes",
@@ -2602,7 +2638,7 @@ Classify and return valid JSON only (no markdown, no prose):
         "ai_parent_company":          str(_parsed.get("parent_company", "") or ""),
         "ai_parent_hq_country":       str(_parsed.get("parent_hq_country", "") or ""),
         "ai_parent_hq_city":          str(_parsed.get("parent_hq_city", "") or ""),
-        "ai_local_entity_country":    input_country,
+        "ai_local_entity_country":    str(_parsed.get("local_entity_country", "") or "") or input_country,
         "ai_evidence_url":            str(_parsed.get("evidence_url", "") or ""),
         "ai_evidence_quote":          str(_parsed.get("evidence_quote", "") or ""),
         "ai_hq_reason":               str(_parsed.get("reason", "") or ""),
@@ -2786,79 +2822,62 @@ def probe_company(
                     _ai_clf     = _ai_res.get("ai_hq_classification", "")
                     _ai_conf    = _ai_res.get("ai_hq_confidence", "")
                     _ai_err     = _ai_res.get("ai_hq_error", "")
+                    _ai_score   = _ai_res.get("ai_hq_score_recommendation", "")
                     _ai_country = _std_country(_ai_res.get("ai_parent_hq_country", ""))
                     _ai_city    = _ai_res.get("ai_parent_hq_city", "")
-                    _inp_norm   = _normalize_country_for_hq(input_country or "Italy")
-                    _ai_norm    = _normalize_country_for_hq(_ai_country)
 
                     # Always populate detected location fields from AI result
                     if _ai_country:
-                        result["hq_detected_country"]   = _ai_country
-                        result["hq_detected_city"]      = _ai_city
+                        result["hq_detected_country"]     = _ai_country
+                        result["hq_detected_city"]        = _ai_city
                         result["parent_group_hq_country"] = _ai_country
                         result["parent_group_hq_city"]    = _ai_city
-                    result["hq_confidence"]   = _ai_conf
-                    result["hq_evidence_quote"] = _ai_res.get("ai_evidence_quote", "")
+                    result["hq_confidence"]     = _ai_conf
+                    result["hq_evidence_quote"] = (
+                        _ai_res.get("ai_evidence_quote", "")
+                        or _ai_res.get("ai_hq_reason", "")
+                    )
                     result["hq_reason"]         = f"[ai-hq] {_ai_res.get('ai_hq_reason','')[:150]}"
+                    result["hq_structure_type"] = _ai_clf
+                    if _ai_res.get("ai_evidence_url"):
+                        result["hq_evidence_url"] = _ai_res.get("ai_evidence_url")
 
-                    # ── Post-AI safety rule: country comparison decides score ──────
-                    # This is the only deterministic step in AI mode.
-                    if _ai_err or _ai_clf == "unclear":
-                        # AI failed or couldn't decide
+                    # ── Post-AI mapping ────────────────────────────────────────────
+                    # The score comes from the validated, re-derived
+                    # recommended_foreign_hq_score (classification + confidence).  A
+                    # foreign parent/group is positive even when the local entity is
+                    # registered in the input country — there is NO country-equality veto.
+                    if _ai_err:
+                        # AI call/parse failed — preserve original score, flag review
                         result["ai_call_success"]                       = "No"
                         result["sig_foreign_hq_score_reviewed"]         = _orig_score
                         result["sig_foreign_hq_score_for_next_scoring"] = _orig_score
-                        _set_manual_review(result, "Yes", "ai_hq_unclear_or_error")
+                        _set_manual_review(result, "Yes", "ai_hq_error")
 
-                    elif not _ai_country:
-                        # AI returned a classification but no country — treat as unclear
-                        result["ai_call_success"]                       = "No"
-                        result["sig_foreign_hq_score_reviewed"]         = _orig_score
-                        result["sig_foreign_hq_score_for_next_scoring"] = _orig_score
-                        _set_manual_review(result, "Yes", "ai_hq_blank_country")
-
-                    elif _ai_norm == _inp_norm:
-                        # AI found HQ in same country as input → domestic, regardless of classification
+                    elif _ai_clf == "uncertain":
+                        # AI could not decide — keep original score, send to review
                         result["ai_call_success"]                       = "Yes"
                         result["foreign_hq_simple"]                     = "False"
-                        result["hq_structure_type"]                     = "domestic"
-                        result["sig_foreign_hq_score_reviewed"]         = 0
-                        result["review_foreign_parent_score"]           = 0
-                        result["sig_foreign_hq_score_for_next_scoring"] = 0
-                        _needs_rev = "Yes" if _ai_conf == "Low" else "No"
-                        _set_manual_review(result, _needs_rev, "ai_hq_low_confidence" if _needs_rev == "Yes" else "")
+                        result["sig_foreign_hq_score_reviewed"]         = _orig_score
+                        result["sig_foreign_hq_score_for_next_scoring"] = _orig_score
+                        _set_manual_review(result, "Yes", "ai_hq_uncertain")
 
                     else:
-                        # HQ country differs from input country
-                        if _ai_clf == "foreign_parent" and _ai_conf in ("High", "Medium"):
-                            result["ai_call_success"]                       = "Yes"
-                            result["foreign_hq_simple"]                     = "True"
-                            result["hq_structure_type"]                     = "foreign_parent"
-                            result["sig_foreign_hq_score_reviewed"]         = 3
-                            result["review_foreign_parent_score"]           = 3
-                            result["sig_foreign_hq_score_for_next_scoring"] = 3
-                            _set_manual_review(result, "No")
-                        elif _ai_clf == "foreign_parent" and _ai_conf == "Low":
-                            # Foreign parent but low confidence — do not auto-score 3
-                            result["ai_call_success"]                       = "Yes"
-                            result["foreign_hq_simple"]                     = "True"
-                            result["hq_structure_type"]                     = "foreign_parent"
-                            result["sig_foreign_hq_score_reviewed"]         = 0
-                            result["review_foreign_parent_score"]           = 0
-                            result["sig_foreign_hq_score_for_next_scoring"] = _orig_score
-                            _set_manual_review(result, "Yes", "ai_hq_low_confidence")
-                        else:
-                            # regional_branch_only or unexpected classification with foreign country
-                            result["ai_call_success"]                       = "Yes"
-                            result["foreign_hq_simple"]                     = "False"
-                            result["hq_structure_type"]                     = (
-                                "regional_branch" if _ai_clf == "regional_branch_only" else _ai_clf
-                            )
-                            result["sig_foreign_hq_score_reviewed"]         = 0
-                            result["review_foreign_parent_score"]           = 0
-                            result["sig_foreign_hq_score_for_next_scoring"] = 0
-                            _needs_rev = "Yes" if _ai_conf == "Low" else "No"
-                            _set_manual_review(result, _needs_rev, "ai_hq_low_confidence" if _needs_rev == "Yes" else "")
+                        try:
+                            _ai_score_i = int(_ai_score)
+                        except (TypeError, ValueError):
+                            _ai_score_i = 0
+                        _is_positive = _ai_score_i >= 3
+                        result["ai_call_success"]                       = "Yes"
+                        result["foreign_hq_simple"]                     = "True" if _is_positive else "False"
+                        result["sig_foreign_hq_score_reviewed"]         = _ai_score_i
+                        result["review_foreign_parent_score"]           = _ai_score_i
+                        result["sig_foreign_hq_score_for_next_scoring"] = _ai_score_i
+                        _needs_rev = "Yes" if _ai_conf == "Low" else "No"
+                        _set_manual_review(
+                            result, _needs_rev,
+                            "ai_hq_low_confidence" if _needs_rev == "Yes" else "",
+                        )
 
             else:
                 # ── DETERMINISTIC PATH ───────────────────────────────────────────
@@ -5039,14 +5058,20 @@ st.subheader("Results")
 _used_ai_mode = any(p.get("ai_call_attempted") in ("Yes", "No") for p in probe_results)
 if _used_ai_mode:
     _ai_foreign_cnt  = sum(1 for p in probe_results
-                           if p.get("ai_hq_classification") == "foreign_parent"
+                           if p.get("ai_hq_classification") in ("foreign_parent_group", "global_professional_network")
                            and p.get("ai_call_success") == "Yes")
     _ai_domestic_cnt = sum(1 for p in probe_results
-                           if p.get("ai_hq_classification") in ("domestic", "regional_branch_only")
+                           if p.get("ai_hq_classification") in (
+                               "domestic_italian_company",
+                               "italian_group_with_international_footprint",
+                               "local_branch_or_office_only",
+                               "unrelated_or_domain_mismatch",
+                           )
                            and p.get("ai_call_success") == "Yes")
     _ai_unclear_cnt  = sum(1 for p in probe_results
                            if p.get("ai_call_attempted") == "Yes"
-                           and p.get("ai_call_success") == "No")
+                           and (p.get("ai_call_success") == "No"
+                                or p.get("ai_hq_classification") == "uncertain"))
     _ai_scored3_cnt  = sum(1 for p in probe_results
                            if p.get("sig_foreign_hq_score_reviewed") == 3)
     ac1, ac2, ac3, ac4, ac5 = st.columns(5)
