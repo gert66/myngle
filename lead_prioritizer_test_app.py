@@ -24,15 +24,31 @@ from lead_prioritizer_core import prioritize_single_lead
 st.set_page_config(page_title="Lead Prioritizer v2 — HQ test", layout="centered")
 st.title("Lead Prioritizer v2 — HQ test")
 
-_serper_key = os.environ.get("SERPER_API_KEY", "")
-_anthropic_key = os.environ.get("ANTHROPIC_API_KEY", "")
+def _get_key(name: str) -> str:
+    """Read a key from Streamlit secrets first, then environment variables."""
+    try:
+        if name in st.secrets:
+            return str(st.secrets[name] or "")
+    except Exception:
+        # st.secrets raises if no secrets.toml exists — fall back to env.
+        pass
+    return os.environ.get(name, "")
+
+
+_serper_key = _get_key("SERPER_API_KEY")
+_anthropic_key = _get_key("ANTHROPIC_API_KEY")
 
 with st.sidebar:
-    st.header("API keys (from environment)")
+    st.header("API keys (secrets or environment)")
     st.write("SERPER_API_KEY:", "✅ set" if _serper_key else "❌ missing")
     st.write("ANTHROPIC_API_KEY:", "✅ set" if _anthropic_key else "❌ missing")
     st.caption(
-        "Set them before launching, e.g.:\n\n"
+        "Keys are read from `.streamlit/secrets.toml` first, then environment "
+        "variables. Either of:\n\n"
+        "secrets.toml:\n\n"
+        "`SERPER_API_KEY = \"...\"`\n\n"
+        "`ANTHROPIC_API_KEY = \"...\"`\n\n"
+        "or environment:\n\n"
         "`export SERPER_API_KEY=...`\n\n"
         "`export ANTHROPIC_API_KEY=...`"
     )
