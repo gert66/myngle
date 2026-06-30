@@ -2475,6 +2475,55 @@ def _extract_json_object_from_ai_text(text: str) -> str:
     return raw
 
 
+def _regex_extract_ai_hq_fields(text: str) -> dict:
+    raw = str(text or "")
+
+    def _str_field(name: str) -> str:
+        # Match simple JSON string fields even if a later field is malformed.
+        m = re.search(
+            rf'"{re.escape(name)}"\s*:\s*"([^"\\]*(?:\\.[^"\\]*)*)"',
+            raw,
+            flags=re.IGNORECASE | re.DOTALL,
+        )
+        if not m:
+            return ""
+        try:
+            return json.loads('"' + m.group(1) + '"')
+        except Exception:
+            return m.group(1)
+
+    def _int_field(name: str):
+        m = re.search(
+            rf'"{re.escape(name)}"\s*:\s*(-?\d+)',
+            raw,
+            flags=re.IGNORECASE,
+        )
+        if not m:
+            return None
+        try:
+            return int(m.group(1))
+        except Exception:
+            return None
+
+    out = {
+        "classification": _str_field("classification"),
+        "parent_company": _str_field("parent_company"),
+        "parent_hq_country": _str_field("parent_hq_country"),
+        "parent_hq_city": _str_field("parent_hq_city"),
+        "local_entity_country": _str_field("local_entity_country"),
+        "confidence": _str_field("confidence"),
+        "evidence_url": _str_field("evidence_url"),
+        "evidence_quote": _str_field("evidence_quote"),
+        "reason": _str_field("reason"),
+    }
+
+    score = _int_field("recommended_foreign_hq_score")
+    if score is not None:
+        out["recommended_foreign_hq_score"] = score
+
+    return out
+
+
 def _ai_interpret_hq_from_serper(
     *,
     company_name: str,
@@ -2620,22 +2669,6 @@ Classify and return valid JSON only (no markdown, no prose):
         _empty["ai_hq_error"] = str(_exc)[:300]
         return _empty
 
-    # Clean the raw model text before json.loads: models often wrap a valid
-    # object in a Markdown fenced code block (```json ... ```) and may add
-    # prose before/after it, which breaks a bare json.loads.  ai_hq_raw_json
-    # keeps the original raw text for debugging.
-    _cleaned = _extract_json_object_from_ai_text(_raw)
-    try:
-        _parsed = json.loads(_cleaned)
-    except Exception as _pexc:
-        _empty["ai_hq_error"]          = (
-            f"ai_hq_parse_error: {str(_pexc)[:150]}; "
-            f"cleaned_preview={_cleaned[:300]}"
-        )
-        _empty["ai_hq_raw_json"]       = _raw[:500]
-        _empty["ai_hq_classification"] = "uncertain"
-        return _empty
-
     _ALLOWED_CLF = (
         "foreign_parent_group",
         "domestic_italian_company",
@@ -2645,6 +2678,50 @@ Classify and return valid JSON only (no markdown, no prose):
         "unrelated_or_domain_mismatch",
         "uncertain",
     )
+
+    # Clean the raw model text before json.loads: models often wrap a valid
+    # object in a Markdown fenced code block (```json ... ```) and may add
+    # prose before/after it, which breaks a bare json.loads.  ai_hq_raw_json
+    # keeps the original raw text for debugging.
+    _cleaned = _extract_json_object_from_ai_text(_raw)
+    _fallback_reason_note = ""
+    try:
+        _parsed = json.loads(_cleaned)
+    except Exception as _pexc:
+        # Fallback: a malformed/truncated free-text reason must not fail the
+        # whole row when the core decision fields are present and valid.
+        # Conservatively regex-extract the core fields; accept only if they
+        # satisfy the SAME validation as the normal path.
+        _fb = _regex_extract_ai_hq_fields(_raw)
+        _fb_clf      = str(_fb.get("classification", "")).strip()
+        _fb_conf     = str(_fb.get("confidence", "")).strip()
+        _fb_score    = _fb.get("recommended_foreign_hq_score", None)
+        _fb_pcountry = str(_fb.get("parent_hq_country", "")).strip()
+        _fb_ok = (
+            _fb_clf in _ALLOWED_CLF
+            and _fb_conf in ("High", "Medium", "Low")
+            and _fb_score is not None
+            and (
+                _fb_clf not in ("foreign_parent_group", "global_professional_network")
+                or bool(_fb_pcountry)
+            )
+        )
+        if _fb_ok:
+            _parsed = _fb
+            if not str(_fb.get("reason", "")).strip():
+                _parsed["reason"] = "Parsed core AI HQ fields from malformed JSON response."
+            # Debug note goes to ai_hq_reason (NOT ai_hq_error) so the row is
+            # not treated as a failed AI call downstream.
+            _fallback_reason_note = "[ai_hq_fallback_parse] "
+        else:
+            _empty["ai_hq_error"]          = (
+                f"ai_hq_parse_error: {str(_pexc)[:150]}; "
+                f"cleaned_preview={_cleaned[:300]}"
+            )
+            _empty["ai_hq_raw_json"]       = _raw[:500]
+            _empty["ai_hq_classification"] = "uncertain"
+            return _empty
+
     clf  = str(_parsed.get("classification", "")).strip()
     conf = str(_parsed.get("confidence", "")).strip()
     if clf not in _ALLOWED_CLF:
@@ -2677,7 +2754,7 @@ Classify and return valid JSON only (no markdown, no prose):
         "ai_local_entity_country":    str(_parsed.get("local_entity_country", "") or "") or input_country,
         "ai_evidence_url":            str(_parsed.get("evidence_url", "") or ""),
         "ai_evidence_quote":          str(_parsed.get("evidence_quote", "") or ""),
-        "ai_hq_reason":               str(_parsed.get("reason", "") or ""),
+        "ai_hq_reason":               _fallback_reason_note + str(_parsed.get("reason", "") or ""),
         "ai_hq_error":                "",
         "ai_hq_raw_json":             _raw[:500],
         "ai_prompt_user_evidence_preview": _ev_preview,
