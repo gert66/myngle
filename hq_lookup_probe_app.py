@@ -4291,7 +4291,11 @@ with st.sidebar:
     default_country = st.text_input(
         "Default country (fallback)",
         DEFAULT_INPUT_COUNTRY,
-        help="Used for every row when no country column is selected or when the column is blank.",
+        help="Used for every row when no country column is selected or when the column is blank. "
+             "For HQ Recovery this is the local/entity country for the whole run: HQ Recovery is "
+             "run-context driven and ignores row-level country columns (old country / "
+             "hq_detected_country / parent_group_hq_country values in the uploaded file are not used "
+             "for the input country).",
     )
 
     st.header("Options")
@@ -4835,10 +4839,11 @@ elif _app_mode == "recovery":
             _rec_row     = _rec_all_rows[_rec_row_idx]
             _rec_company = str(_rec_row.get(company_col) or "").strip()
             _rec_domain  = str(_rec_row.get(domain_col)  or "").strip()
-            _rec_country = (
-                str(_rec_row.get(country_col) or "").strip()
-                if country_col else default_country
-            ) or default_country
+            # HQ Recovery is run-context driven: local/entity country comes from
+            # default_country, not from old row-level country/HQ output columns.
+            _rec_country = _std_country(default_country or DEFAULT_INPUT_COUNTRY)
+            if not _rec_country:
+                _rec_country = DEFAULT_INPUT_COUNTRY
 
             _rec_probe = probe_company(
                 company_name=_rec_company,
@@ -4860,6 +4865,10 @@ elif _app_mode == "recovery":
                 ai_hq_calls_counter=_rec_ai_hq_calls_counter,
                 ai_hq_max_calls=ai_hq_max_calls,
             )
+
+            # Audit guard: record the run-context local/entity country explicitly,
+            # so HQ Recovery never reflects an old row-level country column.
+            _rec_probe["input_country_used"] = _std_country(_rec_country)
 
             # ── Domestic-safety guard (must run before score columns are set) ──
             # Uses _normalize_country_for_hq so IT/ITA/Italia/Italy all match.
