@@ -2854,6 +2854,23 @@ def probe_company(
                         result["hq_detected_city"]        = _ai_city
                         result["parent_group_hq_country"] = _ai_country
                         result["parent_group_hq_city"]    = _ai_city
+                    elif _ai_clf in (
+                        "domestic_italian_company",
+                        "italian_group_with_international_footprint",
+                        "local_branch_or_office_only",
+                    ):
+                        # Domestic-AI visibility: AI confidently placed the local
+                        # entity in the input country but returned no foreign parent
+                        # HQ country.  Surface the local country in the normal
+                        # country columns so it does not look like nothing was
+                        # selected.  Do NOT set parent_group_hq_country here.
+                        _ai_local_country = _std_country(
+                            _ai_res.get("ai_local_entity_country", "")
+                            or input_country or "Italy"
+                        )
+                        if _ai_local_country:
+                            result["hq_detected_country"]   = _ai_local_country
+                            result["local_entity_hq_country"] = _ai_local_country
                     result["hq_confidence"]     = _ai_conf
                     result["hq_evidence_quote"] = (
                         _ai_res.get("ai_evidence_quote", "")
@@ -3977,6 +3994,18 @@ def build_excel_bytes(
 #: Front-loaded, easy-to-find debug columns (the rest of the row's columns are
 #: appended after these in first-seen order, so nothing is dropped).
 _HQ_DEBUG_PRIORITY_COLS: list[str] = [
+    # Identity / recovery / input
+    "company_name",
+    "domain",
+    "input_domain",
+    "validated_domain",
+    "country",
+    "inferred_input_country",
+    "input_country_used",
+    "hq_recovery_selected",
+    "hq_recovery_processed",
+    "hq_recovery_skip_reason",
+    "hq_recovery_selection_reason",
     # Serper / query
     "simple_hq_query", "domain_root_hq_query", "hq_query_used",
     "serper_queries_used", "serper_calls_used", "serper_cache_hit",
@@ -5057,7 +5086,7 @@ elif _app_mode == "recovery":
 
     # ── Display table ───────────────────────────────────────────────────────
     _rec_display_cols = [
-        company_col, domain_col,
+        company_col, domain_col, "input_country_used",
         "hq_recovery_selected", "hq_recovery_processed", "hq_recovery_skip_reason",
         "hq_recovery_selection_reason",
         "sig_foreign_hq_score_original_before_recovery",
@@ -5108,6 +5137,7 @@ elif _app_mode == "recovery":
         # Column order: original cols first, then new probe cols appended
         _orig_cols   = list(_rec_all_rows_r[0].keys()) if _rec_all_rows_r else []
         _extra_cols  = [
+            "input_country_used",
             "hq_recovery_selected", "hq_recovery_selection_reason",
             "sig_foreign_hq_score_original_before_recovery",
             "sig_foreign_hq_score_for_next_scoring",
@@ -5198,6 +5228,9 @@ elif _app_mode == "recovery":
     @st.cache_data(show_spinner=False)
     def _make_recovery_debug_workbook(_key: int) -> bytes:
         _processed = [
+            r for r in _rec_revised_rows
+            if str(r.get("hq_recovery_processed", "")).strip() == "Yes"
+        ] or [
             r for r in _rec_revised_rows
             if str(r.get("hq_recovery_selected", "")).strip() == "Yes"
         ] or _rec_revised_rows
