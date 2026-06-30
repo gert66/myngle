@@ -210,6 +210,7 @@ PROBE_COLS = [
     "ai_hq_reason",
     "ai_hq_error",
     "ai_hq_raw_json",
+    "ai_prompt_user_evidence_preview",
     # Location parser debug columns
     "location_parser_raw_capture",
     "location_parser_country_before_correction",
@@ -2485,6 +2486,7 @@ def _ai_interpret_hq_from_serper(
         "ai_hq_reason":               "",
         "ai_hq_error":                "",
         "ai_hq_raw_json":             "",
+        "ai_prompt_user_evidence_preview": "",
     }
 
     try:
@@ -2510,6 +2512,16 @@ def _ai_interpret_hq_from_serper(
             f"  URL: {_r.get('link','')}"
         )
     organic_block = "\n".join(organic_lines) if organic_lines else "(none)"
+
+    # Compact, secret-free preview of the evidence handed to the model (for debug export).
+    _ev_preview = (
+        f"Q={query} | KG={kg_loc[:120]} | AB={ab_txt[:120]} | "
+        + " || ".join(
+            f"{_r.get('title','')[:60]}~{_r.get('snippet','')[:90]}~{_r.get('link','')}"
+            for _r in org[:3]
+        )
+    )[:1200]
+    _empty["ai_prompt_user_evidence_preview"] = _ev_preview
 
     user_msg = f"""Company name: {company_name}
 Input domain: {input_domain}
@@ -2644,6 +2656,7 @@ Classify and return valid JSON only (no markdown, no prose):
         "ai_hq_reason":               str(_parsed.get("reason", "") or ""),
         "ai_hq_error":                "",
         "ai_hq_raw_json":             _raw[:500],
+        "ai_prompt_user_evidence_preview": _ev_preview,
     }
 
 
@@ -2785,20 +2798,27 @@ def probe_company(
                 result["domain_mismatch_type"] = ""  # AI decides; no deterministic check
                 result["hq_evidence_url"]      = _s_best_url
 
-                _ai_eligible = (
-                    anthropic_key
-                    and (
-                        ai_hq_calls_counter is None
-                        or ai_hq_max_calls is None
-                        or ai_hq_calls_counter[0] < ai_hq_max_calls
-                    )
+                # Max AI = 0 (or None) means UNLIMITED — it must NEVER be treated as
+                # "call limit reached".  A hard cap only applies when ai_hq_max_calls > 0.
+                _ai_limit_reached = (
+                    ai_hq_calls_counter is not None
+                    and ai_hq_max_calls is not None
+                    and ai_hq_max_calls > 0
+                    and ai_hq_calls_counter[0] >= ai_hq_max_calls
                 )
+                _ai_eligible = bool(anthropic_key) and not _ai_limit_reached
                 result["ai_call_attempted"] = "Yes" if _ai_eligible else "No"
                 result["ai_call_success"]   = "No"
 
                 if not _ai_eligible:
+                    if not anthropic_key:
+                        _ai_skip = "ai_hq_skipped: missing Anthropic key"
+                    elif _ai_limit_reached:
+                        _ai_skip = f"ai_hq_skipped: call limit reached (max={ai_hq_max_calls})"
+                    else:
+                        _ai_skip = "ai_hq_skipped: not eligible"
                     result["ai_call_attempted"]                     = "No"
-                    result["ai_hq_error"]                           = "ai_hq_not_eligible: no API key or call limit reached"
+                    result["ai_hq_error"]                           = _ai_skip
                     result["sig_foreign_hq_score_reviewed"]         = _orig_score
                     result["sig_foreign_hq_score_for_next_scoring"] = _orig_score
                     _set_manual_review(result, "Yes", "ai_hq_not_eligible")
@@ -3176,6 +3196,12 @@ def probe_company(
                     result["hq_reason"] = f"No HQ location found for query: '{_dr_query}'"
         else:
             result["needs_manual_review"] = "Yes"
+            if use_ai_hq_interpretation:
+                # AI-first was on but there was no Serper payload to interpret.
+                result["ai_call_attempted"] = "No"
+                result["ai_hq_error"] = (
+                    "ai_hq_skipped: no Serper data" + (f" ({_s_err})" if _s_err else "")
+                )
             if _s_err:
                 result["probe_error"] = _s_err
 
@@ -3941,6 +3967,112 @@ def build_excel_bytes(
     buf.seek(0)
     return buf.getvalue()
 
+
+# ---------------------------------------------------------------------------
+# Deep debug export (HQ_Debug_Full + Debug_Read_Me)
+# ---------------------------------------------------------------------------
+
+#: Front-loaded, easy-to-find debug columns (the rest of the row's columns are
+#: appended after these in first-seen order, so nothing is dropped).
+_HQ_DEBUG_PRIORITY_COLS: list[str] = [
+    # Serper / query
+    "simple_hq_query", "domain_root_hq_query", "hq_query_used",
+    "serper_queries_used", "serper_calls_used", "serper_cache_hit",
+    "serper_answer_box", "serper_knowledge_graph_location",
+    "top_organic_title_1", "top_organic_snippet_1", "top_organic_url_1",
+    "top_organic_title_2", "top_organic_snippet_2", "top_organic_url_2",
+    "top_organic_title_3", "top_organic_snippet_3", "top_organic_url_3",
+    # AI
+    "ai_call_attempted", "ai_call_success", "ai_hq_error", "ai_hq_model",
+    "ai_hq_query", "ai_hq_classification", "ai_hq_score_recommendation",
+    "ai_hq_confidence", "ai_parent_company", "ai_parent_hq_country",
+    "ai_parent_hq_city", "ai_local_entity_country", "ai_evidence_url",
+    "ai_evidence_quote", "ai_hq_reason", "ai_hq_raw_json",
+    "ai_prompt_user_evidence_preview",
+    # Mapping / final
+    "hq_detected_country", "hq_detected_city", "parent_group_hq_country",
+    "parent_group_hq_city", "hq_structure_type", "hq_confidence",
+    "hq_evidence_url", "hq_evidence_quote", "needs_manual_review",
+    "domain_mismatch_type", "input_domain_body", "evidence_domain_body",
+    "sig_foreign_hq_score_reviewed", "sig_foreign_hq_score_for_next_scoring",
+    "competitor_signal_excluded_from_next_scoring",
+]
+
+_HQ_DEBUG_READ_ME: list[tuple[str, str]] = [
+    ("One Serper search per row",
+     "The active simple-HQ / AI-first route runs exactly ONE Serper API search per "
+     "processed row: the query in 'simple_hq_query' (domain root + 'headquarters'). "
+     "That single response may carry organic results, knowledgeGraph, answerBox and "
+     "places/local — but it is still one API call."),
+    ("serper_calls_used = 0 can mean cache hit",
+     "If the same query was already fetched in this run, the cached response is reused "
+     "and serper_calls_used stays 0 while serper_cache_hit = True. Zero calls does NOT "
+     "mean 'no evidence' — check serper_cache_hit and the organic/answerBox columns."),
+    ("Max AI = 0 means UNLIMITED",
+     "'Max AI Headquarters Interpretations' = 0 means no limit: AI interpretation runs "
+     "for every processed row (when AI-first is enabled and an Anthropic key is set). "
+     "A value N > 0 stops AI after N successful calls. 0 is never 'limit reached'."),
+    ("ai_call_attempted = No",
+     "No AI interpretation happened for this row. Read ai_hq_error for the reason: "
+     "'missing Anthropic key', 'call limit reached (max=N)', 'no Serper data', or "
+     "'anthropic SDK not installed'. AI-first being OFF also yields no AI columns."),
+    ("ai_hq_raw_json is not a secret",
+     "ai_hq_raw_json is the raw text the model returned (the JSON classification), "
+     "truncated for storage. It contains NO API keys or secrets — it is the model "
+     "response used for parsing/validation, kept verbatim for debugging."),
+    ("Interpreting Perucchini / BMW",
+     "Perucchini: compare input_domain_body vs evidence_domain_body and read "
+     "ai_prompt_user_evidence_preview — a UK answer usually means the Serper evidence "
+     "itself pointed to a UK 'Perucchini', i.e. a domain/name mismatch, not a mapping "
+     "bug. BMW: blank HQ fields usually mean ai_call_attempted=No (read ai_hq_error) or "
+     "the model returned 'uncertain'/blank parent_hq_country; the single bmw query + "
+     "raw JSON + evidence preview show exactly what the model saw and answered."),
+]
+
+
+def build_hq_debug_workbook_bytes(rows: list[dict]) -> bytes:
+    """Build the deep-debug workbook (HQ_Debug_Full + Debug_Read_Me) from merged
+    input+probe row dicts.  Never alters inputs; returns xlsx bytes."""
+    from openpyxl import Workbook
+    from openpyxl.styles import Font
+
+    # Column order: priority debug cols first (if present anywhere), then every
+    # remaining column in first-seen order — so all input + probe columns survive.
+    present_priority = [c for c in _HQ_DEBUG_PRIORITY_COLS
+                        if any(c in r for r in rows)]
+    seen = set(present_priority)
+    ordered = list(present_priority)
+    for r in rows:
+        for k in r.keys():
+            if k not in seen and not str(k).startswith("_"):
+                ordered.append(k)
+                seen.add(k)
+
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "HQ_Debug_Full"
+    ws.append(ordered)
+    for c in ws[1]:
+        c.font = Font(bold=True)
+    for r in rows:
+        ws.append([r.get(c, "") for c in ordered])
+    ws.freeze_panes = "A2"
+
+    ws2 = wb.create_sheet("Debug_Read_Me")
+    ws2.append(["Topic", "Explanation"])
+    for c in ws2[1]:
+        c.font = Font(bold=True)
+    for topic, expl in _HQ_DEBUG_READ_ME:
+        ws2.append([topic, expl])
+    ws2.column_dimensions["A"].width = 36
+    ws2.column_dimensions["B"].width = 110
+
+    buf = io.BytesIO()
+    wb.save(buf)
+    buf.seek(0)
+    return buf.getvalue()
+
+
 # ---------------------------------------------------------------------------
 # Streamlit app
 # ---------------------------------------------------------------------------
@@ -4262,15 +4394,17 @@ with st.sidebar:
         else:
             ai_hq_model = _ai_hq_model_preset
         _ai_hq_max_raw = st.number_input(
-            "Max AI HQ interpretation calls",
+            "Max AI Headquarters Interpretations",
             min_value=0,
             max_value=10000,
-            value=50,
+            value=0,
             step=10,
             key="ai_hq_max_calls_input",
-            help="Maximum AI calls per batch run. 0 = unlimited.",
+            help="0 = no limit; AI interpretation will run for all processed rows. "
+                 "A value N > 0 stops AI interpretation after N successful AI calls.",
         )
-        ai_hq_max_calls = None if int(_ai_hq_max_raw or 0) == 0 else int(_ai_hq_max_raw)
+        # 0 (or blank) => None => UNLIMITED. N > 0 => hard cap of N calls.
+        ai_hq_max_calls = None if int(_ai_hq_max_raw or 0) <= 0 else int(_ai_hq_max_raw)
 
     anthropic_key = ""
     if use_model or use_anthropic_review or use_haiku_uncertain or use_ai_hq_interpretation:
@@ -5028,6 +5162,27 @@ elif _app_mode == "recovery":
         f"sheet: '{_REC_TARGET_SHEET}'"
     )
 
+    # Deep debug workbook for the processed recovery rows (Perucchini/BMW tracing).
+    @st.cache_data(show_spinner=False)
+    def _make_recovery_debug_workbook(_key: int) -> bytes:
+        _processed = [
+            r for r in _rec_revised_rows
+            if str(r.get("hq_recovery_selected", "")).strip() == "Yes"
+        ] or _rec_revised_rows
+        return build_hq_debug_workbook_bytes(_processed)
+
+    st.download_button(
+        label="🐞 Download HQ Debug Workbook",
+        data=_make_recovery_debug_workbook(id(_rec_revised_rows)),
+        file_name=f"hq_recovery_debug_full_{_rec_ts_r}.xlsx",
+        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        help="Full per-row debug trace for the processed recovery rows: single Serper "
+             "query, cache flag, raw Serper evidence, compact evidence sent to AI, AI "
+             "attempt/skip reason, raw Haiku JSON, validated classification/score, and "
+             "final mapping. Sheets: HQ_Debug_Full + Debug_Read_Me.",
+        key="hq_recovery_download_debug_button",
+    )
+
 
 # Show results (persists across reruns via session state)
 # ---------------------------------------------------------------------------
@@ -5276,3 +5431,26 @@ with dl2:
         mime="text/csv",
         key="hq_probe_download_csv_button",
     )
+
+# Deep debug workbook — full per-row Serper/AI/mapping trace + Read-Me.
+@st.cache_data(show_spinner=False)
+def _make_debug_workbook(_ts: str) -> bytes:
+    _in = st.session_state.get(_KEY_INPUT_ROWS, []) or []
+    _pr = st.session_state.get(_KEY_RESULTS, []) or []
+    _merged = [
+        {**_inr, **{k: v for k, v in _pb.items() if not str(k).startswith("_")}}
+        for _inr, _pb in zip(_in, _pr)
+    ]
+    return build_hq_debug_workbook_bytes(_merged)
+
+st.download_button(
+    label="🐞 Download HQ Debug Workbook",
+    data=_make_debug_workbook(_dl_ts),
+    file_name=f"hq_debug_full_{_dl_ts}.xlsx",
+    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    help="Full per-row debug trace: the single Serper query, cache flag, raw Serper "
+         "evidence, the compact evidence sent to AI, AI attempt/skip reason, raw Haiku "
+         "JSON, validated classification/score, and the final column mapping. "
+         "Sheets: HQ_Debug_Full + Debug_Read_Me.",
+    key="hq_probe_download_debug_button",
+)
