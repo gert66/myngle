@@ -149,20 +149,83 @@ def _build_user_message(
     )
 
 
+def _extract_json_object(text: str) -> str:
+    """Best-effort isolation of the JSON object in an AI response string.
+
+    Drops markdown fences (```json … ```) and any prose before/after the object
+    by keeping the span from the first '{' to the last '}'.
+    """
+    s = str(text or "").strip()
+    if not s:
+        return ""
+    s = re.sub(r"^```(?:json|JSON)?\s*", "", s).strip()
+    s = re.sub(r"\s*```$", "", s).strip()
+    start, end = s.find("{"), s.rfind("}")
+    if start != -1 and end != -1 and end > start:
+        return s[start:end + 1].strip()
+    return s
+
+
+def _regex_extract_core_fields(raw: str) -> dict:
+    """Recover core HQ fields with conservative regex when json.loads fails.
+
+    A malformed/truncated free-text field (typically ``reason``) must not make
+    the whole row fail when classification / confidence / country are still
+    recoverable.  Only simple JSON string fields are matched, so a broken later
+    field does not corrupt the earlier ones.
+    """
+    text = str(raw or "")
+
+    def _str_field(name: str) -> str:
+        m = re.search(
+            rf'"{re.escape(name)}"\s*:\s*"([^"\\]*(?:\\.[^"\\]*)*)"',
+            text,
+            flags=re.IGNORECASE | re.DOTALL,
+        )
+        if not m:
+            return ""
+        try:
+            return json.loads('"' + m.group(1) + '"')
+        except Exception:
+            return m.group(1)
+
+    return {
+        "classification":    _str_field("classification"),
+        "confidence":        _str_field("confidence"),
+        "parent_company":    _str_field("parent_company"),
+        "parent_hq_country": _str_field("parent_hq_country"),
+        "parent_hq_city":    _str_field("parent_hq_city"),
+        "evidence_url":      _str_field("evidence_url"),
+        "evidence_quote":    _str_field("evidence_quote"),
+        "reason":            _str_field("reason"),
+    }
+
+
 def _parse_ai_response(raw: str) -> dict:
-    """Extract the JSON object from the AI response text."""
-    # Strip markdown code fences if present
-    text = re.sub(r"```(?:json)?", "", raw).strip().strip("`").strip()
-    try:
-        return json.loads(text)
-    except Exception:
-        # Try to find first {...} block
-        m = re.search(r"\{[\s\S]+\}", text)
-        if m:
-            try:
-                return json.loads(m.group(0))
-            except Exception:
-                pass
+    """Extract the JSON object from the AI response text.
+
+    Tolerates markdown fences and prose around the JSON, then — if strict
+    parsing fails — recovers the core fields by regex so a truncated/malformed
+    ``reason`` does not discard an otherwise usable classification.
+
+    Returns ``{}`` only when nothing usable (not even a classification) could
+    be recovered, so the caller can route to manual review.
+    """
+    raw = str(raw or "")
+    for cand in (raw, _extract_json_object(raw)):
+        if not cand:
+            continue
+        try:
+            obj = json.loads(cand)
+        except Exception:
+            continue
+        if isinstance(obj, dict):
+            return obj
+
+    # Strict parse failed — recover what we can.
+    fields = _regex_extract_core_fields(raw)
+    if fields.get("classification"):
+        return fields
     return {}
 
 
@@ -281,6 +344,8 @@ def interpret_hq_with_ai(
         hq_confidence=confidence or None,
         hq_evidence_url=ev_url or None,
         hq_evidence_quote=ev_quote or None,
+        parser_source="ai_first",
+        ai_hq_raw_json=(raw_text or "")[:2000],
     )
 
     # ── Post-AI scoring (only deterministic step) ────────────────────────────

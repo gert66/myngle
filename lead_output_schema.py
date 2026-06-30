@@ -41,6 +41,7 @@ class HQDetectionResult:
     ai_call_attempted: Optional[str] = None      # "Yes" | "No"
     ai_call_success: Optional[str] = None        # "Yes" | "No"
     ai_hq_error: Optional[str] = None
+    ai_hq_raw_json: Optional[str] = None         # raw model text (truncated), for debug
 
 
 @dataclass
@@ -65,6 +66,10 @@ class LeadPrioritizationResult:
     sig_foreign_hq_score_for_next_scoring: Optional[float] = None
     # Competitor evidence is audit-only; excluded from scoring
     competitor_signal_excluded_from_next_scoring: Optional[str] = None
+    # Query / parser provenance (for audit & debug)
+    domain_root: Optional[str] = None
+    query_used: Optional[str] = None
+    parser_source: Optional[str] = None
     # AI audit fields
     ai_hq_model: Optional[str] = None
     ai_hq_classification: Optional[str] = None
@@ -75,3 +80,4 @@ class LeadPrioritizationResult:
     ai_call_attempted: Optional[str] = None
     ai_call_success: Optional[str] = None
     ai_hq_error: Optional[str] = None
+    ai_hq_raw_json: Optional[str] = None

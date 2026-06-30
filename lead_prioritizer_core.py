@@ -22,13 +22,20 @@ def prioritize_single_lead(
     serper_api_key: str = "",
     anthropic_api_key: str = "",
     ai_model: str = _DEFAULT_AI_MODEL,
+    default_input_country: str = "Italy",
 ) -> LeadPrioritizationResult:
     """Orchestrate HQ detection and scoring for a single lead.
 
     Requires ``serper_api_key`` and ``anthropic_api_key`` for live operation.
     In tests these can be mocked at the ``call_serper_for_hq`` /
     ``interpret_hq_with_ai`` level.
+
+    ``default_input_country`` supplies the run-context local/entity country when
+    ``input_row.input_country`` is blank/None; the effective country is what the
+    interpreter compares against and what the result records.
     """
+    effective_country = (input_row.input_country or "").strip() or default_input_country
+
     domain_root, query = build_simple_hq_query(input_row.company_name, input_row.domain)
 
     serper_payload = call_serper_for_hq(
@@ -37,8 +44,16 @@ def prioritize_single_lead(
         serper_api_key=serper_api_key,
     )
 
+    # Use the effective (defaulted) country for interpretation without mutating
+    # the caller's input row.
+    interp_input = LeadInput(
+        company_name=input_row.company_name,
+        domain=input_row.domain,
+        input_country=effective_country,
+    )
+
     hq: HQDetectionResult = interpret_hq_with_ai(
-        lead_input=input_row,
+        lead_input=interp_input,
         domain_root=domain_root,
         query=query,
         serper_payload=serper_payload,
@@ -49,7 +64,7 @@ def prioritize_single_lead(
     return LeadPrioritizationResult(
         company_name=input_row.company_name,
         domain=input_row.domain,
-        input_country=input_row.input_country,
+        input_country=effective_country,
         # HQ location
         hq_detected_country=hq.hq_detected_country,
         hq_detected_city=hq.hq_detected_city,
@@ -62,6 +77,14 @@ def prioritize_single_lead(
         hq_structure_type=hq.hq_structure_type,
         # Scoring
         sig_foreign_hq_score_for_next_scoring=hq.sig_foreign_hq_score_for_next_scoring,
+        # Competitor evidence is audit-only and never enters HQ scoring.
+        competitor_signal_excluded_from_next_scoring=(
+            "Competitor evidence is audit-only and excluded from HQ scoring."
+        ),
+        # Query / parser provenance
+        domain_root=hq.domain_root or domain_root,
+        query_used=hq.query_used or query,
+        parser_source=hq.parser_source,
         # AI audit
         ai_hq_model=hq.ai_hq_model,
         ai_hq_classification=hq.ai_hq_classification,
@@ -72,4 +95,5 @@ def prioritize_single_lead(
         ai_call_attempted=hq.ai_call_attempted,
         ai_call_success=hq.ai_call_success,
         ai_hq_error=hq.ai_hq_error,
+        ai_hq_raw_json=hq.ai_hq_raw_json,
     )
