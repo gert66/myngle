@@ -1265,7 +1265,9 @@ def _serper_search(query: str, api_key: str) -> tuple[dict, str]:
     try:
         resp = _requests.post(
             _SERPER_URL, headers=headers,
-            json={"q": query, "num": 5},
+            # gl/hl/location bias ranking toward the intended Italian company
+            # lookup. Still a single Serper search per call — q and num unchanged.
+            json={"q": query, "num": 5, "gl": "it", "hl": "en", "location": "Italy"},
             timeout=_REQUEST_TIMEOUT,
         )
         resp.raise_for_status()
