@@ -4875,11 +4875,23 @@ elif _app_mode == "recovery":
             comm = 0.0
         return comm >= threshold
 
+    _rec_selection_mode = st.radio(
+        "HQ Recovery row selection",
+        ["Recovery candidates only", "All rows in sheet"],
+        index=0,
+        help="Recovery candidates only = sanitized or high-score HQ-zero rows. "
+             "All rows in sheet = process every row in the selected sheet, still respecting Row limit.",
+    )
+
     _rec_sanitized_idx   = [i for i, r in enumerate(_rec_all_rows) if _rec_is_sanitized(r)]
     _rec_highscore_idx   = [i for i, r in enumerate(_rec_all_rows)
                              if _rec_is_highscore_hq_zero(r, _rec_threshold)]
-    _rec_selected_idx    = sorted(set(_rec_sanitized_idx) | set(_rec_highscore_idx))
-    _rec_selected_full   = len(_rec_selected_idx)
+    if _rec_selection_mode == "All rows in sheet":
+        _rec_selected_idx  = list(range(len(_rec_all_rows)))
+        _rec_selected_full = len(_rec_selected_idx)
+    else:
+        _rec_selected_idx  = sorted(set(_rec_sanitized_idx) | set(_rec_highscore_idx))
+        _rec_selected_full = len(_rec_selected_idx)
 
     # Apply row limit (limit is None = unlimited, or a positive int)
     _rec_row_limit = limit  # None or positive int
@@ -4901,6 +4913,8 @@ elif _app_mode == "recovery":
     _rc5.metric("Rows to process",          len(_rec_to_process_idx))
     _rc6.metric("Skipped by row limit",     len(_rec_skipped_idx))
     _rc7.metric("Rows left unchanged",      len(_rec_unchanged_idx))
+
+    st.caption(f"Selection mode: **{_rec_selection_mode}**")
 
     if _rec_row_limit and _rec_selected_full > _rec_row_limit:
         st.caption(
@@ -5045,8 +5059,12 @@ elif _app_mode == "recovery":
             _rec_probe["hq_recovery_processed"]          = "Yes"
             _rec_probe["hq_recovery_skip_reason"]        = ""
             _rec_probe["hq_recovery_selection_reason"]   = (
-                "sanitized_candidate" if _rec_row_idx in set(_rec_sanitized_idx)
-                else "high_score_hq_zero"
+                "all_rows_mode"
+                if _rec_selection_mode == "All rows in sheet"
+                else (
+                    "sanitized_candidate" if _rec_row_idx in set(_rec_sanitized_idx)
+                    else "high_score_hq_zero"
+                )
             )
             _rec_probe["sig_foreign_hq_score_original_before_recovery"] = (
                 _rec_row.get("sig_foreign_hq_score", "")
@@ -5089,6 +5107,7 @@ elif _app_mode == "recovery":
             "sheet":            _rec_sheet,
             "threshold":        _rec_threshold,
             "row_limit":        _rec_row_limit,
+            "selection_mode":   _rec_selection_mode,
             "selected_full":    _rec_selected_full,
             "selected":         len(_rec_to_process_idx),  # actually processed
             "skipped":          len(_rec_skipped_idx),
@@ -5300,6 +5319,7 @@ elif _app_mode == "recovery":
             ("Rows processed",      _rec_meta_r.get("selected", 0)),
             ("Rows skipped (limit)",_rec_meta_r.get("skipped", 0)),
             ("Row limit applied",   _rec_meta_r.get("row_limit", 0) or "none"),
+            ("Selection mode",      _rec_meta_r.get("selection_mode", "")),
             ("Rows unchanged",      _rec_meta_r.get("unchanged", 0)),
             ("Updated to score 3",  _rec_updated_to_3),
             ("Needs manual review", _rec_needs_review),
