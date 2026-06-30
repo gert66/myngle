@@ -726,52 +726,122 @@ def _wb_to_rows(wb, sheet_name: str) -> tuple[list[str], list[dict]]:
     return headers, data
 
 
-def _build_match_index(
-    rows: list[dict],
-    has_domain: bool,
-    has_company: bool,
-    has_country: bool,
-) -> tuple[dict, str]:
-    if has_domain and has_company and has_country:
-        strategy = "domain+company_name+input_country"
-        idx: dict[str, int] = {}
-        for i, r in enumerate(rows):
-            k = (
-                _norm_key(r.get("domain"))
-                + "|" + _norm_key(r.get("company_name") or r.get("name"))
-                + "|" + _norm_key(r.get("input_country_used") or r.get("country"))
-            )
-            idx.setdefault(k, i)
-        if len(idx) >= len(rows) * 0.9:
-            return idx, strategy
+def _norm_domain(v: Any) -> str:
+    """Normalize a domain-or-URL-like value to a bare host.
 
-    if has_domain and has_company:
-        strategy = "domain+company_name"
-        idx = {}
-        for i, r in enumerate(rows):
-            k = (
-                _norm_key(r.get("domain"))
-                + "|" + _norm_key(r.get("company_name") or r.get("name"))
-            )
-            idx.setdefault(k, i)
-        return idx, strategy
+    - lower-case, strip whitespace
+    - unwrap Markdown links: [www.bmw.it](https://www.bmw.it) -> bmw.it
+    - drop scheme (http:// https://) and a leading www.
+    - drop any path / query / fragment
 
-    return {}, "row_order_fallback"
+    Examples:
+        https://www.bmw.it/it/home.html  -> bmw.it
+        [www.bmw.it](https://www.bmw.it) -> bmw.it
+        bmw.it                           -> bmw.it
+    """
+    s = str(v or "").strip().lower()
+    if not s:
+        return ""
+    # Unwrap Markdown link — prefer the URL in (...), else the text in [...].
+    m = _re.search(r"\]\(([^)]+)\)", s)
+    if m:
+        s = m.group(1).strip()
+    else:
+        m = _re.match(r"\[([^\]]+)\]", s)
+        if m:
+            s = m.group(1).strip()
+    # Drop scheme and leading www.
+    s = _re.sub(r"^[a-z][a-z0-9+.\-]*://", "", s)
+    s = _re.sub(r"^www\.", "", s)
+    # Keep host only — cut at first path/query/fragment separator.
+    s = _re.split(r"[/?#]", s, 1)[0]
+    return s.strip().strip("[]()<> ").rstrip(".")
+
+
+# Preferred HQ Recovery matching strategies, in order.  Country is intentionally
+# NOT part of any default key: HQ Recovery input_country_used is run-context
+# driven (e.g. always Italy for an Italy run) while the enriched workbook's
+# country may be blank, stale, inferred, or even a foreign HQ country — using it
+# in the key would wrongly drop many valid matches.  Each strategy pairs a
+# normalized domain (from the first available column) with the company name.
+_MATCH_STRATEGIES: list[tuple[str, tuple[str, ...]]] = [
+    ("domain+company_name",           ("domain",)),
+    ("validated_domain+company_name", ("validated_domain",)),
+    ("input_domain+company_name",     ("input_domain",)),
+    ("website_domain+company_name",   ("website", "homepage_url")),
+]
+
+
+def _company_key(r: dict) -> str:
+    return _norm_key(r.get("company_name") or r.get("name"))
 
 
 def _match_key_for_row(r: dict, strategy: str) -> str:
-    if "input_country" in strategy:
-        return (
-            _norm_key(r.get("domain"))
-            + "|" + _norm_key(r.get("company_name") or r.get("name"))
-            + "|" + _norm_key(r.get("input_country_used") or r.get("country"))
-        )
-    if "company_name" in strategy:
-        return (
-            _norm_key(r.get("domain"))
-            + "|" + _norm_key(r.get("company_name") or r.get("name"))
-        )
+    if strategy == "row_order_fallback":
+        return ""
+    company = _company_key(r)
+    if not company:
+        return ""
+    for name, domain_cols in _MATCH_STRATEGIES:
+        if name != strategy:
+            continue
+        dom = ""
+        for dc in domain_cols:
+            dom = _norm_domain(r.get(dc))
+            if dom:
+                break
+        if not dom:
+            return ""
+        return dom + "|" + company
     return ""
+
+
+def _build_match_index(
+    hqr_rows: list[dict],
+    hqr_headers: list[str],
+    enr_headers: list[str],
+    n_enr: int,
+) -> tuple[dict, str, dict]:
+    """Choose the best country-free matching strategy and build the hqr index.
+
+    Conservative: every key is domain+company_name (never domain-only or
+    company-only, never country).  Tries the preferred strategies in order and
+    accepts the first whose domain column exists in BOTH workbooks and that
+    produces a key for most HQ Recovery rows.  Duplicate keys keep the FIRST
+    row but are counted for the diagnostics summary.
+
+    Returns (index, strategy, diag) where diag = {"dup_hqr_keys": {key: count}}.
+    """
+    has_company = (
+        ("company_name" in hqr_headers or "name" in hqr_headers)
+        and ("company_name" in enr_headers or "name" in enr_headers)
+    )
+    n_hqr = len(hqr_rows)
+    if has_company and n_hqr:
+        for name, domain_cols in _MATCH_STRATEGIES:
+            # The same key must be derivable from enriched rows too, so require
+            # at least one of the strategy's domain columns in BOTH workbooks.
+            if not (any(c in hqr_headers for c in domain_cols)
+                    and any(c in enr_headers for c in domain_cols)):
+                continue
+            key_first: dict[str, int] = {}
+            key_count: dict[str, int] = {}
+            n_nonempty = 0
+            for i, r in enumerate(hqr_rows):
+                k = _match_key_for_row(r, name)
+                if not k:
+                    continue
+                n_nonempty += 1
+                key_count[k] = key_count.get(k, 0) + 1
+                if k not in key_first:
+                    key_first[k] = i
+            # Accept only if the strategy yields keys for most rows.
+            if key_first and n_nonempty >= n_hqr * 0.5:
+                dup = {k: c for k, c in key_count.items() if c > 1}
+                return key_first, name, {"dup_hqr_keys": dup}
+
+    # Fallback: row order — only valid when the two sheets line up 1:1.
+    return {}, "row_order_fallback", {"dup_hqr_keys": {}}
 
 
 def _build_output_wb(
@@ -835,6 +905,10 @@ def _build_output_wb(
     _add("Total enriched rows",             summary.get("n_enr", 0))
     _add("Total HQ Recovery rows",          summary.get("n_hqr", 0))
     _add("Matched rows",                    summary.get("n_matched", 0))
+    _add("Unmatched HQ Recovery rows",      summary.get("n_unmatched_hqr", 0))
+    _add("Duplicate HQ Recovery keys",      summary.get("n_dup_hqr_keys", 0))
+    _add("Duplicate enriched keys",         summary.get("n_dup_enr_keys", 0))
+    _add("HQ eligible rows",                summary.get("n_hq_eligible", 0))
     _add("Recalculated rows",               summary.get("n_recalculated", 0))
     _add("Skipped by row limit",            summary.get("skipped_by_recalc_limit", 0))
     _add("Unchanged rows",                  summary.get("n_enr", 0) - summary.get("n_recalculated", 0))
@@ -935,6 +1009,9 @@ def _build_output_wb(
     _add("HQ-colored rows",                       lov_stats["n_hq"])
     _add("Competitor-colored rows",               lov_stats["n_comp"])
     _add("Both-colored rows",                     lov_stats["n_both"])
+
+    # ── Match diagnostics sheet ────────────────────────────────────────────────
+    _append_match_diagnostics_sheet(wb_out, summary)
 
     return wb_out, lov_stats
 
@@ -1105,6 +1182,81 @@ def _append_lovable_export_sheet(
 
 
 # ---------------------------------------------------------------------------
+# Match diagnostics sheet
+# ---------------------------------------------------------------------------
+
+MATCH_DIAGNOSTICS_SHEET = "HQ Recalc Match Diagnostics"
+
+_DIAG_UNMATCHED_COLS = [
+    "company_name",
+    "domain",
+    "validated_domain",
+    "input_domain",
+    "input_country_used",
+    "sig_foreign_hq_score_for_next_scoring",
+    "hq_detected_country",
+    "ai_hq_classification",
+    "needs_manual_review",
+]
+
+
+def _append_match_diagnostics_sheet(wb_out: Workbook, summary: dict) -> None:
+    """Small, useful sheet: unmatched HQ Recovery rows + duplicate HQ Recovery keys."""
+    diag = summary.get("match_diagnostics") or {}
+    ws = wb_out.create_sheet(MATCH_DIAGNOSTICS_SHEET)
+    bold = Font(bold=True)
+
+    ws.append(["HQ Recalc Match Diagnostics"])
+    ws["A1"].font = Font(bold=True, size=12)
+    ws.append(["Matching strategy",          diag.get("strategy", summary.get("strategy", ""))])
+    ws.append(["Total enriched rows",        summary.get("n_enr", 0)])
+    ws.append(["Total HQ Recovery rows",     summary.get("n_hqr", 0)])
+    ws.append(["Matched rows",               summary.get("n_matched", 0)])
+    ws.append(["Unmatched HQ Recovery rows", summary.get("n_unmatched_hqr", 0)])
+    ws.append(["Duplicate HQ Recovery keys", summary.get("n_dup_hqr_keys", 0)])
+    ws.append(["Duplicate enriched keys",    summary.get("n_dup_enr_keys", 0)])
+    ws.append(["Rows recalculated",          summary.get("n_recalculated", 0)])
+    ws.append(["HQ eligible rows",           summary.get("n_hq_eligible", 0)])
+
+    # ── Section: unmatched HQ Recovery rows ───────────────────────────────────
+    ws.append([])
+    ws.append(["Unmatched HQ Recovery rows"])
+    ws.cell(ws.max_row, 1).font = bold
+    unmatched = diag.get("unmatched_hqr_rows") or []
+    if not unmatched:
+        ws.append(["No unmatched HQ Recovery rows."])
+    else:
+        ws.append(list(_DIAG_UNMATCHED_COLS))
+        for c in ws[ws.max_row]:
+            c.font = bold
+        _CAP = 1000
+        for r in unmatched[:_CAP]:
+            ws.append([r.get(col) for col in _DIAG_UNMATCHED_COLS])
+        if len(unmatched) > _CAP:
+            ws.append([f"... and {len(unmatched) - _CAP} more unmatched rows (truncated)"])
+
+    # ── Section: duplicate HQ Recovery keys ───────────────────────────────────
+    ws.append([])
+    ws.append(["Duplicate HQ Recovery keys"])
+    ws.cell(ws.max_row, 1).font = bold
+    dup = diag.get("dup_hqr_keys") or {}
+    if not dup:
+        ws.append(["No duplicate HQ Recovery keys."])
+    else:
+        ws.append(["key", "count", "sample_company", "sample_domain"])
+        for c in ws[ws.max_row]:
+            c.font = bold
+        for k, cnt in sorted(dup.items(), key=lambda kv: -kv[1])[:200]:
+            _dom, _, _comp = str(k).partition("|")
+            ws.append([k, cnt, _comp, _dom])
+
+    ws.column_dimensions["A"].width = 44
+    ws.column_dimensions["B"].width = 22
+    ws.column_dimensions["C"].width = 24
+    ws.column_dimensions["D"].width = 24
+
+
+# ---------------------------------------------------------------------------
 # Core recalculation logic
 # ---------------------------------------------------------------------------
 
@@ -1140,12 +1292,9 @@ def recalculate_hq_changed_scores_workbook(
     hqr_headers, hqr_rows = _wb_to_rows(wb_hqr, sheet_name)
     wb_hqr.close()
 
-    # ── Build HQ Recovery match index ────────────────────────────────────────
-    hqr_has_domain  = "domain"        in hqr_headers
-    hqr_has_company = ("company_name" in hqr_headers or "name" in hqr_headers)
-    hqr_has_country = ("input_country_used" in hqr_headers or "country" in hqr_headers)
-    hqr_index, strategy = _build_match_index(
-        hqr_rows, hqr_has_domain, hqr_has_company, hqr_has_country
+    # ── Build HQ Recovery match index (country-free) ─────────────────────────
+    hqr_index, strategy, _match_diag = _build_match_index(
+        hqr_rows, hqr_headers, enr_headers, len(enr_rows)
     )
     use_row_order = (strategy == "row_order_fallback")
 
@@ -1153,9 +1302,22 @@ def recalculate_hq_changed_scores_workbook(
         return b"", {
             "error": (
                 f"Cannot use row-order fallback: enriched has {len(enr_rows)} rows, "
-                f"HQ Recovery has {len(hqr_rows)} rows."
+                f"HQ Recovery has {len(hqr_rows)} rows, and no domain+company match "
+                f"was possible. Ensure both sheets share domain and company_name columns."
             ),
         }
+
+    # Duplicate-key counts for diagnostics.
+    dup_hqr_keys = _match_diag.get("dup_hqr_keys", {})
+    n_dup_hqr_keys = len(dup_hqr_keys)
+    n_dup_enr_keys = 0
+    if not use_row_order:
+        _enr_key_count: dict[str, int] = {}
+        for r in enr_rows:
+            k = _match_key_for_row(r, strategy)
+            if k:
+                _enr_key_count[k] = _enr_key_count.get(k, 0) + 1
+        n_dup_enr_keys = sum(1 for c in _enr_key_count.values() if c > 1)
 
     # ── Build output header list ──────────────────────────────────────────────
     out_headers = list(enr_headers)
@@ -1171,6 +1333,7 @@ def recalculate_hq_changed_scores_workbook(
     import time as _time
     out_rows: list[dict] = []
     n_matched = 0
+    matched_hqr_indices: set[int] = set()
     n_hq_eligible = n_upgrades = n_downgrades = n_other_hq = 0
     n_hq_recalculated = n_hq_skipped_limit = 0
     n_competitor_detected = 0
@@ -1207,9 +1370,14 @@ def recalculate_hq_changed_scores_workbook(
         # ── Match to HQ Recovery ──────────────────────────────────────────────
         if use_row_order:
             hqr_row, matched = hqr_rows[i], True
+            matched_hqr_indices.add(i)
         else:
             hqr_idx = hqr_index.get(_match_key_for_row(enr_row, strategy))
-            hqr_row, matched = (hqr_rows[hqr_idx], True) if hqr_idx is not None else ({}, False)
+            if hqr_idx is not None:
+                hqr_row, matched = hqr_rows[hqr_idx], True
+                matched_hqr_indices.add(hqr_idx)
+            else:
+                hqr_row, matched = {}, False
 
         if matched:
             n_matched += 1
@@ -1509,6 +1677,11 @@ def recalculate_hq_changed_scores_workbook(
         1 for r in _hq_recalc_rows if str(r.get("hq_recalc_evidence_quote") or "").strip()
     )
 
+    # ── Unmatched HQ Recovery rows (HQ Recovery rows never consumed by a match)
+    unmatched_hqr_rows = [
+        hqr_rows[i] for i in range(len(hqr_rows)) if i not in matched_hqr_indices
+    ]
+
     summary = {
         "error":                     "",
         "scope":                     scope,
@@ -1516,6 +1689,14 @@ def recalculate_hq_changed_scores_workbook(
         "n_enr":                     len(enr_rows),
         "n_hqr":                     len(hqr_rows),
         "n_matched":                 n_matched,
+        "n_unmatched_hqr":           len(unmatched_hqr_rows),
+        "n_dup_hqr_keys":            n_dup_hqr_keys,
+        "n_dup_enr_keys":            n_dup_enr_keys,
+        "match_diagnostics": {
+            "strategy":            strategy,
+            "unmatched_hqr_rows":  unmatched_hqr_rows,
+            "dup_hqr_keys":        dup_hqr_keys,
+        },
         "n_hq_eligible":             n_hq_eligible,
         "n_hq_recalculated":         n_hq_recalculated,
         "n_hq_skipped_limit":        n_hq_skipped_limit,

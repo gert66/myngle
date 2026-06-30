@@ -281,6 +281,13 @@ st.caption(
     f"Test mode: {'Yes — limit ' + str(summary['max_recalculated_rows']) if summary['test_mode_active'] else 'No'}"
 )
 st.caption(
+    f"Matched **{summary['n_matched']}** of **{summary.get('n_hqr', 0)}** HQ Recovery rows  |  "
+    f"Unmatched HQ Recovery rows: **{summary.get('n_unmatched_hqr', 0)}**  |  "
+    f"Duplicate HQ Recovery keys: **{summary.get('n_dup_hqr_keys', 0)}**  |  "
+    f"Duplicate enriched keys: **{summary.get('n_dup_enr_keys', 0)}**  "
+    f"(see '{'HQ Recalc Match Diagnostics'}' sheet)"
+)
+st.caption(
     "**Final score column:** `final_commercial_fit_score`  |  "
     "**Pre-recalc reference:** `commercial_fit_score` (not updated by this run)"
 )
