@@ -4796,6 +4796,9 @@ elif _app_mode == "recovery":
         _rec_cache: dict = {}
         _rec_errors: list[str] = []
         _rec_total = len(_rec_to_process_idx)
+        # Mutable AI-HQ call counter shared across rows (same as the main Probe flow).
+        # Respects Max AI semantics: ai_hq_max_calls None/0 = unlimited, N>0 = cap.
+        _rec_ai_hq_calls_counter: list[int] = [0]
 
         for _rec_i, _rec_row_idx in enumerate(_rec_to_process_idx):
             _rec_row     = _rec_all_rows[_rec_row_idx]
@@ -4812,7 +4815,7 @@ elif _app_mode == "recovery":
                 input_country=_rec_country,
                 serper_key=serper_key,
                 use_model=False,
-                anthropic_key="",
+                anthropic_key=anthropic_key,
                 cache=_rec_cache,
                 input_row=_rec_row,
                 use_multilingual_check=False,
@@ -4820,6 +4823,11 @@ elif _app_mode == "recovery":
                 use_mimic_check=False,
                 run_mode="fast",
                 use_simple_hq_mode=True,
+                # AI-first HQ interpretation — same controls as the main Probe flow.
+                use_ai_hq_interpretation=use_ai_hq_interpretation,
+                ai_hq_model=ai_hq_model,
+                ai_hq_calls_counter=_rec_ai_hq_calls_counter,
+                ai_hq_max_calls=ai_hq_max_calls,
             )
 
             # ── Domestic-safety guard (must run before score columns are set) ──
@@ -4849,11 +4857,23 @@ elif _app_mode == "recovery":
                 re.IGNORECASE,
             )
             _rec_quote_has_italy = bool(_REC_ITALY_TOKENS.search(_rec_ev_quotes))
+            # A confident AI foreign-parent / global-network classification is an
+            # authoritative positive signal: the local entity being registered in Italy
+            # (so its evidence quote mentions "Italia") must NOT zero the score.  This
+            # only suppresses the quote-override trigger; genuine same-country detection
+            # (trigger #1) still applies, and non-AI runs are unaffected (blank class).
+            _rec_ai_clf  = str(_rec_probe.get("ai_hq_classification", "")).strip()
+            _rec_ai_conf = str(_rec_probe.get("ai_hq_confidence", "")).strip()
+            _rec_ai_positive = (
+                _rec_ai_clf in ("foreign_parent_group", "global_professional_network")
+                and _rec_ai_conf in ("High", "Medium")
+            )
             _rec_quote_overrides = (
                 _rec_inp_norm == "italy"
                 and _rec_quote_has_italy
                 and _rec_det_norm
                 and _rec_det_norm != "italy"
+                and not _rec_ai_positive
             )
             _rec_is_domestic = (
                 (_rec_det_norm and _rec_inp_norm and _rec_det_norm == _rec_inp_norm)
@@ -4937,6 +4957,16 @@ elif _app_mode == "recovery":
             "sanitized":        len(_rec_sanitized_idx),
             "highscore":        len(_rec_highscore_idx),
             "unchanged":        len(_rec_unchanged_idx),
+            # AI-first HQ interpretation telemetry
+            "ai_hq_enabled":         bool(use_ai_hq_interpretation),
+            "ai_hq_max_calls":       ai_hq_max_calls,  # None = unlimited
+            "ai_hq_calls_attempted": sum(
+                1 for p in _rec_probe_map.values() if p.get("ai_call_attempted") == "Yes"),
+            "ai_hq_calls_succeeded": sum(
+                1 for p in _rec_probe_map.values() if p.get("ai_call_success") == "Yes"),
+            "ai_hq_calls_failed": sum(
+                1 for p in _rec_probe_map.values()
+                if p.get("ai_call_attempted") == "Yes" and p.get("ai_call_success") != "Yes"),
         }
         # Store index sets so _build_recovery_rows can mark skipped rows
         st.session_state["hq_recovery_to_process_set"] = _rec_to_process_set
