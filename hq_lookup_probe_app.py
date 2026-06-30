@@ -2602,13 +2602,40 @@ Classify and return valid JSON only (no markdown, no prose):
         _empty["ai_hq_error"] = str(_exc)[:300]
         return _empty
 
-    # Strip markdown fences if model wraps in ```json
-    _clean = re.sub(r"^```(?:json)?\s*", "", _raw, flags=re.I)
-    _clean = re.sub(r"\s*```$", "", _clean).strip()
+    # Robustly recover the JSON object the model returned.  Models often wrap a
+    # valid object in a Markdown fenced code block (```json ... ```), sometimes
+    # with prose before/after the fence, so anchored fence-stripping is not
+    # enough.  Try a sequence of increasingly tolerant candidates and use the
+    # first that parses to a dict.
+    def _json_candidates(raw: str):
+        # 1. As-is.
+        yield raw
+        # 2. Anchored fence strip (legacy behavior).
+        c = re.sub(r"^```(?:json)?\s*", "", raw, flags=re.I)
+        c = re.sub(r"\s*```$", "", c).strip()
+        yield c
+        # 3. Object inside a fenced code block anywhere in the text.
+        m = re.search(r"```(?:json)?\s*(\{.*?\})\s*```", raw, flags=re.I | re.S)
+        if m:
+            yield m.group(1)
+        # 4. First '{' to last '}' substring (drops any surrounding prose).
+        _s, _e = raw.find("{"), raw.rfind("}")
+        if _s != -1 and _e != -1 and _e > _s:
+            yield raw[_s:_e + 1]
 
-    try:
-        _parsed = json.loads(_clean)
-    except Exception:
+    _parsed = None
+    for _cand in _json_candidates(_raw):
+        if not _cand:
+            continue
+        try:
+            _obj = json.loads(_cand)
+        except Exception:
+            continue
+        if isinstance(_obj, dict):
+            _parsed = _obj
+            break
+
+    if _parsed is None:
         _empty["ai_hq_error"]          = f"JSON parse error: {_raw[:200]}"
         _empty["ai_hq_raw_json"]       = _raw[:500]
         _empty["ai_hq_classification"] = "uncertain"
