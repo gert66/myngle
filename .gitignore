@@ -4,6 +4,9 @@ __pycache__/
 .pytest_cache/
 .env
 .streamlit/secrets.toml
+*secrets*.toml
+*.key
+validation_outputs/
 claude_json_cache/
 radar_cache/
 debug_logs/

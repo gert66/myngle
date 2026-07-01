@@ -24,6 +24,28 @@ streamlit run lead_prioritizer_test_app.py
 Tick **Run full v2 single-lead pipeline**, enter the company / domain / country,
 and run. Confirm the headline shows `Pipeline mode: full_v2_single_lead`.
 
+### CLI runner (headless)
+
+`run_v2_single_lead_validation.py` runs all six cases below with
+`run_full_v2_pipeline=True` (`input_country` defaults to Italy) and writes a
+compact, secret-free JSON + CSV report to `validation_outputs/`.
+
+```bash
+export SERPER_API_KEY=...
+export ANTHROPIC_API_KEY=...
+python run_v2_single_lead_validation.py
+
+# Optional: fall back to a TOML secrets file when the env vars are unset
+python run_v2_single_lead_validation.py --secrets-file .streamlit/secrets.toml
+```
+
+Keys are read from the environment first, then from `--secrets-file` if given.
+Key values are never printed or written to output. Each output record contains
+only the compact fields, evidence/signal counts, at most six evidence URLs, and
+`run_success` / `run_error` — raw AI JSON and raw Serper payloads are excluded.
+Outputs land in `validation_outputs/` (gitignored). If a key is missing, cases
+are still recorded with `run_success=false` and a `run_error`.
+
 ## Test cases (input_country = Italy)
 
 | Company | Domain |
