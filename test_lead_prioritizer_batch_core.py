@@ -368,3 +368,213 @@ class TestWorkbook:
         import io as _io
         wb = load_workbook(_io.BytesIO(data))
         assert wb.sheetnames == ["Enriched Leads", "Evidence", "Signals", "Run Summary"]
+
+
+# ---------------------------------------------------------------------------
+# C5 batch integration (optional, country-agnostic) — adjudicator mocked
+# ---------------------------------------------------------------------------
+
+from lead_output_schema import HQDetectionResult  # noqa: E402
+from lead_hq_sonnet_adjudicator import SonnetHQAdjudicationResult  # noqa: E402
+from lead_prioritizer_batch_core import (  # noqa: E402
+    apply_c5_adjudication,
+    add_c5_summary_fields,
+    row_selected_for_c5,
+)
+
+
+def _enriched_rows():
+    """Two rows: one HQ score-3 foreign, one score-0 domestic (manual review)."""
+    return [
+        {"company_name": "Nissan do Brasil", "domain": "nissan.com.br",
+         "input_country": "Brazil", "sig_foreign_hq_score_for_next_scoring": 3.0,
+         "needs_manual_review": False, "hq_positive_score_suppressed_for_review": "No",
+         "hq_detected_country": "Japan", "ai_parent_hq_country": "Japan"},
+        {"company_name": "Empresa Uruguaya", "domain": "empresa.com.uy",
+         "input_country": "Uruguay", "sig_foreign_hq_score_for_next_scoring": 0.0,
+         "needs_manual_review": True, "hq_positive_score_suppressed_for_review": "No",
+         "hq_detected_country": "", "ai_parent_hq_country": ""},
+    ]
+
+
+def _mk_result(adjudication="unclear", confidence="Low", target="unclear",
+               call_success=True, error="", model="claude-sonnet-5"):
+    return SonnetHQAdjudicationResult(
+        adjudication=adjudication, confidence=confidence, target_company_match=target,
+        parent_company="", parent_hq_country="", parent_hq_city="",
+        reason="r", model=model, call_attempted=True,
+        call_success=call_success, error=error)
+
+
+def _patch_adjudicator(result_or_fn):
+    # apply_c5_adjudication reuses adjudicate_row from the probe, which calls
+    # adjudicate_hq_with_sonnet in the probe's namespace.
+    if callable(result_or_fn):
+        return patch("run_hq_sonnet_adjudication_probe.adjudicate_hq_with_sonnet",
+                     side_effect=result_or_fn)
+    return patch("run_hq_sonnet_adjudication_probe.adjudicate_hq_with_sonnet",
+                 return_value=result_or_fn)
+
+
+class TestC5RowSelection:
+    def test_scope_variants(self):
+        rows = _enriched_rows()
+        assert [row_selected_for_c5(r, "all_rows") for r in rows] == [True, True]
+        assert [row_selected_for_c5(r, "score_3_only") for r in rows] == [True, False]
+        assert [row_selected_for_c5(r, "score_3_or_manual_review") for r in rows] == [True, True]
+        assert [row_selected_for_c5(r, "manual_review_or_suppressed") for r in rows] == [False, True]
+
+    def test_suppressed_selected(self):
+        r = {"sig_foreign_hq_score_for_next_scoring": 0.0, "needs_manual_review": False,
+             "hq_positive_score_suppressed_for_review": "Yes"}
+        assert row_selected_for_c5(r, "manual_review_or_suppressed") is True
+
+
+class TestC5Disabled:
+    def test_run_batch_alone_has_no_c5_columns(self):
+        df = pd.DataFrame({"company": ["A"], "domain": ["a.com"]})
+        cfg = BatchRunConfig(company_name_column="company", domain_column="domain",
+                             run_mode="hq_only", row_limit=1)
+        with patch("lead_prioritizer_batch_core.prioritize_single_lead",
+                   return_value=_sample_result()):
+            out = run_batch_dataframe(df, cfg, "k1", "k2")
+        assert not any(c.startswith("c5_") for c in out["enriched_leads"].columns)
+
+
+class TestC5AppendOnly:
+    def test_scores_unchanged_fields_added(self):
+        rows = _enriched_rows()
+        with _patch_adjudicator(_mk_result(adjudication="domestic_confirmed",
+                                           confidence="High", target="yes")):
+            out, counts = apply_c5_adjudication(
+                rows, anthropic_api_key="k", model_used="claude-sonnet-5",
+                model_tier="sonnet", scoring_behavior="append_only", scope="all_rows")
+        # original scores untouched
+        assert out[0]["sig_foreign_hq_score_for_next_scoring"] == 3.0
+        assert out[1]["sig_foreign_hq_score_for_next_scoring"] == 0.0
+        assert out[0]["needs_manual_review"] is False
+        # C5 fields present
+        assert out[0]["c5_adjudication"] == "domestic_confirmed"
+        assert out[0]["c5_call_attempted"] is True
+        assert "c5_possible_foreign_parent_for_review" in out[0]
+        assert counts["c5_rows_attempted"] == 2
+
+
+class TestC5Conservative:
+    def test_confirms_old_score_3(self):
+        rows = [_enriched_rows()[0]]  # score 3
+        with _patch_adjudicator(_mk_result("foreign_parent_confirmed", "High", "yes")):
+            out, counts = apply_c5_adjudication(
+                rows, anthropic_api_key="k", model_used="m", model_tier="sonnet",
+                scoring_behavior="conservative_adjustment", scope="all_rows")
+        assert out[0]["sig_foreign_hq_score_for_next_scoring"] == 3.0
+        assert counts["c5_downgraded_score_3_count"] == 0
+
+    def test_downgrades_old_score_3_when_domestic(self):
+        rows = [_enriched_rows()[0]]
+        with _patch_adjudicator(_mk_result("domestic_confirmed", "High", "yes")):
+            out, counts = apply_c5_adjudication(
+                rows, anthropic_api_key="k", model_used="m", model_tier="sonnet",
+                scoring_behavior="conservative_adjustment", scope="all_rows")
+        assert out[0]["sig_foreign_hq_score_for_next_scoring"] == 0.0
+        assert out[0]["needs_manual_review"] is True
+        assert counts["c5_downgraded_score_3_count"] == 1
+        assert "downgraded" in out[0]["hq_reason"].lower()
+
+    def test_does_not_auto_upgrade_old_score_0(self):
+        rows = [_enriched_rows()[1]]  # score 0
+        with _patch_adjudicator(_mk_result("foreign_parent_confirmed", "High", "yes")):
+            out, counts = apply_c5_adjudication(
+                rows, anthropic_api_key="k", model_used="m", model_tier="sonnet",
+                scoring_behavior="conservative_adjustment", scope="all_rows")
+        assert out[0]["sig_foreign_hq_score_for_next_scoring"] == 0.0
+        assert out[0]["c5_possible_foreign_parent_for_review"] is True
+        assert out[0]["needs_manual_review"] is True
+        assert counts["c5_possible_foreign_parent_for_review_count"] == 1
+
+    def test_failure_old_3_downgrades_old_0_stays_with_error(self):
+        rows = _enriched_rows()  # [score3, score0]
+        fail = _mk_result(adjudication="unclear", call_success=False,
+                          error="sonnet_parse_failed")
+        with _patch_adjudicator(fail):
+            out, counts = apply_c5_adjudication(
+                rows, anthropic_api_key="k", model_used="m", model_tier="sonnet",
+                scoring_behavior="conservative_adjustment", scope="all_rows")
+        # old score 3 → 0 + review
+        assert out[0]["sig_foreign_hq_score_for_next_scoring"] == 0.0
+        assert out[0]["needs_manual_review"] is True
+        assert out[0]["c5_error"] == "sonnet_parse_failed"
+        # old score 0 → stays 0 + review, error present
+        assert out[1]["sig_foreign_hq_score_for_next_scoring"] == 0.0
+        assert out[1]["needs_manual_review"] is True
+        assert out[1]["c5_error"] == "sonnet_parse_failed"
+        assert counts["c5_error_count"] == 2
+
+
+class TestC5ScopeFiltering:
+    def test_score_3_only_sends_one(self):
+        rows = _enriched_rows()
+        with _patch_adjudicator(_mk_result()):
+            out, counts = apply_c5_adjudication(
+                rows, anthropic_api_key="k", model_used="m", model_tier="sonnet",
+                scope="score_3_only")
+        assert out[0]["c5_call_attempted"] is True
+        assert out[1]["c5_call_attempted"] is False   # not sent → blank
+        assert out[1]["c5_possible_foreign_parent_for_review"] is False
+        assert counts["c5_rows_attempted"] == 1
+
+    def test_all_rows_sends_all(self):
+        rows = _enriched_rows()
+        with _patch_adjudicator(_mk_result()):
+            out, counts = apply_c5_adjudication(
+                rows, anthropic_api_key="k", model_used="m", model_tier="sonnet",
+                scope="all_rows")
+        assert counts["c5_rows_attempted"] == 2
+
+
+class TestC5CountryAgnostic:
+    def test_input_country_passed_through(self):
+        rows = _enriched_rows()  # Brazil + Uruguay
+        seen = []
+
+        def _capture(**kwargs):
+            seen.append(kwargs.get("input_country"))
+            return _mk_result()
+
+        with _patch_adjudicator(_capture):
+            apply_c5_adjudication(
+                rows, anthropic_api_key="k", model_used="m", model_tier="sonnet",
+                scope="all_rows")
+        assert "Brazil" in seen
+        assert "Uruguay" in seen
+        # no hardcoded country substituted
+        assert set(seen) == {"Brazil", "Uruguay"}
+
+
+class TestC5RunSummary:
+    def test_summary_includes_settings_and_counts(self):
+        base = build_run_summary_dataframe(
+            BatchRunConfig(company_name_column="c", domain_column="d",
+                           run_mode="hq_only"),
+            total_input_rows=2, selected_rows=2, processed_rows=2,
+            success_count=2, error_count=0)
+        counts = {
+            "c5_rows_attempted": 2, "c5_success_count": 2, "c5_error_count": 0,
+            "c5_foreign_parent_confirmed_count": 1, "c5_domestic_confirmed_count": 1,
+            "c5_unclear_count": 0, "c5_recommended_score_3_count": 1,
+            "c5_possible_foreign_parent_for_review_count": 0,
+            "c5_downgraded_score_3_count": 0,
+        }
+        summ = add_c5_summary_fields(
+            base, c5_enabled=True, c5_scoring_behavior="conservative_adjustment",
+            c5_scope="all_rows", c5_model_tier="sonnet", c5_model_used="claude-sonnet-5",
+            counts=counts)
+        rec = summ.iloc[0].to_dict()
+        assert rec["c5_enabled"] is True
+        assert rec["c5_scoring_behavior"] == "conservative_adjustment"
+        assert rec["c5_scope"] == "all_rows"
+        assert rec["c5_model_tier"] == "sonnet"
+        assert rec["c5_model_used"] == "claude-sonnet-5"
+        assert rec["c5_rows_attempted"] == 2
+        assert rec["c5_foreign_parent_confirmed_count"] == 1
+        assert rec["c5_downgraded_score_3_count"] == 0

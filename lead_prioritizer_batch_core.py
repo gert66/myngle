@@ -392,3 +392,246 @@ def build_excel_workbook_bytes(output_tables: dict) -> bytes:
             frame.to_excel(writer, sheet_name=sheet_name, index=False)
     buf.seek(0)
     return buf.getvalue()
+
+
+# ---------------------------------------------------------------------------
+# Optional C5 Sonnet HQ adjudication layer (country-agnostic)
+# ---------------------------------------------------------------------------
+#
+# C5 runs AFTER normal batch processing, over the Enriched Leads rows. It is a
+# separate, opt-in step: the core imports the C5 layer lazily inside
+# ``apply_c5_adjudication`` so the base batch flow stays independent and C5
+# remains removable. It adds no Serper calls and is country-agnostic — the
+# per-row ``input_country`` is passed straight through to C5.
+
+C5_SCORING_BEHAVIORS = ("append_only", "conservative_adjustment")
+C5_SCOPES = (
+    "all_rows",
+    "score_3_only",
+    "score_3_or_manual_review",
+    "manual_review_or_suppressed",
+)
+
+# Full set of C5 columns with safe defaults for rows NOT sent to C5.
+_C5_BLANK_DEFAULTS = {
+    "c5_adjudication": "",
+    "c5_confidence": "",
+    "c5_target_company_match": "",
+    "c5_parent_company": "",
+    "c5_parent_hq_country": "",
+    "c5_parent_hq_city": "",
+    "c5_reason": "",
+    "c5_sonnet_model": "",
+    "c5_model_used": "",
+    "c5_model_tier": "",
+    "c5_call_attempted": False,
+    "c5_call_success": False,
+    "c5_error": "",
+    "c5_recommended_hq_score": None,
+    "c5_recommended_manual_review": False,
+    "c5_recommendation_reason": "",
+    "c5_possible_foreign_parent_for_review": False,
+}
+
+
+def _c5_truthy(v) -> bool:
+    if isinstance(v, bool):
+        return v
+    return str(v).strip().lower() in ("yes", "true", "1")
+
+
+def _c5_score(v):
+    """Parse a score to float, or None when absent/blank/unparseable."""
+    if v is None or (isinstance(v, str) and not v.strip()):
+        return None
+    try:
+        return float(v)
+    except (TypeError, ValueError):
+        return None
+
+
+def row_selected_for_c5(row: dict, scope: str) -> bool:
+    """Country-agnostic C5 row selection based on the existing HQ output."""
+    score = _c5_score(row.get("sig_foreign_hq_score_for_next_scoring"))
+    is3 = (score == 3.0)
+    review = _c5_truthy(row.get("needs_manual_review"))
+    suppressed = _c5_truthy(row.get("hq_positive_score_suppressed_for_review"))
+    if scope == "all_rows":
+        return True
+    if scope == "score_3_only":
+        return is3
+    if scope == "score_3_or_manual_review":
+        return is3 or review
+    if scope == "manual_review_or_suppressed":
+        return review or suppressed
+    return False
+
+
+def _c5_blank_row(original: dict, include_raw: bool) -> dict:
+    out = dict(original)
+    out.update(_C5_BLANK_DEFAULTS)
+    if include_raw:
+        out["c5_raw_json"] = None
+    return out
+
+
+def _append_hq_reason(row: dict, note: str) -> None:
+    prev = str(row.get("hq_reason") or "").strip()
+    row["hq_reason"] = f"{prev} | {note}" if prev else note
+
+
+def _apply_conservative_adjustment(enriched: dict, result, counts: dict) -> None:
+    """Conservative C5 scoring: confirm/downgrade score-3 positives; never
+    auto-upgrade score-0 rows. Mutates ``enriched`` in place."""
+    old = _c5_score(enriched.get("sig_foreign_hq_score_for_next_scoring"))
+    confirmed = (
+        bool(result.call_success)
+        and result.adjudication == "foreign_parent_confirmed"
+        and result.confidence in ("High", "Medium")
+        and result.target_company_match == "yes"
+    )
+
+    if old == 3.0:
+        if confirmed:
+            return  # keep score 3
+        enriched["sig_foreign_hq_score_for_next_scoring"] = 0.0
+        enriched["needs_manual_review"] = True
+        _append_hq_reason(
+            enriched,
+            "C5 downgraded previous HQ score-3 because foreign parent was not confirmed.")
+        counts["c5_downgraded_score_3_count"] += 1
+        return
+
+    if old == 0.0:
+        enriched["sig_foreign_hq_score_for_next_scoring"] = 0.0  # never auto-upgrade
+        if confirmed:
+            enriched["c5_possible_foreign_parent_for_review"] = True
+            enriched["needs_manual_review"] = True
+            _append_hq_reason(
+                enriched,
+                "C5 possible foreign parent, not auto-upgraded under conservative mode.")
+            counts["c5_possible_foreign_parent_for_review_count"] += 1
+        elif not result.call_success:
+            # Row was selected for C5 but the call/parse failed → stay safe.
+            enriched["needs_manual_review"] = True
+        return
+    # Other/absent old scores: leave untouched under conservative mode.
+
+
+def apply_c5_adjudication(
+    enriched_rows,
+    *,
+    anthropic_api_key: str,
+    model_used: str,
+    model_tier: str,
+    scoring_behavior: str = "append_only",
+    scope: str = "score_3_or_manual_review",
+    include_raw: bool = False,
+    progress_callback=None,
+) -> tuple:
+    """Apply optional C5 Sonnet adjudication over Enriched Leads rows.
+
+    Reuses the single-source ``adjudicate_row`` from the C5 probe (lazy import),
+    so no C5 prompt/parser logic is duplicated. Country-agnostic: each row's
+    ``input_country`` is passed straight to C5.
+
+    Returns ``(out_rows, counts)``. ``append_only`` never changes
+    ``sig_foreign_hq_score_for_next_scoring`` / ``needs_manual_review``;
+    ``conservative_adjustment`` may confirm/downgrade score-3 positives but never
+    auto-upgrades score-0 rows.
+    """
+    from run_hq_sonnet_adjudication_probe import adjudicate_row  # lazy; keeps C5 removable
+
+    if isinstance(enriched_rows, pd.DataFrame):
+        rows = enriched_rows.to_dict("records")
+    else:
+        rows = [dict(r) for r in enriched_rows]
+
+    counts = {
+        "c5_rows_attempted": 0,
+        "c5_success_count": 0,
+        "c5_error_count": 0,
+        "c5_foreign_parent_confirmed_count": 0,
+        "c5_domestic_confirmed_count": 0,
+        "c5_unclear_count": 0,
+        "c5_recommended_score_3_count": 0,
+        "c5_possible_foreign_parent_for_review_count": 0,
+        "c5_downgraded_score_3_count": 0,
+    }
+
+    flags = [row_selected_for_c5(r, scope) for r in rows]
+    total = sum(flags)
+    done = 0
+    out_rows: list[dict] = []
+
+    for r, selected in zip(rows, flags):
+        if not selected:
+            out_rows.append(_c5_blank_row(r, include_raw))
+            continue
+
+        enriched, result, rec = adjudicate_row(
+            r, anthropic_api_key, model_used, model_tier,
+            source_index=r.get("source_index"), include_raw=include_raw,
+        )
+        enriched.setdefault("c5_possible_foreign_parent_for_review", False)
+
+        counts["c5_rows_attempted"] += 1
+        if result.call_success:
+            counts["c5_success_count"] += 1
+        else:
+            counts["c5_error_count"] += 1
+        if result.adjudication == "foreign_parent_confirmed":
+            counts["c5_foreign_parent_confirmed_count"] += 1
+        elif result.adjudication == "domestic_confirmed":
+            counts["c5_domestic_confirmed_count"] += 1
+        else:
+            counts["c5_unclear_count"] += 1
+        if rec["c5_recommended_hq_score"] == 3.0:
+            counts["c5_recommended_score_3_count"] += 1
+
+        if scoring_behavior == "conservative_adjustment":
+            _apply_conservative_adjustment(enriched, result, counts)
+        # append_only: never touch score / needs_manual_review.
+
+        out_rows.append(enriched)
+        done += 1
+        if progress_callback is not None:
+            try:
+                progress_callback({
+                    "c5_processed": done,
+                    "c5_selected": total,
+                    "current_company_name": str(r.get("company_name") or ""),
+                })
+            except Exception:
+                pass
+
+    return out_rows, counts
+
+
+def add_c5_summary_fields(
+    run_summary: pd.DataFrame,
+    *,
+    c5_enabled: bool,
+    c5_scoring_behavior: str,
+    c5_scope: str,
+    c5_model_tier: str,
+    c5_model_used: str,
+    counts: dict,
+) -> pd.DataFrame:
+    """Return a copy of the run-summary DataFrame with C5 settings/counts added."""
+    df = run_summary.copy() if run_summary is not None else pd.DataFrame([{}])
+    if len(df) == 0:
+        df = pd.DataFrame([{}])
+    df["c5_enabled"] = c5_enabled
+    df["c5_scoring_behavior"] = c5_scoring_behavior
+    df["c5_scope"] = c5_scope
+    df["c5_model_tier"] = c5_model_tier
+    df["c5_model_used"] = c5_model_used
+    for key in (
+        "c5_rows_attempted", "c5_success_count", "c5_error_count",
+        "c5_foreign_parent_confirmed_count", "c5_domestic_confirmed_count",
+        "c5_unclear_count", "c5_recommended_score_3_count",
+        "c5_possible_foreign_parent_for_review_count", "c5_downgraded_score_3_count",
+    ):
+        df[key] = counts.get(key, 0)
+    return df

@@ -24,9 +24,25 @@ from lead_prioritizer_batch_core import (
     BatchRunConfig,
     build_excel_workbook_bytes,
     run_batch_dataframe,
+    apply_c5_adjudication,
+    add_c5_summary_fields,
+    row_selected_for_c5,
+    C5_SCORING_BEHAVIORS,
+    C5_SCOPES,
+)
+
+from lead_hq_sonnet_adjudicator import (
+    DEFAULT_SONNET_ADJUDICATION_MODEL,
+    C5_MODEL_TIER_CHOICES,
+)
+from run_hq_sonnet_adjudication_probe import (
+    resolve_c5_model,
+    check_opus_guardrail,
+    _OPUS_WARNING,
 )
 
 CONFIRM_THRESHOLD = 50
+_C5_OPUS_ROW_CAP = 10
 
 # Run-mode radio labels → core modes (order defines UI order; first is default).
 MODE_LABELS: list[str] = [
@@ -295,7 +311,50 @@ def main() -> None:  # pragma: no cover - exercised only under `streamlit run`
             "I understand this may use many API calls and want to run this batch",
             value=False)
 
-    run_disabled = (not keys_ok) or (not big_run_ok) or selected_count == 0
+    # ── C5 Sonnet HQ adjudication (optional, country-agnostic) ────────────────
+    st.subheader("C5 Sonnet HQ adjudication")
+    c5_enabled = st.checkbox("Use C5 Sonnet adjudication", value=False)
+    c5_scoring_behavior = "append_only"
+    c5_scope = "score_3_or_manual_review"
+    c5_model_tier = "sonnet"
+    c5_model_override = ""
+    c5_model_used = ""
+    c5_model_error = None
+    c5_opus_confirm = False
+    c5_block_reason = ""
+    if c5_enabled:
+        c5_scoring_behavior = st.selectbox(
+            "C5 scoring behavior", list(C5_SCORING_BEHAVIORS), index=0,
+            help="append_only: add C5 fields only. conservative_adjustment: may "
+                 "confirm/downgrade existing score-3 positives; never auto-upgrades "
+                 "score-0 rows.")
+        c5_scope = st.selectbox(
+            "Rows to send to C5", list(C5_SCOPES),
+            index=list(C5_SCOPES).index("score_3_or_manual_review"))
+        c5_model_tier = st.selectbox("C5 model tier", list(C5_MODEL_TIER_CHOICES), index=0)
+        if c5_model_tier == "sonnet":
+            st.caption(f"Sonnet default model: **{DEFAULT_SONNET_ADJUDICATION_MODEL}**")
+        c5_model_override = st.text_input(
+            "C5 explicit model override (optional)", value="",
+            help="Overrides the tier. Required for the opus tier.")
+        c5_model_used, c5_model_error = resolve_c5_model(c5_model_tier, c5_model_override)
+        if c5_model_tier == "opus":
+            st.warning(_OPUS_WARNING)
+            rl = int(row_limit)
+            if rl == 0 or rl > _C5_OPUS_ROW_CAP:
+                c5_opus_confirm = st.checkbox(
+                    "I understand Opus is expensive and want to continue", value=False)
+        if c5_model_error:
+            c5_block_reason = c5_model_error
+        elif c5_model_tier == "opus":
+            _guard = check_opus_guardrail(c5_model_tier, int(row_limit), c5_opus_confirm)
+            if _guard:
+                c5_block_reason = _guard
+        if c5_block_reason:
+            st.error(c5_block_reason)
+
+    run_disabled = (not keys_ok) or (not big_run_ok) or selected_count == 0 \
+        or bool(c5_block_reason)
 
     # ── Run ─────────────────────────────────────────────────────────────────
     if st.button("Run batch enrichment", type="primary", disabled=run_disabled):
@@ -326,9 +385,49 @@ def main() -> None:  # pragma: no cover - exercised only under `streamlit run`
         with st.spinner("Running batch enrichment..."):
             tables = run_batch_dataframe(
                 df, config, serper, anthropic, progress_callback=_on_progress)
-            data = build_excel_workbook_bytes(tables)
 
         progress_bar.progress(1.0)
+
+        # ── Optional C5 adjudication (after normal batch processing) ──────────
+        c5_counts = {}
+        if c5_enabled:
+            c5_bar = st.progress(0.0)
+            c5_status = st.empty()
+
+            def _on_c5_progress(payload: dict) -> None:
+                sel = int(payload.get("c5_selected", 0) or 0)
+                dn = int(payload.get("c5_processed", 0) or 0)
+                c5_bar.progress(min(1.0, dn / sel) if sel else 1.0)
+                c5_status.info(
+                    f"C5 {dn}/{sel}: {payload.get('current_company_name', '')}")
+
+            with st.spinner("Running C5 Sonnet adjudication..."):
+                c5_rows, c5_counts = apply_c5_adjudication(
+                    tables["enriched_leads"],
+                    anthropic_api_key=anthropic,
+                    model_used=c5_model_used,
+                    model_tier=c5_model_tier,
+                    scoring_behavior=c5_scoring_behavior,
+                    scope=c5_scope,
+                    include_raw=include_raw_ai_json,
+                    progress_callback=_on_c5_progress,
+                )
+            c5_bar.progress(1.0)
+            tables["enriched_leads"] = pd.DataFrame(c5_rows)
+
+        # Extend Run Summary with C5 settings/counts (always records enabled flag).
+        tables["run_summary"] = add_c5_summary_fields(
+            tables["run_summary"],
+            c5_enabled=c5_enabled,
+            c5_scoring_behavior=c5_scoring_behavior if c5_enabled else "",
+            c5_scope=c5_scope if c5_enabled else "",
+            c5_model_tier=c5_model_tier if c5_enabled else "",
+            c5_model_used=c5_model_used if c5_enabled else "",
+            counts=c5_counts,
+        )
+
+        data = build_excel_workbook_bytes(tables)
+
         _total_elapsed = format_duration(_time.time() - started_at)
         _summary = tables["run_summary"].iloc[0].to_dict() if len(tables["run_summary"]) else {}
         status.success(
