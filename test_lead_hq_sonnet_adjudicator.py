@@ -243,6 +243,67 @@ class TestPrompt:
             or "same name" in p.lower()
         assert "do not guess" in p.lower()
 
+    def test_prompt_contains_control_vs_investment_guard(self):
+        p = build_adjudication_prompt(
+            company_name="Sólides", domain="solides.com.br", input_country="Brazil")
+        # Normalize whitespace so wrapped phrases still match.
+        low = " ".join(p.lower().split())
+        # investment/funding/minority-stake alone is NOT a foreign parent
+        assert "venture capital" in low
+        assert "private equity" in low
+        assert "minority stake" in low
+        assert "funding round" in low
+        assert "control, not investment" in low or "not investment" in low
+        # confirmation requires control / majority ownership / subsidiary
+        assert "controlled by" in low
+        assert "majority-owned" in low or "majority owned" in low
+        assert "subsidiary of" in low
+
+
+class TestControlVsInvestment:
+    """Investment/backing alone must not yield a positive HQ recommendation."""
+
+    def test_investment_only_response_is_unclear_not_score_3(self):
+        # The model, following the refined prompt, returns unclear for an
+        # investment-only (Warburg Pincus) situation → score 0 + manual review.
+        text = ('{"adjudication":"unclear","confidence":"Low",'
+                '"target_company_match":"yes","parent_company":"Warburg Pincus",'
+                '"parent_hq_country":"United States",'
+                '"reason":"Warburg Pincus invested in the company but control '
+                'is not established"}')
+        r = _adj(text, company_name="Sólides", domain="solides.com.br")
+        assert r.adjudication == "unclear"
+        rec = build_c5_recommendation(r)
+        assert rec["c5_recommended_hq_score"] == 0.0
+        assert rec["c5_recommended_manual_review"] is True
+
+    def test_unclear_investment_recommendation_is_manual_review(self):
+        rec = build_c5_recommendation(SonnetHQAdjudicationResult(
+            adjudication="unclear", confidence="Low", target_company_match="yes",
+            parent_company="Some PE Fund", reason="minority stake only"))
+        assert rec["c5_recommended_hq_score"] == 0.0
+        assert rec["c5_recommended_manual_review"] is True
+
+    def test_explicit_confirm_still_scores_3(self):
+        # Score 3 requires the JSON to explicitly say foreign_parent_confirmed +
+        # High/Medium + target yes (recommendation logic unchanged).
+        rec = build_c5_recommendation(SonnetHQAdjudicationResult(
+            adjudication="foreign_parent_confirmed", confidence="High",
+            target_company_match="yes", parent_company="Nissan Motor Co."))
+        assert rec["c5_recommended_hq_score"] == 3.0
+        assert rec["c5_recommended_manual_review"] is False
+
+    def test_parse_failure_stays_manual_safe(self):
+        r = _adj("The ownership situation is complex and I cannot give JSON.")
+        assert r.call_success is False
+        assert r.error == "sonnet_parse_failed"
+        assert r.adjudication == "unclear"
+        assert r.confidence == "Low"
+        assert r.target_company_match == "unclear"
+        rec = build_c5_recommendation(r)
+        assert rec["c5_recommended_hq_score"] == 0.0
+        assert rec["c5_recommended_manual_review"] is True
+
 
 # ---------------------------------------------------------------------------
 # CLI row filtering (small, optional)

@@ -101,8 +101,18 @@ Rules:
   to describe a different company than the supplied domain/name, return
   target_company_match = "no" and adjudication = "unclear".
 - If you are uncertain, return "unclear". Do not guess.
-- "foreign_parent_confirmed" only when the ultimate parent HQ is clearly in a
-  DIFFERENT country than input_country, for THIS company.
+- Control, not investment. Do NOT classify as "foreign_parent_confirmed" based
+  only on: venture capital investment, private equity investment, a minority
+  stake, a funding round, a strategic investment, a partnership, or a
+  customer/vendor relationship. A foreign investor/backer is NOT a foreign
+  parent unless it controls the company.
+- Classify as "foreign_parent_confirmed" ONLY if THIS company is controlled by,
+  majority-owned by, a subsidiary of, or clearly part of a foreign-headquartered
+  parent group. If the evidence indicates only investment/backing (not control,
+  majority ownership, or subsidiary status), or you are uncertain whether the
+  foreign investor controls the company, return "unclear".
+- "foreign_parent_confirmed" also requires the ultimate parent HQ to be clearly
+  in a DIFFERENT country than input_country, for THIS company.
 - "domestic_confirmed" when the ultimate HQ is in the SAME country as
   input_country.
 - Return only valid JSON with exactly these keys:
