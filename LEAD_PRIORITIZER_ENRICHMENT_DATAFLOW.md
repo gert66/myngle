@@ -176,6 +176,42 @@ Wired into `prioritize_single_lead(..., run_full_v2_pipeline=True)`.
 - Intended for **manual validation** and future frontend/API wiring. See
   `LEAD_PRIORITIZER_V2_SINGLE_LEAD_VALIDATION.md`.
 
+## Batch CLI runner
+
+`lead_prioritizer_batch_cli.py` is a thin command-line wrapper over the shared
+batch core (`lead_prioritizer_batch_core.py`). It reads an Excel file, maps
+columns, runs the selected mode, and writes an enriched workbook. It adds no
+enrichment logic and does not duplicate batch logic.
+
+Examples:
+
+Full mode:
+```bash
+python lead_prioritizer_batch_cli.py --input Italy_500.xlsx --sheet "Opportunity Input Full" --company-column company_name --domain-column domain --default-country Italy --mode full --row-limit 10
+```
+
+HQ only:
+```bash
+python lead_prioritizer_batch_cli.py --input Italy_500.xlsx --sheet "Opportunity Input Full" --company-column company_name --domain-column domain --default-country Italy --mode hq_only --row-limit 50
+```
+
+Large run:
+```bash
+python lead_prioritizer_batch_cli.py --input Italy_500.xlsx --sheet "Opportunity Input Full" --company-column company_name --domain-column domain --default-country Italy --mode full --row-limit 500 --yes
+```
+
+Notes:
+- Default `--row-limit` is **10**; `0` means all rows.
+- `--yes` is required when more than **50** rows are selected (full mode makes
+  multiple Serper + Anthropic calls per row).
+- Keys come from the environment (`SERPER_API_KEY`, `ANTHROPIC_API_KEY`) first,
+  then an optional `--secrets-file` TOML fallback. Key values are never printed
+  or written to output.
+- Modes: `full`, `hq_only`, `evidence_only`, `signals_no_score`, `full_no_score`.
+- The output workbook has sheets: **Enriched Leads**, **Evidence**, **Signals**,
+  **Run Summary**. Raw Serper payloads are never written; raw AI JSON only with
+  `--include-raw-ai-json`.
+
 ## Scope of the current step
 
 This step adds **schema and safe placeholders only**:

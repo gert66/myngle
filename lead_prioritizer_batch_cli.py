@@ -1,0 +1,217 @@
+"""Command-line batch runner for Lead Prioritizer v2.
+
+Thin CLI on top of the shared batch core (`lead_prioritizer_batch_core.py`).
+It adds no enrichment logic and does not duplicate batch logic — it only reads
+an Excel file, maps columns, runs the selected mode via the core, and writes an
+enriched workbook.
+
+Secret hygiene: API keys are read from the environment (then an optional
+``--secrets-file`` fallback), passed straight to the core, and never printed or
+written to output.
+"""
+
+from __future__ import annotations
+
+import argparse
+import sys
+from datetime import datetime
+from pathlib import Path
+from typing import Optional
+
+import pandas as pd
+
+from lead_prioritizer_batch_core import (
+    BatchRunConfig,
+    SUPPORTED_RUN_MODES,
+    build_excel_workbook_bytes,
+    run_batch_dataframe,
+    select_batch_rows,
+)
+# Reuse the validated, secret-safe key loader instead of duplicating it.
+from run_v2_single_lead_validation import (
+    load_api_keys,
+    SERPER_KEY_NAME,
+    ANTHROPIC_KEY_NAME,
+)
+
+_CONFIRM_THRESHOLD = 50
+
+
+class SheetResolutionError(ValueError):
+    """Raised when the target sheet cannot be resolved unambiguously."""
+
+
+# ---------------------------------------------------------------------------
+# Argument parsing
+# ---------------------------------------------------------------------------
+
+def build_arg_parser() -> argparse.ArgumentParser:
+    p = argparse.ArgumentParser(
+        description="Lead Prioritizer v2 batch runner (Excel in / Excel out).",
+    )
+    p.add_argument("--input", required=True, help="Path to the input .xlsx file.")
+    p.add_argument("--company-column", required=True, help="Company name column.")
+    p.add_argument("--domain-column", required=True, help="Domain column.")
+
+    p.add_argument("--sheet", default=None,
+                   help="Sheet name. Required only when the workbook has >1 sheet.")
+    p.add_argument("--input-country-column", default=None,
+                   help="Optional per-row input country column.")
+    p.add_argument("--default-country", default="Italy",
+                   help="Fallback input country when no column/value is present.")
+    p.add_argument("--mode", default="full", choices=list(SUPPORTED_RUN_MODES),
+                   help="Run mode (default: full).")
+    p.add_argument("--start-row", type=int, default=0, help="First row offset (default: 0).")
+    p.add_argument("--row-limit", type=int, default=10,
+                   help="Max rows to process; 0 = all rows (default: 10).")
+    p.add_argument("--output", default=None,
+                   help="Output .xlsx path. Default: timestamped file next to input.")
+    p.add_argument("--secrets-file", default=None,
+                   help="Optional TOML fallback for API keys.")
+    p.add_argument("--include-raw-ai-json", action="store_true",
+                   help="Include ai_hq_raw_json in the Enriched Leads sheet.")
+    p.add_argument("--stop-on-error", action="store_true",
+                   help="Stop the batch on the first row error (default: continue).")
+    p.add_argument("--yes", action="store_true",
+                   help=f"Confirm running more than {_CONFIRM_THRESHOLD} rows.")
+    return p
+
+
+# ---------------------------------------------------------------------------
+# Small pure helpers (unit-testable without live APIs)
+# ---------------------------------------------------------------------------
+
+def generate_output_path(input_path: Path, mode: str, when: datetime) -> Path:
+    ts = when.strftime("%Y%m%d_%H%M%S")
+    return input_path.with_name(
+        f"{input_path.stem}_lead_prioritizer_v2_{mode}_{ts}.xlsx"
+    )
+
+
+def resolve_sheet(sheet_names: list[str], sheet_arg: Optional[str]) -> str:
+    if sheet_arg:
+        if sheet_arg not in sheet_names:
+            raise SheetResolutionError(
+                f"Sheet {sheet_arg!r} not found. Available: {', '.join(sheet_names)}"
+            )
+        return sheet_arg
+    if len(sheet_names) == 1:
+        return sheet_names[0]
+    raise SheetResolutionError(
+        "Workbook has multiple sheets; pass --sheet. "
+        f"Available: {', '.join(sheet_names)}"
+    )
+
+
+def check_required_columns(
+    columns,
+    company_col: str,
+    domain_col: str,
+    input_country_col: Optional[str] = None,
+) -> None:
+    cols = set(columns)
+    missing = [c for c in (company_col, domain_col) if c not in cols]
+    if input_country_col and input_country_col not in cols:
+        missing.append(input_country_col)
+    if missing:
+        raise ValueError("missing required column(s): " + ", ".join(missing))
+
+
+def config_from_args(args: argparse.Namespace) -> BatchRunConfig:
+    return BatchRunConfig(
+        company_name_column=args.company_column,
+        domain_column=args.domain_column,
+        input_country_column=args.input_country_column,
+        default_input_country=args.default_country,
+        run_mode=args.mode,
+        start_row=args.start_row,
+        row_limit=args.row_limit,
+        continue_on_error=not args.stop_on_error,
+        include_raw_ai_json=args.include_raw_ai_json,
+    )
+
+
+# ---------------------------------------------------------------------------
+# Main
+# ---------------------------------------------------------------------------
+
+def main(argv: Optional[list[str]] = None) -> int:
+    args = build_arg_parser().parse_args(argv)
+
+    # ── API keys (never printed as values) ────────────────────────────────────
+    keys = load_api_keys(secrets_file=args.secrets_file)
+    serper = keys.get(SERPER_KEY_NAME, "")
+    anthropic = keys.get(ANTHROPIC_KEY_NAME, "")
+    print(f"{SERPER_KEY_NAME}: {'set' if serper else 'missing'}")
+    print(f"{ANTHROPIC_KEY_NAME}: {'set' if anthropic else 'missing'}")
+    if not serper or not anthropic:
+        print("ERROR: missing API key(s). Set env vars or pass --secrets-file.",
+              file=sys.stderr)
+        return 2
+
+    # ── Load workbook ─────────────────────────────────────────────────────────
+    input_path = Path(args.input)
+    if not input_path.exists():
+        print(f"ERROR: input file not found: {input_path}", file=sys.stderr)
+        return 2
+    try:
+        xls = pd.ExcelFile(input_path)
+    except Exception as exc:
+        print(f"ERROR: cannot read workbook: {exc}", file=sys.stderr)
+        return 2
+
+    try:
+        sheet = resolve_sheet(list(xls.sheet_names), args.sheet)
+    except SheetResolutionError as exc:
+        print(f"ERROR: {exc}", file=sys.stderr)
+        return 2
+
+    df = xls.parse(sheet)
+
+    try:
+        check_required_columns(
+            df.columns, args.company_column, args.domain_column, args.input_country_column,
+        )
+    except ValueError as exc:
+        print(f"ERROR: {exc}", file=sys.stderr)
+        return 2
+
+    config = config_from_args(args)
+    selected_count = len(select_batch_rows(df, config))
+    output_path = Path(args.output) if args.output else generate_output_path(
+        input_path, args.mode, datetime.now())
+
+    print(f"Input path    : {input_path}")
+    print(f"Sheet         : {sheet}")
+    print(f"Row count     : {len(df)}")
+    print(f"Run mode      : {args.mode}")
+    print(f"Selected rows : {selected_count}")
+    print(f"Output path   : {output_path}")
+
+    # ── Safety confirmation for large runs ────────────────────────────────────
+    if selected_count > _CONFIRM_THRESHOLD and not args.yes:
+        print(
+            f"WARNING: {selected_count} selected rows exceeds {_CONFIRM_THRESHOLD}. "
+            "Full mode makes multiple Serper + Anthropic calls per row, which has "
+            "cost and time implications.",
+            file=sys.stderr,
+        )
+        print("Re-run with --yes to confirm.", file=sys.stderr)
+        return 3
+
+    # ── Run batch via shared core ─────────────────────────────────────────────
+    tables = run_batch_dataframe(df, config, serper, anthropic)
+    data = build_excel_workbook_bytes(tables)
+    output_path.write_bytes(data)
+
+    summary_df = tables.get("run_summary")
+    summary = summary_df.iloc[0].to_dict() if summary_df is not None and len(summary_df) else {}
+    print(f"Processed rows: {summary.get('processed_rows')}")
+    print(f"Success count : {summary.get('success_count')}")
+    print(f"Error count   : {summary.get('error_count')}")
+    print(f"Output written: {output_path}")
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
