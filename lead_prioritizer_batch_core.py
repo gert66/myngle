@@ -17,7 +17,7 @@ unless ``include_raw_ai_json=True``.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime
 from typing import Callable, Optional
 
@@ -40,6 +40,14 @@ SUPPORTED_RUN_MODES = (
     "signals_no_score",
     "full_no_score",
 )
+
+# "Full enrichment, confirmed foreign-HQ only" — a separate, opt-in batch mode
+# handled by ``run_batch_foreign_hq_only`` (not ``run_batch_dataframe`` /
+# ``resolve_pipeline_flags``), since it needs a two-phase per-row decision
+# (HQ+C4+optional-C5 screening, then a conditional full-enrichment pass).
+# Deliberately excluded from SUPPORTED_RUN_MODES / the CLI so existing run
+# modes stay untouched; only the Streamlit app offers it today.
+FOREIGN_HQ_ONLY_MODE = "full_foreign_hq_only"
 
 
 @dataclass
@@ -635,3 +643,155 @@ def add_c5_summary_fields(
     ):
         df[key] = counts.get(key, 0)
     return df
+
+
+# ---------------------------------------------------------------------------
+# "Full enrichment, confirmed foreign-HQ only" batch mode (country-agnostic)
+# ---------------------------------------------------------------------------
+#
+# Reduces cost/noise for Brazil-and-similar runs: HQ detection (+ C4, and
+# optionally C5) runs for every row first; full v2 enrichment (evidence,
+# signals, scoring, caller fields) then runs ONLY for rows confirmed
+# foreign-HQ. Everything is reused — no duplicated HQ, C4, or C5 logic:
+#   Phase 1 delegates to run_batch_dataframe(run_mode="hq_only").
+#   Phase 2 (optional) delegates to apply_c5_adjudication.
+#   Phase 3 delegates to prioritize_single_lead(run_full_v2_pipeline=True) and
+#   flatten_result_for_excel, but only for confirmed rows.
+
+def run_batch_foreign_hq_only(
+    df: pd.DataFrame,
+    config: BatchRunConfig,
+    serper_api_key: str,
+    anthropic_api_key: str,
+    *,
+    c5_enabled: bool = False,
+    c5_scoring_behavior: str = "append_only",
+    c5_scope: str = "score_3_or_manual_review",
+    c5_model_used: str = "",
+    c5_model_tier: str = "",
+    progress_callback: Optional[Callable[[dict], None]] = None,
+) -> dict:
+    """Run the "Full enrichment, confirmed foreign-HQ only" batch mode.
+
+    "Confirmed foreign-HQ" is the FINAL post-C4/post-C5 value of
+    ``sig_foreign_hq_score_for_next_scoring == 3.0``. If C5 is disabled the
+    decision is based on the post-C4 HQ score; if C5 is enabled with
+    ``conservative_adjustment`` the decision uses the C5-adjusted score. C5's
+    ``c5_possible_foreign_parent_for_review`` flag is never treated as
+    confirmation, and a previous score of 0 is never auto-upgraded to 3 (this
+    already holds by construction — ``apply_c5_adjudication`` never sets a
+    score-0 row to 3.0).
+
+    Rows that are not confirmed are kept in the output, unenriched, with
+    ``enrichment_skipped=True`` / ``enrichment_skip_reason`` set; confirmed
+    rows get ``enrichment_skipped=False`` / ``""`` and the full v2 fields.
+
+    Returns the same dict shape as ``run_batch_dataframe``: ``enriched_leads``,
+    ``evidence``, ``signals``, ``run_summary`` (extended with the mode's own
+    counts and, always, the C5 settings/counts columns).
+    """
+    hq_config = replace(config, run_mode="hq_only")
+    hq_tables = run_batch_dataframe(
+        df, hq_config, serper_api_key, anthropic_api_key,
+        progress_callback=progress_callback,
+    )
+    rows = hq_tables["enriched_leads"].to_dict("records")
+
+    c5_counts: dict = {}
+    if c5_enabled:
+        rows, c5_counts = apply_c5_adjudication(
+            rows,
+            anthropic_api_key=anthropic_api_key,
+            model_used=c5_model_used,
+            model_tier=c5_model_tier,
+            scoring_behavior=c5_scoring_behavior,
+            scope=c5_scope,
+            include_raw=config.include_raw_ai_json,
+            progress_callback=progress_callback,
+        )
+
+    out_rows: list[dict] = []
+    evidence_rows: list[dict] = []
+    signal_rows: list[dict] = []
+    attempted = skipped = confirmed = 0
+
+    for row in rows:
+        score = _c5_score(row.get("sig_foreign_hq_score_for_next_scoring"))
+        is_confirmed = (score == 3.0)
+
+        if not is_confirmed:
+            out_row = dict(row)
+            out_row["enrichment_skipped"] = True
+            out_row["enrichment_skip_reason"] = "Not confirmed foreign HQ"
+            out_rows.append(out_row)
+            skipped += 1
+            continue
+
+        confirmed += 1
+        attempted += 1
+        company = str(row.get(config.company_name_column, "") or "").strip()
+        domain = str(row.get(config.domain_column, "") or "").strip() or None
+        country = None
+        if config.input_country_column:
+            country = str(row.get(config.input_country_column, "") or "").strip() or None
+        source_index = row.get("source_index")
+
+        try:
+            result = prioritize_single_lead(
+                LeadInput(company_name=company, domain=domain, input_country=country),
+                serper_api_key=serper_api_key,
+                anthropic_api_key=anthropic_api_key,
+                default_input_country=config.default_input_country,
+                run_full_v2_pipeline=True,
+            )
+            out_row = flatten_result_for_excel(
+                result, row, source_index, True, "", config.include_raw_ai_json,
+            )
+            evidence_rows.extend(flatten_evidence_for_excel(result, source_index))
+            signal_rows.extend(flatten_signals_for_excel(result, source_index))
+        except Exception as exc:  # per-row isolation, matching run_batch_dataframe
+            out_row = dict(row)
+            out_row["run_success"] = False
+            out_row["run_error"] = f"{type(exc).__name__}: {str(exc)[:300]}"
+
+        out_row["enrichment_skipped"] = False
+        out_row["enrichment_skip_reason"] = ""
+        out_rows.append(out_row)
+
+        if progress_callback is not None:
+            try:
+                progress_callback({
+                    "foreign_hq_full_processed": attempted,
+                    "foreign_hq_full_selected": confirmed,
+                    "current_company_name": company,
+                })
+            except Exception:
+                pass
+
+    success_count = sum(1 for r in out_rows if r.get("run_success", True))
+    error_count = len(out_rows) - success_count
+
+    run_summary = build_run_summary_dataframe(
+        config, total_input_rows=len(df), selected_rows=len(rows),
+        processed_rows=len(rows), success_count=success_count, error_count=error_count,
+    )
+    run_summary["total_processed_rows"] = len(rows)
+    run_summary["full_enrichment_attempted_count"] = attempted
+    run_summary["full_enrichment_skipped_count"] = skipped
+    run_summary["confirmed_foreign_hq_count"] = confirmed
+    run_summary = add_c5_summary_fields(
+        run_summary,
+        c5_enabled=c5_enabled,
+        c5_scoring_behavior=c5_scoring_behavior if c5_enabled else "",
+        c5_scope=c5_scope if c5_enabled else "",
+        c5_model_tier=c5_model_tier if c5_enabled else "",
+        c5_model_used=c5_model_used if c5_enabled else "",
+        counts=c5_counts,
+    )
+
+    return {
+        "enriched_leads": pd.DataFrame(out_rows),
+        "evidence": pd.DataFrame(evidence_rows),
+        "signals": pd.DataFrame(signal_rows),
+        "run_summary": run_summary,
+    }

@@ -380,6 +380,9 @@ from lead_prioritizer_batch_core import (  # noqa: E402
     apply_c5_adjudication,
     add_c5_summary_fields,
     row_selected_for_c5,
+    run_batch_foreign_hq_only,
+    FOREIGN_HQ_ONLY_MODE,
+    SUPPORTED_RUN_MODES,
 )
 
 
@@ -578,3 +581,174 @@ class TestC5RunSummary:
         assert rec["c5_rows_attempted"] == 2
         assert rec["c5_foreign_parent_confirmed_count"] == 1
         assert rec["c5_downgraded_score_3_count"] == 0
+
+
+# ---------------------------------------------------------------------------
+# "Full enrichment, confirmed foreign-HQ only" batch mode
+# ---------------------------------------------------------------------------
+
+def _fake_prioritize_for_foreign_hq(scores: dict):
+    """side_effect for prioritize_single_lead: hq_only calls report `scores`;
+    full calls (run_full_v2_pipeline=True) report the same score plus a
+    final_commercial_fit_score marker so tests can detect enrichment ran."""
+    def _fake(lead_input, **kwargs):
+        score = scores.get(lead_input.company_name, 0.0)
+        if kwargs.get("run_full_v2_pipeline"):
+            return _sample_result(
+                company_name=lead_input.company_name, domain=lead_input.domain,
+                input_country=lead_input.input_country or "Brazil",
+                sig_foreign_hq_score_for_next_scoring=score,
+                final_commercial_fit_score=99.0,
+            )
+        return _sample_result(
+            company_name=lead_input.company_name, domain=lead_input.domain,
+            input_country=lead_input.input_country or "Brazil",
+            sig_foreign_hq_score_for_next_scoring=score,
+            final_commercial_fit_score=None,
+            evidence_items=[], signals=[],
+        )
+    return _fake
+
+
+class TestForeignHQOnlyMode:
+    _df = pd.DataFrame({
+        "company": ["Confirmed Foreign Co", "Local Domestic Co"],
+        "domain": ["confirmed.com.br", "local.com.br"],
+    })
+    _cfg = BatchRunConfig(
+        company_name_column="company", domain_column="domain",
+        run_mode=FOREIGN_HQ_ONLY_MODE, row_limit=2,
+        default_input_country="Brazil",
+    )
+
+    def test_skips_rows_with_final_hq_score_0(self):
+        fake = _fake_prioritize_for_foreign_hq(
+            {"Confirmed Foreign Co": 3.0, "Local Domestic Co": 0.0})
+        with patch("lead_prioritizer_batch_core.prioritize_single_lead", side_effect=fake):
+            out = run_batch_foreign_hq_only(self._df, self._cfg, "S", "A")
+        rows = out["enriched_leads"].set_index("company_name")
+        assert rows.loc["Local Domestic Co", "enrichment_skipped"] == True  # noqa: E712
+        assert rows.loc["Local Domestic Co", "enrichment_skip_reason"] == "Not confirmed foreign HQ"
+        assert pd.isna(rows.loc["Local Domestic Co", "final_commercial_fit_score"])
+
+    def test_enriches_rows_with_final_hq_score_3(self):
+        fake = _fake_prioritize_for_foreign_hq(
+            {"Confirmed Foreign Co": 3.0, "Local Domestic Co": 0.0})
+        with patch("lead_prioritizer_batch_core.prioritize_single_lead", side_effect=fake):
+            out = run_batch_foreign_hq_only(self._df, self._cfg, "S", "A")
+        rows = out["enriched_leads"].set_index("company_name")
+        assert rows.loc["Confirmed Foreign Co", "enrichment_skipped"] == False  # noqa: E712
+        assert rows.loc["Confirmed Foreign Co", "enrichment_skip_reason"] == ""
+        assert rows.loc["Confirmed Foreign Co", "final_commercial_fit_score"] == 99.0
+
+    def test_c5_conservative_downgrade_is_skipped(self):
+        # Old HQ score 3, but C5 does not confirm → conservative_adjustment
+        # downgrades to 0 → the row must be skipped, not enriched.
+        fake = _fake_prioritize_for_foreign_hq(
+            {"Confirmed Foreign Co": 3.0, "Local Domestic Co": 0.0})
+        with patch("lead_prioritizer_batch_core.prioritize_single_lead", side_effect=fake), \
+             _patch_adjudicator(_mk_result("domestic_confirmed", "High", "yes")):
+            out = run_batch_foreign_hq_only(
+                self._df, self._cfg, "S", "A",
+                c5_enabled=True, c5_scoring_behavior="conservative_adjustment",
+                c5_scope="all_rows", c5_model_used="claude-sonnet-5", c5_model_tier="sonnet",
+            )
+        rows = out["enriched_leads"].set_index("company_name")
+        assert rows.loc["Confirmed Foreign Co", "sig_foreign_hq_score_for_next_scoring"] == 0.0
+        assert rows.loc["Confirmed Foreign Co", "enrichment_skipped"] == True  # noqa: E712
+        assert rows.loc["Confirmed Foreign Co", "enrichment_skip_reason"] == "Not confirmed foreign HQ"
+        assert pd.isna(rows.loc["Confirmed Foreign Co", "final_commercial_fit_score"])
+        summary = out["run_summary"].iloc[0].to_dict()
+        assert summary["c5_downgraded_score_3_count"] == 1
+
+    def test_c5_possible_foreign_parent_review_still_skipped(self):
+        # Old HQ score 0; C5 flags a possible foreign parent → conservative
+        # mode never auto-upgrades → the row stays unconfirmed → still skipped.
+        fake = _fake_prioritize_for_foreign_hq(
+            {"Confirmed Foreign Co": 3.0, "Local Domestic Co": 0.0})
+        with patch("lead_prioritizer_batch_core.prioritize_single_lead", side_effect=fake), \
+             _patch_adjudicator(_mk_result("foreign_parent_confirmed", "High", "yes")):
+            out = run_batch_foreign_hq_only(
+                self._df, self._cfg, "S", "A",
+                c5_enabled=True, c5_scoring_behavior="conservative_adjustment",
+                c5_scope="all_rows", c5_model_used="claude-sonnet-5", c5_model_tier="sonnet",
+            )
+        rows = out["enriched_leads"].set_index("company_name")
+        assert rows.loc["Local Domestic Co", "sig_foreign_hq_score_for_next_scoring"] == 0.0
+        assert rows.loc["Local Domestic Co", "c5_possible_foreign_parent_for_review"] == True  # noqa: E712
+        assert rows.loc["Local Domestic Co", "enrichment_skipped"] == True  # noqa: E712
+        assert rows.loc["Local Domestic Co", "enrichment_skip_reason"] == "Not confirmed foreign HQ"
+
+    def test_output_columns_present_for_both_confirmed_and_skipped(self):
+        fake = _fake_prioritize_for_foreign_hq(
+            {"Confirmed Foreign Co": 3.0, "Local Domestic Co": 0.0})
+        with patch("lead_prioritizer_batch_core.prioritize_single_lead", side_effect=fake):
+            out = run_batch_foreign_hq_only(self._df, self._cfg, "S", "A")
+        assert "enrichment_skipped" in out["enriched_leads"].columns
+        assert "enrichment_skip_reason" in out["enriched_leads"].columns
+        assert len(out["enriched_leads"]) == 2  # both confirmed and skipped rows present
+
+    def test_run_summary_counts_and_mode(self):
+        fake = _fake_prioritize_for_foreign_hq(
+            {"Confirmed Foreign Co": 3.0, "Local Domestic Co": 0.0})
+        with patch("lead_prioritizer_batch_core.prioritize_single_lead", side_effect=fake):
+            out = run_batch_foreign_hq_only(self._df, self._cfg, "S", "A")
+        summary = out["run_summary"].iloc[0].to_dict()
+        assert summary["run_mode"] == FOREIGN_HQ_ONLY_MODE
+        assert summary["total_processed_rows"] == 2
+        assert summary["full_enrichment_attempted_count"] == 1
+        assert summary["full_enrichment_skipped_count"] == 1
+        assert summary["confirmed_foreign_hq_count"] == 1
+        # C5 settings/counts columns are always present (enabled or not).
+        assert summary["c5_enabled"] is False
+
+    def test_country_agnostic_brazil_and_uruguay(self):
+        df = pd.DataFrame({
+            "company": ["Brazil Co", "Uruguay Co"],
+            "domain": ["brco.com.br", "uyco.com.uy"],
+            "country": ["Brazil", "Uruguay"],
+        })
+        cfg = BatchRunConfig(
+            company_name_column="company", domain_column="domain",
+            input_country_column="country", run_mode=FOREIGN_HQ_ONLY_MODE, row_limit=2,
+        )
+        seen_countries = []
+
+        def _fake(lead_input, **kwargs):
+            seen_countries.append(lead_input.input_country)
+            score = 3.0 if lead_input.company_name == "Brazil Co" else 0.0
+            if kwargs.get("run_full_v2_pipeline"):
+                return _sample_result(
+                    company_name=lead_input.company_name, domain=lead_input.domain,
+                    input_country=lead_input.input_country,
+                    sig_foreign_hq_score_for_next_scoring=score,
+                    final_commercial_fit_score=99.0)
+            return _sample_result(
+                company_name=lead_input.company_name, domain=lead_input.domain,
+                input_country=lead_input.input_country,
+                sig_foreign_hq_score_for_next_scoring=score,
+                final_commercial_fit_score=None, evidence_items=[], signals=[])
+
+        with patch("lead_prioritizer_batch_core.prioritize_single_lead", side_effect=_fake):
+            run_batch_foreign_hq_only(df, cfg, "S", "A")
+        assert "Brazil" in seen_countries
+        assert "Uruguay" in seen_countries
+        # no hardcoded country substituted
+        assert set(seen_countries) == {"Brazil", "Uruguay"}
+
+    def test_existing_run_modes_unchanged(self):
+        # The new mode is deliberately excluded from SUPPORTED_RUN_MODES / the
+        # CLI's --mode choices; resolve_pipeline_flags for existing modes and
+        # run_batch_dataframe's own output shape are both untouched.
+        assert FOREIGN_HQ_ONLY_MODE not in SUPPORTED_RUN_MODES
+        assert resolve_pipeline_flags("full")["run_full_v2_pipeline"] is True
+        assert all(v is False for v in resolve_pipeline_flags("hq_only").values())
+
+        df = pd.DataFrame({"company": ["Acme"], "domain": ["acme.com"]})
+        cfg = BatchRunConfig(company_name_column="company", domain_column="domain",
+                             run_mode="hq_only", row_limit=1)
+        with patch("lead_prioritizer_batch_core.prioritize_single_lead",
+                   return_value=_sample_result()):
+            out = run_batch_dataframe(df, cfg, "S", "A")
+        assert "enrichment_skipped" not in out["enriched_leads"].columns
+        assert "full_enrichment_attempted_count" not in out["run_summary"].columns

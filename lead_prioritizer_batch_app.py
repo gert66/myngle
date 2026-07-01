@@ -24,6 +24,8 @@ from lead_prioritizer_batch_core import (
     BatchRunConfig,
     build_excel_workbook_bytes,
     run_batch_dataframe,
+    run_batch_foreign_hq_only,
+    FOREIGN_HQ_ONLY_MODE,
     apply_c5_adjudication,
     add_c5_summary_fields,
     row_selected_for_c5,
@@ -51,6 +53,7 @@ MODE_LABELS: list[str] = [
     "Evidence only",
     "Signals, no score",
     "Full, no score",
+    "Full enrichment, confirmed foreign-HQ only",
 ]
 _LABEL_TO_MODE: dict[str, str] = {
     "Full v2 enrichment": "full",
@@ -58,7 +61,14 @@ _LABEL_TO_MODE: dict[str, str] = {
     "Evidence only": "evidence_only",
     "Signals, no score": "signals_no_score",
     "Full, no score": "full_no_score",
+    "Full enrichment, confirmed foreign-HQ only": FOREIGN_HQ_ONLY_MODE,
 }
+
+FOREIGN_HQ_ONLY_HELP_TEXT = (
+    "This first runs HQ detection and optional C5 adjudication, then performs "
+    "full enrichment only for leads with confirmed foreign-HQ score 3. "
+    "Non-confirmed rows are kept in the output and marked as skipped."
+)
 
 # Likely column names for preselection.
 COMPANY_CANDIDATES = ["company_name", "Company Name", "name", "legal_name"]
@@ -316,6 +326,8 @@ def main() -> None:  # pragma: no cover - exercised only under `streamlit run`
     st.subheader("Run mode")
     mode_label = st.radio("Mode", MODE_LABELS, index=0)
     run_mode = mode_label_to_core_mode(mode_label)
+    if run_mode == FOREIGN_HQ_ONLY_MODE:
+        st.caption(FOREIGN_HQ_ONLY_HELP_TEXT)
 
     # ── Row controls ──────────────────────────────────────────────────────────
     st.subheader("Rows")
@@ -412,49 +424,68 @@ def main() -> None:  # pragma: no cover - exercised only under `streamlit run`
             progress_bar.progress(min(1.0, max(0.0, frac)))
             status.info(build_progress_status_text(payload, started_at))
 
-        with st.spinner("Running batch enrichment..."):
-            tables = run_batch_dataframe(
-                df, config, serper, anthropic, progress_callback=_on_progress)
-
-        progress_bar.progress(1.0)
-
-        # ── Optional C5 adjudication (after normal batch processing) ──────────
-        c5_counts = {}
-        if c5_enabled:
-            c5_bar = st.progress(0.0)
-            c5_status = st.empty()
-
-            def _on_c5_progress(payload: dict) -> None:
-                sel = int(payload.get("c5_selected", 0) or 0)
-                dn = int(payload.get("c5_processed", 0) or 0)
-                c5_bar.progress(min(1.0, dn / sel) if sel else 1.0)
-                c5_status.info(
-                    f"C5 {dn}/{sel}: {payload.get('current_company_name', '')}")
-
-            with st.spinner("Running C5 Sonnet adjudication..."):
-                c5_rows, c5_counts = apply_c5_adjudication(
-                    tables["enriched_leads"],
-                    anthropic_api_key=anthropic,
-                    model_used=c5_model_used,
-                    model_tier=c5_model_tier,
-                    scoring_behavior=c5_scoring_behavior,
-                    scope=c5_scope,
-                    include_raw=include_raw_ai_json,
-                    progress_callback=_on_c5_progress,
+        if run_mode == FOREIGN_HQ_ONLY_MODE:
+            # HQ+C4+optional-C5 screening and the confirmed-only full-enrichment
+            # pass both happen inside run_batch_foreign_hq_only; C5 must not be
+            # re-applied afterward here (it already ran as part of the decision).
+            with st.spinner(
+                "Running HQ screening, optional C5 adjudication, and "
+                "confirmed-only full enrichment..."
+            ):
+                tables = run_batch_foreign_hq_only(
+                    df, config, serper, anthropic,
+                    c5_enabled=c5_enabled,
+                    c5_scoring_behavior=c5_scoring_behavior,
+                    c5_scope=c5_scope,
+                    c5_model_used=c5_model_used,
+                    c5_model_tier=c5_model_tier,
+                    progress_callback=_on_progress,
                 )
-            c5_bar.progress(1.0)
-            tables["enriched_leads"] = pd.DataFrame(c5_rows)
+            progress_bar.progress(1.0)
+        else:
+            with st.spinner("Running batch enrichment..."):
+                tables = run_batch_dataframe(
+                    df, config, serper, anthropic, progress_callback=_on_progress)
 
-        # Extend Run Summary with C5 settings/counts (always records enabled flag).
-        tables["run_summary"] = add_c5_summary_fields(
-            tables["run_summary"],
-            c5_enabled=c5_enabled,
-            c5_scoring_behavior=c5_scoring_behavior if c5_enabled else "",
-            c5_scope=c5_scope if c5_enabled else "",
-            c5_model_tier=c5_model_tier if c5_enabled else "",
-            c5_model_used=c5_model_used if c5_enabled else "",
-            counts=c5_counts,
-        )
+            progress_bar.progress(1.0)
+
+            # ── Optional C5 adjudication (after normal batch processing) ──────────
+            c5_counts = {}
+            if c5_enabled:
+                c5_bar = st.progress(0.0)
+                c5_status = st.empty()
+
+                def _on_c5_progress(payload: dict) -> None:
+                    sel = int(payload.get("c5_selected", 0) or 0)
+                    dn = int(payload.get("c5_processed", 0) or 0)
+                    c5_bar.progress(min(1.0, dn / sel) if sel else 1.0)
+                    c5_status.info(
+                        f"C5 {dn}/{sel}: {payload.get('current_company_name', '')}")
+
+                with st.spinner("Running C5 Sonnet adjudication..."):
+                    c5_rows, c5_counts = apply_c5_adjudication(
+                        tables["enriched_leads"],
+                        anthropic_api_key=anthropic,
+                        model_used=c5_model_used,
+                        model_tier=c5_model_tier,
+                        scoring_behavior=c5_scoring_behavior,
+                        scope=c5_scope,
+                        include_raw=include_raw_ai_json,
+                        progress_callback=_on_c5_progress,
+                    )
+                c5_bar.progress(1.0)
+                tables["enriched_leads"] = pd.DataFrame(c5_rows)
+
+            # Extend Run Summary with C5 settings/counts (always records enabled flag).
+            tables["run_summary"] = add_c5_summary_fields(
+                tables["run_summary"],
+                c5_enabled=c5_enabled,
+                c5_scoring_behavior=c5_scoring_behavior if c5_enabled else "",
+                c5_scope=c5_scope if c5_enabled else "",
+                c5_model_tier=c5_model_tier if c5_enabled else "",
+                c5_model_used=c5_model_used if c5_enabled else "",
+                counts=c5_counts,
+            )
 
         data = build_excel_workbook_bytes(tables)
 
