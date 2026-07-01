@@ -47,9 +47,30 @@ def test_derive_domain_root(input_domain, expected):
     # Subdomain with simple ccTLD
     ("corporate.acme.de", "acme"),
     ("www.acme.fr", "acme"),
+    # .com.uy / .net.uy / .org.uy / .edu.uy / .gub.uy — Uruguay
+    ("macromercado.com.uy", "macromercado"),
+    ("www.macromercado.com.uy", "macromercado"),
+    ("mega.net.uy", "mega"),
+    ("example.org.uy", "example"),
+    ("example.edu.uy", "example"),
+    ("example.gub.uy", "example"),
 ])
 def test_derive_domain_root_public_suffix(input_domain, expected):
     assert derive_domain_root(input_domain) == expected
+
+
+# ---------------------------------------------------------------------------
+# derive_domain_root — Uruguay regression (previously collapsed to "com"/"net")
+# ---------------------------------------------------------------------------
+
+@pytest.mark.parametrize("input_domain", [
+    "macromercado.com.uy",
+    "mega.net.uy",
+    "example.org.uy",
+])
+def test_derive_domain_root_uruguay_not_truncated_to_pseudo_tld_label(input_domain):
+    root = derive_domain_root(input_domain)
+    assert root not in ("com", "net", "org")
 
 
 # ---------------------------------------------------------------------------
@@ -62,9 +83,30 @@ def test_derive_domain_root_public_suffix(input_domain, expected):
     ("Datwyler", "datwyler.com", ("datwyler", "datwyler headquarters")),
     ("Nadara", "nadara.com", ("nadara", "nadara headquarters")),
     ("AlphaStream Technologies B.V.", "alphastream.io", ("alphastream", "alphastream headquarters")),
+    ("Macromercado", "macromercado.com.uy", ("macromercado", "macromercado headquarters")),
+    ("Mega", "mega.net.uy", ("mega", "mega headquarters")),
 ])
 def test_build_simple_hq_query_with_domain(company, domain, expected):
     assert build_simple_hq_query(company, domain) == expected
+
+
+# ---------------------------------------------------------------------------
+# build_simple_hq_query — Uruguay regression
+# ---------------------------------------------------------------------------
+
+@pytest.mark.parametrize("company, domain", [
+    ("Macromercado", "macromercado.com.uy"),
+    ("Mega", "mega.net.uy"),
+    ("Example", "example.org.uy"),
+])
+def test_build_simple_hq_query_uruguay_not_com_headquarters(company, domain):
+    root, query = build_simple_hq_query(company, domain)
+    assert root not in ("com", "net", "org")
+    assert query != "com headquarters"
+    assert query != "net headquarters"
+    assert query != "org headquarters"
+    # query must reference the company/domain root, not the bare pseudo-TLD label
+    assert root in query
 
 
 # ---------------------------------------------------------------------------

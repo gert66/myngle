@@ -121,6 +121,8 @@ _PSEUDO_TLDS = frozenset({
     "com.vn", "org.vn",
     # Pakistan
     "com.pk", "org.pk",
+    # Uruguay
+    "com.uy", "net.uy", "org.uy", "edu.uy", "gub.uy",
 })
 
 
@@ -147,6 +149,8 @@ def derive_domain_root(domain: str) -> str:
     'example'
     >>> derive_domain_root("example.co.jp")
     'example'
+    >>> derive_domain_root("macromercado.com.uy")
+    'macromercado'
     >>> derive_domain_root("")
     ''
     """
