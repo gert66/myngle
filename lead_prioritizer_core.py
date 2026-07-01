@@ -184,6 +184,12 @@ def prioritize_single_lead(
         domain_root=hq.domain_root or domain_root,
         query_used=hq.query_used or query,
         parser_source=hq.parser_source,
+        # C4 positive-score safety audit
+        hq_query_risk_flag=hq.hq_query_risk_flag,
+        hq_evidence_domain_match=hq.hq_evidence_domain_match,
+        hq_evidence_domain_mismatch_warning=hq.hq_evidence_domain_mismatch_warning,
+        hq_positive_score_suppressed_for_review=hq.hq_positive_score_suppressed_for_review,
+        hq_review_reason=hq.hq_review_reason,
         # AI audit
         ai_hq_model=hq.ai_hq_model,
         ai_hq_classification=hq.ai_hq_classification,

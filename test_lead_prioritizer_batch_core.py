@@ -160,6 +160,21 @@ class TestFlatten:
         # also no competitor field surfaced
         assert not any("competitor" in k.lower() for k in row)
 
+    def test_c4_safety_fields_in_enriched_leads(self):
+        result = _sample_result(
+            hq_positive_score_suppressed_for_review="Yes",
+            hq_evidence_domain_mismatch_warning="Yes",
+            hq_review_reason="risky domain root and evidence URL does not match lead domain",
+            hq_query_risk_flag="Yes",
+            hq_evidence_domain_match="No",
+        )
+        row = flatten_result_for_excel(result, {"c": "Acme"}, 0, True, "")
+        assert row["hq_positive_score_suppressed_for_review"] == "Yes"
+        assert row["hq_evidence_domain_mismatch_warning"] == "Yes"
+        assert row["hq_review_reason"].startswith("risky domain root")
+        assert row["hq_query_risk_flag"] == "Yes"
+        assert row["hq_evidence_domain_match"] == "No"
+
     def test_error_row_has_metadata_only(self):
         row = flatten_result_for_excel(None, {"c": "Acme"}, 3, False, "Boom: x")
         assert row["run_success"] is False

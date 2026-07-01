@@ -101,10 +101,13 @@ class TestC2DefaultCountry:
     def test_blank_country_defaults_to_italy_foreign(self):
         # input_country None → effective "Italy"; German parent differs → score 3.
         lead = LeadInput(company_name="BMW Italia", domain="bmw.it", input_country=None)
+        # bmw is a short (risky) root, so include matching evidence so the C4
+        # safety layer keeps the confirmed foreign HQ score.
         ai = json.dumps(dict(
             classification="foreign_parent", confidence="High",
             parent_company="BMW AG", parent_hq_country="Germany",
-            parent_hq_city="Munich", evidence_url="", evidence_quote="", reason="r",
+            parent_hq_city="Munich", evidence_url="https://www.bmw.it/",
+            evidence_quote="", reason="r",
         ))
         r = _run(lead, ai)
         assert r.input_country == "Italy"
@@ -245,9 +248,88 @@ class TestBrazilNormalization:
         assert r.input_country == "Brazil"
 
     def test_genuine_foreign_parent_still_scores_3(self):
+        # foo is a short (risky) root, so include matching evidence so the C4
+        # safety layer keeps the confirmed foreign HQ score.
         ai = json.dumps(dict(
             classification="foreign_parent", confidence="High",
-            parent_hq_country="Germany", reason="German parent",
+            parent_hq_country="Germany",
+            evidence_url="https://www.foo.com.br/", reason="German parent",
         ))
         r = _run(self._br, ai)
         assert r.sig_foreign_hq_score_for_next_scoring == 3.0
+
+
+class TestHQPositiveScoreSafety:
+    """C4 — a risky short/generic domain root with blank/mismatched evidence
+    must not blindly score a domestic company as foreign; route to review."""
+
+    def test_fiap_false_positive_suppressed(self):
+        lead = LeadInput(company_name="FIAP", domain="fiap.com.br", input_country="Brazil")
+        ai = json.dumps(dict(
+            classification="foreign_parent", confidence="High",
+            parent_hq_country="Luxembourg",
+            evidence_url="https://www.fiap.net/", reason="matched fiap.net",
+        ))
+        r = _run(lead, ai)
+        assert r.sig_foreign_hq_score_for_next_scoring == 0.0
+        assert r.needs_manual_review is True
+        assert r.hq_positive_score_suppressed_for_review == "Yes"
+        assert r.hq_evidence_domain_mismatch_warning == "Yes"
+        # classification and parent HQ stay visible
+        assert r.ai_hq_classification == "foreign_parent"
+        assert r.ai_parent_hq_country == "Luxembourg"
+        assert r.hq_structure_type == "foreign_parent"
+
+    def test_bild_generic_root_suppressed(self):
+        lead = LeadInput(company_name="Bild Desenvolvimento Imobiliário",
+                         domain="bild.com.br", input_country="Brazil")
+        ai = json.dumps(dict(
+            classification="foreign_parent", confidence="High",
+            parent_hq_country="Germany",
+            evidence_url="https://www.bild.de/", reason="matched bild.de",
+        ))
+        r = _run(lead, ai)
+        assert r.sig_foreign_hq_score_for_next_scoring == 0.0
+        assert r.needs_manual_review is True
+        assert r.hq_positive_score_suppressed_for_review == "Yes"
+
+    def test_risky_root_same_domain_evidence_not_suppressed(self):
+        lead = LeadInput(company_name="SH", domain="sh.com.br", input_country="Brazil")
+        ai = json.dumps(dict(
+            classification="foreign_parent", confidence="High",
+            parent_hq_country="United States",
+            evidence_url="https://www.sh.com.br/about", reason="same domain",
+        ))
+        r = _run(lead, ai)
+        assert r.sig_foreign_hq_score_for_next_scoring == 3.0
+        assert r.needs_manual_review is False
+        assert r.hq_positive_score_suppressed_for_review == "No"
+        assert r.hq_evidence_domain_match == "Yes"
+
+    def test_non_risky_valid_foreign_hq_scores_3(self):
+        lead = LeadInput(company_name="Nissan do Brasil", domain="nissan.com.br",
+                         input_country="Brazil")
+        ai = json.dumps(dict(
+            classification="foreign_parent", confidence="High",
+            parent_hq_country="Japan",
+            evidence_url="https://www.nissan.com.br/", reason="Japanese parent",
+        ))
+        r = _run(lead, ai)
+        assert r.sig_foreign_hq_score_for_next_scoring == 3.0
+        assert r.needs_manual_review is False
+        assert r.hq_positive_score_suppressed_for_review == "No"
+        assert r.hq_query_risk_flag == "No"
+
+    def test_domestic_brazil_remains_zero_no_suppression(self):
+        lead = LeadInput(company_name="Banco BMG", domain="bancobmg.com.br",
+                         input_country="Brazil")
+        ai = json.dumps(dict(
+            classification="domestic", confidence="High",
+            parent_hq_country="Brasil",
+            evidence_url="https://www.bancobmg.com.br/", reason="domestic",
+        ))
+        r = _run(lead, ai)
+        assert r.sig_foreign_hq_score_for_next_scoring == 0.0
+        assert r.hq_structure_type == "domestic"
+        # domestic path never sets the suppression flag
+        assert r.hq_positive_score_suppressed_for_review is None

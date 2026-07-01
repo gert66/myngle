@@ -127,6 +127,10 @@ _RESULT_FLAT_FIELDS = [
     "hq_evidence_url", "hq_evidence_quote", "hq_structure_type",
     "sig_foreign_hq_score_for_next_scoring",
     "domain_root", "query_used", "parser_source",
+    # C4 positive-score safety audit
+    "hq_query_risk_flag", "hq_evidence_domain_match",
+    "hq_evidence_domain_mismatch_warning",
+    "hq_positive_score_suppressed_for_review", "hq_review_reason",
     "ai_hq_model", "ai_hq_classification", "ai_hq_confidence",
     "ai_parent_company", "ai_parent_hq_country", "ai_parent_hq_city",
     "ai_call_attempted", "ai_call_success", "ai_hq_error",

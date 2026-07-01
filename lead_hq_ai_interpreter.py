@@ -264,6 +264,90 @@ def _normalize_country_for_hq(value: object) -> str:
     return _MAP.get(text, text)
 
 
+# ---------------------------------------------------------------------------
+# C4 — positive-score safety layer
+# ---------------------------------------------------------------------------
+
+# Small generic acronym / short-root set that is prone to matching a DIFFERENT
+# international entity than the target company (not company-specific exceptions).
+_RISKY_ROOTS = frozenset({
+    "fiap", "fia", "sh", "vr", "rnp", "uol", "pbh", "rj", "sp", "bild",
+})
+
+# Multi-label public suffixes used to guard the "lead is a subdomain of
+# evidence" match against public-suffix artifacts (e.g. matching on "com.br").
+_PUBLIC_SUFFIXES = frozenset({
+    "com.br", "com.au", "co.uk", "co.jp", "co.in", "com.mx", "com.ar",
+    "co.za", "com.tr", "com.cn",
+})
+
+
+def _host_from(url_or_domain) -> str:
+    """Return a bare lowercase host (no scheme / www / path) or ""."""
+    s = str(url_or_domain or "").strip().lower()
+    if not s:
+        return ""
+    s = re.sub(r"^[a-z][a-z0-9+.\-]*://", "", s)   # drop scheme
+    s = s.split("/")[0].split("?")[0].split("#")[0]  # drop path/query/fragment
+    s = s.split(":")[0]                              # drop port
+    s = re.sub(r"^www\.", "", s)
+    return s.strip().strip(".")
+
+
+def _hosts_match(lead_host: str, ev_host: str) -> bool:
+    """True when the evidence host plausibly belongs to the lead domain.
+
+    - exact host match, or
+    - evidence host is a subdomain of the lead host, or
+    - lead host is a subdomain of the evidence host, but only when the evidence
+      host is a real registrable domain and not a bare public-suffix artifact.
+    """
+    if not lead_host or not ev_host:
+        return False
+    if lead_host == ev_host:
+        return True
+    if ev_host.endswith("." + lead_host):
+        return True
+    if lead_host.endswith("." + ev_host):
+        return ev_host not in _PUBLIC_SUFFIXES and ev_host.count(".") >= 1
+    return False
+
+
+def evaluate_hq_positive_score_safety(
+    *,
+    lead_domain,
+    domain_root: str,
+    evidence_url,
+) -> dict:
+    """Decide whether a provisional positive foreign-HQ score is safe to keep.
+
+    Deterministic and evidence-only (no competitor evidence, no network). Returns
+    an audit dict; ``suppress`` is True only for a risky short/generic domain
+    root whose supporting evidence URL is blank or does not match the lead
+    domain — i.e. the evidence likely belongs to a different company.
+    """
+    root = (domain_root or "").strip().lower()
+    risky = len(root) <= 4 or root in _RISKY_ROOTS
+
+    lead_host = _host_from(lead_domain)
+    ev_host = _host_from(evidence_url)
+    has_evidence_url = bool(ev_host)
+    evidence_match = _hosts_match(lead_host, ev_host) if has_evidence_url else False
+    mismatch_warning = has_evidence_url and not evidence_match
+
+    suppress = risky and ((not has_evidence_url) or (not evidence_match))
+
+    return {
+        "risky": risky,
+        "has_evidence_url": has_evidence_url,
+        "evidence_match": evidence_match,
+        "mismatch_warning": mismatch_warning,
+        "suppress": suppress,
+        "lead_host": lead_host,
+        "evidence_host": ev_host,
+    }
+
+
 def interpret_hq_with_ai(
     *,
     lead_input: "LeadInput",
@@ -389,14 +473,51 @@ def interpret_hq_with_ai(
 
     # Countries differ
     if clf == "foreign_parent" and confidence in ("High", "Medium"):
+        # C4 positive-score safety: keep the foreign_parent classification, but
+        # only keep score 3.0 when the evidence appears to belong to this
+        # company/domain. Risky short/generic roots with blank/mismatched
+        # evidence are routed to manual review at score 0.0.
+        _safety = evaluate_hq_positive_score_safety(
+            lead_domain=lead_input.domain,
+            domain_root=domain_root,
+            evidence_url=ev_url,
+        )
+        _audit = dict(
+            hq_query_risk_flag="Yes" if _safety["risky"] else "No",
+            hq_evidence_domain_match=(
+                "Yes" if _safety["evidence_match"]
+                else ("No" if _safety["has_evidence_url"] else "")
+            ),
+            hq_evidence_domain_mismatch_warning="Yes" if _safety["mismatch_warning"] else "No",
+        )
+        if _safety["suppress"]:
+            return HQDetectionResult(
+                **_base, **ai_fields, **_audit,
+                ai_call_success="Yes",
+                foreign_hq_simple=True,
+                hq_structure_type="foreign_parent",
+                needs_manual_review=True,
+                hq_reason=(
+                    "foreign_parent_score_suppressed_for_review: risky domain root "
+                    "and evidence URL does not match lead domain"
+                    + (f" | {ai_reason}" if ai_reason else "")
+                ),
+                sig_foreign_hq_score_for_next_scoring=0.0,
+                hq_positive_score_suppressed_for_review="Yes",
+                hq_review_reason=(
+                    "risky domain root and evidence URL does not match lead domain"
+                ),
+            )
         return HQDetectionResult(
-            **_base, **ai_fields,
+            **_base, **ai_fields, **_audit,
             ai_call_success="Yes",
             foreign_hq_simple=True,
             hq_structure_type="foreign_parent",
             needs_manual_review=False,
             hq_reason=f"foreign_parent ({confidence}): {ai_reason}",
             sig_foreign_hq_score_for_next_scoring=3.0,
+            hq_positive_score_suppressed_for_review="No",
+            hq_review_reason="",
         )
 
     if clf == "foreign_parent" and confidence == "Low":

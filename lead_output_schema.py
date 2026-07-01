@@ -42,6 +42,12 @@ class HQDetectionResult:
     ai_call_success: Optional[str] = None        # "Yes" | "No"
     ai_hq_error: Optional[str] = None
     ai_hq_raw_json: Optional[str] = None         # raw model text (truncated), for debug
+    # C4 positive-score safety audit (optional, backwards compatible)
+    hq_query_risk_flag: Optional[str] = None                    # "Yes" | "No"
+    hq_evidence_domain_match: Optional[str] = None              # "Yes" | "No" | ""
+    hq_evidence_domain_mismatch_warning: Optional[str] = None   # "Yes" | "No"
+    hq_positive_score_suppressed_for_review: Optional[str] = None  # "Yes" | "No"
+    hq_review_reason: Optional[str] = None
 
 
 @dataclass
@@ -120,6 +126,12 @@ class LeadPrioritizationResult:
     domain_root: Optional[str] = None
     query_used: Optional[str] = None
     parser_source: Optional[str] = None
+    # C4 positive-score safety audit (optional, backwards compatible)
+    hq_query_risk_flag: Optional[str] = None
+    hq_evidence_domain_match: Optional[str] = None
+    hq_evidence_domain_mismatch_warning: Optional[str] = None
+    hq_positive_score_suppressed_for_review: Optional[str] = None
+    hq_review_reason: Optional[str] = None
     # AI audit fields
     ai_hq_model: Optional[str] = None
     ai_hq_classification: Optional[str] = None
