@@ -245,6 +245,13 @@ disabled until both keys are present.
   "Include raw AI JSON" is checked.
 - Intended for **synchronous local runs**. Large async Anthropic Message Batch
   processing will be designed separately later.
+- During a run the app shows a **progress bar** and a status line with
+  processed/selected counts, success/error counts, current company, elapsed
+  time, and an **ETA**. The ETA is based on the average time per processed row,
+  so it is unknown until the first row completes and becomes more reliable after
+  several rows. Progress is delivered via an optional `progress_callback` on
+  `run_batch_dataframe` (default `None`, so the CLI is unaffected); a failing
+  callback never breaks the batch, and progress messages contain no secrets.
 
 ## Scope of the current step
 

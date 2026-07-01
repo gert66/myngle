@@ -246,6 +246,73 @@ class TestRunBatch:
         assert (~enriched["run_success"]).sum() == 1
         assert out["run_summary"].iloc[0]["error_count"] == 1
 
+    def test_progress_callback_once_per_row(self):
+        payloads = []
+
+        def _fake(lead_input, **kwargs):
+            return _sample_result(company_name=lead_input.company_name)
+
+        cfg = BatchRunConfig(company_name_column="company", domain_column="domain",
+                             run_mode="full", row_limit=0)
+        with patch("lead_prioritizer_batch_core.prioritize_single_lead", side_effect=_fake):
+            run_batch_dataframe(self._df, cfg, "k1", "k2",
+                                progress_callback=lambda p: payloads.append(p))
+        assert len(payloads) == 3  # one per selected row
+        last = payloads[-1]
+        assert last["selected_rows"] == 3
+        assert last["processed_rows"] == 3
+        assert last["success_count"] == 3
+        assert last["error_count"] == 0
+        # secret-free payload
+        for p in payloads:
+            for k in p:
+                assert "api_key" not in k.lower() and "serper" not in k.lower()
+        assert "k1" not in str(payloads) and "k2" not in str(payloads)
+
+    def test_progress_callback_called_for_error_rows(self):
+        seen = []
+
+        def _fake(lead_input, **kwargs):
+            if lead_input.company_name == "Beta":
+                raise RuntimeError("boom")
+            return _sample_result(company_name=lead_input.company_name)
+
+        cfg = BatchRunConfig(company_name_column="company", domain_column="domain",
+                             run_mode="full", row_limit=0, continue_on_error=True)
+        with patch("lead_prioritizer_batch_core.prioritize_single_lead", side_effect=_fake):
+            run_batch_dataframe(self._df, cfg, "k1", "k2",
+                                progress_callback=lambda p: seen.append(p))
+        assert len(seen) == 3
+        beta = [p for p in seen if p["current_company_name"] == "Beta"][0]
+        assert beta["run_success"] is False
+        assert "boom" in beta["run_error"]
+
+    def test_progress_callback_exception_does_not_break_batch(self):
+        def _fake(lead_input, **kwargs):
+            return _sample_result(company_name=lead_input.company_name)
+
+        cfg = BatchRunConfig(company_name_column="company", domain_column="domain",
+                             run_mode="full", row_limit=0)
+
+        def _boom(_payload):
+            raise ValueError("callback broke")
+
+        with patch("lead_prioritizer_batch_core.prioritize_single_lead", side_effect=_fake):
+            out = run_batch_dataframe(self._df, cfg, "k1", "k2", progress_callback=_boom)
+        # Batch still completes fully despite the broken callback.
+        assert out["enriched_leads"].shape[0] == 3
+        assert out["run_summary"].iloc[0]["success_count"] == 3
+
+    def test_backward_compatible_without_callback(self):
+        def _fake(lead_input, **kwargs):
+            return _sample_result(company_name=lead_input.company_name)
+
+        cfg = BatchRunConfig(company_name_column="company", domain_column="domain",
+                             run_mode="full", row_limit=1)
+        with patch("lead_prioritizer_batch_core.prioritize_single_lead", side_effect=_fake):
+            out = run_batch_dataframe(self._df, cfg, "k1", "k2")  # no callback
+        assert out["enriched_leads"].shape[0] == 1
+
     def test_stop_on_error_when_configured(self):
         def _fake(lead_input, **kwargs):
             if lead_input.company_name == "Beta":

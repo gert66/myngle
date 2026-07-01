@@ -126,6 +126,58 @@ def build_download_filename(mode: str) -> str:
     return f"lead_prioritizer_v2_{mode}_enriched.xlsx"
 
 
+def format_duration(seconds) -> str:
+    """Format a duration in seconds as HH:MM:SS.  Negative/None → 00:00:00."""
+    try:
+        total = int(max(0, round(float(seconds))))
+    except (TypeError, ValueError):
+        return "00:00:00"
+    h, rem = divmod(total, 3600)
+    m, s = divmod(rem, 60)
+    return f"{h:02d}:{m:02d}:{s:02d}"
+
+
+def build_progress_status_text(payload: dict, started_at: float, now: Optional[float] = None) -> str:
+    """Build a calm one-line status string with elapsed time and ETA.
+
+    ``started_at`` / ``now`` are wall-clock epoch seconds (``time.time()``).
+    ETA is based on average time per processed row, so it is unknown until at
+    least one row has been processed and grows more reliable with more rows.
+    Contains no secrets.
+    """
+    import time as _time
+    from datetime import datetime as _dt
+
+    if now is None:
+        now = _time.time()
+
+    processed = int(payload.get("processed_rows", 0) or 0)
+    selected = int(payload.get("selected_rows", 0) or 0)
+    success = int(payload.get("success_count", 0) or 0)
+    errors = int(payload.get("error_count", 0) or 0)
+    current = str(payload.get("current_company_name") or "?")
+
+    elapsed = max(0.0, now - started_at)
+    parts = [
+        f"Processed {processed}/{selected}",
+        f"Success {success}",
+        f"Errors {errors}",
+        f"Current: {current}",
+        f"Elapsed {format_duration(elapsed)}",
+    ]
+
+    if processed > 0 and selected > 0:
+        avg = elapsed / processed
+        remaining = avg * max(0, selected - processed)
+        finish = _dt.fromtimestamp(now + remaining)
+        parts.append(f"ETA {format_duration(remaining)}")
+        parts.append(f"Finish around {finish.strftime('%H:%M')}")
+    else:
+        parts.append("ETA unknown")
+
+    return " | ".join(parts)
+
+
 # ---------------------------------------------------------------------------
 # Streamlit UI
 # ---------------------------------------------------------------------------
@@ -258,9 +310,31 @@ def main() -> None:  # pragma: no cover - exercised only under `streamlit run`
             continue_on_error=not stop_on_error,
             include_raw_ai_json=include_raw_ai_json,
         )
+        import time as _time
+
+        progress_bar = st.progress(0.0)
+        status = st.empty()
+        started_at = _time.time()
+
+        def _on_progress(payload: dict) -> None:
+            selected = int(payload.get("selected_rows", 0) or 0)
+            processed = int(payload.get("processed_rows", 0) or 0)
+            frac = (processed / selected) if selected else 0.0
+            progress_bar.progress(min(1.0, max(0.0, frac)))
+            status.info(build_progress_status_text(payload, started_at))
+
         with st.spinner("Running batch enrichment..."):
-            tables = run_batch_dataframe(df, config, serper, anthropic)
+            tables = run_batch_dataframe(
+                df, config, serper, anthropic, progress_callback=_on_progress)
             data = build_excel_workbook_bytes(tables)
+
+        progress_bar.progress(1.0)
+        _total_elapsed = format_duration(_time.time() - started_at)
+        _summary = tables["run_summary"].iloc[0].to_dict() if len(tables["run_summary"]) else {}
+        status.success(
+            f"Completed {_summary.get('processed_rows', 0)} rows in {_total_elapsed} "
+            f"(success {_summary.get('success_count', 0)}, errors {_summary.get('error_count', 0)})."
+        )
         st.session_state["v2_batch_output_bytes"] = data
         st.session_state["v2_batch_tables"] = tables
         st.session_state["v2_batch_mode"] = run_mode

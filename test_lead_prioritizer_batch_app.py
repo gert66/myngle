@@ -15,6 +15,8 @@ from lead_prioritizer_batch_app import (
     count_selected_rows,
     mode_label_to_core_mode,
     build_download_filename,
+    format_duration,
+    build_progress_status_text,
     MODE_LABELS,
 )
 
@@ -134,6 +136,56 @@ class TestDownloadFilename:
         assert build_download_filename("full") == "lead_prioritizer_v2_full_enriched.xlsx"
         assert build_download_filename("hq_only").endswith(".xlsx")
         assert "hq_only" in build_download_filename("hq_only")
+
+
+# ---------------------------------------------------------------------------
+# format_duration
+# ---------------------------------------------------------------------------
+
+class TestFormatDuration:
+    def test_basic(self):
+        assert format_duration(0) == "00:00:00"
+        assert format_duration(65) == "00:01:05"
+        assert format_duration(3672) == "01:01:12"
+
+    def test_negative_and_bad_input(self):
+        assert format_duration(-5) == "00:00:00"
+        assert format_duration(None) == "00:00:00"
+        assert format_duration("x") == "00:00:00"
+
+
+# ---------------------------------------------------------------------------
+# build_progress_status_text
+# ---------------------------------------------------------------------------
+
+class TestProgressStatusText:
+    def test_includes_counts_and_eta(self):
+        payload = {
+            "processed_rows": 17, "selected_rows": 100,
+            "success_count": 16, "error_count": 1,
+            "current_company_name": "BMW ITALIA SPA",
+        }
+        # started 192s ago; avg = 192/17 ≈ 11.29s/row; remaining ≈ 937s
+        text = build_progress_status_text(payload, started_at=1000.0, now=1192.0)
+        assert "Processed 17/100" in text
+        assert "Success 16" in text
+        assert "Errors 1" in text
+        assert "Current: BMW ITALIA SPA" in text
+        assert "Elapsed 00:03:12" in text
+        assert "ETA " in text and "Finish around " in text
+
+    def test_zero_processed_is_unknown_eta(self):
+        payload = {"processed_rows": 0, "selected_rows": 10,
+                   "success_count": 0, "error_count": 0, "current_company_name": "X"}
+        text = build_progress_status_text(payload, started_at=1000.0, now=1000.0)
+        assert "ETA unknown" in text
+        assert "Finish around" not in text
+
+    def test_no_secrets_in_text(self):
+        payload = {"processed_rows": 1, "selected_rows": 2, "success_count": 1,
+                   "error_count": 0, "current_company_name": "Acme"}
+        text = build_progress_status_text(payload, started_at=0.0, now=10.0)
+        assert "api_key" not in text.lower() and "sk-ant" not in text.lower()
 
 
 # ---------------------------------------------------------------------------

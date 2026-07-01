@@ -19,7 +19,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime
-from typing import Optional
+from typing import Callable, Optional
 
 import io
 
@@ -274,15 +274,23 @@ def run_batch_dataframe(
     config: BatchRunConfig,
     serper_api_key: str,
     anthropic_api_key: str,
+    progress_callback: Optional[Callable[[dict], None]] = None,
 ) -> dict:
     """Run Lead Prioritizer v2 over selected rows.
 
     Returns a dict of DataFrames: ``enriched_leads``, ``evidence``, ``signals``,
     ``run_summary``.  API keys are passed through only; they are never printed or
     written into any output.
+
+    ``progress_callback`` (optional) is invoked once after each processed row —
+    including rows that error — with a secret-free payload dict.  It defaults to
+    ``None`` for backward compatibility (the CLI and existing callers are
+    unaffected).  If the callback raises, the exception is swallowed so it can
+    never break enrichment.
     """
     flags = resolve_pipeline_flags(config.run_mode)
     selected = select_batch_rows(df, config)
+    selected_rows = len(selected)
 
     enriched_rows: list[dict] = []
     evidence_rows: list[dict] = []
@@ -321,6 +329,23 @@ def run_batch_dataframe(
         if result is not None:
             evidence_rows.extend(flatten_evidence_for_excel(result, idx))
             signal_rows.extend(flatten_signals_for_excel(result, idx))
+
+        # Secret-free progress notification (never breaks the batch).
+        if progress_callback is not None:
+            try:
+                progress_callback({
+                    "processed_rows": processed,
+                    "selected_rows": selected_rows,
+                    "success_count": success,
+                    "error_count": error,
+                    "current_source_index": idx,
+                    "current_company_name": company,
+                    "current_domain": domain,
+                    "run_success": run_success,
+                    "run_error": run_error,
+                })
+            except Exception:
+                pass  # a broken callback must never break enrichment
 
         if not run_success and not config.continue_on_error:
             break
