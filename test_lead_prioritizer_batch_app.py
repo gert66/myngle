@@ -12,12 +12,15 @@ import lead_prioritizer_batch_app as app
 from lead_prioritizer_batch_app import (
     get_secret_or_env,
     resolve_default_column,
+    resolve_default_input_country,
     count_selected_rows,
     mode_label_to_core_mode,
     build_download_filename,
     format_duration,
     build_progress_status_text,
     MODE_LABELS,
+    SUPPORTED_DEFAULT_INPUT_COUNTRIES,
+    DEFAULT_COUNTRY_PLACEHOLDER,
 )
 
 
@@ -186,6 +189,39 @@ class TestProgressStatusText:
                    "error_count": 0, "current_company_name": "Acme"}
         text = build_progress_status_text(payload, started_at=0.0, now=10.0)
         assert "api_key" not in text.lower() and "sk-ant" not in text.lower()
+
+
+# ---------------------------------------------------------------------------
+# resolve_default_input_country
+# ---------------------------------------------------------------------------
+
+class TestResolveDefaultInputCountry:
+    def test_placeholder_is_rejected(self):
+        country, error = resolve_default_input_country(DEFAULT_COUNTRY_PLACEHOLDER)
+        assert country is None
+        assert error == "Please select a default input country before running."
+
+    def test_blank_is_rejected(self):
+        country, error = resolve_default_input_country("")
+        assert country is None
+        assert error
+
+    @pytest.mark.parametrize("selected", ["Italy", "Brazil", "Uruguay"])
+    def test_supported_countries_are_valid(self, selected):
+        country, error = resolve_default_input_country(selected)
+        assert country == selected
+        assert error is None
+
+    def test_unknown_country_is_rejected(self):
+        country, error = resolve_default_input_country("Atlantis")
+        assert country is None
+        assert error
+
+    def test_supported_list_contains_brazil_and_uruguay(self):
+        # Guards against regressing to an Italy-only default.
+        assert "Italy" in SUPPORTED_DEFAULT_INPUT_COUNTRIES
+        assert "Brazil" in SUPPORTED_DEFAULT_INPUT_COUNTRIES
+        assert "Uruguay" in SUPPORTED_DEFAULT_INPUT_COUNTRIES
 
 
 # ---------------------------------------------------------------------------

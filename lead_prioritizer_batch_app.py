@@ -68,6 +68,12 @@ DOMAIN_CANDIDATES = [
 ]
 COUNTRY_CANDIDATES = ["input_country", "country", "Country"]
 
+# Central list of default-input-country choices. Add new countries here only —
+# no other code path hardcodes a country name.
+SUPPORTED_DEFAULT_INPUT_COUNTRIES = ["Italy", "Brazil", "Uruguay"]
+DEFAULT_COUNTRY_PLACEHOLDER = "Select country..."
+DEFAULT_COUNTRY_REQUIRED_MESSAGE = "Please select a default input country before running."
+
 _SERPER_KEY_NAME = "SERPER_API_KEY"
 _ANTHROPIC_KEY_NAME = "ANTHROPIC_API_KEY"
 
@@ -106,6 +112,19 @@ def get_secret_or_env(
     except Exception:
         pass
     return (env.get(key) or "").strip()
+
+
+def resolve_default_input_country(selected: str) -> tuple[Optional[str], Optional[str]]:
+    """Validate the selected default input country.
+
+    Returns ``(country, error)`` — exactly one of the two is not ``None``.
+    ``country`` is the selected value verbatim (e.g. "Italy", "Brazil",
+    "Uruguay"); ``error`` is the user-facing message when the placeholder is
+    still selected (or an unknown value is passed in).
+    """
+    if selected in SUPPORTED_DEFAULT_INPUT_COUNTRIES:
+        return selected, None
+    return None, DEFAULT_COUNTRY_REQUIRED_MESSAGE
 
 
 def resolve_default_column(columns, candidates) -> Optional[str]:
@@ -283,7 +302,15 @@ def main() -> None:  # pragma: no cover - exercised only under `streamlit run`
         index=(country_options.index(country_default) if country_default in country_options else 0))
     input_country_column = None if country_choice == "(None)" else country_choice
 
-    default_country = st.text_input("Default input country", "Italy")
+    default_country_choice = st.selectbox(
+        "Default input country",
+        [DEFAULT_COUNTRY_PLACEHOLDER] + SUPPORTED_DEFAULT_INPUT_COUNTRIES,
+        index=0,
+        help="Used as the fallback input_country when the row's own "
+             "input_country column is blank. Must be chosen explicitly.")
+    default_country, default_country_error = resolve_default_input_country(default_country_choice)
+    if default_country_error:
+        st.error(default_country_error)
 
     # ── Run mode ──────────────────────────────────────────────────────────────
     st.subheader("Run mode")
@@ -354,15 +381,18 @@ def main() -> None:  # pragma: no cover - exercised only under `streamlit run`
             st.error(c5_block_reason)
 
     run_disabled = (not keys_ok) or (not big_run_ok) or selected_count == 0 \
-        or bool(c5_block_reason)
+        or bool(c5_block_reason) or bool(default_country_error)
 
     # ── Run ─────────────────────────────────────────────────────────────────
     if st.button("Run batch enrichment", type="primary", disabled=run_disabled):
+        if default_country_error:
+            st.error(default_country_error)
+            return
         config = BatchRunConfig(
             company_name_column=company_col,
             domain_column=domain_col,
             input_country_column=input_country_column,
-            default_input_country=default_country.strip() or "Italy",
+            default_input_country=default_country,
             run_mode=run_mode,
             start_row=int(start_row),
             row_limit=int(row_limit),
