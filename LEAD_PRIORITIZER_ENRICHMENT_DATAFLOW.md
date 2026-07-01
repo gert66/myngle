@@ -212,6 +212,40 @@ Notes:
   **Run Summary**. Raw Serper payloads are never written; raw AI JSON only with
   `--include-raw-ai-json`.
 
+## Streamlit batch Excel app
+
+`lead_prioritizer_batch_app.py` is a local Streamlit app over the shared batch
+core (`lead_prioritizer_batch_core.py`). Upload an Excel file, map columns, pick
+a run mode, run the batch, and download the enriched workbook. It adds no
+enrichment logic and does not duplicate batch logic; it does not import legacy
+apps.
+
+Run:
+```bash
+streamlit run lead_prioritizer_batch_app.py
+```
+
+Keys — local secrets in `.streamlit/secrets.toml`:
+```toml
+SERPER_API_KEY = "..."
+ANTHROPIC_API_KEY = "..."
+```
+Falls back to the `SERPER_API_KEY` / `ANTHROPIC_API_KEY` environment variables.
+Key values are never shown in the UI or written to output; the run button is
+disabled until both keys are present.
+
+- Modes: **Full v2 enrichment** (`full`), **HQ only** (`hq_only`), **Evidence
+  only** (`evidence_only`), **Signals, no score** (`signals_no_score`),
+  **Full, no score** (`full_no_score`). Default is Full v2 enrichment.
+- Default row limit is **10**; `0` means all remaining rows.
+- When more than **50** rows are selected, a warning shows and an explicit
+  confirmation checkbox is required before the run button is enabled.
+- Output workbook sheets: **Enriched Leads**, **Evidence**, **Signals**,
+  **Run Summary**. Raw Serper payloads are never written; raw AI JSON only when
+  "Include raw AI JSON" is checked.
+- Intended for **synchronous local runs**. Large async Anthropic Message Batch
+  processing will be designed separately later.
+
 ## Scope of the current step
 
 This step adds **schema and safe placeholders only**:
