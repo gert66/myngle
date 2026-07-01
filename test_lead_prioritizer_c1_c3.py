@@ -259,6 +259,38 @@ class TestBrazilNormalization:
         assert r.sig_foreign_hq_score_for_next_scoring == 3.0
 
 
+class TestUruguayNormalization:
+    """Uruguay aliases (Uruguay / Uruguayan / UY / URY / full official name)
+    must normalize equal to input Uruguay, so a domestic Uruguayan company is
+    not misclassified as foreign. Uses a non-risky domain root ('empresa') so
+    the C4 safety layer does not interfere with the assertions."""
+
+    _uy = LeadInput(company_name="Empresa Uruguaya S.A.", domain="empresa.com.uy",
+                    input_country="Uruguay")
+
+    def test_uruguay_variants_are_domestic(self):
+        for parent_variant in (
+            "Uruguay", "Uruguayan", "UY", "URY", "República Oriental del Uruguay",
+        ):
+            ai = json.dumps(dict(
+                classification="foreign_parent", confidence="High",
+                parent_hq_country=parent_variant, reason="same country",
+            ))
+            r = _run(self._uy, ai)
+            assert r.hq_structure_type == "domestic", parent_variant
+            assert r.sig_foreign_hq_score_for_next_scoring == 0.0, parent_variant
+
+    def test_genuine_foreign_parent_still_scores_3(self):
+        ai = json.dumps(dict(
+            classification="foreign_parent", confidence="High",
+            parent_hq_country="Spain",
+            evidence_url="https://www.empresa.com.uy/", reason="Spanish parent",
+        ))
+        r = _run(self._uy, ai)
+        assert r.sig_foreign_hq_score_for_next_scoring == 3.0
+        assert r.hq_structure_type == "foreign_parent"
+
+
 class TestHQPositiveScoreSafety:
     """C4 — a risky short/generic domain root with blank/mismatched evidence
     must not blindly score a domestic company as foreign; route to review."""

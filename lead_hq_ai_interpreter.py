@@ -259,6 +259,8 @@ def _normalize_country_for_hq(value: object) -> str:
         "sg": "singapore", "singapore": "singapore",
         "br": "brazil", "bra": "brazil", "brasil": "brazil",
         "brazil": "brazil", "brazilian": "brazil",
+        "uy": "uruguay", "ury": "uruguay", "uruguay": "uruguay",
+        "uruguayan": "uruguay", "república oriental del uruguay": "uruguay",
     }
     text = re.sub(r"\s+", " ", re.sub(r"\.", "", str(value or "").strip().lower()))
     return _MAP.get(text, text)
