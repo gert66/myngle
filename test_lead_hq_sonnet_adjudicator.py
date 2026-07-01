@@ -13,9 +13,28 @@ from lead_hq_sonnet_adjudicator import (
     adjudicate_hq_with_sonnet,
     build_adjudication_prompt,
     build_c5_recommendation,
+    extract_anthropic_text,
     SonnetHQAdjudicationResult,
     DEFAULT_SONNET_ADJUDICATION_MODEL,
 )
+
+
+class _Block:
+    """Minimal stand-in for an Anthropic content block object."""
+    def __init__(self, **kw):
+        self.__dict__.update(kw)
+
+
+class _ThinkingBlock:
+    """A block with NO .text attribute (like a real ThinkingBlock)."""
+    def __init__(self, thinking=""):
+        self.thinking = thinking
+        self.type = "thinking"
+
+
+class _Resp:
+    def __init__(self, content):
+        self.content = content
 
 
 def _mock_anthropic(text: str):
@@ -92,6 +111,74 @@ class TestParsing:
         assert r.call_attempted is True
         assert r.call_success is False
         assert r.error == "sonnet_parse_failed"
+
+
+# ---------------------------------------------------------------------------
+# extract_anthropic_text — robust content-block handling (Sonnet 5 thinking)
+# ---------------------------------------------------------------------------
+
+class TestExtractAnthropicText:
+    def test_thinking_then_text_objects(self):
+        resp = _Resp([_ThinkingBlock("reasoning..."),
+                      _Block(type="text", text='{"adjudication":"unclear"}')])
+        assert extract_anthropic_text(resp) == '{"adjudication":"unclear"}'
+
+    def test_dict_thinking_then_dict_text(self):
+        resp = _Resp([
+            {"type": "thinking", "thinking": "hmm"},
+            {"type": "text", "text": '{"adjudication":"domestic_confirmed"}'},
+        ])
+        assert extract_anthropic_text(resp) == '{"adjudication":"domestic_confirmed"}'
+
+    def test_plain_string_content(self):
+        assert extract_anthropic_text(_Resp('{"adjudication":"unclear"}')) \
+            == '{"adjudication":"unclear"}'
+
+    def test_no_text_block_returns_empty(self):
+        # Only a thinking block, no text → safe empty string (no crash).
+        assert extract_anthropic_text(_Resp([_ThinkingBlock("only thinking")])) == ""
+        assert extract_anthropic_text(_Resp([{"type": "thinking", "thinking": "x"}])) == ""
+
+    def test_multiple_text_blocks_concatenated(self):
+        resp = _Resp([_Block(type="text", text='{"a":1'),
+                      _Block(type="text", text=',"b":2}')])
+        assert extract_anthropic_text(resp) == '{"a":1,"b":2}'
+
+    def test_none_content_returns_empty(self):
+        assert extract_anthropic_text(_Resp(None)) == ""
+
+    def test_leading_thinking_does_not_crash_adjudicate(self):
+        # Full adjudicate path: client returns thinking block first, then text.
+        payload = ('{"adjudication":"foreign_parent_confirmed","confidence":"High",'
+                   '"target_company_match":"yes","parent_hq_country":"Japan"}')
+        resp = _Resp([_ThinkingBlock("let me reason"),
+                      _Block(type="text", text=payload)])
+        client = MagicMock()
+        client.messages.create.return_value = resp
+        lib = MagicMock()
+        lib.Anthropic.return_value = client
+        with patch("lead_hq_sonnet_adjudicator._anthropic_lib", lib):
+            r = adjudicate_hq_with_sonnet(
+                company_name="X", domain="x.com", input_country="Brazil",
+                anthropic_api_key="fake")
+        assert r.call_success is True
+        assert r.adjudication == "foreign_parent_confirmed"
+        assert r.parent_hq_country == "Japan"
+
+    def test_only_thinking_block_yields_parse_failure(self):
+        # No text block at all → empty raw → parse fails → manual-safe unclear.
+        resp = _Resp([_ThinkingBlock("only thinking, no answer")])
+        client = MagicMock()
+        client.messages.create.return_value = resp
+        lib = MagicMock()
+        lib.Anthropic.return_value = client
+        with patch("lead_hq_sonnet_adjudicator._anthropic_lib", lib):
+            r = adjudicate_hq_with_sonnet(
+                company_name="X", domain="x.com", input_country="Brazil",
+                anthropic_api_key="fake")
+        assert r.call_success is False
+        assert r.error == "sonnet_parse_failed"
+        assert r.adjudication == "unclear"
 
 
 # ---------------------------------------------------------------------------

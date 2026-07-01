@@ -208,6 +208,53 @@ def _parse_adjudication_response(raw: str) -> dict:
     return {}
 
 
+def extract_anthropic_text(response) -> str:
+    """Concatenate the text from an Anthropic response, skipping non-text blocks.
+
+    Claude Sonnet 5 (and extended-thinking models) can return content blocks
+    other than text — e.g. ``ThinkingBlock`` — which have no ``.text`` attribute.
+    This helper is defensive:
+
+    - ``response.content`` may be a list of blocks (objects or dicts) or a string.
+    - object blocks: include ``block.text`` only when it is a non-empty string
+      (skip ThinkingBlock and anything without usable text);
+    - dict blocks: prefer ``block["text"]`` when the type is textual / absent;
+    - a plain string ``content`` is returned as-is.
+    - Returns "" only when no text block exists (never raises on a leading
+      non-text block).
+    """
+    content = getattr(response, "content", None)
+    if content is None:
+        return ""
+    if isinstance(content, str):
+        return content
+
+    parts: list[str] = []
+    try:
+        blocks = list(content)
+    except TypeError:
+        return ""
+
+    for block in blocks:
+        # Dict-like block: {"type": "text", "text": "..."} / thinking has no text.
+        if isinstance(block, dict):
+            btype = str(block.get("type") or "").lower()
+            if btype and btype != "text":
+                # Only skip when it is an explicitly non-text type (e.g. thinking).
+                if "text" not in block:
+                    continue
+            val = block.get("text")
+            if isinstance(val, str) and val:
+                parts.append(val)
+            continue
+        # Object block (e.g. TextBlock / ThinkingBlock): use .text only if usable.
+        val = getattr(block, "text", None)
+        if isinstance(val, str) and val:
+            parts.append(val)
+
+    return "".join(parts)
+
+
 def _norm_enum(value: str, allowed: tuple, default: str) -> str:
     v = str(value or "").strip()
     if v in allowed:
@@ -266,7 +313,7 @@ def adjudicate_hq_with_sonnet(
             system=_SYSTEM_PROMPT,
             messages=[{"role": "user", "content": prompt}],
         )
-        raw_text = resp.content[0].text if resp.content else ""
+        raw_text = extract_anthropic_text(resp)
     except Exception as exc:
         return SonnetHQAdjudicationResult(
             model=model, call_attempted=True, call_success=False,
