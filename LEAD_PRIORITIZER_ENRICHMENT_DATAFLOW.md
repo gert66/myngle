@@ -111,6 +111,31 @@ Implemented in `lead_app_summary_builder.py` and wired into
   `advanced_notes_app` is audit-only counts/flags (evidence count, signal count,
   signal names, low-confidence/zero-score signals, manual-review flags).
 
+## Step 5: v2 scoring adapter
+
+Implemented in `lead_v2_scoring_adapter.py` and wired into
+`prioritize_single_lead(..., calculate_commercial_score_flag=True)`.
+
+- **Explicit opt-in, single-lead flow only.** Scoring runs only when the flag is
+  set; it never collects evidence, extracts signals, or builds summaries
+  implicitly.
+- **Uses `commercial_fit_scoring.score_company`** with the default profile
+  `italy_register_icp_only`. Legacy scoring behavior is untouched.
+- **Conservative signal mapping:**
+  - `sig_foreign_hq_score` ← v2 foreign-HQ signal,
+  - `sig_intl_footprint_score` ← `international_profile`,
+  - `sig_lnd_onboarding_score` ← `onboarding_training_need`,
+  - `sig_explicit_lnd_score` ← `icp_keyword_match`,
+  - `sig_employer_branding_score` and `ti_onboarding_score` = 0.0 (not inferred
+    yet).
+- **Company size complexity is audit-only for now** — it is NOT used as an
+  employee range, so the size fields are left blank.
+- **Rapid growth is set to 0.0** and never presented as a positive driver.
+- **Competitor is not mapped or scored.**
+- Scoring runs even with only the HQ signal present (missing non-HQ signals map
+  to 0.0).
+- **This does not change batch ranking yet.**
+
 ## Scope of the current step
 
 This step adds **schema and safe placeholders only**:

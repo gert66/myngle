@@ -18,6 +18,7 @@ from lead_non_hq_signal_extractor import (
     summarize_non_hq_signals_for_result,
 )
 from lead_app_summary_builder import build_app_summary_fields
+from lead_v2_scoring_adapter import score_lead_v2_result
 
 _DEFAULT_AI_MODEL = "claude-haiku-4-5-20251001"
 
@@ -32,6 +33,7 @@ def prioritize_single_lead(
     collect_non_hq_evidence: bool = False,
     extract_non_hq_signals_flag: bool = False,
     build_app_summary_fields_flag: bool = False,
+    calculate_commercial_score_flag: bool = False,
 ) -> LeadPrioritizationResult:
     """Orchestrate HQ detection and scoring for a single lead.
 
@@ -58,6 +60,15 @@ def prioritize_single_lead(
     already present.  It never collects evidence or extracts signals implicitly;
     it only fills ``evidence_summary_app`` / ``key_source_links_app`` /
     ``advanced_notes_app``.  Final scoring and ranking are unchanged.
+
+    ``calculate_commercial_score_flag`` (default ``False``) enables Step-5
+    commercial scoring for this single lead via
+    ``commercial_fit_scoring.score_company`` (profile
+    ``italy_register_icp_only``).  It maps the v2 HQ/non-HQ signals already on
+    the result and fills only the scoring output fields; if no non-HQ signals
+    were extracted, scoring still runs from the HQ signal plus zeros.  It never
+    collects evidence, extracts signals, or builds summaries implicitly, and does
+    NOT change batch ranking or legacy scoring behavior.
     """
     effective_country = (input_row.input_country or "").strip() or default_input_country
 
@@ -114,7 +125,7 @@ def prioritize_single_lead(
     if build_app_summary_fields_flag:
         app_summary = build_app_summary_fields(signals, evidence_items)
 
-    return LeadPrioritizationResult(
+    result = LeadPrioritizationResult(
         company_name=input_row.company_name,
         domain=input_row.domain,
         input_country=effective_country,
@@ -174,3 +185,28 @@ def prioritize_single_lead(
         evidence_items=evidence_items,
         signals=signals,
     )
+
+    # ── Step 5: commercial scoring (opt-in, single-lead flow only) ────────────
+    # Maps the v2 signals already on `result` into commercial_fit_scoring and
+    # fills only the scoring output fields. Runs from HQ + zeros for missing
+    # non-HQ signals. Does not change batch ranking or legacy scoring.
+    if calculate_commercial_score_flag:
+        score_out = score_lead_v2_result(result, scoring_profile="italy_register_icp_only")
+        result.final_commercial_fit_score = score_out.get("final_commercial_fit_score")
+        result.commercial_tier = score_out.get("commercial_tier")
+        result.icp_similarity_score = score_out.get("icp_similarity_score")
+        result.lean_model_prob = score_out.get("lean_model_prob")
+        result.lr_z_score = score_out.get("lr_z_score")
+        result.scoring_profile = score_out.get("scoring_profile") or score_out.get("v2_scoring_profile_used")
+        result.scoring_notes = score_out.get("scoring_notes")
+        result.missing_scoring_fields = score_out.get("missing_scoring_fields")
+        result.top_score_drivers = score_out.get("top_score_drivers")
+        result.weak_score_drivers = score_out.get("weak_score_drivers")
+        result.v2_score_input_mapping_note = score_out.get("v2_score_input_mapping_note")
+        result.score_input_foreign_hq = score_out.get("score_input_foreign_hq")
+        result.score_input_intl_footprint = score_out.get("score_input_intl_footprint")
+        result.score_input_explicit_lnd = score_out.get("score_input_explicit_lnd")
+        result.score_input_lnd_onboarding = score_out.get("score_input_lnd_onboarding")
+        result.score_input_rapid_growth = score_out.get("score_input_rapid_growth")
+
+    return result

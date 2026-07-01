@@ -60,6 +60,7 @@ input_country = st.text_input("Input country", "Italy")
 collect_non_hq = st.checkbox("Collect non-HQ enrichment evidence", value=False)
 extract_non_hq = st.checkbox("Extract non-HQ signals from evidence", value=False)
 build_app_summary = st.checkbox("Build app/evidence summary fields", value=False)
+calculate_score = st.checkbox("Calculate commercial fit score", value=False)
 
 run = st.button("Run HQ detection", type="primary")
 
@@ -86,6 +87,7 @@ if run:
             collect_non_hq_evidence=collect_non_hq,
             extract_non_hq_signals_flag=extract_non_hq,
             build_app_summary_fields_flag=build_app_summary,
+            calculate_commercial_score_flag=calculate_score,
         )
 
     # ── Headline ────────────────────────────────────────────────────────────
@@ -186,6 +188,26 @@ if run:
         st.text(rd.get("key_source_links_app") or "(none)")
         st.markdown("**advanced_notes_app**")
         st.text(rd.get("advanced_notes_app") or "(none)")
+
+    st.subheader("Commercial fit score")
+    if rd.get("final_commercial_fit_score") is None and rd.get("scoring_profile") is None:
+        st.caption("No score calculated. Tick 'Calculate commercial fit score'.")
+    else:
+        s1, s2, s3 = st.columns(3)
+        _fcs = rd.get("final_commercial_fit_score")
+        s1.metric("Final commercial fit score", "—" if _fcs is None else f"{_fcs:g}")
+        s2.metric("Commercial tier", rd.get("commercial_tier") or "—")
+        _prob = rd.get("lean_model_prob")
+        s3.metric("Lean model prob", "—" if _prob is None else f"{_prob:g}")
+        _score_keys = [
+            "final_commercial_fit_score", "commercial_tier", "icp_similarity_score",
+            "lean_model_prob", "lr_z_score", "scoring_profile", "scoring_notes",
+            "missing_scoring_fields",
+            "score_input_foreign_hq", "score_input_intl_footprint",
+            "score_input_explicit_lnd", "score_input_lnd_onboarding",
+            "score_input_rapid_growth", "v2_score_input_mapping_note",
+        ]
+        st.table([{"field": k, "value": rd.get(k)} for k in _score_keys])
 
     with st.expander("Full result (all fields)"):
         st.json(rd)

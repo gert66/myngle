@@ -160,3 +160,22 @@ class LeadPrioritizationResult:
     # ── Structured evidence / signals (flow downstream with every signal) ──────
     evidence_items: list[LeadEvidence] = field(default_factory=list)
     signals: list[LeadSignal] = field(default_factory=list)
+
+    # ── Commercial scoring output (Step 5 — opt-in, single-lead flow only) ─────
+    final_commercial_fit_score: Optional[float] = None
+    commercial_tier: Optional[str] = None
+    icp_similarity_score: Optional[float] = None
+    lean_model_prob: Optional[float] = None
+    lr_z_score: Optional[float] = None
+    scoring_profile: Optional[str] = None
+    scoring_notes: Optional[str] = None
+    missing_scoring_fields: Optional[str] = None
+    top_score_drivers: Optional[str] = None
+    weak_score_drivers: Optional[str] = None
+    # v2 scoring audit — how v2 signals were mapped into score_company inputs
+    v2_score_input_mapping_note: Optional[str] = None
+    score_input_foreign_hq: Optional[float] = None
+    score_input_intl_footprint: Optional[float] = None
+    score_input_explicit_lnd: Optional[float] = None
+    score_input_lnd_onboarding: Optional[float] = None
+    score_input_rapid_growth: Optional[float] = None
