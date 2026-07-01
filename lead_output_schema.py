@@ -45,6 +45,56 @@ class HQDetectionResult:
 
 
 @dataclass
+class LeadEvidence:
+    """A single piece of source evidence backing a signal.
+
+    Evidence must flow downstream with every signal so any score can be traced
+    back to the search result / parser output it came from.
+    """
+    evidence_id: Optional[str] = None
+    signal_name: Optional[str] = None
+    query_used: Optional[str] = None
+    source_url: Optional[str] = None
+    source_title: Optional[str] = None
+    source_snippet: Optional[str] = None
+    source_type: Optional[str] = None            # e.g. "knowledge_graph", "answer_box", "organic"
+    parser_source: Optional[str] = None
+    retrieved_at: Optional[str] = None           # ISO-8601 timestamp string
+    confidence: Optional[str] = None             # "High" | "Medium" | "Low"
+    notes: Optional[str] = None
+
+
+@dataclass
+class LeadSignal:
+    """A single extracted signal with its score and backing evidence."""
+    signal_name: str
+    signal_value: Optional[str] = None
+    signal_score: Optional[float] = None
+    signal_confidence: Optional[str] = None      # "High" | "Medium" | "Low"
+    signal_reason: Optional[str] = None
+    evidence_url: Optional[str] = None
+    evidence_quote: Optional[str] = None
+    evidence_title: Optional[str] = None
+    query_used: Optional[str] = None
+    parser_source: Optional[str] = None
+    needs_manual_review: bool = False
+
+
+@dataclass
+class LeadEnrichmentResult:
+    """Optional grouped container for the raw enrichment output of one lead.
+
+    Groups the HQ detection result with the collected signals and evidence so a
+    single enrichment pass can be passed around before it is flattened into a
+    ``LeadPrioritizationResult``.  Placeholder for now — non-HQ enrichment is
+    not implemented yet.
+    """
+    hq: Optional[HQDetectionResult] = None
+    signals: list[LeadSignal] = field(default_factory=list)
+    evidence_items: list[LeadEvidence] = field(default_factory=list)
+
+
+@dataclass
 class LeadPrioritizationResult:
     company_name: str
     domain: Optional[str] = None
@@ -81,3 +131,32 @@ class LeadPrioritizationResult:
     ai_call_success: Optional[str] = None
     ai_hq_error: Optional[str] = None
     ai_hq_raw_json: Optional[str] = None
+
+    # ── Non-HQ v2 signal scores (placeholders — no live enrichment yet) ────────
+    sig_international_profile_score: Optional[float] = None
+    sig_onboarding_training_need_score: Optional[float] = None
+    sig_company_size_complexity_score: Optional[float] = None
+    sig_icp_keyword_match_score: Optional[float] = None
+    # Reasons
+    international_profile_reason: Optional[str] = None
+    onboarding_training_need_reason: Optional[str] = None
+    company_size_complexity_reason: Optional[str] = None
+    icp_keyword_match_reason: Optional[str] = None
+    # Evidence URLs
+    international_profile_evidence_url: Optional[str] = None
+    onboarding_training_need_evidence_url: Optional[str] = None
+    company_size_complexity_evidence_url: Optional[str] = None
+    icp_keyword_match_evidence_url: Optional[str] = None
+    # Evidence quotes
+    international_profile_evidence_quote: Optional[str] = None
+    onboarding_training_need_evidence_quote: Optional[str] = None
+    company_size_complexity_evidence_quote: Optional[str] = None
+    icp_keyword_match_evidence_quote: Optional[str] = None
+    # App-facing text (placeholders)
+    evidence_summary_app: Optional[str] = None
+    key_source_links_app: Optional[str] = None
+    advanced_notes_app: Optional[str] = None
+
+    # ── Structured evidence / signals (flow downstream with every signal) ──────
+    evidence_items: list[LeadEvidence] = field(default_factory=list)
+    signals: list[LeadSignal] = field(default_factory=list)

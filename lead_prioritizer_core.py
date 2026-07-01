@@ -96,4 +96,28 @@ def prioritize_single_lead(
         ai_call_success=hq.ai_call_success,
         ai_hq_error=hq.ai_hq_error,
         ai_hq_raw_json=hq.ai_hq_raw_json,
+        # ── Non-HQ enrichment placeholders ────────────────────────────────────
+        # Non-HQ enrichment is not implemented yet: keep every field at a safe
+        # empty default so downstream consumers see explicit "not enriched".
+        sig_international_profile_score=None,
+        sig_onboarding_training_need_score=None,
+        sig_company_size_complexity_score=None,
+        sig_icp_keyword_match_score=None,
+        international_profile_reason=None,
+        onboarding_training_need_reason=None,
+        company_size_complexity_reason=None,
+        icp_keyword_match_reason=None,
+        international_profile_evidence_url=None,
+        onboarding_training_need_evidence_url=None,
+        company_size_complexity_evidence_url=None,
+        icp_keyword_match_evidence_url=None,
+        international_profile_evidence_quote=None,
+        onboarding_training_need_evidence_quote=None,
+        company_size_complexity_evidence_quote=None,
+        icp_keyword_match_evidence_quote=None,
+        evidence_summary_app=None,
+        key_source_links_app=None,
+        advanced_notes_app=None,
+        evidence_items=[],
+        signals=[],
     )

@@ -115,5 +115,15 @@ if run:
     st.subheader("Raw AI JSON (ai_hq_raw_json)")
     st.code(rd.get("ai_hq_raw_json") or "(none)", language="json")
 
+    st.subheader("Non-HQ enrichment placeholders")
+    st.caption("Not implemented yet — these stay empty until non-HQ enrichment is added.")
+    _placeholder_keys = [
+        "sig_international_profile_score",
+        "sig_onboarding_training_need_score",
+        "sig_company_size_complexity_score",
+        "sig_icp_keyword_match_score",
+    ]
+    st.table([{"field": k, "value": rd.get(k)} for k in _placeholder_keys])
+
     with st.expander("Full result (all fields)"):
         st.json(rd)
