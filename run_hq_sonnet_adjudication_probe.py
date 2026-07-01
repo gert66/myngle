@@ -114,6 +114,100 @@ def _cell(row: dict, key: str) -> str:
     return "" if s.lower() == "nan" else s
 
 
+def adjudicate_row(
+    original: dict,
+    anthropic_api_key: str,
+    model_used: str,
+    model_tier: str,
+    source_index=None,
+    include_raw: bool = False,
+):
+    """Adjudicate one input row and return (enriched_row, result, recommendation).
+
+    Single source of truth for the per-row C5 output shape, reused by both the
+    CLI probe and the Streamlit app. Never raises: a failed call yields an
+    unclear / manual-safe result via ``adjudicate_hq_with_sonnet``.
+    """
+    result = adjudicate_hq_with_sonnet(
+        company_name=_cell(original, "company_name"),
+        domain=_cell(original, "domain"),
+        input_country=_cell(original, "input_country"),
+        hq_detected_country=_cell(original, "hq_detected_country"),
+        hq_detected_city=_cell(original, "hq_detected_city"),
+        ai_parent_company=_cell(original, "ai_parent_company"),
+        ai_parent_hq_country=_cell(original, "ai_parent_hq_country"),
+        ai_parent_hq_city=_cell(original, "ai_parent_hq_city"),
+        hq_evidence_url=_cell(original, "hq_evidence_url"),
+        hq_evidence_quote=_cell(original, "hq_evidence_quote"),
+        hq_reason=_cell(original, "hq_reason"),
+        anthropic_api_key=anthropic_api_key,
+        model=model_used,
+        include_raw=include_raw,
+    )
+    rec = build_c5_recommendation(result)
+
+    enriched = dict(original)
+    enriched.update({
+        "source_index": source_index,
+        "c5_adjudication": result.adjudication,
+        "c5_confidence": result.confidence,
+        "c5_target_company_match": result.target_company_match,
+        "c5_parent_company": result.parent_company,
+        "c5_parent_hq_country": result.parent_hq_country,
+        "c5_parent_hq_city": result.parent_hq_city,
+        "c5_reason": result.reason,
+        "c5_sonnet_model": result.model,   # kept for backwards compatibility
+        "c5_model_used": model_used,        # preferred general column
+        "c5_model_tier": model_tier,
+        "c5_call_attempted": result.call_attempted,
+        "c5_call_success": result.call_success,
+        "c5_error": result.error,
+        "c5_recommended_hq_score": rec["c5_recommended_hq_score"],
+        "c5_recommended_manual_review": rec["c5_recommended_manual_review"],
+        "c5_recommendation_reason": rec["c5_recommendation_reason"],
+    })
+    if include_raw:
+        enriched["c5_raw_json"] = result.raw_json
+    return enriched, result, rec
+
+
+def build_c5_summary_dict(
+    *,
+    input_label: str,
+    sheet: str,
+    model_used: str,
+    model_tier: str,
+    confirm_expensive_opus: bool,
+    total_rows: int,
+    selected_rows: int,
+    adjudicated_rows: int,
+    n_foreign: int,
+    n_domestic: int,
+    n_unclear: int,
+    n_review: int,
+    only_manual_review: bool,
+    only_suppressed: bool,
+) -> dict:
+    """Build the C5 Summary sheet row. Shared by the CLI probe and the app."""
+    return {
+        "input_file": input_label,
+        "sheet": sheet,
+        "sonnet_model": model_used,   # kept for backwards compatibility
+        "c5_model_used": model_used,
+        "c5_model_tier": model_tier,
+        "confirm_expensive_opus": confirm_expensive_opus,
+        "total_rows": total_rows,
+        "selected_rows": selected_rows,
+        "adjudicated_rows": adjudicated_rows,
+        "foreign_parent_confirmed": n_foreign,
+        "domestic_confirmed": n_domestic,
+        "unclear": n_unclear,
+        "recommended_manual_review": n_review,
+        "only_manual_review": only_manual_review,
+        "only_suppressed": only_suppressed,
+    }
+
+
 def build_arg_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(description="C5 Sonnet HQ adjudication probe.")
     p.add_argument("--input", required=True)
@@ -181,46 +275,10 @@ def main(argv: Optional[list] = None) -> int:
     n_foreign = n_domestic = n_unclear = n_review = 0
     for idx, row in selected.iterrows():
         original = row.to_dict()
-        result = adjudicate_hq_with_sonnet(
-            company_name=_cell(original, "company_name"),
-            domain=_cell(original, "domain"),
-            input_country=_cell(original, "input_country"),
-            hq_detected_country=_cell(original, "hq_detected_country"),
-            hq_detected_city=_cell(original, "hq_detected_city"),
-            ai_parent_company=_cell(original, "ai_parent_company"),
-            ai_parent_hq_country=_cell(original, "ai_parent_hq_country"),
-            ai_parent_hq_city=_cell(original, "ai_parent_hq_city"),
-            hq_evidence_url=_cell(original, "hq_evidence_url"),
-            hq_evidence_quote=_cell(original, "hq_evidence_quote"),
-            hq_reason=_cell(original, "hq_reason"),
-            anthropic_api_key=anthropic_key,
-            model=model_used,
-            include_raw=args.include_raw_json,
+        enriched, result, rec = adjudicate_row(
+            original, anthropic_key, model_used, args.model_tier,
+            source_index=idx, include_raw=args.include_raw_json,
         )
-        rec = build_c5_recommendation(result)
-
-        enriched = dict(original)
-        enriched.update({
-            "source_index": idx,
-            "c5_adjudication": result.adjudication,
-            "c5_confidence": result.confidence,
-            "c5_target_company_match": result.target_company_match,
-            "c5_parent_company": result.parent_company,
-            "c5_parent_hq_country": result.parent_hq_country,
-            "c5_parent_hq_city": result.parent_hq_city,
-            "c5_reason": result.reason,
-            "c5_sonnet_model": result.model,   # kept for backwards compatibility
-            "c5_model_used": model_used,        # preferred general column
-            "c5_model_tier": args.model_tier,
-            "c5_call_attempted": result.call_attempted,
-            "c5_call_success": result.call_success,
-            "c5_error": result.error,
-            "c5_recommended_hq_score": rec["c5_recommended_hq_score"],
-            "c5_recommended_manual_review": rec["c5_recommended_manual_review"],
-            "c5_recommendation_reason": rec["c5_recommendation_reason"],
-        })
-        if args.include_raw_json:
-            enriched["c5_raw_json"] = result.raw_json
         out_rows.append(enriched)
 
         if result.adjudication == "foreign_parent_confirmed":
@@ -233,23 +291,22 @@ def main(argv: Optional[list] = None) -> int:
             n_review += 1
 
     out_df = pd.DataFrame(out_rows)
-    summary = pd.DataFrame([{
-        "input_file": args.input,
-        "sheet": sheet,
-        "sonnet_model": model_used,   # kept for backwards compatibility
-        "c5_model_used": model_used,
-        "c5_model_tier": args.model_tier,
-        "confirm_expensive_opus": args.confirm_expensive_opus,
-        "total_rows": len(df),
-        "selected_rows": len(selected),
-        "adjudicated_rows": len(out_rows),
-        "foreign_parent_confirmed": n_foreign,
-        "domestic_confirmed": n_domestic,
-        "unclear": n_unclear,
-        "recommended_manual_review": n_review,
-        "only_manual_review": args.only_manual_review,
-        "only_suppressed": args.only_suppressed,
-    }])
+    summary = pd.DataFrame([build_c5_summary_dict(
+        input_label=args.input,
+        sheet=sheet,
+        model_used=model_used,
+        model_tier=args.model_tier,
+        confirm_expensive_opus=args.confirm_expensive_opus,
+        total_rows=len(df),
+        selected_rows=len(selected),
+        adjudicated_rows=len(out_rows),
+        n_foreign=n_foreign,
+        n_domestic=n_domestic,
+        n_unclear=n_unclear,
+        n_review=n_review,
+        only_manual_review=args.only_manual_review,
+        only_suppressed=args.only_suppressed,
+    )])
 
     with pd.ExcelWriter(args.output, engine="openpyxl") as writer:
         out_df.to_excel(writer, sheet_name="C5 Adjudication", index=False)
