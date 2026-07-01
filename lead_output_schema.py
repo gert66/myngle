@@ -192,3 +192,7 @@ class LeadPrioritizationResult:
     foreign_hq_signal_used_in_app: Optional[str] = None
     foreign_hq_country_app: Optional[str] = None
     foreign_hq_city_app: Optional[str] = None
+
+    # ── Run metadata ──────────────────────────────────────────────────────────
+    # "hq_only" | "partial_v2" | "full_v2_single_lead"
+    v2_pipeline_mode: Optional[str] = None

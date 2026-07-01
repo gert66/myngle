@@ -36,6 +36,7 @@ def prioritize_single_lead(
     build_app_summary_fields_flag: bool = False,
     calculate_commercial_score_flag: bool = False,
     build_caller_app_fields_flag: bool = False,
+    run_full_v2_pipeline: bool = False,
 ) -> LeadPrioritizationResult:
     """Orchestrate HQ detection and scoring for a single lead.
 
@@ -77,7 +78,33 @@ def prioritize_single_lead(
     result (HQ, non-HQ signals, evidence, optional score).  It only fills the
     app-facing fields; it never collects evidence, extracts signals, builds
     summaries, or scores implicitly.
+
+    ``run_full_v2_pipeline`` (default ``False``) is an explicit opt-in preset
+    that turns on all optional v2 steps (2–6) for a single-lead end-to-end run.
+    It does not add batch processing, change legacy ranking, or alter the
+    canonical HQ-first order.  ``v2_pipeline_mode`` on the result records which
+    mode ran: ``"hq_only"``, ``"partial_v2"``, or ``"full_v2_single_lead"``.
     """
+    # Full-pipeline preset: enable every optional v2 step explicitly (order of
+    # operations below is unchanged — HQ first, then 2→6).
+    if run_full_v2_pipeline:
+        collect_non_hq_evidence = True
+        extract_non_hq_signals_flag = True
+        build_app_summary_fields_flag = True
+        calculate_commercial_score_flag = True
+        build_caller_app_fields_flag = True
+
+    if run_full_v2_pipeline:
+        v2_pipeline_mode = "full_v2_single_lead"
+    elif any((
+        collect_non_hq_evidence, extract_non_hq_signals_flag,
+        build_app_summary_fields_flag, calculate_commercial_score_flag,
+        build_caller_app_fields_flag,
+    )):
+        v2_pipeline_mode = "partial_v2"
+    else:
+        v2_pipeline_mode = "hq_only"
+
     effective_country = (input_row.input_country or "").strip() or default_input_country
 
     domain_root, query = build_simple_hq_query(input_row.company_name, input_row.domain)
@@ -192,6 +219,7 @@ def prioritize_single_lead(
         advanced_notes_app=app_summary["advanced_notes_app"],
         evidence_items=evidence_items,
         signals=signals,
+        v2_pipeline_mode=v2_pipeline_mode,
     )
 
     # ── Step 5: commercial scoring (opt-in, single-lead flow only) ────────────

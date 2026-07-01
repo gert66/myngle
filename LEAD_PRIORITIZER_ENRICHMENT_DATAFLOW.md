@@ -158,6 +158,24 @@ Implemented in `lead_caller_app_fields_builder.py` and wired into
   failures.
 - **This prepares the payload but does not change batch ranking yet.**
 
+## Full v2 single-lead pipeline preset
+
+Wired into `prioritize_single_lead(..., run_full_v2_pipeline=True)`.
+
+- **Explicit opt-in preset.** When enabled it turns on every optional v2 step
+  (2–6): non-HQ evidence collection, signal extraction, app/evidence summaries,
+  commercial scoring, and caller/app fields.
+- **Runs the complete current v2 single-lead flow** end-to-end for one lead.
+- **Does not add batch processing** and **does not change legacy ranking** or
+  legacy score outputs.
+- **Keeps the canonical HQ-first order**: (1) HQ detection → (2) non-HQ evidence
+  → (3) signal extraction → (4) app/evidence summaries → (5) commercial scoring
+  → (6) caller/app fields.
+- The result records `v2_pipeline_mode`: `"hq_only"` (no optional steps),
+  `"partial_v2"` (some optional steps), or `"full_v2_single_lead"` (preset on).
+- Intended for **manual validation** and future frontend/API wiring. See
+  `LEAD_PRIORITIZER_V2_SINGLE_LEAD_VALIDATION.md`.
+
 ## Scope of the current step
 
 This step adds **schema and safe placeholders only**:

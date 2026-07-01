@@ -57,6 +57,11 @@ st.subheader("Lead")
 company_name = st.text_input("Company name", "")
 domain = st.text_input("Domain", "")
 input_country = st.text_input("Input country", "Italy")
+run_full_pipeline = st.checkbox("Run full v2 single-lead pipeline", value=False)
+st.caption(
+    "Full pipeline runs HQ, non-HQ evidence, signal extraction, app summaries, "
+    "scoring, and caller/app fields."
+)
 collect_non_hq = st.checkbox("Collect non-HQ enrichment evidence", value=False)
 extract_non_hq = st.checkbox("Extract non-HQ signals from evidence", value=False)
 build_app_summary = st.checkbox("Build app/evidence summary fields", value=False)
@@ -90,6 +95,7 @@ if run:
             build_app_summary_fields_flag=build_app_summary,
             calculate_commercial_score_flag=calculate_score,
             build_caller_app_fields_flag=build_caller_fields,
+            run_full_v2_pipeline=run_full_pipeline,
         )
 
     # ── Headline ────────────────────────────────────────────────────────────
@@ -98,6 +104,7 @@ if run:
     c1.metric("HQ score (next scoring)", "—" if score is None else f"{score:g}")
     c2.metric("Foreign HQ", str(result.foreign_hq_simple))
     c3.metric("Manual review", "Yes" if result.needs_manual_review else "No")
+    st.caption(f"Pipeline mode: **{result.v2_pipeline_mode}**")
 
     # ── Important output fields ───────────────────────────────────────────────
     st.subheader("Output fields")
