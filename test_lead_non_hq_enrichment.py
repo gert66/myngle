@@ -1,0 +1,176 @@
+"""Lightweight tests for Lead Prioritizer v2 non-HQ evidence collection (Step 2).
+
+No network / live keys: the Serper call is mocked. Covers the query builder,
+the competitor-term exclusion guard, the evidence extractor, and the core flag
+gating (default must NOT call non-HQ enrichment).
+"""
+
+from __future__ import annotations
+
+from unittest.mock import patch
+
+from lead_output_schema import LeadEvidence, LeadInput
+from lead_non_hq_enrichment import (
+    build_non_hq_enrichment_queries,
+    extract_evidence_from_serper_payload,
+)
+from lead_prioritizer_core import prioritize_single_lead
+
+
+# Terms that must never appear in non-HQ enrichment queries.
+_FORBIDDEN_TERMS = [
+    "competitor", "competitors", "competing", "alternative", "alternatives",
+    "vendor", "comparison", "vs ", "rival", "berlitz", "speexx", "learnlight",
+    "rapid growth", "fast growing", "fastest growing",
+]
+
+
+# ---------------------------------------------------------------------------
+# Query builder
+# ---------------------------------------------------------------------------
+
+class TestQueryBuilder:
+    def test_uses_domain_root_not_legal_name(self):
+        specs = build_non_hq_enrichment_queries("BMW Italia S.p.A.", "www.bmw.it")
+        assert specs, "expected query specs"
+        for spec in specs:
+            assert spec["query"].startswith("bmw "), spec["query"]
+            assert "italia" not in spec["query"].lower()
+            assert "s.p.a" not in spec["query"].lower()
+
+    def test_falls_back_to_company_name_without_domain(self):
+        specs = build_non_hq_enrichment_queries("Some Company", None)
+        assert specs
+        for spec in specs:
+            assert spec["query"].startswith("some company ")
+
+    def test_at_most_four_queries(self):
+        specs = build_non_hq_enrichment_queries("Acme", "acme.com")
+        assert len(specs) <= 4
+        assert {s["signal_name"] for s in specs} == {
+            "international_profile", "onboarding_training_need",
+            "company_size_complexity", "icp_keyword_match",
+        }
+
+    def test_no_competitor_or_growth_terms(self):
+        specs = build_non_hq_enrichment_queries("Acme", "acme.com")
+        for spec in specs:
+            q = spec["query"].lower()
+            for term in _FORBIDDEN_TERMS:
+                assert term not in q, f"forbidden term {term!r} in query: {q}"
+
+    def test_empty_input_yields_no_queries(self):
+        assert build_non_hq_enrichment_queries("", None) == []
+
+
+# ---------------------------------------------------------------------------
+# Evidence extractor
+# ---------------------------------------------------------------------------
+
+class TestEvidenceExtractor:
+    _payload = {
+        "knowledgeGraph": {
+            "title": "Acme Corp",
+            "description": "Acme is a global manufacturer.",
+            "website": "https://acme.com",
+        },
+        "answerBox": {
+            "title": "Acme locations",
+            "answer": "Acme has offices in 12 countries.",
+            "link": "https://acme.com/locations",
+        },
+        "organic": [
+            {"title": "Acme careers", "snippet": "Training and onboarding academy.",
+             "link": "https://acme.com/careers"},
+            {"title": "Acme profile", "snippet": "5,000 employees.",
+             "link": "https://example.com/acme"},
+        ],
+    }
+
+    def test_returns_lead_evidence(self):
+        ev = extract_evidence_from_serper_payload(
+            self._payload, signal_name="international_profile",
+            query_used="acme international offices", max_items=3,
+        )
+        assert ev and all(isinstance(e, LeadEvidence) for e in ev)
+
+    def test_respects_max_items_and_priority(self):
+        ev = extract_evidence_from_serper_payload(
+            self._payload, signal_name="international_profile",
+            query_used="q", max_items=2,
+        )
+        assert len(ev) == 2
+        # KG first, then answer box.
+        assert ev[0].source_type == "knowledge_graph"
+        assert ev[1].source_type == "answer_box"
+
+    def test_fields_are_populated_and_verbatim(self):
+        ev = extract_evidence_from_serper_payload(
+            self._payload, signal_name="company_size_complexity",
+            query_used="acme employees", max_items=5,
+        )
+        first = ev[0]
+        assert first.signal_name == "company_size_complexity"
+        assert first.query_used == "acme employees"
+        assert first.source_snippet == "Acme is a global manufacturer."
+        assert first.parser_source == "serper_knowledge_graph"
+        assert first.confidence is None  # deterministic collector
+
+    def test_empty_payload_returns_empty(self):
+        assert extract_evidence_from_serper_payload({}, "x", "q") == []
+
+
+# ---------------------------------------------------------------------------
+# Core flag gating
+# ---------------------------------------------------------------------------
+
+class TestCoreFlagGating:
+    _lead = LeadInput(company_name="Acme", domain="acme.com", input_country="Italy")
+
+    def _patches(self, collector_mock):
+        return (
+            patch("lead_prioritizer_core.call_serper_for_hq", return_value={"organic": []}),
+            patch("lead_prioritizer_core.interpret_hq_with_ai",
+                  return_value=__import__("lead_output_schema").HQDetectionResult(
+                      hq_structure_type="domestic",
+                      sig_foreign_hq_score_for_next_scoring=0.0,
+                  )),
+            patch("lead_prioritizer_core.collect_non_hq_enrichment_evidence",
+                  side_effect=collector_mock),
+        )
+
+    def test_default_does_not_collect(self):
+        calls = {"n": 0}
+
+        def _collector(*a, **k):
+            calls["n"] += 1
+            return []
+
+        p1, p2, p3 = self._patches(_collector)
+        with p1, p2, p3:
+            result = prioritize_single_lead(
+                self._lead, serper_api_key="fake", anthropic_api_key="fake",
+            )
+        assert calls["n"] == 0
+        assert result.evidence_items == []
+
+    def test_flag_true_collects(self):
+        calls = {"n": 0}
+        sample = [LeadEvidence(evidence_id="international_profile:organic:1",
+                               signal_name="international_profile")]
+
+        def _collector(*a, **k):
+            calls["n"] += 1
+            return sample
+
+        p1, p2, p3 = self._patches(_collector)
+        with p1, p2, p3:
+            result = prioritize_single_lead(
+                self._lead, serper_api_key="fake", anthropic_api_key="fake",
+                collect_non_hq_evidence=True,
+            )
+        assert calls["n"] == 1
+        assert len(result.evidence_items) == 1
+        # No scores produced by Step 2.
+        assert result.sig_international_profile_score is None
+        assert result.signals == []

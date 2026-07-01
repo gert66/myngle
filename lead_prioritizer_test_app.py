@@ -57,6 +57,7 @@ st.subheader("Lead")
 company_name = st.text_input("Company name", "")
 domain = st.text_input("Domain", "")
 input_country = st.text_input("Input country", "Italy")
+collect_non_hq = st.checkbox("Collect non-HQ enrichment evidence", value=False)
 
 run = st.button("Run HQ detection", type="primary")
 
@@ -80,6 +81,7 @@ if run:
             serper_api_key=_serper_key,
             anthropic_api_key=_anthropic_key,
             default_input_country="Italy",
+            collect_non_hq_evidence=collect_non_hq,
         )
 
     # ── Headline ────────────────────────────────────────────────────────────
@@ -124,6 +126,26 @@ if run:
         "sig_icp_keyword_match_score",
     ]
     st.table([{"field": k, "value": rd.get(k)} for k in _placeholder_keys])
+
+    st.subheader("Non-HQ enrichment evidence")
+    _evidence = rd.get("evidence_items") or []
+    if not _evidence:
+        st.caption(
+            "No evidence collected. Tick 'Collect non-HQ enrichment evidence' "
+            "and provide a Serper key to gather evidence."
+        )
+    else:
+        st.table([
+            {
+                "signal_name":    e.get("signal_name"),
+                "source_type":    e.get("source_type"),
+                "source_title":   e.get("source_title"),
+                "source_url":     e.get("source_url"),
+                "source_snippet": e.get("source_snippet"),
+                "query_used":     e.get("query_used"),
+            }
+            for e in _evidence
+        ])
 
     with st.expander("Full result (all fields)"):
         st.json(rd)

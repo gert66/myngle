@@ -41,6 +41,28 @@ without traceable evidence is not a scorable signal.
   import or modify the old HQ sanitizer logic.
 - **`enrich_clients_claude.py` is not changed** by this work.
 
+## Step 2: non-HQ evidence collection
+
+Implemented in `lead_non_hq_enrichment.py` and wired into
+`prioritize_single_lead(..., collect_non_hq_evidence=True)`.
+
+- **Evidence only — no non-HQ scores yet.** All `sig_*` non-HQ score fields and
+  their reasons stay `None`; `signals` stays empty. Only `evidence_items` is
+  populated.
+- **Runs strictly after HQ detection.** HQ is decided first; this step never
+  affects the HQ flow, and the flag defaults to `False` so existing behavior is
+  unchanged.
+- **At most 4 Serper queries per lead** — one per non-HQ signal
+  (`international_profile`, `onboarding_training_need`, `company_size_complexity`,
+  `icp_keyword_match`), built domain-root-first.
+- **No competitor collection.** No competitor, alternative-provider,
+  vendor-comparison or rapid-growth queries or fields are collected.
+- **Deterministic extraction.** Evidence comes verbatim from Serper
+  knowledgeGraph / answerBox / top organic results — no AI interpretation and no
+  invented quotes at this step.
+- Collected evidence is attached to `LeadPrioritizationResult.evidence_items` as
+  `LeadEvidence` objects.
+
 ## Scope of the current step
 
 This step adds **schema and safe placeholders only**:

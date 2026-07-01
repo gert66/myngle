@@ -12,6 +12,7 @@ from __future__ import annotations
 from lead_output_schema import LeadInput, LeadPrioritizationResult, HQDetectionResult
 from hq_simple_detector import build_simple_hq_query
 from lead_hq_ai_interpreter import call_serper_for_hq, interpret_hq_with_ai
+from lead_non_hq_enrichment import collect_non_hq_enrichment_evidence
 
 _DEFAULT_AI_MODEL = "claude-haiku-4-5-20251001"
 
@@ -23,6 +24,7 @@ def prioritize_single_lead(
     anthropic_api_key: str = "",
     ai_model: str = _DEFAULT_AI_MODEL,
     default_input_country: str = "Italy",
+    collect_non_hq_evidence: bool = False,
 ) -> LeadPrioritizationResult:
     """Orchestrate HQ detection and scoring for a single lead.
 
@@ -33,6 +35,10 @@ def prioritize_single_lead(
     ``default_input_country`` supplies the run-context local/entity country when
     ``input_row.input_country`` is blank/None; the effective country is what the
     interpreter compares against and what the result records.
+
+    ``collect_non_hq_evidence`` (default ``False``) enables Step-2 non-HQ
+    evidence collection.  It only fills ``evidence_items`` — no non-HQ scores are
+    produced.  HQ detection always runs first and is unaffected by this flag.
     """
     effective_country = (input_row.input_country or "").strip() or default_input_country
 
@@ -60,6 +66,16 @@ def prioritize_single_lead(
         anthropic_api_key=anthropic_api_key,
         model=ai_model,
     )
+
+    # ── Step 2: non-HQ evidence collection (evidence only, no scores) ─────────
+    # Runs strictly after HQ detection and only when explicitly enabled.
+    evidence_items = []
+    if collect_non_hq_evidence:
+        evidence_items = collect_non_hq_enrichment_evidence(
+            company_name=input_row.company_name,
+            domain=input_row.domain,
+            serper_api_key=serper_api_key,
+        )
 
     return LeadPrioritizationResult(
         company_name=input_row.company_name,
@@ -118,6 +134,6 @@ def prioritize_single_lead(
         evidence_summary_app=None,
         key_source_links_app=None,
         advanced_notes_app=None,
-        evidence_items=[],
+        evidence_items=evidence_items,
         signals=[],
     )
