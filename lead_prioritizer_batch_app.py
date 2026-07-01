@@ -18,6 +18,8 @@ installed.
 from __future__ import annotations
 
 import os
+import re
+from pathlib import Path
 from typing import Optional
 
 from lead_prioritizer_batch_core import (
@@ -169,6 +171,53 @@ def mode_label_to_core_mode(label: str) -> str:
 
 def build_download_filename(mode: str) -> str:
     return f"lead_prioritizer_v2_{mode}_enriched.xlsx"
+
+
+DEFAULT_AUTOSAVE_DIR = "batch_outputs"
+AUTOSAVE_HELP_TEXT = (
+    "When enabled, the completed Excel output will be saved automatically on "
+    "this machine in the selected folder. The download button will still be shown."
+)
+
+
+def sanitize_run_mode_for_filename(run_mode: str) -> str:
+    """Reduce a run mode to a filesystem-safe token (alnum, ``_``, ``-``)."""
+    safe = re.sub(r"[^A-Za-z0-9_-]+", "_", str(run_mode or "").strip()).strip("_")
+    return safe or "run"
+
+
+def autosave_output_workbook(output_bytes: bytes, output_dir: str, run_mode: str,
+                             now=None) -> Path:
+    """Write the completed workbook bytes to ``output_dir`` and return the path.
+
+    - Creates the directory (and parents) when missing.
+    - Relative paths resolve against the current working directory; ``~`` is
+      expanded. Windows-safe via ``pathlib``.
+    - Filename: ``lead_prioritizer_v2_{run_mode}_{YYYYMMDD_HHMMSS}.xlsx`` with
+      the run mode sanitized. Never overwrites: an existing name gets a ``_2``,
+      ``_3``, … suffix.
+    - Writes only the already-built workbook bytes — no keys, no secrets.
+    - Raises on failure (unwritable path etc.); the caller decides how to
+      surface the error.
+    """
+    from datetime import datetime as _dt
+
+    stamp = (now or _dt.now()).strftime("%Y%m%d_%H%M%S")
+    base = f"lead_prioritizer_v2_{sanitize_run_mode_for_filename(run_mode)}_{stamp}"
+
+    directory = Path(output_dir or DEFAULT_AUTOSAVE_DIR).expanduser()
+    if not directory.is_absolute():
+        directory = Path.cwd() / directory
+    directory.mkdir(parents=True, exist_ok=True)
+
+    target = directory / f"{base}.xlsx"
+    counter = 2
+    while target.exists():
+        target = directory / f"{base}_{counter}.xlsx"
+        counter += 1
+
+    target.write_bytes(output_bytes)
+    return target.resolve()
 
 
 def format_duration(seconds) -> str:
@@ -376,6 +425,14 @@ def main() -> None:  # pragma: no cover - exercised only under `streamlit run`
     stop_on_error = st.checkbox("Stop on first row error", value=False)
     include_raw_ai_json = st.checkbox("Include raw AI JSON", value=False)
 
+    # ── Autosave (output workbook to disk when the run completes) ─────────────
+    autosave_enabled = st.checkbox(
+        "Autosave output workbook when run completes", value=False)
+    autosave_dir = DEFAULT_AUTOSAVE_DIR
+    if autosave_enabled:
+        autosave_dir = st.text_input("Autosave directory", value=DEFAULT_AUTOSAVE_DIR)
+        st.caption(AUTOSAVE_HELP_TEXT)
+
     selected_count = count_selected_rows(len(df), int(start_row), int(row_limit))
     st.caption(f"Selected rows: **{selected_count}**")
 
@@ -547,6 +604,17 @@ def main() -> None:  # pragma: no cover - exercised only under `streamlit run`
         st.session_state["v2_batch_output_bytes"] = data
         st.session_state["v2_batch_tables"] = tables
         st.session_state["v2_batch_mode"] = run_mode
+
+        # ── Optional autosave (same bytes as the download button) ─────────────
+        if autosave_enabled:
+            try:
+                saved_path = autosave_output_workbook(data, autosave_dir, run_mode)
+                st.success(f"Autosaved output workbook to: {saved_path}")
+            except Exception as exc:
+                st.error(
+                    f"Autosave failed: {exc}. "
+                    "You can still use the download button below."
+                )
 
     # ── Output ────────────────────────────────────────────────────────────────
     tables = st.session_state.get("v2_batch_tables")

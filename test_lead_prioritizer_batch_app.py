@@ -19,6 +19,8 @@ from lead_prioritizer_batch_app import (
     format_duration,
     build_progress_status_text,
     build_phase_progress_status_text,
+    autosave_output_workbook,
+    sanitize_run_mode_for_filename,
     MODE_LABELS,
     SUPPORTED_DEFAULT_INPUT_COUNTRIES,
     DEFAULT_COUNTRY_PLACEHOLDER,
@@ -293,3 +295,62 @@ def test_module_imports_without_streamlit():
     # Importing the app module must not require Streamlit (lazy import in main).
     assert hasattr(app, "main")
     assert app.CONFIRM_THRESHOLD == 50
+
+
+# ---------------------------------------------------------------------------
+# autosave_output_workbook
+# ---------------------------------------------------------------------------
+
+from datetime import datetime as _dt  # noqa: E402
+
+_FIXED_NOW = _dt(2026, 7, 2, 2, 15, 30)
+
+
+class TestAutosaveOutputWorkbook:
+    def test_creates_missing_directory_and_writes_timestamped_xlsx(self, tmp_path):
+        out_dir = tmp_path / "nested" / "batch_outputs"
+        assert not out_dir.exists()
+        path = autosave_output_workbook(
+            b"workbook-bytes", str(out_dir), "full_foreign_hq_only", now=_FIXED_NOW)
+        assert out_dir.is_dir()
+        assert path.name == "lead_prioritizer_v2_full_foreign_hq_only_20260702_021530.xlsx"
+        assert path.read_bytes() == b"workbook-bytes"
+
+    def test_does_not_overwrite_existing_files(self, tmp_path):
+        p1 = autosave_output_workbook(b"first", str(tmp_path), "full", now=_FIXED_NOW)
+        p2 = autosave_output_workbook(b"second", str(tmp_path), "full", now=_FIXED_NOW)
+        p3 = autosave_output_workbook(b"third", str(tmp_path), "full", now=_FIXED_NOW)
+        assert p1 != p2 != p3
+        assert p1.read_bytes() == b"first"   # original untouched
+        assert p2.read_bytes() == b"second"
+        assert p2.name.endswith("_2.xlsx")
+        assert p3.name.endswith("_3.xlsx")
+
+    def test_relative_path_resolves_under_cwd(self, tmp_path, monkeypatch):
+        monkeypatch.chdir(tmp_path)
+        path = autosave_output_workbook(b"x", "batch_outputs", "hq_only", now=_FIXED_NOW)
+        assert path.parent == (tmp_path / "batch_outputs").resolve()
+        assert path.exists()
+
+    def test_run_mode_is_sanitized_in_filename(self, tmp_path):
+        path = autosave_output_workbook(
+            b"x", str(tmp_path), "weird/../mode name!", now=_FIXED_NOW)
+        assert "/" not in path.name and ".." not in path.name and " " not in path.name
+        assert path.name.startswith("lead_prioritizer_v2_weird_mode_name_")
+        assert path.suffix == ".xlsx"
+
+    def test_unwritable_path_raises(self, tmp_path):
+        blocker = tmp_path / "not_a_dir"
+        blocker.write_bytes(b"i am a file")  # mkdir on a path through a file fails
+        with pytest.raises(Exception):
+            autosave_output_workbook(b"x", str(blocker / "sub"), "full", now=_FIXED_NOW)
+
+
+class TestSanitizeRunMode:
+    def test_known_modes_unchanged(self):
+        assert sanitize_run_mode_for_filename("full_foreign_hq_only") == "full_foreign_hq_only"
+        assert sanitize_run_mode_for_filename("hq_only") == "hq_only"
+
+    def test_blank_falls_back(self):
+        assert sanitize_run_mode_for_filename("") == "run"
+        assert sanitize_run_mode_for_filename(None) == "run"
