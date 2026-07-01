@@ -59,6 +59,7 @@ domain = st.text_input("Domain", "")
 input_country = st.text_input("Input country", "Italy")
 collect_non_hq = st.checkbox("Collect non-HQ enrichment evidence", value=False)
 extract_non_hq = st.checkbox("Extract non-HQ signals from evidence", value=False)
+build_app_summary = st.checkbox("Build app/evidence summary fields", value=False)
 
 run = st.button("Run HQ detection", type="primary")
 
@@ -84,6 +85,7 @@ if run:
             default_input_country="Italy",
             collect_non_hq_evidence=collect_non_hq,
             extract_non_hq_signals_flag=extract_non_hq,
+            build_app_summary_fields_flag=build_app_summary,
         )
 
     # ── Headline ────────────────────────────────────────────────────────────
@@ -169,6 +171,21 @@ if run:
             }
             for s in _signals
         ])
+
+    st.subheader("App/evidence summary fields")
+    if not any(rd.get(k) for k in
+               ("evidence_summary_app", "key_source_links_app", "advanced_notes_app")):
+        st.caption(
+            "No summary built. Tick 'Build app/evidence summary fields' "
+            "(signals/evidence must be present)."
+        )
+    else:
+        st.markdown("**evidence_summary_app**")
+        st.text(rd.get("evidence_summary_app") or "(none)")
+        st.markdown("**key_source_links_app**")
+        st.text(rd.get("key_source_links_app") or "(none)")
+        st.markdown("**advanced_notes_app**")
+        st.text(rd.get("advanced_notes_app") or "(none)")
 
     with st.expander("Full result (all fields)"):
         st.json(rd)

@@ -17,6 +17,7 @@ from lead_non_hq_signal_extractor import (
     extract_non_hq_signals,
     summarize_non_hq_signals_for_result,
 )
+from lead_app_summary_builder import build_app_summary_fields
 
 _DEFAULT_AI_MODEL = "claude-haiku-4-5-20251001"
 
@@ -30,6 +31,7 @@ def prioritize_single_lead(
     default_input_country: str = "Italy",
     collect_non_hq_evidence: bool = False,
     extract_non_hq_signals_flag: bool = False,
+    build_app_summary_fields_flag: bool = False,
 ) -> LeadPrioritizationResult:
     """Orchestrate HQ detection and scoring for a single lead.
 
@@ -50,6 +52,12 @@ def prioritize_single_lead(
     triggers a Serper call itself: if evidence was not collected, extraction runs
     over an empty list and yields empty signals.  Intermediate signal scores are
     filled; the final commercial score and ranking are NOT touched here.
+
+    ``build_app_summary_fields_flag`` (default ``False``) enables Step-4
+    deterministic app/evidence summary building from the signals and evidence
+    already present.  It never collects evidence or extracts signals implicitly;
+    it only fills ``evidence_summary_app`` / ``key_source_links_app`` /
+    ``advanced_notes_app``.  Final scoring and ranking are unchanged.
     """
     effective_country = (input_row.input_country or "").strip() or default_input_country
 
@@ -94,6 +102,17 @@ def prioritize_single_lead(
     if extract_non_hq_signals_flag:
         signals = extract_non_hq_signals(evidence_items)
     non_hq_summary = summarize_non_hq_signals_for_result(signals)
+
+    # ── Step 4: deterministic app/evidence summary fields (no live calls) ─────
+    # Built only from signals/evidence already present; never collects or
+    # extracts implicitly.
+    app_summary = {
+        "evidence_summary_app": None,
+        "key_source_links_app": None,
+        "advanced_notes_app": None,
+    }
+    if build_app_summary_fields_flag:
+        app_summary = build_app_summary_fields(signals, evidence_items)
 
     return LeadPrioritizationResult(
         company_name=input_row.company_name,
@@ -149,9 +168,9 @@ def prioritize_single_lead(
         onboarding_training_need_evidence_quote=non_hq_summary["onboarding_training_need_evidence_quote"],
         company_size_complexity_evidence_quote=non_hq_summary["company_size_complexity_evidence_quote"],
         icp_keyword_match_evidence_quote=non_hq_summary["icp_keyword_match_evidence_quote"],
-        evidence_summary_app=None,
-        key_source_links_app=None,
-        advanced_notes_app=None,
+        evidence_summary_app=app_summary["evidence_summary_app"],
+        key_source_links_app=app_summary["key_source_links_app"],
+        advanced_notes_app=app_summary["advanced_notes_app"],
         evidence_items=evidence_items,
         signals=signals,
     )

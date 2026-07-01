@@ -90,6 +90,27 @@ Implemented in `lead_non_hq_signal_extractor.py` and wired into
 - **Evidence is copied verbatim** (URL / snippet / title) from the existing
   `LeadEvidence` — nothing is invented.
 
+## Step 4: deterministic app/evidence summary fields
+
+Implemented in `lead_app_summary_builder.py` and wired into
+`prioritize_single_lead(..., build_app_summary_fields_flag=True)`.
+
+- **Built only from existing signals/evidence.** The builder reads the already
+  extracted `signals` and collected `evidence_items`; it never collects evidence
+  or extracts signals implicitly, and network behavior stays controlled solely
+  by `collect_non_hq_evidence`.
+- **No AI, no final scoring, no ranking change.** It only fills
+  `evidence_summary_app`, `key_source_links_app`, and `advanced_notes_app`.
+- **No competitor display.** Only the four supported non-HQ signals contribute;
+  any other (e.g. competitor-tagged) item is ignored. Rapid growth is never
+  presented as a positive driver.
+- **Traceable, nothing invented.** `evidence_summary_app` is one compact line
+  per present signal (label, score, confidence, short reason).
+  `key_source_links_app` deduplicates URLs (signal URLs first, then evidence
+  URLs, capped at `max_links`, default 6) using only existing URLs/titles.
+  `advanced_notes_app` is audit-only counts/flags (evidence count, signal count,
+  signal names, low-confidence/zero-score signals, manual-review flags).
+
 ## Scope of the current step
 
 This step adds **schema and safe placeholders only**:
