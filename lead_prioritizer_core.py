@@ -13,6 +13,10 @@ from lead_output_schema import LeadInput, LeadPrioritizationResult, HQDetectionR
 from hq_simple_detector import build_simple_hq_query
 from lead_hq_ai_interpreter import call_serper_for_hq, interpret_hq_with_ai
 from lead_non_hq_enrichment import collect_non_hq_enrichment_evidence
+from lead_non_hq_signal_extractor import (
+    extract_non_hq_signals,
+    summarize_non_hq_signals_for_result,
+)
 
 _DEFAULT_AI_MODEL = "claude-haiku-4-5-20251001"
 
@@ -25,6 +29,7 @@ def prioritize_single_lead(
     ai_model: str = _DEFAULT_AI_MODEL,
     default_input_country: str = "Italy",
     collect_non_hq_evidence: bool = False,
+    extract_non_hq_signals_flag: bool = False,
 ) -> LeadPrioritizationResult:
     """Orchestrate HQ detection and scoring for a single lead.
 
@@ -39,6 +44,12 @@ def prioritize_single_lead(
     ``collect_non_hq_evidence`` (default ``False``) enables Step-2 non-HQ
     evidence collection.  It only fills ``evidence_items`` — no non-HQ scores are
     produced.  HQ detection always runs first and is unaffected by this flag.
+
+    ``extract_non_hq_signals_flag`` (default ``False``) enables Step-3
+    deterministic signal extraction from whatever evidence is present.  It never
+    triggers a Serper call itself: if evidence was not collected, extraction runs
+    over an empty list and yields empty signals.  Intermediate signal scores are
+    filled; the final commercial score and ranking are NOT touched here.
     """
     effective_country = (input_row.input_country or "").strip() or default_input_country
 
@@ -77,6 +88,13 @@ def prioritize_single_lead(
             serper_api_key=serper_api_key,
         )
 
+    # ── Step 3: deterministic non-HQ signal extraction (no live calls) ────────
+    # Extracts only from evidence already present — never triggers Serper here.
+    signals = []
+    if extract_non_hq_signals_flag:
+        signals = extract_non_hq_signals(evidence_items)
+    non_hq_summary = summarize_non_hq_signals_for_result(signals)
+
     return LeadPrioritizationResult(
         company_name=input_row.company_name,
         domain=input_row.domain,
@@ -112,28 +130,28 @@ def prioritize_single_lead(
         ai_call_success=hq.ai_call_success,
         ai_hq_error=hq.ai_hq_error,
         ai_hq_raw_json=hq.ai_hq_raw_json,
-        # ── Non-HQ enrichment placeholders ────────────────────────────────────
-        # Non-HQ enrichment is not implemented yet: keep every field at a safe
-        # empty default so downstream consumers see explicit "not enriched".
-        sig_international_profile_score=None,
-        sig_onboarding_training_need_score=None,
-        sig_company_size_complexity_score=None,
-        sig_icp_keyword_match_score=None,
-        international_profile_reason=None,
-        onboarding_training_need_reason=None,
-        company_size_complexity_reason=None,
-        icp_keyword_match_reason=None,
-        international_profile_evidence_url=None,
-        onboarding_training_need_evidence_url=None,
-        company_size_complexity_evidence_url=None,
-        icp_keyword_match_evidence_url=None,
-        international_profile_evidence_quote=None,
-        onboarding_training_need_evidence_quote=None,
-        company_size_complexity_evidence_quote=None,
-        icp_keyword_match_evidence_quote=None,
+        # ── Non-HQ signal scores (Step 3 — intermediate, not final fit score) ──
+        # Filled from deterministic extraction when the flag is on; otherwise the
+        # summary is all-None, matching the previous placeholder behavior.
+        sig_international_profile_score=non_hq_summary["sig_international_profile_score"],
+        sig_onboarding_training_need_score=non_hq_summary["sig_onboarding_training_need_score"],
+        sig_company_size_complexity_score=non_hq_summary["sig_company_size_complexity_score"],
+        sig_icp_keyword_match_score=non_hq_summary["sig_icp_keyword_match_score"],
+        international_profile_reason=non_hq_summary["international_profile_reason"],
+        onboarding_training_need_reason=non_hq_summary["onboarding_training_need_reason"],
+        company_size_complexity_reason=non_hq_summary["company_size_complexity_reason"],
+        icp_keyword_match_reason=non_hq_summary["icp_keyword_match_reason"],
+        international_profile_evidence_url=non_hq_summary["international_profile_evidence_url"],
+        onboarding_training_need_evidence_url=non_hq_summary["onboarding_training_need_evidence_url"],
+        company_size_complexity_evidence_url=non_hq_summary["company_size_complexity_evidence_url"],
+        icp_keyword_match_evidence_url=non_hq_summary["icp_keyword_match_evidence_url"],
+        international_profile_evidence_quote=non_hq_summary["international_profile_evidence_quote"],
+        onboarding_training_need_evidence_quote=non_hq_summary["onboarding_training_need_evidence_quote"],
+        company_size_complexity_evidence_quote=non_hq_summary["company_size_complexity_evidence_quote"],
+        icp_keyword_match_evidence_quote=non_hq_summary["icp_keyword_match_evidence_quote"],
         evidence_summary_app=None,
         key_source_links_app=None,
         advanced_notes_app=None,
         evidence_items=evidence_items,
-        signals=[],
+        signals=signals,
     )

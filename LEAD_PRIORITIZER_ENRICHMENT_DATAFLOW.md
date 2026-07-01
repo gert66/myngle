@@ -63,6 +63,33 @@ Implemented in `lead_non_hq_enrichment.py` and wired into
 - Collected evidence is attached to `LeadPrioritizationResult.evidence_items` as
   `LeadEvidence` objects.
 
+## Step 3: deterministic non-HQ signal extraction
+
+Implemented in `lead_non_hq_signal_extractor.py` and wired into
+`prioritize_single_lead(..., extract_non_hq_signals_flag=True)`.
+
+- **Uses collected evidence only.** Signals are extracted from
+  `evidence_items`; this step never triggers a Serper call. If evidence was not
+  collected, extraction runs over an empty list and yields empty signals — so
+  network behavior stays explicit and controlled by the Step-2 flag.
+- **Deterministic keyword rules only — no AI.** For each of the four supported
+  signals (`international_profile`, `onboarding_training_need`,
+  `company_size_complexity`, `icp_keyword_match`) the extractor counts distinct
+  positive keyword hits in the evidence title + snippet:
+  - `2.0` when ≥2 distinct keyword hits,
+  - `1.0` when exactly 1,
+  - `0.0` when evidence exists but no keyword matches.
+  No signal is produced for a name with no evidence.
+- **Confidence** is `High` (score 2.0 + a source URL), `Medium` (score 1.0 + a
+  source URL), otherwise `Low`.
+- **No competitor extraction** and **no rapid-growth positive signal.**
+- **No final commercial scoring.** These are intermediate signal scores that
+  populate the `sig_*` non-HQ fields and the `signals` list on
+  `LeadPrioritizationResult`; they are NOT the final commercial fit score, and
+  ranking is unchanged.
+- **Evidence is copied verbatim** (URL / snippet / title) from the existing
+  `LeadEvidence` — nothing is invented.
+
 ## Scope of the current step
 
 This step adds **schema and safe placeholders only**:

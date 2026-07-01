@@ -58,6 +58,7 @@ company_name = st.text_input("Company name", "")
 domain = st.text_input("Domain", "")
 input_country = st.text_input("Input country", "Italy")
 collect_non_hq = st.checkbox("Collect non-HQ enrichment evidence", value=False)
+extract_non_hq = st.checkbox("Extract non-HQ signals from evidence", value=False)
 
 run = st.button("Run HQ detection", type="primary")
 
@@ -82,6 +83,7 @@ if run:
             anthropic_api_key=_anthropic_key,
             default_input_country="Italy",
             collect_non_hq_evidence=collect_non_hq,
+            extract_non_hq_signals_flag=extract_non_hq,
         )
 
     # ── Headline ────────────────────────────────────────────────────────────
@@ -145,6 +147,27 @@ if run:
                 "query_used":     e.get("query_used"),
             }
             for e in _evidence
+        ])
+
+    st.subheader("Non-HQ extracted signals")
+    _signals = rd.get("signals") or []
+    if not _signals:
+        st.caption(
+            "No signals extracted. Tick 'Extract non-HQ signals from evidence' "
+            "(evidence must be collected first)."
+        )
+    else:
+        st.table([
+            {
+                "signal_name":       s.get("signal_name"),
+                "signal_score":      s.get("signal_score"),
+                "signal_confidence": s.get("signal_confidence"),
+                "signal_value":      s.get("signal_value"),
+                "signal_reason":     s.get("signal_reason"),
+                "evidence_url":      s.get("evidence_url"),
+                "evidence_quote":    s.get("evidence_quote"),
+            }
+            for s in _signals
         ])
 
     with st.expander("Full result (all fields)"):
