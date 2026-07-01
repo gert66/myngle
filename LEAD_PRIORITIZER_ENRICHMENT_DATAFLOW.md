@@ -136,6 +136,28 @@ Implemented in `lead_v2_scoring_adapter.py` and wired into
   to 0.0).
 - **This does not change batch ranking yet.**
 
+## Step 6: deterministic caller/app fields
+
+Implemented in `lead_caller_app_fields_builder.py` and wired into
+`prioritize_single_lead(..., build_caller_app_fields_flag=True)`.
+
+- **Built only from existing result fields** — HQ fields, non-HQ signal scores,
+  evidence summaries, and the optional commercial-score fields already on the
+  `LeadPrioritizationResult`.
+- **No AI, no live search, no implicit scoring.** The flag never collects
+  evidence, extracts signals, builds summaries, or scores; it only reads what is
+  already present.
+- **No competitor display** and **rapid growth is never presented as a positive
+  driver.**
+- Fills the app-facing payload for Lovable / Company Hub: `commercial_fit_score_app`,
+  `commercial_tier_app`, `what_is_hot_app`, `what_is_not_app`, `why_relevant_app`,
+  `caller_angle_app`, `call_starter_app`, `caution_app`,
+  `foreign_hq_signal_used_in_app`, `foreign_hq_country_app`, `foreign_hq_city_app`.
+- Text is short, practical, and traceable; `what_is_not_app` states factual gaps
+  (e.g. "Commercial score not calculated") without framing un-run features as
+  failures.
+- **This prepares the payload but does not change batch ranking yet.**
+
 ## Scope of the current step
 
 This step adds **schema and safe placeholders only**:

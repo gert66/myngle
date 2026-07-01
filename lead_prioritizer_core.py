@@ -19,6 +19,7 @@ from lead_non_hq_signal_extractor import (
 )
 from lead_app_summary_builder import build_app_summary_fields
 from lead_v2_scoring_adapter import score_lead_v2_result
+from lead_caller_app_fields_builder import build_caller_app_fields
 
 _DEFAULT_AI_MODEL = "claude-haiku-4-5-20251001"
 
@@ -34,6 +35,7 @@ def prioritize_single_lead(
     extract_non_hq_signals_flag: bool = False,
     build_app_summary_fields_flag: bool = False,
     calculate_commercial_score_flag: bool = False,
+    build_caller_app_fields_flag: bool = False,
 ) -> LeadPrioritizationResult:
     """Orchestrate HQ detection and scoring for a single lead.
 
@@ -69,6 +71,12 @@ def prioritize_single_lead(
     were extracted, scoring still runs from the HQ signal plus zeros.  It never
     collects evidence, extracts signals, or builds summaries implicitly, and does
     NOT change batch ranking or legacy scoring behavior.
+
+    ``build_caller_app_fields_flag`` (default ``False``) enables Step-6
+    deterministic caller/app field generation from whatever is already on the
+    result (HQ, non-HQ signals, evidence, optional score).  It only fills the
+    app-facing fields; it never collects evidence, extracts signals, builds
+    summaries, or scores implicitly.
     """
     effective_country = (input_row.input_country or "").strip() or default_input_country
 
@@ -208,5 +216,22 @@ def prioritize_single_lead(
         result.score_input_explicit_lnd = score_out.get("score_input_explicit_lnd")
         result.score_input_lnd_onboarding = score_out.get("score_input_lnd_onboarding")
         result.score_input_rapid_growth = score_out.get("score_input_rapid_growth")
+
+    # ── Step 6: deterministic caller/app fields (uses only existing result) ───
+    # Builds the Lovable/Company Hub app payload from fields already present;
+    # never collects, extracts, summarizes, or scores implicitly.
+    if build_caller_app_fields_flag:
+        caller_fields = build_caller_app_fields(result)
+        result.commercial_fit_score_app = caller_fields["commercial_fit_score_app"]
+        result.commercial_tier_app = caller_fields["commercial_tier_app"]
+        result.what_is_hot_app = caller_fields["what_is_hot_app"]
+        result.what_is_not_app = caller_fields["what_is_not_app"]
+        result.why_relevant_app = caller_fields["why_relevant_app"]
+        result.caller_angle_app = caller_fields["caller_angle_app"]
+        result.call_starter_app = caller_fields["call_starter_app"]
+        result.caution_app = caller_fields["caution_app"]
+        result.foreign_hq_signal_used_in_app = caller_fields["foreign_hq_signal_used_in_app"]
+        result.foreign_hq_country_app = caller_fields["foreign_hq_country_app"]
+        result.foreign_hq_city_app = caller_fields["foreign_hq_city_app"]
 
     return result

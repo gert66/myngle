@@ -179,3 +179,16 @@ class LeadPrioritizationResult:
     score_input_explicit_lnd: Optional[float] = None
     score_input_lnd_onboarding: Optional[float] = None
     score_input_rapid_growth: Optional[float] = None
+
+    # ── Caller / app-facing fields (Step 6 — opt-in, deterministic) ───────────
+    commercial_fit_score_app: Optional[float] = None
+    commercial_tier_app: Optional[str] = None
+    what_is_hot_app: Optional[str] = None
+    what_is_not_app: Optional[str] = None
+    why_relevant_app: Optional[str] = None
+    caller_angle_app: Optional[str] = None
+    call_starter_app: Optional[str] = None
+    caution_app: Optional[str] = None
+    foreign_hq_signal_used_in_app: Optional[str] = None
+    foreign_hq_country_app: Optional[str] = None
+    foreign_hq_city_app: Optional[str] = None

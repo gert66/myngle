@@ -61,6 +61,7 @@ collect_non_hq = st.checkbox("Collect non-HQ enrichment evidence", value=False)
 extract_non_hq = st.checkbox("Extract non-HQ signals from evidence", value=False)
 build_app_summary = st.checkbox("Build app/evidence summary fields", value=False)
 calculate_score = st.checkbox("Calculate commercial fit score", value=False)
+build_caller_fields = st.checkbox("Build caller/app fields", value=False)
 
 run = st.button("Run HQ detection", type="primary")
 
@@ -88,6 +89,7 @@ if run:
             extract_non_hq_signals_flag=extract_non_hq,
             build_app_summary_fields_flag=build_app_summary,
             calculate_commercial_score_flag=calculate_score,
+            build_caller_app_fields_flag=build_caller_fields,
         )
 
     # ── Headline ────────────────────────────────────────────────────────────
@@ -208,6 +210,18 @@ if run:
             "score_input_rapid_growth", "v2_score_input_mapping_note",
         ]
         st.table([{"field": k, "value": rd.get(k)} for k in _score_keys])
+
+    st.subheader("Caller/app fields")
+    _caller_keys = [
+        "commercial_fit_score_app", "commercial_tier_app",
+        "what_is_hot_app", "what_is_not_app", "why_relevant_app",
+        "caller_angle_app", "call_starter_app", "caution_app",
+        "foreign_hq_signal_used_in_app", "foreign_hq_country_app", "foreign_hq_city_app",
+    ]
+    if not any(rd.get(k) is not None for k in _caller_keys):
+        st.caption("No caller/app fields built. Tick 'Build caller/app fields'.")
+    else:
+        st.table([{"field": k, "value": rd.get(k)} for k in _caller_keys])
 
     with st.expander("Full result (all fields)"):
         st.json(rd)
