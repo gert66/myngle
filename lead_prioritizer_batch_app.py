@@ -223,6 +223,45 @@ def build_progress_status_text(payload: dict, started_at: float, now: Optional[f
     return " | ".join(parts)
 
 
+def build_phase_progress_status_text(
+    payload: dict, started_at: float, now: Optional[float] = None,
+) -> str:
+    """Status line for phased runs (the foreign-HQ-only mode).
+
+    Renders the ``phase`` / ``phase_label`` / ``phase_processed`` /
+    ``phase_total`` keys emitted by ``run_batch_foreign_hq_only``, with
+    success/error counts when the phase provides them.  Payloads without phase
+    info fall back to ``build_progress_status_text``, so this is safe as a
+    single renderer for any progress payload.  Contains no secrets.
+    """
+    if "phase" not in payload:
+        return build_progress_status_text(payload, started_at, now)
+
+    import time as _time
+
+    if now is None:
+        now = _time.time()
+
+    phase = int(payload.get("phase", 0) or 0)
+    phase_count = int(payload.get("phase_count", 3) or 3)
+    label = str(payload.get("phase_label") or "")
+    done = int(payload.get("phase_processed", 0) or 0)
+    total = int(payload.get("phase_total", 0) or 0)
+    current = str(payload.get("current_company_name") or "?")
+    elapsed = max(0.0, now - started_at)
+
+    parts = [
+        f"Phase {phase}/{phase_count}: {label}",
+        f"Processed {done}/{total}",
+    ]
+    if "success_count" in payload or "error_count" in payload:
+        parts.append(f"Success {int(payload.get('success_count', 0) or 0)}")
+        parts.append(f"Errors {int(payload.get('error_count', 0) or 0)}")
+    parts.append(f"Current: {current}")
+    parts.append(f"Elapsed {format_duration(elapsed)}")
+    return " | ".join(parts)
+
+
 # ---------------------------------------------------------------------------
 # Streamlit UI
 # ---------------------------------------------------------------------------
@@ -428,6 +467,16 @@ def main() -> None:  # pragma: no cover - exercised only under `streamlit run`
             # HQ+C4+optional-C5 screening and the confirmed-only full-enrichment
             # pass both happen inside run_batch_foreign_hq_only; C5 must not be
             # re-applied afterward here (it already ran as part of the decision).
+            def _on_phase_progress(payload: dict) -> None:
+                phase = int(payload.get("phase", 1) or 1)
+                phase_count = int(payload.get("phase_count", 3) or 3)
+                total = int(payload.get("phase_total", 0) or 0)
+                done = int(payload.get("phase_processed", 0) or 0)
+                within = min(1.0, done / total) if total else 0.0
+                overall = ((phase - 1) + within) / phase_count
+                progress_bar.progress(min(1.0, max(0.0, overall)))
+                status.info(build_phase_progress_status_text(payload, started_at))
+
             with st.spinner(
                 "Running HQ screening, optional C5 adjudication, and "
                 "confirmed-only full enrichment..."
@@ -439,7 +488,7 @@ def main() -> None:  # pragma: no cover - exercised only under `streamlit run`
                     c5_scope=c5_scope,
                     c5_model_used=c5_model_used,
                     c5_model_tier=c5_model_tier,
-                    progress_callback=_on_progress,
+                    progress_callback=_on_phase_progress,
                 )
             progress_bar.progress(1.0)
         else:

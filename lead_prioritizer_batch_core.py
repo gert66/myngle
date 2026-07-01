@@ -49,6 +49,16 @@ SUPPORTED_RUN_MODES = (
 # modes stay untouched; only the Streamlit app offers it today.
 FOREIGN_HQ_ONLY_MODE = "full_foreign_hq_only"
 
+# Progress-phase labels for the foreign-HQ-only mode. Every progress payload
+# emitted by ``run_batch_foreign_hq_only`` carries ``phase`` / ``phase_count`` /
+# ``phase_label`` / ``phase_processed`` / ``phase_total`` so a UI can render
+# per-phase progress; phase 2 is skipped when C5 is disabled.
+FOREIGN_HQ_ONLY_PHASE_LABELS = {
+    1: "HQ screening",
+    2: "C5 adjudication",
+    3: "Full enrichment for confirmed foreign-HQ leads",
+}
+
 
 @dataclass
 class BatchRunConfig:
@@ -690,10 +700,33 @@ def run_batch_foreign_hq_only(
     ``evidence``, ``signals``, ``run_summary`` (extended with the mode's own
     counts and, always, the C5 settings/counts columns).
     """
+    def _emit_phase(phase: int, phase_processed, phase_total, base: dict) -> None:
+        """Forward a progress payload augmented with phase info; never raises."""
+        if progress_callback is None:
+            return
+        payload = dict(base)
+        payload.update({
+            "phase": phase,
+            "phase_count": 3,
+            "phase_label": FOREIGN_HQ_ONLY_PHASE_LABELS[phase],
+            "phase_processed": int(phase_processed or 0),
+            "phase_total": int(phase_total or 0),
+        })
+        try:
+            progress_callback(payload)
+        except Exception:
+            pass  # a broken callback must never break the run
+
+    def _phase1_cb(payload: dict) -> None:
+        _emit_phase(1, payload.get("processed_rows"), payload.get("selected_rows"), payload)
+
+    def _phase2_cb(payload: dict) -> None:
+        _emit_phase(2, payload.get("c5_processed"), payload.get("c5_selected"), payload)
+
     hq_config = replace(config, run_mode="hq_only")
     hq_tables = run_batch_dataframe(
         df, hq_config, serper_api_key, anthropic_api_key,
-        progress_callback=progress_callback,
+        progress_callback=_phase1_cb if progress_callback is not None else None,
     )
     rows = hq_tables["enriched_leads"].to_dict("records")
 
@@ -707,18 +740,23 @@ def run_batch_foreign_hq_only(
             scoring_behavior=c5_scoring_behavior,
             scope=c5_scope,
             include_raw=config.include_raw_ai_json,
-            progress_callback=progress_callback,
+            progress_callback=_phase2_cb if progress_callback is not None else None,
         )
 
     out_rows: list[dict] = []
     evidence_rows: list[dict] = []
     signal_rows: list[dict] = []
     attempted = skipped = confirmed = 0
+    p3_success = p3_error = 0
 
-    for row in rows:
-        score = _c5_score(row.get("sig_foreign_hq_score_for_next_scoring"))
-        is_confirmed = (score == 3.0)
+    # Same confirmation expression as before, precomputed so progress can
+    # report a fixed phase-3 total; enrich/skip decisions are unchanged.
+    confirmed_flags = [
+        _c5_score(r.get("sig_foreign_hq_score_for_next_scoring")) == 3.0 for r in rows
+    ]
+    total_confirmed = sum(confirmed_flags)
 
+    for row, is_confirmed in zip(rows, confirmed_flags):
         if not is_confirmed:
             out_row = dict(row)
             out_row["enrichment_skipped"] = True
@@ -749,24 +787,25 @@ def run_batch_foreign_hq_only(
             )
             evidence_rows.extend(flatten_evidence_for_excel(result, source_index))
             signal_rows.extend(flatten_signals_for_excel(result, source_index))
+            p3_success += 1
         except Exception as exc:  # per-row isolation, matching run_batch_dataframe
             out_row = dict(row)
             out_row["run_success"] = False
             out_row["run_error"] = f"{type(exc).__name__}: {str(exc)[:300]}"
+            p3_error += 1
 
         out_row["enrichment_skipped"] = False
         out_row["enrichment_skip_reason"] = ""
         out_rows.append(out_row)
 
-        if progress_callback is not None:
-            try:
-                progress_callback({
-                    "foreign_hq_full_processed": attempted,
-                    "foreign_hq_full_selected": confirmed,
-                    "current_company_name": company,
-                })
-            except Exception:
-                pass
+        _emit_phase(3, attempted, total_confirmed, {
+            "success_count": p3_success,
+            "error_count": p3_error,
+            "current_company_name": company,
+            # legacy keys kept for compatibility with earlier payload shape
+            "foreign_hq_full_processed": attempted,
+            "foreign_hq_full_selected": total_confirmed,
+        })
 
     success_count = sum(1 for r in out_rows if r.get("run_success", True))
     error_count = len(out_rows) - success_count

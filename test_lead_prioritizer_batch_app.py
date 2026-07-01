@@ -18,6 +18,7 @@ from lead_prioritizer_batch_app import (
     build_download_filename,
     format_duration,
     build_progress_status_text,
+    build_phase_progress_status_text,
     MODE_LABELS,
     SUPPORTED_DEFAULT_INPUT_COUNTRIES,
     DEFAULT_COUNTRY_PLACEHOLDER,
@@ -188,6 +189,66 @@ class TestProgressStatusText:
         payload = {"processed_rows": 1, "selected_rows": 2, "success_count": 1,
                    "error_count": 0, "current_company_name": "Acme"}
         text = build_progress_status_text(payload, started_at=0.0, now=10.0)
+        assert "api_key" not in text.lower() and "sk-ant" not in text.lower()
+
+
+# ---------------------------------------------------------------------------
+# build_phase_progress_status_text (foreign-HQ-only mode)
+# ---------------------------------------------------------------------------
+
+class TestPhaseProgressStatusText:
+    def test_phase1_renders_label_counts_and_company(self):
+        payload = {
+            "phase": 1, "phase_count": 3, "phase_label": "HQ screening",
+            "phase_processed": 3, "phase_total": 30,
+            "success_count": 3, "error_count": 0,
+            "current_company_name": "Macromercado",
+        }
+        text = build_phase_progress_status_text(payload, started_at=1000.0, now=1065.0)
+        assert "Phase 1/3: HQ screening" in text
+        assert "Processed 3/30" in text
+        assert "Success 3" in text and "Errors 0" in text
+        assert "Current: Macromercado" in text
+        assert "Elapsed 00:01:05" in text
+        assert "0/0" not in text
+
+    def test_phase2_without_success_counts(self):
+        payload = {
+            "phase": 2, "phase_count": 3, "phase_label": "C5 adjudication",
+            "phase_processed": 1, "phase_total": 4,
+            "current_company_name": "Toto Calzados",
+        }
+        text = build_phase_progress_status_text(payload, started_at=0.0, now=10.0)
+        assert "Phase 2/3: C5 adjudication" in text
+        assert "Processed 1/4" in text
+        assert "Success" not in text and "Errors" not in text
+        assert "Current: Toto Calzados" in text
+
+    def test_phase3_label(self):
+        payload = {
+            "phase": 3, "phase_count": 3,
+            "phase_label": "Full enrichment for confirmed foreign-HQ leads",
+            "phase_processed": 2, "phase_total": 5,
+            "success_count": 2, "error_count": 0,
+            "current_company_name": "Gestam",
+        }
+        text = build_phase_progress_status_text(payload, started_at=0.0, now=1.0)
+        assert "Phase 3/3: Full enrichment for confirmed foreign-HQ leads" in text
+        assert "Processed 2/5" in text
+
+    def test_falls_back_to_plain_status_without_phase(self):
+        payload = {
+            "processed_rows": 2, "selected_rows": 5, "success_count": 2,
+            "error_count": 0, "current_company_name": "Acme",
+        }
+        assert build_phase_progress_status_text(payload, 0.0, now=10.0) == \
+            build_progress_status_text(payload, 0.0, now=10.0)
+
+    def test_no_secrets_in_text(self):
+        payload = {"phase": 1, "phase_label": "HQ screening",
+                   "phase_processed": 1, "phase_total": 2,
+                   "current_company_name": "Acme"}
+        text = build_phase_progress_status_text(payload, 0.0, now=5.0)
         assert "api_key" not in text.lower() and "sk-ant" not in text.lower()
 
 

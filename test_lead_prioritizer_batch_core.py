@@ -752,3 +752,61 @@ class TestForeignHQOnlyMode:
             out = run_batch_dataframe(df, cfg, "S", "A")
         assert "enrichment_skipped" not in out["enriched_leads"].columns
         assert "full_enrichment_attempted_count" not in out["run_summary"].columns
+
+    # ── Progress reporting (phase-aware payloads) ────────────────────────────
+
+    def test_progress_phases_nonzero_totals_and_company(self):
+        payloads = []
+        fake = _fake_prioritize_for_foreign_hq(
+            {"Confirmed Foreign Co": 3.0, "Local Domestic Co": 0.0})
+        with patch("lead_prioritizer_batch_core.prioritize_single_lead", side_effect=fake):
+            run_batch_foreign_hq_only(self._df, self._cfg, "S", "A",
+                                      progress_callback=payloads.append)
+        assert payloads, "expected progress payloads"
+        assert all("phase" in p for p in payloads)
+        # Phase 1: HQ screening over ALL selected rows — never 0/0.
+        p1 = [p for p in payloads if p["phase"] == 1]
+        assert p1
+        assert all(p["phase_total"] == 2 for p in p1)
+        assert all(p["phase_label"] == "HQ screening" for p in p1)
+        assert p1[-1]["phase_processed"] == 2
+        assert all(p.get("current_company_name") for p in p1)
+        # Phase 2 absent when C5 is disabled.
+        assert not [p for p in payloads if p["phase"] == 2]
+        # Phase 3: total is the confirmed count (1), not a running counter.
+        p3 = [p for p in payloads if p["phase"] == 3]
+        assert p3
+        assert all(p["phase_total"] == 1 for p in p3)
+        assert p3[-1]["phase_processed"] == 1
+        assert p3[-1]["current_company_name"] == "Confirmed Foreign Co"
+        assert p3[-1]["success_count"] == 1
+        assert p3[-1]["error_count"] == 0
+
+    def test_progress_phase2_present_when_c5_enabled(self):
+        payloads = []
+        fake = _fake_prioritize_for_foreign_hq(
+            {"Confirmed Foreign Co": 3.0, "Local Domestic Co": 0.0})
+        with patch("lead_prioritizer_batch_core.prioritize_single_lead", side_effect=fake), \
+             _patch_adjudicator(_mk_result("foreign_parent_confirmed", "High", "yes")):
+            run_batch_foreign_hq_only(
+                self._df, self._cfg, "S", "A",
+                c5_enabled=True, c5_scoring_behavior="append_only",
+                c5_scope="all_rows", c5_model_used="claude-sonnet-5", c5_model_tier="sonnet",
+                progress_callback=payloads.append)
+        p2 = [p for p in payloads if p["phase"] == 2]
+        assert p2
+        assert all(p["phase_label"] == "C5 adjudication" for p in p2)
+        assert all(p["phase_total"] == 2 for p in p2)  # scope all_rows → both rows
+        assert p2[-1]["phase_processed"] == 2
+        assert all(p.get("current_company_name") for p in p2)
+
+    def test_progress_callback_exception_does_not_break_run(self):
+        def _boom(_payload):
+            raise RuntimeError("ui broke")
+
+        fake = _fake_prioritize_for_foreign_hq(
+            {"Confirmed Foreign Co": 3.0, "Local Domestic Co": 0.0})
+        with patch("lead_prioritizer_batch_core.prioritize_single_lead", side_effect=fake):
+            out = run_batch_foreign_hq_only(self._df, self._cfg, "S", "A",
+                                            progress_callback=_boom)
+        assert len(out["enriched_leads"]) == 2
