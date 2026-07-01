@@ -199,3 +199,55 @@ class TestScoringEdges:
         r = _run(self._lead, ai)
         assert r.sig_foreign_hq_score_for_next_scoring == 0.0
         assert r.foreign_hq_simple is False
+
+
+class TestBrazilNormalization:
+    """Brazil aliases (Brasil / BR / BRA) must normalize equal to input Brazil,
+    so a domestic Brazilian company is not misclassified as foreign."""
+
+    _br = LeadInput(company_name="Foo Brasil Ltda", domain="foo.com.br",
+                    input_country="Brazil")
+
+    def test_brasil_alias_is_domestic(self):
+        ai = json.dumps(dict(
+            classification="foreign_parent", confidence="High",
+            parent_hq_country="Brasil", reason="same country",
+        ))
+        r = _run(self._br, ai)
+        assert r.sig_foreign_hq_score_for_next_scoring == 0.0
+        assert r.hq_structure_type == "domestic"
+
+    def test_br_alias_scores_zero(self):
+        ai = json.dumps(dict(
+            classification="foreign_parent", confidence="High",
+            parent_hq_country="BR", reason="same country",
+        ))
+        r = _run(self._br, ai)
+        assert r.sig_foreign_hq_score_for_next_scoring == 0.0
+
+    def test_bra_alias_scores_zero(self):
+        ai = json.dumps(dict(
+            classification="foreign_parent", confidence="High",
+            parent_hq_country="BRA", reason="same country",
+        ))
+        r = _run(self._br, ai)
+        assert r.sig_foreign_hq_score_for_next_scoring == 0.0
+
+    def test_default_country_brazil_domestic(self):
+        lead = LeadInput(company_name="Foo Brasil Ltda", domain="foo.com.br",
+                         input_country=None)
+        ai = json.dumps(dict(
+            classification="domestic", confidence="High",
+            parent_hq_country="Brasil", reason="domestic",
+        ))
+        r = _run(lead, ai, default_input_country="Brazil")
+        assert r.sig_foreign_hq_score_for_next_scoring == 0.0
+        assert r.input_country == "Brazil"
+
+    def test_genuine_foreign_parent_still_scores_3(self):
+        ai = json.dumps(dict(
+            classification="foreign_parent", confidence="High",
+            parent_hq_country="Germany", reason="German parent",
+        ))
+        r = _run(self._br, ai)
+        assert r.sig_foreign_hq_score_for_next_scoring == 3.0
