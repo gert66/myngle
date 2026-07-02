@@ -21,5 +21,6 @@ venv/
 autosave/
 .claude/
 local_paths.json
+batch_temp_uploads/
 
 linkedin_signal_cache/

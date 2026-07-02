@@ -16,8 +16,9 @@ from __future__ import annotations
 
 import io
 import json
-import tempfile
+import uuid
 import zipfile
+from datetime import datetime
 from pathlib import Path
 
 import streamlit as st
@@ -31,10 +32,54 @@ from export_lead_prioritizer_to_lovable_json import (
 COUNTRY_PLACEHOLDER = "Select country..."
 EXPORT_COUNTRIES = ["Italy", "Brazil", "Uruguay"]
 
+# Stable local folder for uploaded workbooks. Deliberately not a
+# tempfile.TemporaryDirectory: on Windows, pandas/openpyxl can still hold a
+# file handle open on the uploaded .xlsx after export returns, and
+# TemporaryDirectory.__exit__ calling shutil.rmtree while that handle is open
+# raises PermissionError ([WinError 32]) and crashes the app.
+UPLOAD_TEMP_DIR = Path("batch_temp_uploads")
+
 
 def parse_cold_callers(text: str) -> list[str]:
     """One non-empty caller name per line."""
     return [line.strip() for line in (text or "").splitlines() if line.strip()]
+
+
+def make_upload_path(original_name: str, upload_dir: Path = UPLOAD_TEMP_DIR) -> Path:
+    """Build a unique, safe path for an uploaded workbook in a stable folder."""
+    upload_dir.mkdir(parents=True, exist_ok=True)
+    suffix = Path(original_name or "workbook.xlsx").suffix or ".xlsx"
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    filename = f"uploaded_{timestamp}_{uuid.uuid4().hex}{suffix}"
+    return upload_dir / filename
+
+
+def save_uploaded_workbook(uploaded_file, upload_dir: Path = UPLOAD_TEMP_DIR) -> Path:
+    """Write an uploaded workbook's bytes to a stable temp folder.
+
+    The file handle is closed (via the ``with`` block) before this returns, so
+    the caller can safely hand the path to pandas/openpyxl right after.
+    """
+    upload_path = make_upload_path(uploaded_file.name, upload_dir)
+    with open(upload_path, "wb") as f:
+        f.write(uploaded_file.getvalue())
+    return upload_path
+
+
+def cleanup_uploaded_workbook(upload_path: Path) -> str | None:
+    """Best-effort delete of an uploaded workbook; never raises.
+
+    Returns a warning message if cleanup failed (e.g. Windows still holding a
+    file handle open), or None on success/no-op.
+    """
+    try:
+        Path(upload_path).unlink(missing_ok=True)
+        return None
+    except PermissionError as exc:
+        return (
+            f"Could not remove temporary upload file {upload_path}: {exc}. "
+            "This is harmless and the file can be deleted manually later."
+        )
 
 
 def build_zip_bytes(file_paths: list[str]) -> bytes:
@@ -97,24 +142,27 @@ def main() -> None:
             st.error("Enter an output directory.")
             return
 
+        # Written to a stable folder (not TemporaryDirectory) so Windows never
+        # has to rmtree a file that pandas/openpyxl may still have open.
+        upload_path = save_uploaded_workbook(uploaded)
         try:
-            # Keep the original workbook name so it shows up in the manifest.
-            with tempfile.TemporaryDirectory() as tmp_dir:
-                tmp_path = Path(tmp_dir) / (uploaded.name or "workbook.xlsx")
-                tmp_path.write_bytes(uploaded.getvalue())
-                with st.spinner("Exporting workbook to Lovable JSON..."):
-                    manifest = export_workbook_to_lovable_json(
-                        input_xlsx=tmp_path,
-                        output_dir=output_dir.strip(),
-                        export_country=country,
-                        cold_callers=cold_callers,
-                        include_skipped=include_skipped,
-                        foreign_hq_only=foreign_hq_only,
-                        bucket_size=int(bucket_size),
-                    )
+            with st.spinner("Exporting workbook to Lovable JSON..."):
+                manifest = export_workbook_to_lovable_json(
+                    input_xlsx=upload_path,
+                    output_dir=output_dir.strip(),
+                    export_country=country,
+                    cold_callers=cold_callers,
+                    include_skipped=include_skipped,
+                    foreign_hq_only=foreign_hq_only,
+                    bucket_size=int(bucket_size),
+                )
         except LovableExportError as exc:
             st.error(f"Export failed: {exc}")
             return
+        finally:
+            cleanup_warning = cleanup_uploaded_workbook(upload_path)
+            if cleanup_warning:
+                st.warning(cleanup_warning)
 
         st.success(
             f"Export complete: {manifest['rows_exported']} companies written "
@@ -155,6 +203,9 @@ def main() -> None:
             file_name="lovable_export.zip",
             mime="application/zip",
         )
+
+        with st.expander("Debug: upload temp file"):
+            st.code(str(upload_path), language=None)
 
 
 if __name__ == "__main__":
