@@ -17,6 +17,7 @@ unless ``include_raw_ai_json=True``.
 
 from __future__ import annotations
 
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, replace
 from datetime import datetime
 from typing import Callable, Optional
@@ -833,4 +834,280 @@ def run_batch_foreign_hq_only(
         "evidence": pd.DataFrame(evidence_rows),
         "signals": pd.DataFrame(signal_rows),
         "run_summary": run_summary,
+    }
+
+
+# ---------------------------------------------------------------------------
+# Optional parallel chunk processing (Streamlit batch app)
+# ---------------------------------------------------------------------------
+#
+# Splits the selected rows into approximately equal chunks and runs each chunk
+# through run_single_batch_unit — the exact same code path a normal smaller
+# batch takes (run_batch_dataframe + optional C5, or run_batch_foreign_hq_only)
+# — on a thread pool (API-bound work). No scoring/C4/C5 logic lives here; the
+# sequential paths are untouched.
+
+MAX_PARALLEL_WORKERS = 4
+
+_PARALLEL_C5_COUNT_KEYS = (
+    "c5_rows_attempted", "c5_success_count", "c5_error_count",
+    "c5_foreign_parent_confirmed_count", "c5_domestic_confirmed_count",
+    "c5_unclear_count", "c5_recommended_score_3_count",
+    "c5_possible_foreign_parent_for_review_count", "c5_downgraded_score_3_count",
+)
+_PARALLEL_FHO_COUNT_KEYS = (
+    "total_processed_rows", "full_enrichment_attempted_count",
+    "full_enrichment_skipped_count", "confirmed_foreign_hq_count",
+)
+
+
+def split_dataframe_into_chunks(df: pd.DataFrame, n_chunks: int) -> list:
+    """Split a DataFrame into at most ``n_chunks`` order-preserving chunks.
+
+    Chunk sizes differ by at most one row; the original index is preserved.
+    Never produces empty chunks (fewer rows than chunks → fewer chunks).
+    """
+    n = len(df)
+    if n == 0:
+        return []
+    k = max(1, min(int(n_chunks or 1), n))
+    base, extra = divmod(n, k)
+    chunks, start = [], 0
+    for i in range(k):
+        size = base + (1 if i < extra else 0)
+        chunks.append(df.iloc[start:start + size])
+        start += size
+    return chunks
+
+
+def run_single_batch_unit(
+    df: pd.DataFrame,
+    config: BatchRunConfig,
+    serper_api_key: str,
+    anthropic_api_key: str,
+    *,
+    c5_enabled: bool = False,
+    c5_scoring_behavior: str = "append_only",
+    c5_scope: str = "score_3_or_manual_review",
+    c5_model_used: str = "",
+    c5_model_tier: str = "",
+    progress_callback: Optional[Callable[[dict], None]] = None,
+) -> dict:
+    """Run one batch unit through the same code path as a sequential run.
+
+    ``full_foreign_hq_only`` delegates to ``run_batch_foreign_hq_only`` (which
+    applies C5 internally); every other mode runs ``run_batch_dataframe`` plus
+    the same optional C5 post-step and Run Summary extension the Streamlit app
+    performs sequentially. Used by the parallel runner for each chunk.
+    """
+    if config.run_mode == FOREIGN_HQ_ONLY_MODE:
+        return run_batch_foreign_hq_only(
+            df, config, serper_api_key, anthropic_api_key,
+            c5_enabled=c5_enabled,
+            c5_scoring_behavior=c5_scoring_behavior,
+            c5_scope=c5_scope,
+            c5_model_used=c5_model_used,
+            c5_model_tier=c5_model_tier,
+            progress_callback=progress_callback,
+        )
+
+    tables = run_batch_dataframe(
+        df, config, serper_api_key, anthropic_api_key,
+        progress_callback=progress_callback,
+    )
+    c5_counts: dict = {}
+    if c5_enabled:
+        rows, c5_counts = apply_c5_adjudication(
+            tables["enriched_leads"],
+            anthropic_api_key=anthropic_api_key,
+            model_used=c5_model_used,
+            model_tier=c5_model_tier,
+            scoring_behavior=c5_scoring_behavior,
+            scope=c5_scope,
+            include_raw=config.include_raw_ai_json,
+        )
+        tables["enriched_leads"] = pd.DataFrame(rows)
+    tables["run_summary"] = add_c5_summary_fields(
+        tables["run_summary"],
+        c5_enabled=c5_enabled,
+        c5_scoring_behavior=c5_scoring_behavior if c5_enabled else "",
+        c5_scope=c5_scope if c5_enabled else "",
+        c5_model_tier=c5_model_tier if c5_enabled else "",
+        c5_model_used=c5_model_used if c5_enabled else "",
+        counts=c5_counts,
+    )
+    return tables
+
+
+def run_batch_dataframe_parallel(
+    df: pd.DataFrame,
+    config: BatchRunConfig,
+    serper_api_key: str,
+    anthropic_api_key: str,
+    *,
+    workers: int,
+    c5_enabled: bool = False,
+    c5_scoring_behavior: str = "append_only",
+    c5_scope: str = "score_3_or_manual_review",
+    c5_model_used: str = "",
+    c5_model_tier: str = "",
+    progress_callback: Optional[Callable[[dict], None]] = None,
+    chunk_result_callback: Optional[Callable[[dict, dict], None]] = None,
+) -> dict:
+    """Run the selected rows as parallel chunks and combine the outputs.
+
+    - ``workers`` is capped at ``MAX_PARALLEL_WORKERS`` (and at the row count).
+    - Row selection (start_row/row_limit), C5 config, and country behavior are
+      identical to a sequential run; each chunk runs with selection already
+      applied (chunk config gets ``start_row=0, row_limit=0``).
+    - Output has the same table structure as ``run_batch_dataframe`` plus a
+      ``chunk_reports`` list; Enriched Leads preserves the original selected-row
+      order. A failed chunk contributes placeholder error rows and never
+      discards other chunks' results.
+    - ``progress_callback`` (main thread) receives chunk-level payloads:
+      ``parallel_chunks_total`` / ``parallel_chunks_completed`` /
+      ``chunk_index`` / ``chunk_row_count`` / ``chunk_success`` /
+      ``chunk_error``. ``chunk_result_callback(report, tables)`` fires (main
+      thread) for each successful chunk, e.g. for checkpoint autosave; both
+      callbacks are exception-proofed.
+    """
+    workers = max(1, min(int(workers or 1), MAX_PARALLEL_WORKERS))
+    selected = select_batch_rows(df, config)
+    chunks = split_dataframe_into_chunks(selected, workers)
+    chunk_config = replace(config, start_row=0, row_limit=0)
+
+    reports: list[dict] = [{
+        "chunk_index": i + 1,
+        "row_count": len(chunk),
+        "source_index_first": chunk.index[0],
+        "source_index_last": chunk.index[-1],
+        "success": None,
+        "error": "",
+    } for i, chunk in enumerate(chunks)]
+
+    results: list = [None] * len(chunks)
+    completed = 0
+
+    def _emit_chunk(report: dict) -> None:
+        if progress_callback is None:
+            return
+        try:
+            progress_callback({
+                "parallel_chunks_total": len(chunks),
+                "parallel_chunks_completed": completed,
+                "chunk_index": report["chunk_index"],
+                "chunk_row_count": report["row_count"],
+                "chunk_success": report["success"],
+                "chunk_error": report["error"],
+            })
+        except Exception:
+            pass  # a broken callback must never break the run
+
+    if chunks:
+        with ThreadPoolExecutor(max_workers=workers) as pool:
+            futures = {
+                pool.submit(
+                    run_single_batch_unit, chunk, chunk_config,
+                    serper_api_key, anthropic_api_key,
+                    c5_enabled=c5_enabled,
+                    c5_scoring_behavior=c5_scoring_behavior,
+                    c5_scope=c5_scope,
+                    c5_model_used=c5_model_used,
+                    c5_model_tier=c5_model_tier,
+                ): i
+                for i, chunk in enumerate(chunks)
+            }
+            for future in as_completed(futures):
+                i = futures[future]
+                try:
+                    results[i] = future.result()
+                    reports[i]["success"] = True
+                except Exception as exc:  # chunk-level isolation
+                    reports[i]["success"] = False
+                    reports[i]["error"] = f"{type(exc).__name__}: {str(exc)[:300]}"
+                completed += 1
+                _emit_chunk(reports[i])
+                if reports[i]["success"] and chunk_result_callback is not None:
+                    try:
+                        chunk_result_callback(dict(reports[i]), results[i])
+                    except Exception:
+                        pass  # checkpoint saving must never break the run
+
+    # ── Combine in chunk order (original selected-row order) ─────────────────
+    enriched_frames, evidence_frames, signal_frames = [], [], []
+    processed = success = error = 0
+    for i, chunk in enumerate(chunks):
+        if reports[i]["success"]:
+            tables = results[i]
+            enriched_frames.append(tables["enriched_leads"])
+            if len(tables["evidence"]):
+                evidence_frames.append(tables["evidence"])
+            if len(tables["signals"]):
+                signal_frames.append(tables["signals"])
+            summary = tables["run_summary"].iloc[0].to_dict() if len(tables["run_summary"]) else {}
+            processed += int(summary.get("processed_rows", 0) or 0)
+            success += int(summary.get("success_count", 0) or 0)
+            error += int(summary.get("error_count", 0) or 0)
+        else:
+            # Placeholder error rows so the failed chunk's rows stay visible.
+            placeholder = []
+            for idx, row in chunk.iterrows():
+                out = row.to_dict()
+                out["source_index"] = idx
+                out["run_success"] = False
+                out["run_error"] = f"parallel_chunk_failed: {reports[i]['error']}"
+                placeholder.append(out)
+            enriched_frames.append(pd.DataFrame(placeholder))
+            error += len(chunk)
+
+    enriched = pd.concat(enriched_frames, ignore_index=True) if enriched_frames else pd.DataFrame()
+    evidence = pd.concat(evidence_frames, ignore_index=True) if evidence_frames else pd.DataFrame()
+    signals = pd.concat(signal_frames, ignore_index=True) if signal_frames else pd.DataFrame()
+
+    # ── Combined Run Summary ──────────────────────────────────────────────────
+    run_summary = build_run_summary_dataframe(
+        config, total_input_rows=len(df), selected_rows=len(selected),
+        processed_rows=processed, success_count=success, error_count=error,
+    )
+    agg: dict = {}
+    for i in range(len(chunks)):
+        if not reports[i]["success"]:
+            continue
+        summary = results[i]["run_summary"].iloc[0].to_dict() if len(results[i]["run_summary"]) else {}
+        for key in _PARALLEL_C5_COUNT_KEYS + _PARALLEL_FHO_COUNT_KEYS:
+            if key in summary:
+                try:
+                    agg[key] = agg.get(key, 0) + int(summary.get(key) or 0)
+                except (TypeError, ValueError):
+                    pass
+    run_summary = add_c5_summary_fields(
+        run_summary,
+        c5_enabled=c5_enabled,
+        c5_scoring_behavior=c5_scoring_behavior if c5_enabled else "",
+        c5_scope=c5_scope if c5_enabled else "",
+        c5_model_tier=c5_model_tier if c5_enabled else "",
+        c5_model_used=c5_model_used if c5_enabled else "",
+        counts={k: v for k, v in agg.items() if k in _PARALLEL_C5_COUNT_KEYS},
+    )
+    for key in _PARALLEL_FHO_COUNT_KEYS:
+        if key in agg:
+            run_summary[key] = agg[key]
+
+    sizes = [len(c) for c in chunks]
+    run_summary["parallel_processing_enabled"] = True
+    run_summary["parallel_workers"] = workers
+    run_summary["parallel_chunk_count"] = len(chunks)
+    run_summary["parallel_chunk_size_min"] = min(sizes) if sizes else 0
+    run_summary["parallel_chunk_size_max"] = max(sizes) if sizes else 0
+    run_summary["parallel_failed_chunk_count"] = sum(
+        1 for r in reports if r["success"] is False)
+    run_summary["parallel_successful_chunk_count"] = sum(
+        1 for r in reports if r["success"] is True)
+
+    return {
+        "enriched_leads": enriched,
+        "evidence": evidence,
+        "signals": signals,
+        "run_summary": run_summary,
+        "chunk_reports": reports,
     }

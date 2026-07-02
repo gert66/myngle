@@ -17,6 +17,7 @@ installed.
 
 from __future__ import annotations
 
+import json
 import os
 import re
 from pathlib import Path
@@ -27,7 +28,9 @@ from lead_prioritizer_batch_core import (
     build_excel_workbook_bytes,
     run_batch_dataframe,
     run_batch_foreign_hq_only,
+    run_batch_dataframe_parallel,
     FOREIGN_HQ_ONLY_MODE,
+    MAX_PARALLEL_WORKERS,
     apply_c5_adjudication,
     add_c5_summary_fields,
     row_selected_for_c5,
@@ -179,11 +182,36 @@ AUTOSAVE_HELP_TEXT = (
     "this machine in the selected folder. The download button will still be shown."
 )
 
+PARALLEL_WORKER_CHOICES = [1, 2, 3, 4]
+PARALLEL_HELP_TEXT = (
+    "Splits selected rows into equal chunks and processes chunks in parallel. "
+    "This may use more API calls at the same time and can hit rate limits. "
+    "Recommended: 2–4 workers for local overnight runs."
+)
+PARALLEL_WARNING_TEXT = (
+    "Parallel mode increases concurrent Serper and Anthropic calls. Use with care."
+)
+
 
 def sanitize_run_mode_for_filename(run_mode: str) -> str:
     """Reduce a run mode to a filesystem-safe token (alnum, ``_``, ``-``)."""
     safe = re.sub(r"[^A-Za-z0-9_-]+", "_", str(run_mode or "").strip()).strip("_")
     return safe or "run"
+
+
+def resolve_autosave_directory(output_dir: str) -> Path:
+    """Resolve the autosave directory: expand ``~``, anchor relative paths to cwd."""
+    directory = Path(output_dir or DEFAULT_AUTOSAVE_DIR).expanduser()
+    if not directory.is_absolute():
+        directory = Path.cwd() / directory
+    return directory
+
+
+def write_parallel_run_manifest(run_dir, manifest: dict) -> Path:
+    """Write ``run_manifest.json`` into the parallel run directory."""
+    path = Path(run_dir) / "run_manifest.json"
+    path.write_text(json.dumps(manifest, indent=2, default=str), encoding="utf-8")
+    return path
 
 
 def autosave_output_workbook(output_bytes: bytes, output_dir: str, run_mode: str,
@@ -205,9 +233,7 @@ def autosave_output_workbook(output_bytes: bytes, output_dir: str, run_mode: str
     stamp = (now or _dt.now()).strftime("%Y%m%d_%H%M%S")
     base = f"lead_prioritizer_v2_{sanitize_run_mode_for_filename(run_mode)}_{stamp}"
 
-    directory = Path(output_dir or DEFAULT_AUTOSAVE_DIR).expanduser()
-    if not directory.is_absolute():
-        directory = Path.cwd() / directory
+    directory = resolve_autosave_directory(output_dir)
     directory.mkdir(parents=True, exist_ok=True)
 
     target = directory / f"{base}.xlsx"
@@ -433,6 +459,17 @@ def main() -> None:  # pragma: no cover - exercised only under `streamlit run`
         autosave_dir = st.text_input("Autosave directory", value=DEFAULT_AUTOSAVE_DIR)
         st.caption(AUTOSAVE_HELP_TEXT)
 
+    # ── Parallel processing ───────────────────────────────────────────────────
+    st.subheader("Parallel processing")
+    parallel_enabled = st.checkbox("Enable parallel chunk processing", value=False)
+    parallel_workers = 1
+    if parallel_enabled:
+        parallel_workers = int(st.selectbox(
+            "Parallel workers", PARALLEL_WORKER_CHOICES, index=0))
+        st.caption(PARALLEL_HELP_TEXT)
+        if parallel_workers > 1:
+            st.warning(PARALLEL_WARNING_TEXT)
+
     selected_count = count_selected_rows(len(df), int(start_row), int(row_limit))
     st.caption(f"Selected rows: **{selected_count}**")
 
@@ -520,7 +557,71 @@ def main() -> None:  # pragma: no cover - exercised only under `streamlit run`
             progress_bar.progress(min(1.0, max(0.0, frac)))
             status.info(build_progress_status_text(payload, started_at))
 
-        if run_mode == FOREIGN_HQ_ONLY_MODE:
+        use_parallel = parallel_enabled and parallel_workers > 1
+        run_stamp = _time.strftime("%Y%m%d_%H%M%S")
+        run_dir = None
+        chunk_files: dict = {}
+        chunk_reports: list = []
+
+        if use_parallel:
+            # Chunked parallel run: each chunk goes through the exact same code
+            # path as a sequential smaller batch (incl. FHO mode and C5 config).
+            if autosave_enabled:
+                try:
+                    run_dir = resolve_autosave_directory(autosave_dir) / f"run_{run_stamp}"
+                    run_dir.mkdir(parents=True, exist_ok=True)
+                except Exception as exc:
+                    st.error(
+                        f"Could not create autosave run directory: {exc}. "
+                        "Chunk checkpoints are disabled for this run."
+                    )
+                    run_dir = None
+
+            def _save_chunk(report: dict, chunk_tables: dict) -> None:
+                if run_dir is None:
+                    return
+                try:
+                    fname = f"chunk_{int(report['chunk_index']):03d}_output.xlsx"
+                    (run_dir / fname).write_bytes(build_excel_workbook_bytes(chunk_tables))
+                    chunk_files[int(report["chunk_index"])] = fname
+                except Exception as exc:
+                    st.warning(f"Chunk checkpoint save failed: {exc}")
+
+            def _on_chunk_progress(payload: dict) -> None:
+                total = int(payload.get("parallel_chunks_total", 0) or 0)
+                done = int(payload.get("parallel_chunks_completed", 0) or 0)
+                progress_bar.progress(min(1.0, done / total) if total else 0.0)
+                outcome = "ok" if payload.get("chunk_success") else "FAILED"
+                status.info(
+                    f"Chunks completed {done}/{total} | "
+                    f"Last: chunk {payload.get('chunk_index')} "
+                    f"({payload.get('chunk_row_count')} rows) {outcome} | "
+                    f"Elapsed {format_duration(_time.time() - started_at)}"
+                )
+
+            with st.spinner(f"Running parallel batch ({parallel_workers} workers)..."):
+                tables = run_batch_dataframe_parallel(
+                    df, config, serper, anthropic,
+                    workers=parallel_workers,
+                    c5_enabled=c5_enabled,
+                    c5_scoring_behavior=c5_scoring_behavior,
+                    c5_scope=c5_scope,
+                    c5_model_used=c5_model_used,
+                    c5_model_tier=c5_model_tier,
+                    progress_callback=_on_chunk_progress,
+                    chunk_result_callback=_save_chunk if run_dir is not None else None,
+                )
+            progress_bar.progress(1.0)
+
+            chunk_reports = tables.get("chunk_reports") or []
+            for report in chunk_reports:
+                if report.get("success") is False:
+                    st.error(
+                        f"Chunk {report['chunk_index']} failed: {report['error']} — "
+                        "its rows were added as error rows; successful chunks are "
+                        "included in the combined output."
+                    )
+        elif run_mode == FOREIGN_HQ_ONLY_MODE:
             # HQ+C4+optional-C5 screening and the confirmed-only full-enrichment
             # pass both happen inside run_batch_foreign_hq_only; C5 must not be
             # re-applied afterward here (it already ran as part of the decision).
@@ -607,14 +708,47 @@ def main() -> None:  # pragma: no cover - exercised only under `streamlit run`
 
         # ── Optional autosave (same bytes as the download button) ─────────────
         if autosave_enabled:
-            try:
-                saved_path = autosave_output_workbook(data, autosave_dir, run_mode)
-                st.success(f"Autosaved output workbook to: {saved_path}")
-            except Exception as exc:
-                st.error(
-                    f"Autosave failed: {exc}. "
-                    "You can still use the download button below."
-                )
+            if use_parallel and run_dir is not None:
+                # Parallel run: combined workbook + manifest in the run dir,
+                # next to the chunk checkpoint workbooks saved during the run.
+                try:
+                    combined_name = (
+                        f"lead_prioritizer_v2_{sanitize_run_mode_for_filename(run_mode)}"
+                        f"_combined_{run_stamp}.xlsx"
+                    )
+                    (run_dir / combined_name).write_bytes(data)
+                    _summary_row = (tables["run_summary"].iloc[0].to_dict()
+                                    if len(tables["run_summary"]) else {})
+                    write_parallel_run_manifest(run_dir, {
+                        "run_mode": run_mode,
+                        "selected_rows": int(_summary_row.get("selected_rows", 0) or 0),
+                        "workers": int(parallel_workers),
+                        "chunk_count": len(chunk_reports),
+                        "chunks": [
+                            {**report,
+                             "output_file": chunk_files.get(report["chunk_index"], "")}
+                            for report in chunk_reports
+                        ],
+                        "combined_output_file": combined_name,
+                    })
+                    st.success(
+                        "Autosaved combined workbook, chunk checkpoints and "
+                        f"run_manifest.json to: {run_dir.resolve()}"
+                    )
+                except Exception as exc:
+                    st.error(
+                        f"Autosave failed: {exc}. "
+                        "You can still use the download button below."
+                    )
+            else:
+                try:
+                    saved_path = autosave_output_workbook(data, autosave_dir, run_mode)
+                    st.success(f"Autosaved output workbook to: {saved_path}")
+                except Exception as exc:
+                    st.error(
+                        f"Autosave failed: {exc}. "
+                        "You can still use the download button below."
+                    )
 
     # ── Output ────────────────────────────────────────────────────────────────
     tables = st.session_state.get("v2_batch_tables")

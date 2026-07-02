@@ -381,7 +381,11 @@ from lead_prioritizer_batch_core import (  # noqa: E402
     add_c5_summary_fields,
     row_selected_for_c5,
     run_batch_foreign_hq_only,
+    run_batch_dataframe_parallel,
+    run_single_batch_unit,
+    split_dataframe_into_chunks,
     FOREIGN_HQ_ONLY_MODE,
+    MAX_PARALLEL_WORKERS,
     SUPPORTED_RUN_MODES,
 )
 
@@ -810,3 +814,232 @@ class TestForeignHQOnlyMode:
             out = run_batch_foreign_hq_only(self._df, self._cfg, "S", "A",
                                             progress_callback=_boom)
         assert len(out["enriched_leads"]) == 2
+
+
+# ---------------------------------------------------------------------------
+# Parallel chunk processing
+# ---------------------------------------------------------------------------
+
+class TestSplitDataframeIntoChunks:
+    def test_splits_into_approximately_equal_chunks(self):
+        df = pd.DataFrame({"c": list(range(10))})
+        chunks = split_dataframe_into_chunks(df, 3)
+        assert [len(c) for c in chunks] == [4, 3, 3]  # sizes differ by at most 1
+        # order and original index preserved
+        recombined = pd.concat(chunks)
+        assert list(recombined["c"]) == list(range(10))
+        assert list(recombined.index) == list(range(10))
+
+    def test_never_produces_empty_chunks(self):
+        df = pd.DataFrame({"c": [1, 2]})
+        chunks = split_dataframe_into_chunks(df, 4)
+        assert [len(c) for c in chunks] == [1, 1]
+
+    def test_empty_frame_yields_no_chunks(self):
+        assert split_dataframe_into_chunks(pd.DataFrame({"c": []}), 3) == []
+
+
+def _fake_prioritize_named(lead_input, **kwargs):
+    return _sample_result(company_name=lead_input.company_name,
+                          domain=lead_input.domain)
+
+
+class TestParallelBatch:
+    _df9 = pd.DataFrame({
+        "company": [f"Co{i}" for i in range(9)],
+        "domain": [f"co{i}.com" for i in range(9)],
+    })
+    _cfg = BatchRunConfig(company_name_column="company", domain_column="domain",
+                          run_mode="hq_only", row_limit=0)
+
+    def test_parallel_disabled_path_unchanged(self):
+        # The sequential entry point is untouched: same output shape as always,
+        # no parallel fields on its Run Summary.
+        with patch("lead_prioritizer_batch_core.prioritize_single_lead",
+                   side_effect=_fake_prioritize_named):
+            out = run_batch_dataframe(self._df9, self._cfg, "S", "A")
+        assert len(out["enriched_leads"]) == 9
+        assert "parallel_processing_enabled" not in out["run_summary"].columns
+        assert "chunk_reports" not in out
+
+    def test_workers_1_single_chunk_matches_sequential(self):
+        with patch("lead_prioritizer_batch_core.prioritize_single_lead",
+                   side_effect=_fake_prioritize_named):
+            seq = run_batch_dataframe(self._df9, self._cfg, "S", "A")
+            par = run_batch_dataframe_parallel(self._df9, self._cfg, "S", "A", workers=1)
+        assert list(par["enriched_leads"]["company_name"]) == \
+            list(seq["enriched_leads"]["company_name"])
+        summary = par["run_summary"].iloc[0].to_dict()
+        assert summary["parallel_chunk_count"] == 1
+        assert summary["parallel_workers"] == 1
+
+    def test_workers_3_processes_all_rows_preserves_order(self):
+        payloads = []
+        with patch("lead_prioritizer_batch_core.prioritize_single_lead",
+                   side_effect=_fake_prioritize_named):
+            out = run_batch_dataframe_parallel(
+                self._df9, self._cfg, "S", "A", workers=3,
+                progress_callback=payloads.append)
+        enriched = out["enriched_leads"]
+        assert list(enriched["company_name"]) == [f"Co{i}" for i in range(9)]
+        summary = out["run_summary"].iloc[0].to_dict()
+        assert summary["processed_rows"] == 9
+        assert summary["success_count"] == 9
+        assert summary["error_count"] == 0
+        assert summary["parallel_processing_enabled"] == True  # noqa: E712
+        assert summary["parallel_workers"] == 3
+        assert summary["parallel_chunk_count"] == 3
+        assert summary["parallel_chunk_size_min"] == 3
+        assert summary["parallel_chunk_size_max"] == 3
+        assert summary["parallel_failed_chunk_count"] == 0
+        assert summary["parallel_successful_chunk_count"] == 3
+        # chunk progress is accurate: totals nonzero, completes at 3/3
+        assert payloads
+        assert all(p["parallel_chunks_total"] == 3 for p in payloads)
+        assert payloads[-1]["parallel_chunks_completed"] == 3
+        assert all(p["chunk_row_count"] == 3 for p in payloads)
+
+    def test_combines_evidence_and_signals_from_chunks(self):
+        # _sample_result carries 1 evidence item + 1 signal per row.
+        with patch("lead_prioritizer_batch_core.prioritize_single_lead",
+                   side_effect=_fake_prioritize_named):
+            out = run_batch_dataframe_parallel(self._df9, self._cfg, "S", "A", workers=3)
+        assert len(out["evidence"]) == 9
+        assert len(out["signals"]) == 9
+        assert set(out["evidence"]["source_index"]) == set(range(9))
+        assert set(out["signals"]["source_index"]) == set(range(9))
+
+    def test_failed_chunk_reported_without_losing_successes(self):
+        original_unit = bc.run_single_batch_unit
+
+        def _unit(chunk_df, cfg, s, a, **kw):
+            if "Co4" in list(chunk_df["company"]):
+                raise RuntimeError("chunk exploded")
+            return original_unit(chunk_df, cfg, s, a, **kw)
+
+        with patch("lead_prioritizer_batch_core.prioritize_single_lead",
+                   side_effect=_fake_prioritize_named), \
+             patch("lead_prioritizer_batch_core.run_single_batch_unit",
+                   side_effect=_unit):
+            out = run_batch_dataframe_parallel(self._df9, self._cfg, "S", "A", workers=3)
+
+        enriched = out["enriched_leads"]
+        assert len(enriched) == 9  # nothing discarded
+        # middle chunk (Co3-Co5) becomes placeholder error rows, order intact
+        assert list(enriched["company"]) == [f"Co{i}" for i in range(9)]
+        failed_rows = enriched[enriched["run_success"] == False]  # noqa: E712
+        assert list(failed_rows["company"]) == ["Co3", "Co4", "Co5"]
+        assert all(str(e).startswith("parallel_chunk_failed: RuntimeError")
+                   for e in failed_rows["run_error"])
+        summary = out["run_summary"].iloc[0].to_dict()
+        assert summary["parallel_failed_chunk_count"] == 1
+        assert summary["parallel_successful_chunk_count"] == 2
+        assert summary["processed_rows"] == 6
+        assert summary["success_count"] == 6
+        assert summary["error_count"] == 3
+        reports = out["chunk_reports"]
+        failed = [r for r in reports if r["success"] is False]
+        assert len(failed) == 1 and "chunk exploded" in failed[0]["error"]
+        # successful chunks' data is intact
+        assert len(out["evidence"]) == 6
+
+    def test_fho_and_c5_config_passed_through_unchanged(self):
+        seen: dict = {}
+
+        def _unit(chunk_df, cfg, s, a, **kw):
+            seen.update(kw)
+            seen["run_mode"] = cfg.run_mode
+            seen["start_row"] = cfg.start_row
+            seen["row_limit"] = cfg.row_limit
+            seen["default_input_country"] = cfg.default_input_country
+            seen["input_country_column"] = cfg.input_country_column
+            return {
+                "enriched_leads": pd.DataFrame([{"company": "X"}] * len(chunk_df)),
+                "evidence": pd.DataFrame(),
+                "signals": pd.DataFrame(),
+                "run_summary": pd.DataFrame([{
+                    "processed_rows": len(chunk_df),
+                    "success_count": len(chunk_df), "error_count": 0,
+                }]),
+            }
+
+        cfg = BatchRunConfig(
+            company_name_column="company", domain_column="domain",
+            input_country_column="country", default_input_country="Uruguay",
+            run_mode=FOREIGN_HQ_ONLY_MODE, start_row=1, row_limit=6)
+        df = pd.DataFrame({
+            "company": [f"Co{i}" for i in range(8)],
+            "domain": [f"co{i}.com" for i in range(8)],
+            "country": ["Uruguay"] * 8,
+        })
+        with patch("lead_prioritizer_batch_core.run_single_batch_unit",
+                   side_effect=_unit):
+            out = run_batch_dataframe_parallel(
+                df, cfg, "S", "A", workers=2,
+                c5_enabled=True, c5_scoring_behavior="conservative_adjustment",
+                c5_scope="all_rows", c5_model_used="claude-sonnet-5",
+                c5_model_tier="sonnet")
+        # C5 config forwarded verbatim to every chunk unit
+        assert seen["c5_enabled"] is True
+        assert seen["c5_scoring_behavior"] == "conservative_adjustment"
+        assert seen["c5_scope"] == "all_rows"
+        assert seen["c5_model_used"] == "claude-sonnet-5"
+        assert seen["c5_model_tier"] == "sonnet"
+        # FHO mode + country config forwarded; selection already applied
+        assert seen["run_mode"] == FOREIGN_HQ_ONLY_MODE
+        assert seen["default_input_country"] == "Uruguay"
+        assert seen["input_country_column"] == "country"
+        assert seen["start_row"] == 0 and seen["row_limit"] == 0
+        # start_row=1 + row_limit=6 → 6 selected rows across chunks
+        summary = out["run_summary"].iloc[0].to_dict()
+        assert summary["selected_rows"] == 6
+        assert summary["processed_rows"] == 6
+
+    def test_fho_mode_end_to_end_parallel(self):
+        def _fake(lead_input, **kwargs):
+            score = 3.0 if lead_input.company_name in ("Co1", "Co4") else 0.0
+            return _sample_result(
+                company_name=lead_input.company_name, domain=lead_input.domain,
+                sig_foreign_hq_score_for_next_scoring=score,
+                final_commercial_fit_score=(
+                    99.0 if kwargs.get("run_full_v2_pipeline") else None),
+            )
+
+        df = pd.DataFrame({
+            "company": [f"Co{i}" for i in range(6)],
+            "domain": [f"co{i}.com" for i in range(6)],
+        })
+        cfg = BatchRunConfig(company_name_column="company", domain_column="domain",
+                             run_mode=FOREIGN_HQ_ONLY_MODE, row_limit=0)
+        with patch("lead_prioritizer_batch_core.prioritize_single_lead",
+                   side_effect=_fake):
+            out = run_batch_dataframe_parallel(df, cfg, "S", "A", workers=2)
+        enriched = out["enriched_leads"].set_index("company_name")
+        assert enriched.loc["Co1", "enrichment_skipped"] == False  # noqa: E712
+        assert enriched.loc["Co4", "enrichment_skipped"] == False  # noqa: E712
+        assert enriched.loc["Co0", "enrichment_skipped"] == True   # noqa: E712
+        summary = out["run_summary"].iloc[0].to_dict()
+        assert summary["confirmed_foreign_hq_count"] == 2
+        assert summary["full_enrichment_attempted_count"] == 2
+        assert summary["full_enrichment_skipped_count"] == 4
+
+    def test_workers_capped_at_4(self):
+        assert MAX_PARALLEL_WORKERS == 4
+        with patch("lead_prioritizer_batch_core.prioritize_single_lead",
+                   side_effect=_fake_prioritize_named):
+            out = run_batch_dataframe_parallel(self._df9, self._cfg, "S", "A",
+                                               workers=10)
+        summary = out["run_summary"].iloc[0].to_dict()
+        assert summary["parallel_workers"] == 4
+        assert summary["parallel_chunk_count"] == 4
+
+    def test_chunk_result_callback_receives_successful_chunks(self):
+        saved = []
+        with patch("lead_prioritizer_batch_core.prioritize_single_lead",
+                   side_effect=_fake_prioritize_named):
+            run_batch_dataframe_parallel(
+                self._df9, self._cfg, "S", "A", workers=3,
+                chunk_result_callback=lambda rep, tab: saved.append((rep, tab)))
+        assert len(saved) == 3
+        assert sorted(rep["chunk_index"] for rep, _ in saved) == [1, 2, 3]
+        assert all("enriched_leads" in tab for _, tab in saved)

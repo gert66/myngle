@@ -354,3 +354,57 @@ class TestSanitizeRunMode:
     def test_blank_falls_back(self):
         assert sanitize_run_mode_for_filename("") == "run"
         assert sanitize_run_mode_for_filename(None) == "run"
+
+
+# ---------------------------------------------------------------------------
+# Parallel-run helpers (manifest / directory resolution / constants)
+# ---------------------------------------------------------------------------
+
+import json as _json  # noqa: E402
+
+from lead_prioritizer_batch_app import (  # noqa: E402
+    resolve_autosave_directory,
+    write_parallel_run_manifest,
+    PARALLEL_WORKER_CHOICES,
+    PARALLEL_HELP_TEXT,
+    PARALLEL_WARNING_TEXT,
+)
+
+
+class TestParallelHelpers:
+    def test_worker_choices_capped_at_4(self):
+        assert PARALLEL_WORKER_CHOICES == [1, 2, 3, 4]
+        assert PARALLEL_HELP_TEXT and PARALLEL_WARNING_TEXT
+
+    def test_resolve_autosave_directory_relative(self, tmp_path, monkeypatch):
+        monkeypatch.chdir(tmp_path)
+        assert resolve_autosave_directory("batch_outputs") == tmp_path / "batch_outputs"
+
+    def test_resolve_autosave_directory_absolute(self, tmp_path):
+        assert resolve_autosave_directory(str(tmp_path / "abs")) == tmp_path / "abs"
+
+    def test_write_parallel_run_manifest(self, tmp_path):
+        manifest = {
+            "run_mode": "full_foreign_hq_only",
+            "selected_rows": 30,
+            "workers": 3,
+            "chunk_count": 3,
+            "chunks": [
+                {"chunk_index": 1, "row_count": 10, "source_index_first": 0,
+                 "source_index_last": 9, "success": True, "error": "",
+                 "output_file": "chunk_001_output.xlsx"},
+                {"chunk_index": 2, "row_count": 10, "source_index_first": 10,
+                 "source_index_last": 19, "success": False,
+                 "error": "RuntimeError: boom", "output_file": ""},
+            ],
+            "combined_output_file": "lead_prioritizer_v2_full_foreign_hq_only_combined_20260702_021530.xlsx",
+        }
+        path = write_parallel_run_manifest(tmp_path, manifest)
+        assert path.name == "run_manifest.json"
+        loaded = _json.loads(path.read_text(encoding="utf-8"))
+        assert loaded["workers"] == 3
+        assert loaded["chunks"][1]["success"] is False
+        assert loaded["combined_output_file"].endswith(".xlsx")
+        # manifest never contains keys/secrets
+        text = path.read_text(encoding="utf-8").lower()
+        assert "api_key" not in text and "sk-ant" not in text
