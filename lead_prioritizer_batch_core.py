@@ -23,6 +23,7 @@ from datetime import datetime
 from typing import Callable, Optional
 
 import io
+import re
 
 import pandas as pd
 
@@ -58,6 +59,23 @@ FOREIGN_HQ_ONLY_PHASE_LABELS = {
     1: "HQ screening",
     2: "C5 adjudication",
     3: "Full enrichment for confirmed foreign-HQ leads",
+}
+
+# "Full enrichment, confirmed non-English foreign-HQ only" — an Australia-
+# specific companion to FOREIGN_HQ_ONLY_MODE. Same two-phase HQ+C4+optional-C5
+# screening (shared via ``_run_hq_and_c5_screening``), but the full-enrichment
+# gate additionally requires the confirmed parent HQ to be in a non-English-
+# speaking market AND the row's effective input country to be Australia. The
+# language/market classification itself (``classify_parent_hq_language_market``)
+# is country-agnostic and reusable; only the full-enrichment gate is Australia-
+# specific. Deliberately excluded from SUPPORTED_RUN_MODES / the CLI, same as
+# FOREIGN_HQ_ONLY_MODE.
+NON_ENGLISH_FOREIGN_HQ_ONLY_MODE = "full_non_english_foreign_hq_only"
+
+NON_ENGLISH_FOREIGN_HQ_ONLY_PHASE_LABELS = {
+    1: "HQ screening",
+    2: "C5 adjudication",
+    3: "Full enrichment for confirmed non-English foreign-HQ leads (Australia)",
 }
 
 
@@ -669,6 +687,91 @@ def add_c5_summary_fields(
 #   Phase 3 delegates to prioritize_single_lead(run_full_v2_pipeline=True) and
 #   flatten_result_for_excel, but only for confirmed rows.
 
+def _emit_batch_phase_progress(
+    progress_callback: Optional[Callable[[dict], None]],
+    phase_labels: dict,
+    phase: int,
+    phase_processed,
+    phase_total,
+    base: dict,
+) -> None:
+    """Forward a progress payload augmented with phase info; never raises.
+
+    Shared by every mode in the foreign-HQ-only family so phase-1/2/3 progress
+    payloads always carry the same ``phase`` / ``phase_count`` / ``phase_label``
+    / ``phase_processed`` / ``phase_total`` shape.
+    """
+    if progress_callback is None:
+        return
+    payload = dict(base)
+    payload.update({
+        "phase": phase,
+        "phase_count": 3,
+        "phase_label": phase_labels[phase],
+        "phase_processed": int(phase_processed or 0),
+        "phase_total": int(phase_total or 0),
+    })
+    try:
+        progress_callback(payload)
+    except Exception:
+        pass  # a broken callback must never break the run
+
+
+def _run_hq_and_c5_screening(
+    df: pd.DataFrame,
+    config: BatchRunConfig,
+    serper_api_key: str,
+    anthropic_api_key: str,
+    *,
+    c5_enabled: bool,
+    c5_scoring_behavior: str,
+    c5_scope: str,
+    c5_model_used: str,
+    c5_model_tier: str,
+    phase_labels: dict,
+    progress_callback: Optional[Callable[[dict], None]],
+) -> tuple:
+    """Phase 1 (HQ-only screening) + Phase 2 (optional C5) — shared by every
+    mode in the foreign-HQ-only family so HQ/C4/C5 logic is never duplicated.
+
+    Phase 1 delegates to ``run_batch_dataframe(run_mode="hq_only")``; Phase 2
+    (only when ``c5_enabled``) delegates to ``apply_c5_adjudication`` exactly
+    as before. Returns ``(rows, c5_counts)`` — ``rows`` is the Enriched-Leads
+    dict list after HQ+C4 (and, if enabled, C5) has been applied. Phase 3
+    (the mode-specific full-enrichment decision) is the caller's job.
+    """
+    def _phase1_cb(payload: dict) -> None:
+        _emit_batch_phase_progress(
+            progress_callback, phase_labels, 1,
+            payload.get("processed_rows"), payload.get("selected_rows"), payload)
+
+    def _phase2_cb(payload: dict) -> None:
+        _emit_batch_phase_progress(
+            progress_callback, phase_labels, 2,
+            payload.get("c5_processed"), payload.get("c5_selected"), payload)
+
+    hq_config = replace(config, run_mode="hq_only")
+    hq_tables = run_batch_dataframe(
+        df, hq_config, serper_api_key, anthropic_api_key,
+        progress_callback=_phase1_cb if progress_callback is not None else None,
+    )
+    rows = hq_tables["enriched_leads"].to_dict("records")
+
+    c5_counts: dict = {}
+    if c5_enabled:
+        rows, c5_counts = apply_c5_adjudication(
+            rows,
+            anthropic_api_key=anthropic_api_key,
+            model_used=c5_model_used,
+            model_tier=c5_model_tier,
+            scoring_behavior=c5_scoring_behavior,
+            scope=c5_scope,
+            include_raw=config.include_raw_ai_json,
+            progress_callback=_phase2_cb if progress_callback is not None else None,
+        )
+    return rows, c5_counts
+
+
 def run_batch_foreign_hq_only(
     df: pd.DataFrame,
     config: BatchRunConfig,
@@ -701,48 +804,12 @@ def run_batch_foreign_hq_only(
     ``evidence``, ``signals``, ``run_summary`` (extended with the mode's own
     counts and, always, the C5 settings/counts columns).
     """
-    def _emit_phase(phase: int, phase_processed, phase_total, base: dict) -> None:
-        """Forward a progress payload augmented with phase info; never raises."""
-        if progress_callback is None:
-            return
-        payload = dict(base)
-        payload.update({
-            "phase": phase,
-            "phase_count": 3,
-            "phase_label": FOREIGN_HQ_ONLY_PHASE_LABELS[phase],
-            "phase_processed": int(phase_processed or 0),
-            "phase_total": int(phase_total or 0),
-        })
-        try:
-            progress_callback(payload)
-        except Exception:
-            pass  # a broken callback must never break the run
-
-    def _phase1_cb(payload: dict) -> None:
-        _emit_phase(1, payload.get("processed_rows"), payload.get("selected_rows"), payload)
-
-    def _phase2_cb(payload: dict) -> None:
-        _emit_phase(2, payload.get("c5_processed"), payload.get("c5_selected"), payload)
-
-    hq_config = replace(config, run_mode="hq_only")
-    hq_tables = run_batch_dataframe(
-        df, hq_config, serper_api_key, anthropic_api_key,
-        progress_callback=_phase1_cb if progress_callback is not None else None,
+    rows, c5_counts = _run_hq_and_c5_screening(
+        df, config, serper_api_key, anthropic_api_key,
+        c5_enabled=c5_enabled, c5_scoring_behavior=c5_scoring_behavior,
+        c5_scope=c5_scope, c5_model_used=c5_model_used, c5_model_tier=c5_model_tier,
+        phase_labels=FOREIGN_HQ_ONLY_PHASE_LABELS, progress_callback=progress_callback,
     )
-    rows = hq_tables["enriched_leads"].to_dict("records")
-
-    c5_counts: dict = {}
-    if c5_enabled:
-        rows, c5_counts = apply_c5_adjudication(
-            rows,
-            anthropic_api_key=anthropic_api_key,
-            model_used=c5_model_used,
-            model_tier=c5_model_tier,
-            scoring_behavior=c5_scoring_behavior,
-            scope=c5_scope,
-            include_raw=config.include_raw_ai_json,
-            progress_callback=_phase2_cb if progress_callback is not None else None,
-        )
 
     out_rows: list[dict] = []
     evidence_rows: list[dict] = []
@@ -799,7 +866,8 @@ def run_batch_foreign_hq_only(
         out_row["enrichment_skip_reason"] = ""
         out_rows.append(out_row)
 
-        _emit_phase(3, attempted, total_confirmed, {
+        _emit_batch_phase_progress(progress_callback, FOREIGN_HQ_ONLY_PHASE_LABELS, 3,
+                                   attempted, total_confirmed, {
             "success_count": p3_success,
             "error_count": p3_error,
             "current_company_name": company,
@@ -819,6 +887,295 @@ def run_batch_foreign_hq_only(
     run_summary["full_enrichment_attempted_count"] = attempted
     run_summary["full_enrichment_skipped_count"] = skipped
     run_summary["confirmed_foreign_hq_count"] = confirmed
+    run_summary = add_c5_summary_fields(
+        run_summary,
+        c5_enabled=c5_enabled,
+        c5_scoring_behavior=c5_scoring_behavior if c5_enabled else "",
+        c5_scope=c5_scope if c5_enabled else "",
+        c5_model_tier=c5_model_tier if c5_enabled else "",
+        c5_model_used=c5_model_used if c5_enabled else "",
+        counts=c5_counts,
+    )
+
+    return {
+        "enriched_leads": pd.DataFrame(out_rows),
+        "evidence": pd.DataFrame(evidence_rows),
+        "signals": pd.DataFrame(signal_rows),
+        "run_summary": run_summary,
+    }
+
+
+# ---------------------------------------------------------------------------
+# Parent-HQ language/market classifier (country-agnostic filter layer)
+# ---------------------------------------------------------------------------
+#
+# A small, standalone classification layer used by the Australia non-English
+# foreign-HQ mode. It knows nothing about Australia, HQ detection, C4, or C5 —
+# it only maps a parent-HQ country string to a market bucket, so it stays
+# reusable for any future "confirmed foreign-HQ in market X" mode. The
+# Australia-specific "is this a good export candidate" gate lives in
+# ``run_batch_non_english_foreign_hq_only``, not here.
+
+_ENGLISH_SPEAKING_PARENT_COUNTRIES = frozenset({
+    "australia", "united states", "usa", "us", "united kingdom", "uk",
+    "canada", "new zealand", "ireland",
+})
+
+_NON_ENGLISH_SPEAKING_PARENT_COUNTRIES = frozenset({
+    "japan", "china", "south korea", "korea", "germany", "france", "italy",
+    "spain", "netherlands", "belgium", "switzerland", "austria", "sweden",
+    "norway", "denmark", "finland", "brazil", "mexico", "argentina", "chile",
+    "colombia", "turkey",
+})
+
+_REVIEW_PARENT_COUNTRIES = frozenset({
+    "singapore", "india", "south africa", "united arab emirates", "uae",
+    "hong kong", "malaysia", "philippines", "israel", "middle east",
+})
+
+PARENT_HQ_LANGUAGE_MARKET_TYPES = (
+    "english_speaking", "non_english_speaking", "review", "unclear",
+)
+
+
+def _normalize_country_token(value) -> str:
+    """Lowercase, whitespace-collapsed comparison key for a country string."""
+    return re.sub(r"\s+", " ", str(value or "").strip().lower())
+
+
+def classify_parent_hq_language_market(country) -> str:
+    """Classify a parent-HQ country into one of ``PARENT_HQ_LANGUAGE_MARKET_TYPES``.
+
+    - ``english_speaking``: Australia, US/USA, UK, Canada, New Zealand, Ireland
+      — lower priority as an export trigger.
+    - ``non_english_speaking``: e.g. Japan, China, Germany, France, Brazil —
+      the commercial trigger this mode looks for.
+    - ``review``: nuanced/multilingual markets (Singapore, India, South
+      Africa, UAE, Hong Kong, Malaysia, Philippines, Israel, "Middle East")
+      that are never auto-classified as non-English.
+    - ``unclear``: blank, unrecognised, or otherwise unmapped country text.
+
+    Blank/unknown never defaults to ``non_english_speaking`` — only an exact
+    (normalised) match against the non-English list does.
+    """
+    norm = _normalize_country_token(country)
+    if not norm:
+        return "unclear"
+    if norm in _ENGLISH_SPEAKING_PARENT_COUNTRIES:
+        return "english_speaking"
+    if norm in _NON_ENGLISH_SPEAKING_PARENT_COUNTRIES:
+        return "non_english_speaking"
+    if norm in _REVIEW_PARENT_COUNTRIES:
+        return "review"
+    return "unclear"
+
+
+def resolve_parent_hq_country_for_export(row: dict) -> str:
+    """Pick the parent-HQ country to export/classify: C5 > AI HQ > detected HQ.
+
+    Priority: ``c5_parent_hq_country`` (if present/non-blank), else
+    ``ai_parent_hq_country``, else ``hq_detected_country``. Returns "" when
+    none are set. The picked value is only whitespace-trimmed here; matching
+    against the classifier's lists is case/whitespace-normalised separately.
+    """
+    for key in ("c5_parent_hq_country", "ai_parent_hq_country", "hq_detected_country"):
+        val = str(row.get(key) or "").strip()
+        if val:
+            return val
+    return ""
+
+
+# ---------------------------------------------------------------------------
+# "Full enrichment, confirmed non-English foreign-HQ only" batch mode
+# ---------------------------------------------------------------------------
+#
+# Australia-specific companion to run_batch_foreign_hq_only: same Phase 1
+# (HQ-only screening) + Phase 2 (optional C5) via _run_hq_and_c5_screening —
+# no duplicated HQ/C4/C5 logic. Every row is additionally annotated with the
+# language/market classification (regardless of country, so the fields stay
+# meaningful for audit/export even outside Australia); Phase 3 (full v2
+# enrichment) runs ONLY for rows that are simultaneously:
+#   1. effective input_country == Australia,
+#   2. confirmed foreign-HQ (final post-C4/post-C5 score == 3.0), and
+#   3. parent_hq_language_market_type == "non_english_speaking".
+
+_PARALLEL_NON_ENGLISH_COUNT_KEYS = (
+    "confirmed_foreign_hq_count", "non_english_foreign_hq_count",
+    "english_speaking_parent_hq_count", "review_parent_hq_count",
+    "unclear_parent_hq_count", "full_enrichment_attempted_count",
+    "full_enrichment_skipped_count",
+)
+
+
+def _non_english_foreign_hq_reason(is_confirmed: bool, market_type: str, parent_country: str) -> str:
+    """Country-agnostic explanation for ``non_english_foreign_hq_detected``."""
+    if not is_confirmed:
+        return "Not confirmed foreign HQ"
+    if market_type == "non_english_speaking":
+        return f"Confirmed foreign HQ with non-English parent market ({parent_country or 'unknown'})"
+    if market_type == "english_speaking":
+        return "Parent HQ country is English-speaking/lower-priority for Australia"
+    if market_type == "review":
+        return "Parent HQ language market is review/nuanced"
+    return "Parent HQ country unclear"
+
+
+def run_batch_non_english_foreign_hq_only(
+    df: pd.DataFrame,
+    config: BatchRunConfig,
+    serper_api_key: str,
+    anthropic_api_key: str,
+    *,
+    c5_enabled: bool = False,
+    c5_scoring_behavior: str = "append_only",
+    c5_scope: str = "score_3_or_manual_review",
+    c5_model_used: str = "",
+    c5_model_tier: str = "",
+    progress_callback: Optional[Callable[[dict], None]] = None,
+) -> dict:
+    """Run the "Full enrichment, confirmed non-English foreign-HQ only" mode.
+
+    Shares Phase 1/2 (HQ-only screening + optional C5) with
+    ``run_batch_foreign_hq_only`` via ``_run_hq_and_c5_screening``. Every row
+    gets the export/classification fields (``foreign_hq_detected_for_export``,
+    ``parent_hq_country_for_export``, ``parent_hq_language_market_type``,
+    ``non_english_foreign_hq_detected``, ``non_english_foreign_hq_reason``,
+    ``recommended_for_australia_export``) regardless of country, so the
+    classifier stays reusable/auditable outside Australia too.
+
+    Full v2 enrichment (Phase 3) runs ONLY for rows where
+    ``recommended_for_australia_export`` is True: effective ``input_country``
+    is Australia, the HQ is confirmed foreign (final post-C4/post-C5 score
+    3.0), AND the parent HQ is in a non-English-speaking market. All other
+    rows are kept, unenriched, with ``enrichment_skipped=True`` and one of the
+    five documented skip reasons.
+
+    Returns the same dict shape as ``run_batch_foreign_hq_only``.
+    """
+    rows, c5_counts = _run_hq_and_c5_screening(
+        df, config, serper_api_key, anthropic_api_key,
+        c5_enabled=c5_enabled, c5_scoring_behavior=c5_scoring_behavior,
+        c5_scope=c5_scope, c5_model_used=c5_model_used, c5_model_tier=c5_model_tier,
+        phase_labels=NON_ENGLISH_FOREIGN_HQ_ONLY_PHASE_LABELS,
+        progress_callback=progress_callback,
+    )
+
+    # ── Classify every row first (country-agnostic; needed for both the
+    # export fields and the Phase-3 eligibility gate) ─────────────────────────
+    decisions: list[dict] = []
+    confirmed_count = non_english_count = 0
+    english_count = review_count = unclear_count = 0
+    for row in rows:
+        is_confirmed = _c5_score(row.get("sig_foreign_hq_score_for_next_scoring")) == 3.0
+        parent_country = resolve_parent_hq_country_for_export(row)
+        market_type = classify_parent_hq_language_market(parent_country)
+        is_australia = _normalize_country_token(row.get("input_country")) == "australia"
+
+        if is_confirmed:
+            confirmed_count += 1
+        if market_type == "english_speaking":
+            english_count += 1
+        elif market_type == "review":
+            review_count += 1
+        elif market_type == "unclear":
+            unclear_count += 1
+
+        non_english_detected = is_confirmed and market_type == "non_english_speaking"
+        if non_english_detected:
+            non_english_count += 1
+        recommended = non_english_detected and is_australia
+        reason = _non_english_foreign_hq_reason(is_confirmed, market_type, parent_country)
+
+        if not is_australia:
+            skip_reason = "Non-English foreign-HQ mode requires Australia input country"
+        elif recommended:
+            skip_reason = ""
+        else:
+            skip_reason = reason
+
+        decisions.append({
+            "foreign_hq_detected_for_export": is_confirmed,
+            "parent_hq_country_for_export": parent_country,
+            "parent_hq_language_market_type": market_type,
+            "non_english_foreign_hq_detected": non_english_detected,
+            "non_english_foreign_hq_reason": reason,
+            "recommended_for_australia_export": recommended,
+            "_skip_reason": skip_reason,
+        })
+
+    total_eligible = sum(1 for d in decisions if d["recommended_for_australia_export"])
+
+    out_rows: list[dict] = []
+    evidence_rows: list[dict] = []
+    signal_rows: list[dict] = []
+    attempted = skipped = 0
+    p3_success = p3_error = 0
+
+    for row, decision in zip(rows, decisions):
+        out_row = dict(row)
+        skip_reason = decision.pop("_skip_reason")
+        out_row.update(decision)
+
+        if not decision["recommended_for_australia_export"]:
+            out_row["enrichment_skipped"] = True
+            out_row["enrichment_skip_reason"] = skip_reason
+            out_rows.append(out_row)
+            skipped += 1
+            continue
+
+        attempted += 1
+        company = str(row.get(config.company_name_column, "") or "").strip()
+        domain = str(row.get(config.domain_column, "") or "").strip() or None
+        country = None
+        if config.input_country_column:
+            country = str(row.get(config.input_country_column, "") or "").strip() or None
+        source_index = row.get("source_index")
+
+        try:
+            result = prioritize_single_lead(
+                LeadInput(company_name=company, domain=domain, input_country=country),
+                serper_api_key=serper_api_key,
+                anthropic_api_key=anthropic_api_key,
+                default_input_country=config.default_input_country,
+                run_full_v2_pipeline=True,
+            )
+            out_row = flatten_result_for_excel(
+                result, out_row, source_index, True, "", config.include_raw_ai_json,
+            )
+            evidence_rows.extend(flatten_evidence_for_excel(result, source_index))
+            signal_rows.extend(flatten_signals_for_excel(result, source_index))
+            p3_success += 1
+        except Exception as exc:  # per-row isolation, matching run_batch_foreign_hq_only
+            out_row["run_success"] = False
+            out_row["run_error"] = f"{type(exc).__name__}: {str(exc)[:300]}"
+            p3_error += 1
+
+        out_row["enrichment_skipped"] = False
+        out_row["enrichment_skip_reason"] = ""
+        out_rows.append(out_row)
+
+        _emit_batch_phase_progress(
+            progress_callback, NON_ENGLISH_FOREIGN_HQ_ONLY_PHASE_LABELS, 3,
+            attempted, total_eligible, {
+                "success_count": p3_success,
+                "error_count": p3_error,
+                "current_company_name": company,
+            })
+
+    success_count = sum(1 for r in out_rows if r.get("run_success", True))
+    error_count = len(out_rows) - success_count
+
+    run_summary = build_run_summary_dataframe(
+        config, total_input_rows=len(df), selected_rows=len(rows),
+        processed_rows=len(rows), success_count=success_count, error_count=error_count,
+    )
+    run_summary["confirmed_foreign_hq_count"] = confirmed_count
+    run_summary["non_english_foreign_hq_count"] = non_english_count
+    run_summary["english_speaking_parent_hq_count"] = english_count
+    run_summary["review_parent_hq_count"] = review_count
+    run_summary["unclear_parent_hq_count"] = unclear_count
+    run_summary["full_enrichment_attempted_count"] = attempted
+    run_summary["full_enrichment_skipped_count"] = skipped
     run_summary = add_c5_summary_fields(
         run_summary,
         c5_enabled=c5_enabled,
@@ -859,6 +1216,12 @@ _PARALLEL_FHO_COUNT_KEYS = (
     "total_processed_rows", "full_enrichment_attempted_count",
     "full_enrichment_skipped_count", "confirmed_foreign_hq_count",
 )
+# Deduplicated union of every non-C5 mode-specific summary count key (FHO and
+# non-English-FHO share several key names — a plain concatenation would
+# double-count them when aggregating across parallel chunks).
+_PARALLEL_MODE_COUNT_KEYS = tuple(sorted(
+    set(_PARALLEL_FHO_COUNT_KEYS) | set(_PARALLEL_NON_ENGLISH_COUNT_KEYS)
+))
 
 
 def split_dataframe_into_chunks(df: pd.DataFrame, n_chunks: int) -> list:
@@ -895,13 +1258,25 @@ def run_single_batch_unit(
 ) -> dict:
     """Run one batch unit through the same code path as a sequential run.
 
-    ``full_foreign_hq_only`` delegates to ``run_batch_foreign_hq_only`` (which
-    applies C5 internally); every other mode runs ``run_batch_dataframe`` plus
-    the same optional C5 post-step and Run Summary extension the Streamlit app
-    performs sequentially. Used by the parallel runner for each chunk.
+    ``full_foreign_hq_only`` delegates to ``run_batch_foreign_hq_only`` and
+    ``full_non_english_foreign_hq_only`` delegates to
+    ``run_batch_non_english_foreign_hq_only`` (both apply C5 internally);
+    every other mode runs ``run_batch_dataframe`` plus the same optional C5
+    post-step and Run Summary extension the Streamlit app performs
+    sequentially. Used by the parallel runner for each chunk.
     """
     if config.run_mode == FOREIGN_HQ_ONLY_MODE:
         return run_batch_foreign_hq_only(
+            df, config, serper_api_key, anthropic_api_key,
+            c5_enabled=c5_enabled,
+            c5_scoring_behavior=c5_scoring_behavior,
+            c5_scope=c5_scope,
+            c5_model_used=c5_model_used,
+            c5_model_tier=c5_model_tier,
+            progress_callback=progress_callback,
+        )
+    if config.run_mode == NON_ENGLISH_FOREIGN_HQ_ONLY_MODE:
+        return run_batch_non_english_foreign_hq_only(
             df, config, serper_api_key, anthropic_api_key,
             c5_enabled=c5_enabled,
             c5_scoring_behavior=c5_scoring_behavior,
@@ -1074,7 +1449,7 @@ def run_batch_dataframe_parallel(
         if not reports[i]["success"]:
             continue
         summary = results[i]["run_summary"].iloc[0].to_dict() if len(results[i]["run_summary"]) else {}
-        for key in _PARALLEL_C5_COUNT_KEYS + _PARALLEL_FHO_COUNT_KEYS:
+        for key in _PARALLEL_C5_COUNT_KEYS + _PARALLEL_MODE_COUNT_KEYS:
             if key in summary:
                 try:
                     agg[key] = agg.get(key, 0) + int(summary.get(key) or 0)
@@ -1089,7 +1464,7 @@ def run_batch_dataframe_parallel(
         c5_model_used=c5_model_used if c5_enabled else "",
         counts={k: v for k, v in agg.items() if k in _PARALLEL_C5_COUNT_KEYS},
     )
-    for key in _PARALLEL_FHO_COUNT_KEYS:
+    for key in _PARALLEL_MODE_COUNT_KEYS:
         if key in agg:
             run_summary[key] = agg[key]
 

@@ -24,6 +24,10 @@ from lead_prioritizer_batch_app import (
     MODE_LABELS,
     SUPPORTED_DEFAULT_INPUT_COUNTRIES,
     DEFAULT_COUNTRY_PLACEHOLDER,
+    NON_ENGLISH_FOREIGN_HQ_ONLY_HELP_TEXT,
+)
+from lead_prioritizer_batch_core import (
+    NON_ENGLISH_FOREIGN_HQ_ONLY_MODE as _NON_ENGLISH_MODE_CONST,
 )
 
 
@@ -408,3 +412,32 @@ class TestParallelHelpers:
         # manifest never contains keys/secrets
         text = path.read_text(encoding="utf-8").lower()
         assert "api_key" not in text and "sk-ant" not in text
+
+
+# ---------------------------------------------------------------------------
+# Australia + non-English foreign-HQ mode (app-level wiring)
+# ---------------------------------------------------------------------------
+
+class TestAustraliaNonEnglishModeWiring:
+    def test_australia_in_supported_default_countries(self):
+        assert "Australia" in SUPPORTED_DEFAULT_INPUT_COUNTRIES
+
+    def test_resolve_default_input_country_australia(self):
+        country, error = resolve_default_input_country("Australia")
+        assert country == "Australia"
+        assert error is None
+
+    def test_mode_label_maps_to_core_constant(self):
+        label = "Full enrichment, confirmed non-English foreign-HQ only"
+        assert label in MODE_LABELS
+        assert mode_label_to_core_mode(label) == _NON_ENGLISH_MODE_CONST
+        assert _NON_ENGLISH_MODE_CONST == "full_non_english_foreign_hq_only"
+
+    def test_existing_foreign_hq_only_label_unchanged(self):
+        label = "Full enrichment, confirmed foreign-HQ only"
+        assert label in MODE_LABELS
+        assert mode_label_to_core_mode(label) == "full_foreign_hq_only"
+
+    def test_help_text_present(self):
+        assert NON_ENGLISH_FOREIGN_HQ_ONLY_HELP_TEXT
+        assert "Australia" in NON_ENGLISH_FOREIGN_HQ_ONLY_HELP_TEXT

@@ -381,10 +381,14 @@ from lead_prioritizer_batch_core import (  # noqa: E402
     add_c5_summary_fields,
     row_selected_for_c5,
     run_batch_foreign_hq_only,
+    run_batch_non_english_foreign_hq_only,
     run_batch_dataframe_parallel,
     run_single_batch_unit,
     split_dataframe_into_chunks,
+    classify_parent_hq_language_market,
+    resolve_parent_hq_country_for_export,
     FOREIGN_HQ_ONLY_MODE,
+    NON_ENGLISH_FOREIGN_HQ_ONLY_MODE,
     MAX_PARALLEL_WORKERS,
     SUPPORTED_RUN_MODES,
 )
@@ -1043,3 +1047,267 @@ class TestParallelBatch:
         assert len(saved) == 3
         assert sorted(rep["chunk_index"] for rep, _ in saved) == [1, 2, 3]
         assert all("enriched_leads" in tab for _, tab in saved)
+
+
+# ---------------------------------------------------------------------------
+# Australia non-English foreign-HQ mode
+# ---------------------------------------------------------------------------
+
+class TestClassifyParentHqLanguageMarket:
+    @pytest.mark.parametrize("country,expected", [
+        ("Germany", "non_english_speaking"),
+        ("Japan", "non_english_speaking"),
+        ("Brazil", "non_english_speaking"),
+        ("United States", "english_speaking"),
+        ("USA", "english_speaking"),
+        ("UK", "english_speaking"),
+        ("Canada", "english_speaking"),
+        ("New Zealand", "english_speaking"),
+        ("Ireland", "english_speaking"),
+        ("Australia", "english_speaking"),
+        ("Singapore", "review"),
+        ("India", "review"),
+        ("South Africa", "review"),
+        ("United Arab Emirates", "review"),
+        ("UAE", "review"),
+        ("", "unclear"),
+        (None, "unclear"),
+        ("Atlantis", "unclear"),
+    ])
+    def test_classification(self, country, expected):
+        assert classify_parent_hq_language_market(country) == expected
+
+    def test_case_and_whitespace_insensitive(self):
+        assert classify_parent_hq_language_market("  germany  ") == "non_english_speaking"
+        assert classify_parent_hq_language_market("UNITED STATES") == "english_speaking"
+
+
+class TestResolveParentHqCountryForExport:
+    def test_c5_takes_priority(self):
+        row = {"c5_parent_hq_country": "Germany", "ai_parent_hq_country": "France",
+               "hq_detected_country": "Italy"}
+        assert resolve_parent_hq_country_for_export(row) == "Germany"
+
+    def test_falls_back_to_ai_then_detected(self):
+        assert resolve_parent_hq_country_for_export(
+            {"c5_parent_hq_country": "", "ai_parent_hq_country": "France",
+             "hq_detected_country": "Italy"}) == "France"
+        assert resolve_parent_hq_country_for_export(
+            {"c5_parent_hq_country": "", "ai_parent_hq_country": "",
+             "hq_detected_country": "Italy"}) == "Italy"
+
+    def test_all_blank_returns_empty(self):
+        assert resolve_parent_hq_country_for_export({}) == ""
+
+
+def _au_result(company, score, parent_country, full=False):
+    kw = dict(
+        company_name=company, domain=company.lower() + ".com", input_country="Australia",
+        hq_detected_country=parent_country,
+        hq_structure_type="foreign_parent" if score == 3.0 else "domestic",
+        sig_foreign_hq_score_for_next_scoring=score,
+        ai_parent_hq_country=parent_country,
+        domain_root=company.lower(), query_used=f"{company} headquarters", parser_source="ai",
+        evidence_items=[], signals=[],
+    )
+    if full:
+        kw["final_commercial_fit_score"] = 88.0
+    return LeadPrioritizationResult(**kw)
+
+
+def _fake_prioritize_for_au(scores: dict):
+    def _fake(lead_input, **kwargs):
+        score, parent = scores[lead_input.company_name]
+        return _au_result(lead_input.company_name, score, parent,
+                          full=bool(kwargs.get("run_full_v2_pipeline")))
+    return _fake
+
+
+class TestNonEnglishForeignHqOnlyMode:
+    _rows = {
+        "GermanCo": (3.0, "Germany"),        # confirmed + non-English -> enrich
+        "USCo": (3.0, "United States"),       # confirmed but English -> skip
+        "UKCo": (3.0, "United Kingdom"),      # confirmed but English -> skip
+        "CanadaCo": (3.0, "Canada"),          # confirmed but English -> skip
+        "NZCo": (3.0, "New Zealand"),         # confirmed but English -> skip
+        "IrelandCo": (3.0, "Ireland"),        # confirmed but English -> skip
+        "SGCo": (3.0, "Singapore"),           # confirmed but review -> skip
+        "IndiaCo": (3.0, "India"),            # confirmed but review -> skip
+        "SACo": (3.0, "South Africa"),        # confirmed but review -> skip
+        "UAECo": (3.0, "UAE"),                # confirmed but review -> skip
+        "DomesticCo": (0.0, "Australia"),     # not confirmed -> skip
+    }
+    _df = pd.DataFrame({"company": list(_rows), "domain": [c.lower() + ".com" for c in _rows]})
+    _cfg = BatchRunConfig(company_name_column="company", domain_column="domain",
+                          run_mode=NON_ENGLISH_FOREIGN_HQ_ONLY_MODE, row_limit=0,
+                          default_input_country="Australia")
+
+    def test_only_confirmed_non_english_parent_gets_full_enrichment(self):
+        with patch("lead_prioritizer_batch_core.prioritize_single_lead",
+                   side_effect=_fake_prioritize_for_au(self._rows)):
+            out = run_batch_non_english_foreign_hq_only(self._df, self._cfg, "S", "A")
+        rows = out["enriched_leads"].set_index("company_name")
+        assert rows.loc["GermanCo", "enrichment_skipped"] == False  # noqa: E712
+        assert rows.loc["GermanCo", "recommended_for_australia_export"] == True  # noqa: E712
+        assert rows.loc["GermanCo", "final_commercial_fit_score"] == 88.0
+        assert rows.loc["GermanCo", "parent_hq_language_market_type"] == "non_english_speaking"
+
+    def test_english_speaking_parents_not_enriched(self):
+        with patch("lead_prioritizer_batch_core.prioritize_single_lead",
+                   side_effect=_fake_prioritize_for_au(self._rows)):
+            out = run_batch_non_english_foreign_hq_only(self._df, self._cfg, "S", "A")
+        rows = out["enriched_leads"].set_index("company_name")
+        for co in ("USCo", "UKCo", "CanadaCo", "NZCo", "IrelandCo"):
+            assert rows.loc[co, "enrichment_skipped"] == True, co  # noqa: E712
+            assert rows.loc[co, "parent_hq_language_market_type"] == "english_speaking", co
+            assert rows.loc[co, "enrichment_skip_reason"] == \
+                "Parent HQ country is English-speaking/lower-priority for Australia"
+            assert pd.isna(rows.loc[co, "final_commercial_fit_score"])
+
+    def test_review_markets_not_enriched(self):
+        with patch("lead_prioritizer_batch_core.prioritize_single_lead",
+                   side_effect=_fake_prioritize_for_au(self._rows)):
+            out = run_batch_non_english_foreign_hq_only(self._df, self._cfg, "S", "A")
+        rows = out["enriched_leads"].set_index("company_name")
+        for co in ("SGCo", "IndiaCo", "SACo", "UAECo"):
+            assert rows.loc[co, "enrichment_skipped"] == True, co  # noqa: E712
+            assert rows.loc[co, "parent_hq_language_market_type"] == "review", co
+            assert rows.loc[co, "enrichment_skip_reason"] == \
+                "Parent HQ language market is review/nuanced"
+
+    def test_not_confirmed_row_skipped(self):
+        with patch("lead_prioritizer_batch_core.prioritize_single_lead",
+                   side_effect=_fake_prioritize_for_au(self._rows)):
+            out = run_batch_non_english_foreign_hq_only(self._df, self._cfg, "S", "A")
+        rows = out["enriched_leads"].set_index("company_name")
+        assert rows.loc["DomesticCo", "enrichment_skipped"] == True  # noqa: E712
+        assert rows.loc["DomesticCo", "enrichment_skip_reason"] == "Not confirmed foreign HQ"
+
+    def test_non_australia_row_skipped_with_specific_reason(self):
+        rows = {"ItalyCo": (3.0, "Germany")}
+        df = pd.DataFrame({"company": ["ItalyCo"], "domain": ["italyco.com"],
+                           "country": ["Italy"]})
+        cfg = BatchRunConfig(company_name_column="company", domain_column="domain",
+                             input_country_column="country",
+                             run_mode=NON_ENGLISH_FOREIGN_HQ_ONLY_MODE, row_limit=1)
+        with patch("lead_prioritizer_batch_core.prioritize_single_lead",
+                   side_effect=_fake_prioritize_for_au(rows)):
+            # override input_country in the fake result to Italy for this row
+            def _fake(lead_input, **kwargs):
+                r = _au_result("ItalyCo", 3.0, "Germany",
+                               full=bool(kwargs.get("run_full_v2_pipeline")))
+                r.input_country = "Italy"
+                return r
+            with patch("lead_prioritizer_batch_core.prioritize_single_lead", side_effect=_fake):
+                out = run_batch_non_english_foreign_hq_only(df, cfg, "S", "A")
+        row = out["enriched_leads"].iloc[0]
+        assert row["enrichment_skipped"] == True  # noqa: E712
+        assert row["enrichment_skip_reason"] == \
+            "Non-English foreign-HQ mode requires Australia input country"
+        # non_english_foreign_hq_detected is still True (country-agnostic signal)
+        assert row["non_english_foreign_hq_detected"] == True  # noqa: E712
+        assert row["recommended_for_australia_export"] == False  # noqa: E712
+
+    def test_run_summary_counts(self):
+        with patch("lead_prioritizer_batch_core.prioritize_single_lead",
+                   side_effect=_fake_prioritize_for_au(self._rows)):
+            out = run_batch_non_english_foreign_hq_only(self._df, self._cfg, "S", "A")
+        summary = out["run_summary"].iloc[0].to_dict()
+        assert summary["confirmed_foreign_hq_count"] == 10  # all but DomesticCo
+        assert summary["non_english_foreign_hq_count"] == 1  # GermanCo only
+        # english_speaking_parent_hq_count is a pure market-type tally (not
+        # gated by confirmation): 5 confirmed English parents + DomesticCo
+        # (parent country "Australia", not confirmed, market still english).
+        assert summary["english_speaking_parent_hq_count"] == 6
+        assert summary["review_parent_hq_count"] == 4
+        assert summary["unclear_parent_hq_count"] == 0
+        assert summary["full_enrichment_attempted_count"] == 1
+        assert summary["full_enrichment_skipped_count"] == 10
+
+    def test_output_includes_all_export_columns(self):
+        with patch("lead_prioritizer_batch_core.prioritize_single_lead",
+                   side_effect=_fake_prioritize_for_au(self._rows)):
+            out = run_batch_non_english_foreign_hq_only(self._df, self._cfg, "S", "A")
+        for col in (
+            "foreign_hq_detected_for_export", "parent_hq_country_for_export",
+            "parent_hq_language_market_type", "non_english_foreign_hq_detected",
+            "non_english_foreign_hq_reason", "recommended_for_australia_export",
+            "enrichment_skipped", "enrichment_skip_reason",
+        ):
+            assert col in out["enriched_leads"].columns
+
+    def test_c5_conservative_downgrade_prevents_enrichment(self):
+        rows = {"GermanCo": (3.0, "Germany")}
+        df = pd.DataFrame({"company": ["GermanCo"], "domain": ["germanco.com"]})
+        cfg = BatchRunConfig(company_name_column="company", domain_column="domain",
+                             run_mode=NON_ENGLISH_FOREIGN_HQ_ONLY_MODE, row_limit=1,
+                             default_input_country="Australia")
+        with patch("lead_prioritizer_batch_core.prioritize_single_lead",
+                   side_effect=_fake_prioritize_for_au(rows)), \
+             _patch_adjudicator(_mk_result("domestic_confirmed", "High", "yes")):
+            out = run_batch_non_english_foreign_hq_only(
+                df, cfg, "S", "A", c5_enabled=True,
+                c5_scoring_behavior="conservative_adjustment", c5_scope="all_rows",
+                c5_model_used="claude-sonnet-5", c5_model_tier="sonnet")
+        row = out["enriched_leads"].iloc[0]
+        assert row["sig_foreign_hq_score_for_next_scoring"] == 0.0
+        assert row["enrichment_skipped"] == True  # noqa: E712
+        assert row["recommended_for_australia_export"] == False  # noqa: E712
+
+
+class TestExistingForeignHqOnlyModeUnaffected:
+    """The FOREIGN_HQ_ONLY_MODE selection/output behavior must be byte-for-byte
+    unchanged after adding the non-English mode (shared-helper refactor)."""
+
+    def test_selection_and_output_unchanged(self):
+        rows = {"GermanCo": (3.0, "Germany"), "USCo": (3.0, "United States"),
+                "DomesticCo": (0.0, "Australia")}
+        df = pd.DataFrame({"company": list(rows), "domain": [f"{c.lower()}.com" for c in rows]})
+        cfg = BatchRunConfig(company_name_column="company", domain_column="domain",
+                             run_mode=FOREIGN_HQ_ONLY_MODE, row_limit=0)
+        with patch("lead_prioritizer_batch_core.prioritize_single_lead",
+                   side_effect=_fake_prioritize_for_au(rows)):
+            out = run_batch_foreign_hq_only(df, cfg, "S", "A")
+        enriched = out["enriched_leads"].set_index("company_name")
+        # ALL confirmed rows enrich regardless of parent-HQ language (no filter)
+        assert enriched.loc["GermanCo", "enrichment_skipped"] == False  # noqa: E712
+        assert enriched.loc["USCo", "enrichment_skipped"] == False  # noqa: E712
+        assert enriched.loc["DomesticCo", "enrichment_skipped"] == True  # noqa: E712
+        # no non-English-mode-only columns leak into this mode's output
+        for col in ("parent_hq_language_market_type", "recommended_for_australia_export"):
+            assert col not in out["enriched_leads"].columns
+        summary = out["run_summary"].iloc[0].to_dict()
+        assert summary["confirmed_foreign_hq_count"] == 2
+        assert summary["full_enrichment_attempted_count"] == 2
+        assert summary["full_enrichment_skipped_count"] == 1
+
+
+class TestParallelNonEnglishMode:
+    def test_run_single_batch_unit_dispatches_to_non_english_mode(self):
+        rows = {"GermanCo": (3.0, "Germany"), "USCo": (3.0, "United States")}
+        df = pd.DataFrame({"company": list(rows), "domain": [f"{c.lower()}.com" for c in rows]})
+        cfg = BatchRunConfig(company_name_column="company", domain_column="domain",
+                             run_mode=NON_ENGLISH_FOREIGN_HQ_ONLY_MODE, row_limit=0,
+                             default_input_country="Australia")
+        with patch("lead_prioritizer_batch_core.prioritize_single_lead",
+                   side_effect=_fake_prioritize_for_au(rows)):
+            out = run_single_batch_unit(df, cfg, "S", "A")
+        assert "recommended_for_australia_export" in out["enriched_leads"].columns
+
+    def test_parallel_run_aggregates_non_english_counts(self):
+        rows = {f"Co{i}": (3.0, "Germany") for i in range(4)}
+        rows["USCo"] = (3.0, "United States")
+        rows["DomesticCo"] = (0.0, "Australia")
+        df = pd.DataFrame({"company": list(rows), "domain": [f"{c.lower()}.com" for c in rows]})
+        cfg = BatchRunConfig(company_name_column="company", domain_column="domain",
+                             run_mode=NON_ENGLISH_FOREIGN_HQ_ONLY_MODE, row_limit=0,
+                             default_input_country="Australia")
+        with patch("lead_prioritizer_batch_core.prioritize_single_lead",
+                   side_effect=_fake_prioritize_for_au(rows)):
+            out = run_batch_dataframe_parallel(df, cfg, "S", "A", workers=3)
+        assert len(out["enriched_leads"]) == 6
+        summary = out["run_summary"].iloc[0].to_dict()
+        assert summary["non_english_foreign_hq_count"] == 4
+        assert summary["full_enrichment_attempted_count"] == 4
+        assert summary["full_enrichment_skipped_count"] == 2
+        assert summary["parallel_chunk_count"] == 3

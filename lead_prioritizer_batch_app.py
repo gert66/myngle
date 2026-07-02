@@ -28,8 +28,10 @@ from lead_prioritizer_batch_core import (
     build_excel_workbook_bytes,
     run_batch_dataframe,
     run_batch_foreign_hq_only,
+    run_batch_non_english_foreign_hq_only,
     run_batch_dataframe_parallel,
     FOREIGN_HQ_ONLY_MODE,
+    NON_ENGLISH_FOREIGN_HQ_ONLY_MODE,
     MAX_PARALLEL_WORKERS,
     apply_c5_adjudication,
     add_c5_summary_fields,
@@ -59,6 +61,7 @@ MODE_LABELS: list[str] = [
     "Signals, no score",
     "Full, no score",
     "Full enrichment, confirmed foreign-HQ only",
+    "Full enrichment, confirmed non-English foreign-HQ only",
 ]
 _LABEL_TO_MODE: dict[str, str] = {
     "Full v2 enrichment": "full",
@@ -67,12 +70,24 @@ _LABEL_TO_MODE: dict[str, str] = {
     "Signals, no score": "signals_no_score",
     "Full, no score": "full_no_score",
     "Full enrichment, confirmed foreign-HQ only": FOREIGN_HQ_ONLY_MODE,
+    "Full enrichment, confirmed non-English foreign-HQ only": NON_ENGLISH_FOREIGN_HQ_ONLY_MODE,
 }
 
 FOREIGN_HQ_ONLY_HELP_TEXT = (
     "This first runs HQ detection and optional C5 adjudication, then performs "
     "full enrichment only for leads with confirmed foreign-HQ score 3. "
     "Non-confirmed rows are kept in the output and marked as skipped."
+)
+
+NON_ENGLISH_FOREIGN_HQ_ONLY_HELP_TEXT = (
+    "Australia-specific: this first runs HQ detection and optional C5 "
+    "adjudication (same as \"confirmed foreign-HQ only\"), then performs full "
+    "enrichment only for leads whose input country is Australia, whose "
+    "foreign HQ is confirmed, AND whose parent HQ is in a non-English-speaking "
+    "market (e.g. Japan, Germany, Brazil). English-speaking parents (US, UK, "
+    "Canada, New Zealand, Ireland) and nuanced/review markets (Singapore, "
+    "India, South Africa, UAE, ...) are kept in the output but not fully "
+    "enriched."
 )
 
 # Likely column names for preselection.
@@ -85,7 +100,7 @@ COUNTRY_CANDIDATES = ["input_country", "country", "Country"]
 
 # Central list of default-input-country choices. Add new countries here only —
 # no other code path hardcodes a country name.
-SUPPORTED_DEFAULT_INPUT_COUNTRIES = ["Italy", "Brazil", "Uruguay"]
+SUPPORTED_DEFAULT_INPUT_COUNTRIES = ["Italy", "Brazil", "Uruguay", "Australia"]
 DEFAULT_COUNTRY_PLACEHOLDER = "Select country..."
 DEFAULT_COUNTRY_REQUIRED_MESSAGE = "Please select a default input country before running."
 
@@ -442,6 +457,8 @@ def main() -> None:  # pragma: no cover - exercised only under `streamlit run`
     run_mode = mode_label_to_core_mode(mode_label)
     if run_mode == FOREIGN_HQ_ONLY_MODE:
         st.caption(FOREIGN_HQ_ONLY_HELP_TEXT)
+    elif run_mode == NON_ENGLISH_FOREIGN_HQ_ONLY_MODE:
+        st.caption(NON_ENGLISH_FOREIGN_HQ_ONLY_HELP_TEXT)
 
     # ── Row controls ──────────────────────────────────────────────────────────
     st.subheader("Rows")
@@ -621,9 +638,9 @@ def main() -> None:  # pragma: no cover - exercised only under `streamlit run`
                         "its rows were added as error rows; successful chunks are "
                         "included in the combined output."
                     )
-        elif run_mode == FOREIGN_HQ_ONLY_MODE:
+        elif run_mode in (FOREIGN_HQ_ONLY_MODE, NON_ENGLISH_FOREIGN_HQ_ONLY_MODE):
             # HQ+C4+optional-C5 screening and the confirmed-only full-enrichment
-            # pass both happen inside run_batch_foreign_hq_only; C5 must not be
+            # pass both happen inside the mode function; C5 must not be
             # re-applied afterward here (it already ran as part of the decision).
             def _on_phase_progress(payload: dict) -> None:
                 phase = int(payload.get("phase", 1) or 1)
@@ -635,11 +652,16 @@ def main() -> None:  # pragma: no cover - exercised only under `streamlit run`
                 progress_bar.progress(min(1.0, max(0.0, overall)))
                 status.info(build_phase_progress_status_text(payload, started_at))
 
+            _mode_fn = (
+                run_batch_non_english_foreign_hq_only
+                if run_mode == NON_ENGLISH_FOREIGN_HQ_ONLY_MODE
+                else run_batch_foreign_hq_only
+            )
             with st.spinner(
                 "Running HQ screening, optional C5 adjudication, and "
                 "confirmed-only full enrichment..."
             ):
-                tables = run_batch_foreign_hq_only(
+                tables = _mode_fn(
                     df, config, serper, anthropic,
                     c5_enabled=c5_enabled,
                     c5_scoring_behavior=c5_scoring_behavior,
