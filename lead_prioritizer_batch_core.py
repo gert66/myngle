@@ -61,21 +61,22 @@ FOREIGN_HQ_ONLY_PHASE_LABELS = {
     3: "Full enrichment for confirmed foreign-HQ leads",
 }
 
-# "Full enrichment, confirmed non-English foreign-HQ only" — an Australia-
-# specific companion to FOREIGN_HQ_ONLY_MODE. Same two-phase HQ+C4+optional-C5
-# screening (shared via ``_run_hq_and_c5_screening``), but the full-enrichment
-# gate additionally requires the confirmed parent HQ to be in a non-English-
-# speaking market AND the row's effective input country to be Australia. The
-# language/market classification itself (``classify_parent_hq_language_market``)
-# is country-agnostic and reusable; only the full-enrichment gate is Australia-
-# specific. Deliberately excluded from SUPPORTED_RUN_MODES / the CLI, same as
-# FOREIGN_HQ_ONLY_MODE.
+# "Full enrichment, confirmed non-English foreign-HQ only" — a country-agnostic
+# companion to FOREIGN_HQ_ONLY_MODE. Same two-phase HQ+C4+optional-C5 screening
+# (shared via ``_run_hq_and_c5_screening``), but the full-enrichment gate
+# additionally requires: input_country present, foreign HQ confirmed, a parent
+# HQ country present and different from input_country, and that parent country
+# is in a non-English-speaking market. Works for any input_country (Australia,
+# New Zealand, ...) — the language/market classification itself
+# (``classify_parent_hq_language_market``) has never been country-specific;
+# only the export-eligibility gate now is, and it is generic. Deliberately
+# excluded from SUPPORTED_RUN_MODES / the CLI, same as FOREIGN_HQ_ONLY_MODE.
 NON_ENGLISH_FOREIGN_HQ_ONLY_MODE = "full_non_english_foreign_hq_only"
 
 NON_ENGLISH_FOREIGN_HQ_ONLY_PHASE_LABELS = {
     1: "HQ screening",
     2: "C5 adjudication",
-    3: "Full enrichment for confirmed non-English foreign-HQ leads (Australia)",
+    3: "Full enrichment for confirmed non-English foreign-HQ leads",
 }
 
 
@@ -910,12 +911,12 @@ def run_batch_foreign_hq_only(
 # Parent-HQ language/market classifier (country-agnostic filter layer)
 # ---------------------------------------------------------------------------
 #
-# A small, standalone classification layer used by the Australia non-English
-# foreign-HQ mode. It knows nothing about Australia, HQ detection, C4, or C5 —
-# it only maps a parent-HQ country string to a market bucket, so it stays
-# reusable for any future "confirmed foreign-HQ in market X" mode. The
-# Australia-specific "is this a good export candidate" gate lives in
-# ``run_batch_non_english_foreign_hq_only``, not here.
+# A small, standalone classification layer used by the non-English foreign-HQ
+# mode. It knows nothing about any specific input country, HQ detection, C4,
+# or C5 — it only maps a parent-HQ country string to a market bucket, so it
+# stays reusable for any future "confirmed foreign-HQ in market X" mode. The
+# "is this a good export candidate" gate (input country vs. parent country)
+# lives in ``run_batch_non_english_foreign_hq_only``, not here.
 
 _ENGLISH_SPEAKING_PARENT_COUNTRIES = frozenset({
     "australia", "united states", "usa", "us", "united kingdom", "uk",
@@ -1015,10 +1016,75 @@ def _non_english_foreign_hq_reason(is_confirmed: bool, market_type: str, parent_
     if market_type == "non_english_speaking":
         return f"Confirmed foreign HQ with non-English parent market ({parent_country or 'unknown'})"
     if market_type == "english_speaking":
-        return "Parent HQ country is English-speaking/lower-priority for Australia"
+        return "Parent HQ country is English-speaking/lower-priority for language/training export"
     if market_type == "review":
         return "Parent HQ language market is review/nuanced"
     return "Parent HQ country unclear"
+
+
+def _non_english_export_decision(row: dict) -> dict:
+    """Country-agnostic export-eligibility decision for one HQ-screened row.
+
+    Full enrichment is recommended only when, simultaneously:
+      1. input_country is present,
+      2. foreign parent/HQ is confirmed (final post-C4/post-C5 score == 3.0),
+      3. parent_hq_country is present,
+      4. parent_hq_country != input_country (guards against a same-country
+         false positive being misread as "foreign"),
+      5. parent_hq_language_market_type == "non_english_speaking".
+
+    Works identically for Australia, New Zealand, or any other input country
+    — nothing here references a specific country name.
+    """
+    input_country = str(row.get("input_country") or "").strip()
+    is_confirmed = _c5_score(row.get("sig_foreign_hq_score_for_next_scoring")) == 3.0
+    parent_country = resolve_parent_hq_country_for_export(row)
+    market_type = classify_parent_hq_language_market(parent_country)
+
+    same_as_input = (
+        bool(input_country) and bool(parent_country)
+        and _normalize_country_token(input_country) == _normalize_country_token(parent_country)
+    )
+    non_english_detected = is_confirmed and market_type == "non_english_speaking"
+    reason = _non_english_foreign_hq_reason(is_confirmed, market_type, parent_country)
+
+    recommended = (
+        bool(input_country) and is_confirmed and bool(parent_country)
+        and not same_as_input and non_english_detected
+    )
+
+    if not input_country:
+        skip_reason = "Input country is missing"
+    elif not is_confirmed:
+        skip_reason = "Not confirmed foreign HQ"
+    elif not parent_country:
+        skip_reason = "Parent HQ country is missing"
+    elif same_as_input:
+        skip_reason = "Parent HQ country matches input country (not foreign)"
+    elif market_type == "english_speaking":
+        skip_reason = "Parent HQ country is English-speaking/lower-priority for language/training export"
+    elif market_type == "review":
+        skip_reason = "Parent HQ language market is review/nuanced"
+    elif market_type == "unclear":
+        skip_reason = "Parent HQ country unclear"
+    else:
+        skip_reason = ""  # recommended
+
+    is_australia = _normalize_country_token(input_country) == "australia"
+
+    return {
+        "foreign_hq_detected_for_export": is_confirmed,
+        "parent_hq_country_for_export": parent_country,
+        "parent_hq_language_market_type": market_type,
+        "non_english_foreign_hq_detected": non_english_detected,
+        "non_english_foreign_hq_reason": reason,
+        "recommended_for_non_english_foreign_hq_export": recommended,
+        # Backward-compatible field: same semantics as before (Australia AND
+        # eligible). Kept so older consumers/exports don't break, but the
+        # generic field above is what now drives full enrichment.
+        "recommended_for_australia_export": recommended and is_australia,
+        "_skip_reason": skip_reason,
+    }
 
 
 def run_batch_non_english_foreign_hq_only(
@@ -1041,15 +1107,20 @@ def run_batch_non_english_foreign_hq_only(
     gets the export/classification fields (``foreign_hq_detected_for_export``,
     ``parent_hq_country_for_export``, ``parent_hq_language_market_type``,
     ``non_english_foreign_hq_detected``, ``non_english_foreign_hq_reason``,
-    ``recommended_for_australia_export``) regardless of country, so the
-    classifier stays reusable/auditable outside Australia too.
+    ``recommended_for_non_english_foreign_hq_export``) regardless of country,
+    so the classifier stays reusable/auditable for any input country.
 
     Full v2 enrichment (Phase 3) runs ONLY for rows where
-    ``recommended_for_australia_export`` is True: effective ``input_country``
-    is Australia, the HQ is confirmed foreign (final post-C4/post-C5 score
-    3.0), AND the parent HQ is in a non-English-speaking market. All other
-    rows are kept, unenriched, with ``enrichment_skipped=True`` and one of the
-    five documented skip reasons.
+    ``recommended_for_non_english_foreign_hq_export`` is True — see
+    ``_non_english_export_decision`` for the exact (country-agnostic) gate:
+    input_country present, foreign HQ confirmed (final post-C4/post-C5 score
+    3.0), a parent HQ country present and different from input_country, and
+    that parent country in a non-English-speaking market. Works identically
+    for Australia, New Zealand, or any other input country. All other rows
+    are kept, unenriched, with ``enrichment_skipped=True`` and a clear skip
+    reason. ``recommended_for_australia_export`` is kept for backward
+    compatibility only (same old Australia-specific semantics); it is no
+    longer what drives full enrichment.
 
     Returns the same dict shape as ``run_batch_foreign_hq_only``.
     """
@@ -1067,44 +1138,22 @@ def run_batch_non_english_foreign_hq_only(
     confirmed_count = non_english_count = 0
     english_count = review_count = unclear_count = 0
     for row in rows:
-        is_confirmed = _c5_score(row.get("sig_foreign_hq_score_for_next_scoring")) == 3.0
-        parent_country = resolve_parent_hq_country_for_export(row)
-        market_type = classify_parent_hq_language_market(parent_country)
-        is_australia = _normalize_country_token(row.get("input_country")) == "australia"
-
-        if is_confirmed:
+        decision = _non_english_export_decision(row)
+        if decision["foreign_hq_detected_for_export"]:
             confirmed_count += 1
+        market_type = decision["parent_hq_language_market_type"]
         if market_type == "english_speaking":
             english_count += 1
         elif market_type == "review":
             review_count += 1
         elif market_type == "unclear":
             unclear_count += 1
-
-        non_english_detected = is_confirmed and market_type == "non_english_speaking"
-        if non_english_detected:
+        if decision["non_english_foreign_hq_detected"]:
             non_english_count += 1
-        recommended = non_english_detected and is_australia
-        reason = _non_english_foreign_hq_reason(is_confirmed, market_type, parent_country)
+        decisions.append(decision)
 
-        if not is_australia:
-            skip_reason = "Non-English foreign-HQ mode requires Australia input country"
-        elif recommended:
-            skip_reason = ""
-        else:
-            skip_reason = reason
-
-        decisions.append({
-            "foreign_hq_detected_for_export": is_confirmed,
-            "parent_hq_country_for_export": parent_country,
-            "parent_hq_language_market_type": market_type,
-            "non_english_foreign_hq_detected": non_english_detected,
-            "non_english_foreign_hq_reason": reason,
-            "recommended_for_australia_export": recommended,
-            "_skip_reason": skip_reason,
-        })
-
-    total_eligible = sum(1 for d in decisions if d["recommended_for_australia_export"])
+    total_eligible = sum(
+        1 for d in decisions if d["recommended_for_non_english_foreign_hq_export"])
 
     out_rows: list[dict] = []
     evidence_rows: list[dict] = []
@@ -1117,7 +1166,7 @@ def run_batch_non_english_foreign_hq_only(
         skip_reason = decision.pop("_skip_reason")
         out_row.update(decision)
 
-        if not decision["recommended_for_australia_export"]:
+        if not decision["recommended_for_non_english_foreign_hq_export"]:
             out_row["enrichment_skipped"] = True
             out_row["enrichment_skip_reason"] = skip_reason
             out_rows.append(out_row)

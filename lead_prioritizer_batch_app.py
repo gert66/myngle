@@ -540,7 +540,7 @@ def main() -> None:  # pragma: no cover - exercised only under `streamlit run`
     st.subheader("Rows")
     rc1, rc2 = st.columns(2)
     start_row = rc1.number_input("Start row", min_value=0, value=0, step=1)
-    row_limit = rc2.number_input("Row limit (0 = all remaining)", min_value=0, value=10, step=1)
+    row_limit = rc2.number_input("Row limit (0 = all remaining)", min_value=0, value=0, step=1)
     stop_on_error = st.checkbox("Stop on first row error", value=False)
     include_raw_ai_json = st.checkbox("Include raw AI JSON", value=False)
 
@@ -566,11 +566,12 @@ def main() -> None:  # pragma: no cover - exercised only under `streamlit run`
 
     # ── Parallel processing ───────────────────────────────────────────────────
     st.subheader("Parallel processing")
-    parallel_enabled = st.checkbox("Enable parallel chunk processing", value=False)
+    parallel_enabled = st.checkbox("Enable parallel chunk processing", value=True)
     parallel_workers = 1
     if parallel_enabled:
         parallel_workers = int(st.selectbox(
-            "Parallel workers", PARALLEL_WORKER_CHOICES, index=0))
+            "Parallel workers", PARALLEL_WORKER_CHOICES,
+            index=PARALLEL_WORKER_CHOICES.index(MAX_PARALLEL_WORKERS)))
         st.caption(PARALLEL_HELP_TEXT)
         if parallel_workers > 1:
             st.warning(PARALLEL_WARNING_TEXT)
@@ -586,12 +587,12 @@ def main() -> None:  # pragma: no cover - exercised only under `streamlit run`
         )
         big_run_ok = st.checkbox(
             "I understand this may use many API calls and want to run this batch",
-            value=False)
+            value=True)
 
     # ── C5 Sonnet HQ adjudication (optional, country-agnostic) ────────────────
     st.subheader("C5 Sonnet HQ adjudication")
-    c5_enabled = st.checkbox("Use C5 Sonnet adjudication", value=False)
-    c5_scoring_behavior = "append_only"
+    c5_enabled = st.checkbox("Use C5 Sonnet adjudication", value=True)
+    c5_scoring_behavior = "conservative_adjustment"
     c5_scope = "score_3_or_manual_review"
     c5_model_tier = "sonnet"
     c5_model_override = ""
@@ -601,7 +602,8 @@ def main() -> None:  # pragma: no cover - exercised only under `streamlit run`
     c5_block_reason = ""
     if c5_enabled:
         c5_scoring_behavior = st.selectbox(
-            "C5 scoring behavior", list(C5_SCORING_BEHAVIORS), index=0,
+            "C5 scoring behavior", list(C5_SCORING_BEHAVIORS),
+            index=list(C5_SCORING_BEHAVIORS).index("conservative_adjustment"),
             help="append_only: add C5 fields only. conservative_adjustment: may "
                  "confirm/downgrade existing score-3 positives; never auto-upgrades "
                  "score-0 rows.")
