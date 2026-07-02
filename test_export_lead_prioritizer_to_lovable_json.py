@@ -15,6 +15,7 @@ from export_lead_prioritizer_to_lovable_json import (
     FOREIGN_HQ_SIGNAL_LABEL,
     LovableExportError,
     export_workbook_to_lovable_json,
+    is_technical_reason,
     parse_key_source_links,
 )
 
@@ -443,6 +444,79 @@ def test_builds_visible_icp_signal_scores_with_foreign_hq_row(tmp_path):
     assert not any(label.startswith("sig_") for label in by_label)
     assert "unmapped_custom_signal" not in by_label
     assert by_label["Unmapped custom signal"]["evidence"] == "Some quote."
+
+
+def test_visible_icp_signal_prefers_evidence_quote_over_technical_reason(tmp_path):
+    enriched = [enriched_row()]
+    signals = [
+        {"source_index": 1, "signal_name": "icp_keyword_match", "signal_score": 2,
+         "signal_reason": "3 distinct keyword match(es) in evidence: training, "
+                           "learning, development",
+         "evidence_quote": "The company runs a dedicated L&D academy for new hires."},
+    ]
+    _, out_dir = run_export(tmp_path, enriched, signals=signals)
+
+    visible = detail_for(out_dir, "Acme Brasil")["visible_icp_signal_scores"]
+    by_label = {row["label"]: row for row in visible}
+
+    row = by_label["Explicit learning and development signal"]
+    assert row["evidence"] == "The company runs a dedicated L&D academy for new hires."
+
+
+def test_visible_icp_signal_hides_technical_reason_without_quote(tmp_path):
+    enriched = [enriched_row()]
+    signals = [
+        {"source_index": 1, "signal_name": "icp_keyword_match", "signal_score": 2,
+         "signal_reason": "3 distinct keyword match(es) in evidence: training, "
+                           "learning, development"},
+    ]
+    _, out_dir = run_export(tmp_path, enriched, signals=signals)
+
+    visible = detail_for(out_dir, "Acme Brasil")["visible_icp_signal_scores"]
+    by_label = {row["label"]: row for row in visible}
+
+    row = by_label["Explicit learning and development signal"]
+    assert row["evidence"] != signals[0]["signal_reason"]
+    assert "distinct keyword match" not in (row["evidence"] or "")
+
+
+def test_visible_icp_signal_keeps_non_technical_reason_without_quote(tmp_path):
+    enriched = [enriched_row()]
+    signals = [
+        {"source_index": 1, "signal_name": "international_profile", "signal_score": 2,
+         "signal_reason": "Operates offices in three countries."},
+    ]
+    _, out_dir = run_export(tmp_path, enriched, signals=signals)
+
+    visible = detail_for(out_dir, "Acme Brasil")["visible_icp_signal_scores"]
+    by_label = {row["label"]: row for row in visible}
+
+    row = by_label["International business context"]
+    assert row["evidence"] == "Operates offices in three countries."
+
+
+@pytest.mark.parametrize("reason", [
+    "3 distinct keyword match(es) in evidence: training, learning, development",
+    "2 keyword match(es) found",
+    "C5 confirmed foreign parent",
+    "c5_adjudication: foreign_parent_confirmed",
+    "sig_foreign_hq_score_for_next_scoring set to 3",
+    "parser_source: knowledge_graph",
+    "Adjudication result: confirmed",
+    "raw AI classification: foreign_parent",
+])
+def test_is_technical_reason_detects_internal_text(reason):
+    assert is_technical_reason(reason) is True
+
+
+@pytest.mark.parametrize("reason", [
+    "Operates offices in three countries.",
+    "The company recently announced international expansion.",
+    None,
+    "",
+])
+def test_is_technical_reason_allows_user_facing_text(reason):
+    assert is_technical_reason(reason) is False
 
 
 # ---------------------------------------------------------------------------

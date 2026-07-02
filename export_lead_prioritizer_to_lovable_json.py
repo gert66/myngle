@@ -61,6 +61,30 @@ SCORE_FIELD_PRECEDENCE = [
     "commercial_fit_score",
 ]
 
+# Patterns that mark a signal_reason as internal/technical (not user-facing
+# body text), e.g. "3 distinct keyword match(es) in evidence: training, ...".
+_TECHNICAL_REASON_RE = re.compile(
+    r"distinct\s+keyword\s+match"
+    r"|keyword\s+match\(es\)"
+    r"|\bC5\b"
+    r"|c5_"
+    r"|sig_"
+    r"|parser_source"
+    r"|adjudication"
+    r"|\braw\b",
+    re.IGNORECASE,
+)
+
+
+def is_technical_reason(text) -> bool:
+    """True if a signal_reason string looks internal/technical rather than
+    user-facing (e.g. keyword-match counts, c5_/sig_ field names)."""
+    text = clean_str(text)
+    if not text:
+        return False
+    return bool(_TECHNICAL_REASON_RE.search(text))
+
+
 # Signals.signal_name -> Lovable display label (no technical sig_* labels).
 SIGNAL_DISPLAY_LABELS = {
     "international_profile": "International business context",
@@ -420,8 +444,9 @@ def build_visible_icp_signal_scores(
             label = name.removeprefix("sig_").replace("_", " ").strip().capitalize()
         if not label:
             continue
-        evidence = (clean_str(sig.get("signal_reason"))
-                    or clean_str(sig.get("evidence_quote"))
+        reason = clean_str(sig.get("signal_reason"))
+        evidence = (clean_str(sig.get("evidence_quote"))
+                    or (reason if not is_technical_reason(reason) else None)
                     or clean_str(sig.get("evidence_title")))
         visible.append({
             "label": label,
