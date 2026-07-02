@@ -176,6 +176,21 @@ class TestFlatten:
         assert row["hq_query_risk_flag"] == "Yes"
         assert row["hq_evidence_domain_match"] == "No"
 
+    def test_employer_branding_fields_included(self):
+        result = _sample_result(
+            sig_employer_branding_score=2.0,
+            employer_branding_reason="2 distinct keyword match(es) in evidence: "
+                                      "employer branding, employee satisfaction",
+            employer_branding_evidence_url="https://acme.com/careers",
+            employer_branding_evidence_quote="Recognized as a great place to work.",
+        )
+        row = flatten_result_for_excel(result, {"c": "Acme"}, 0, True, "")
+        assert row["sig_employer_branding_score"] == 2.0
+        assert row["employer_branding_reason"].startswith("2 distinct")
+        assert row["employer_branding_evidence_url"] == "https://acme.com/careers"
+        assert row["employer_branding_evidence_quote"] == \
+            "Recognized as a great place to work."
+
     def test_error_row_has_metadata_only(self):
         row = flatten_result_for_excel(None, {"c": "Acme"}, 3, False, "Boom: x")
         assert row["run_success"] is False

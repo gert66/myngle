@@ -34,12 +34,14 @@ class TestInputMapping:
             sig_onboarding_training_need_score=1.0,
             sig_icp_keyword_match_score=2.0,
             sig_company_size_complexity_score=2.0,
+            sig_employer_branding_score=2.0,
         )
         row = build_score_company_input_from_v2_result(r)
         assert row["sig_foreign_hq_score"] == 3.0
         assert row["sig_intl_footprint_score"] == 2.0
         assert row["sig_lnd_onboarding_score"] == 1.0
         assert row["sig_explicit_lnd_score"] == 2.0
+        assert row["sig_employer_branding_score"] == 2.0
 
     def test_company_size_complexity_not_used_as_employee_range(self):
         r = _result(sig_company_size_complexity_score=2.0)
@@ -58,10 +60,17 @@ class TestInputMapping:
         row = build_score_company_input_from_v2_result(_result())
         assert row["sig_rapid_growth_score"] == 0.0
 
-    def test_employer_branding_and_ti_onboarding_zero(self):
+    def test_ti_onboarding_zero(self):
         row = build_score_company_input_from_v2_result(_result())
-        assert row["sig_employer_branding_score"] == 0.0
         assert row["ti_onboarding_score"] == 0.0
+
+    def test_employer_branding_maps_from_result_not_hardcoded(self):
+        row_none = build_score_company_input_from_v2_result(_result())
+        assert row_none["sig_employer_branding_score"] == 0.0
+
+        row_scored = build_score_company_input_from_v2_result(
+            _result(sig_employer_branding_score=2.0))
+        assert row_scored["sig_employer_branding_score"] == 2.0
 
     def test_no_competitor_field_anywhere(self):
         row = build_score_company_input_from_v2_result(

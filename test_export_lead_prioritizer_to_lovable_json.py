@@ -590,6 +590,26 @@ def test_non_hq_evidence_quote_unaffected_by_c5_sanitization(tmp_path):
     )
 
 
+def test_employer_branding_signal_maps_to_lovable_label(tmp_path):
+    enriched = [enriched_row()]
+    signals = [
+        {"source_index": 1, "signal_name": "employer_branding", "signal_score": 2,
+         "evidence_quote": "Recognized as a great place to work by employees."},
+    ]
+    _, out_dir = run_export(tmp_path, enriched, signals=signals)
+
+    visible = detail_for(out_dir, "Acme Brasil")["visible_icp_signal_scores"]
+    by_label = {row["label"]: row for row in visible}
+
+    row = by_label["Employer branding or employee satisfaction"]
+    assert row["score"] == 2.0
+    assert row["evidence"] == "Recognized as a great place to work by employees."
+
+    detail = detail_for(out_dir, "Acme Brasil")
+    signal_names = {s["signal_name"] for s in detail["evidence_audit"]["signal_evidence"]}
+    assert "employer_branding" in signal_names
+
+
 def test_c5_audit_and_debug_fields_not_removed(tmp_path):
     enriched = [enriched_row(
         c5_adjudication="foreign_parent_confirmed",

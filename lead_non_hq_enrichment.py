@@ -37,7 +37,7 @@ def build_non_hq_enrichment_queries(
     company_name: str,
     domain: Optional[str],
 ) -> list[dict]:
-    """Return up to 4 non-HQ enrichment query specs.
+    """Return up to 5 non-HQ enrichment query specs.
 
     Each spec is ``{"signal_name": str, "query": str}``.  Queries are built from
     the domain root when a usable domain exists, else from the company name.
@@ -65,6 +65,11 @@ def build_non_hq_enrichment_queries(
         {
             "signal_name": "icp_keyword_match",
             "query": f"{root} corporate training sales customer service global teams",
+        },
+        {
+            "signal_name": "employer_branding",
+            "query": f"{root} employer branding employee satisfaction workplace "
+                     "culture employee experience great place to work glassdoor",
         },
     ]
 
@@ -199,7 +204,7 @@ def collect_non_hq_enrichment_evidence(
     """Build query specs, call Serper per query, extract evidence.
 
     Returns one flat list of ``LeadEvidence`` across all non-HQ signals.  No
-    scores are produced.  At most 4 Serper queries are made (one per signal).
+    scores are produced.  At most 5 Serper queries are made (one per signal).
     """
     specs = build_non_hq_enrichment_queries(company_name, domain)
     evidence: list[LeadEvidence] = []

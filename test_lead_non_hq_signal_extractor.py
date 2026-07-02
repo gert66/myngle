@@ -78,6 +78,16 @@ class TestExtractor:
         assert s.parser_source == "serper_organic_1"
         assert s.needs_manual_review is False
 
+    def test_employer_branding_two_keywords_give_score_2(self):
+        ev = [_ev("employer_branding",
+                  snippet="Great place to work with strong employee satisfaction.")]
+        sigs = extract_non_hq_signals(ev)
+        assert len(sigs) == 1
+        s = sigs[0]
+        assert s.signal_name == "employer_branding"
+        assert s.signal_score == 2.0
+        assert s.signal_value == "positive_evidence"
+
     def test_only_supported_signals_and_no_competitor(self):
         # An evidence item tagged with a competitor-like name must NOT yield a signal.
         ev = [
@@ -101,7 +111,10 @@ class TestSummary:
         for key in (
             "sig_international_profile_score", "sig_onboarding_training_need_score",
             "sig_company_size_complexity_score", "sig_icp_keyword_match_score",
+            "sig_employer_branding_score",
             "international_profile_reason", "icp_keyword_match_evidence_url",
+            "employer_branding_reason", "employer_branding_evidence_url",
+            "employer_branding_evidence_quote",
         ):
             assert summary[key] is None
 
@@ -112,6 +125,18 @@ class TestSummary:
         assert summary["sig_icp_keyword_match_score"] == 2.0
         assert summary["icp_keyword_match_evidence_url"] == "https://x.example/p"
         assert "corporate training" in summary["icp_keyword_match_reason"]
+
+    def test_employer_branding_signal_maps_fields(self):
+        ev = [_ev("employer_branding",
+                  snippet="Employee satisfaction and workplace culture are strong.",
+                  url="https://acme.com/careers")]
+        sigs = extract_non_hq_signals(ev)
+        summary = summarize_non_hq_signals_for_result(sigs)
+        assert summary["sig_employer_branding_score"] == 2.0
+        assert summary["employer_branding_evidence_url"] == "https://acme.com/careers"
+        assert summary["employer_branding_evidence_quote"] == \
+            "Employee satisfaction and workplace culture are strong."
+        assert "keyword match" in summary["employer_branding_reason"]
 
 
 # ---------------------------------------------------------------------------
@@ -157,3 +182,17 @@ class TestCoreGating:
         r = self._run([], extract_non_hq_signals_flag=True)
         assert r.signals == []
         assert r.sig_international_profile_score is None
+
+    def test_employer_branding_flows_through_result(self):
+        r = self._run(
+            [_ev("employer_branding",
+                 snippet="Great place to work with strong employee satisfaction.",
+                 url="https://acme.com/careers")],
+            collect_non_hq_evidence=True,
+            extract_non_hq_signals_flag=True,
+        )
+        assert r.sig_employer_branding_score == 2.0
+        assert r.employer_branding_evidence_url == "https://acme.com/careers"
+        assert r.employer_branding_evidence_quote == \
+            "Great place to work with strong employee satisfaction."
+        assert "keyword match" in r.employer_branding_reason

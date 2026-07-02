@@ -4,9 +4,9 @@ Maps the v2 intermediate signals on a ``LeadPrioritizationResult`` into the row
 dict format expected by ``commercial_fit_scoring.score_company`` and runs it.
 
 Conservative, explicit mapping:
-- HQ, international footprint, onboarding/training and ICP-keyword signals map to
-  their existing scoring fields.
-- Employer branding and TI-onboarding are left at 0.0 (not inferred yet).
+- HQ, international footprint, onboarding/training, ICP-keyword and employer
+  branding signals map to their existing scoring fields.
+- TI-onboarding is left at 0.0 (not inferred yet).
 - Rapid growth is 0.0 and never presented as a positive driver.
 - Company size complexity is a v2 audit signal only — it is NOT used as an
   employee range, so size fields are left blank.
@@ -24,8 +24,9 @@ _MAPPING_NOTE = (
     "v2→score_company mapping: sig_foreign_hq_score<-foreign HQ, "
     "sig_intl_footprint_score<-international_profile, "
     "sig_lnd_onboarding_score<-onboarding_training_need, "
-    "sig_explicit_lnd_score<-icp_keyword_match; "
-    "employer_branding/ti_onboarding/rapid_growth=0.0; "
+    "sig_explicit_lnd_score<-icp_keyword_match, "
+    "sig_employer_branding_score<-employer_branding; "
+    "ti_onboarding/rapid_growth=0.0; "
     "company_size_complexity is audit-only (not employee range); "
     "competitor not mapped."
 )
@@ -53,8 +54,8 @@ def build_score_company_input_from_v2_result(result: LeadPrioritizationResult) -
         "sig_lnd_onboarding_score": _num(result.sig_onboarding_training_need_score),
         # D. Explicit L&D / ICP fit
         "sig_explicit_lnd_score": _num(result.sig_icp_keyword_match_score),
-        # E. Employer branding — not inferred from careers pages yet.
-        "sig_employer_branding_score": 0.0,
+        # E. Employer branding
+        "sig_employer_branding_score": _num(result.sig_employer_branding_score),
         # F. TI onboarding — not inferred from current v2 evidence yet.
         "ti_onboarding_score": 0.0,
         # G. Rapid growth — intentionally 0.0. Rapid growth is deliberately not

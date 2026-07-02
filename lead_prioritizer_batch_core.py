@@ -177,12 +177,16 @@ _RESULT_FLAT_FIELDS = [
     # non-HQ signal scores / reasons / evidence
     "sig_international_profile_score", "sig_onboarding_training_need_score",
     "sig_company_size_complexity_score", "sig_icp_keyword_match_score",
+    "sig_employer_branding_score",
     "international_profile_reason", "onboarding_training_need_reason",
     "company_size_complexity_reason", "icp_keyword_match_reason",
+    "employer_branding_reason",
     "international_profile_evidence_url", "onboarding_training_need_evidence_url",
     "company_size_complexity_evidence_url", "icp_keyword_match_evidence_url",
+    "employer_branding_evidence_url",
     "international_profile_evidence_quote", "onboarding_training_need_evidence_quote",
     "company_size_complexity_evidence_quote", "icp_keyword_match_evidence_quote",
+    "employer_branding_evidence_quote",
     # score / tier
     "final_commercial_fit_score", "commercial_tier", "icp_similarity_score",
     "lean_model_prob", "lr_z_score", "scoring_profile", "scoring_notes",

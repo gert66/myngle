@@ -13,7 +13,7 @@ from typing import Optional
 from lead_output_schema import LeadEvidence, LeadSignal
 
 
-# Exactly the four supported non-HQ signals and their positive keyword groups.
+# Exactly the five supported non-HQ signals and their positive keyword groups.
 # (No competitor / alternative-provider / rapid-growth keywords anywhere.)
 _SIGNAL_KEYWORDS: dict[str, list[str]] = {
     "international_profile": [
@@ -32,6 +32,13 @@ _SIGNAL_KEYWORDS: dict[str, list[str]] = {
         "corporate training", "sales", "customer service", "support",
         "global teams", "multilingual", "language", "learning", "academy",
         "employees", "international teams",
+    ],
+    "employer_branding": [
+        "employer brand", "employer branding", "employee satisfaction",
+        "employee experience", "workplace culture", "company culture",
+        "great place to work", "best places to work", "employee engagement",
+        "employee wellbeing", "people culture", "career development",
+        "learning culture",
     ],
 }
 
@@ -140,6 +147,12 @@ _RESULT_FIELD_MAP: dict[str, dict[str, str]] = {
         "reason": "icp_keyword_match_reason",
         "evidence_url": "icp_keyword_match_evidence_url",
         "evidence_quote": "icp_keyword_match_evidence_quote",
+    },
+    "employer_branding": {
+        "score": "sig_employer_branding_score",
+        "reason": "employer_branding_reason",
+        "evidence_url": "employer_branding_evidence_url",
+        "evidence_quote": "employer_branding_evidence_quote",
     },
 }
 

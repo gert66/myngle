@@ -149,21 +149,25 @@ class LeadPrioritizationResult:
     sig_onboarding_training_need_score: Optional[float] = None
     sig_company_size_complexity_score: Optional[float] = None
     sig_icp_keyword_match_score: Optional[float] = None
+    sig_employer_branding_score: Optional[float] = None
     # Reasons
     international_profile_reason: Optional[str] = None
     onboarding_training_need_reason: Optional[str] = None
     company_size_complexity_reason: Optional[str] = None
     icp_keyword_match_reason: Optional[str] = None
+    employer_branding_reason: Optional[str] = None
     # Evidence URLs
     international_profile_evidence_url: Optional[str] = None
     onboarding_training_need_evidence_url: Optional[str] = None
     company_size_complexity_evidence_url: Optional[str] = None
     icp_keyword_match_evidence_url: Optional[str] = None
+    employer_branding_evidence_url: Optional[str] = None
     # Evidence quotes
     international_profile_evidence_quote: Optional[str] = None
     onboarding_training_need_evidence_quote: Optional[str] = None
     company_size_complexity_evidence_quote: Optional[str] = None
     icp_keyword_match_evidence_quote: Optional[str] = None
+    employer_branding_evidence_quote: Optional[str] = None
     # App-facing text (placeholders)
     evidence_summary_app: Optional[str] = None
     key_source_links_app: Optional[str] = None
