@@ -15,6 +15,7 @@ from lead_hq_ai_interpreter import call_serper_for_hq, interpret_hq_with_ai
 from lead_non_hq_enrichment import collect_non_hq_enrichment_evidence
 from lead_non_hq_signal_extractor import (
     extract_non_hq_signals,
+    extract_sector_industry,
     summarize_non_hq_signals_for_result,
 )
 from lead_app_summary_builder import build_app_summary_fields
@@ -149,6 +150,10 @@ def prioritize_single_lead(
         signals = extract_non_hq_signals(evidence_items)
     non_hq_summary = summarize_non_hq_signals_for_result(signals)
 
+    # Sector/industry metadata from sector_industry evidence (deterministic,
+    # audit/app only — feeds no score, C4, C5, HQ, or foreign-HQ filtering).
+    sector_summary = extract_sector_industry(evidence_items)
+
     # ── Step 4: deterministic app/evidence summary fields (no live calls) ─────
     # Built only from signals/evidence already present; never collects or
     # extracts implicitly.
@@ -224,6 +229,15 @@ def prioritize_single_lead(
         company_size_complexity_evidence_quote=non_hq_summary["company_size_complexity_evidence_quote"],
         icp_keyword_match_evidence_quote=non_hq_summary["icp_keyword_match_evidence_quote"],
         employer_branding_evidence_quote=non_hq_summary["employer_branding_evidence_quote"],
+        # Sector / industry metadata (audit & app only — never scoring)
+        detected_industry=sector_summary["detected_industry"],
+        detected_sub_industry=sector_summary["detected_sub_industry"],
+        detected_company_type=sector_summary["detected_company_type"],
+        sector_confidence=sector_summary["sector_confidence"],
+        sector_reason=sector_summary["sector_reason"],
+        sector_evidence_url=sector_summary["sector_evidence_url"],
+        sector_evidence_quote=sector_summary["sector_evidence_quote"],
+        sector_source_title=sector_summary["sector_source_title"],
         evidence_summary_app=app_summary["evidence_summary_app"],
         key_source_links_app=app_summary["key_source_links_app"],
         advanced_notes_app=app_summary["advanced_notes_app"],

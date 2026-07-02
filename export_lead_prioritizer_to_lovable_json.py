@@ -570,6 +570,17 @@ _CONSUMED_COLUMNS = {
 }
 
 
+def _resolve_industry(row: dict) -> str:
+    """Best usable industry: keep the input value when present, otherwise fall
+    back to v2 sector detection, then legacy firmographics, then "Unknown".
+    Never overwrites a user-provided industry."""
+    for column in ("industry", "detected_industry", "lusha_industry", "main_industry"):
+        value = clean_str(row.get(column))
+        if value and value.lower() != "unknown":
+            return value
+    return "Unknown"
+
+
 def _build_list_item(row: dict, company_id: str, export_country: str,
                      foreign_hq_detected: bool, foreign_hq_reason,
                      now_iso: str) -> dict:
@@ -599,7 +610,7 @@ def _build_list_item(row: dict, company_id: str, export_country: str,
         "assigned_cold_caller_rank": None,  # filled in after sorting
         "foreign_hq_detected_for_export": foreign_hq_detected,
         "foreign_hq_export_reason": foreign_hq_reason,
-        "industry": clean_str(row.get("industry")) or "Unknown",
+        "industry": _resolve_industry(row),
         "employee_range": clean_str(row.get("employee_range")) or "",
         "size_category_app": clean_str(row.get("size_category_app")),
         "display_size_category_app": clean_str(row.get("display_size_category_app")),
@@ -685,6 +696,15 @@ def _build_detail_record(
         "foreign_hq_signal_used_in_app": to_bool(row.get("foreign_hq_signal_used_in_app")),
         "competitor_signal_used_in_app": to_bool(row.get("competitor_signal_used_in_app")),
         "competitor_signal_suppressed": to_bool(row.get("competitor_signal_suppressed")),
+        # Sector / industry detection (audit & app metadata — never scoring)
+        "detected_industry": clean_str(row.get("detected_industry")),
+        "detected_sub_industry": clean_str(row.get("detected_sub_industry")),
+        "detected_company_type": clean_str(row.get("detected_company_type")),
+        "sector_confidence": clean_str(row.get("sector_confidence")),
+        "sector_reason": clean_str(row.get("sector_reason")),
+        "sector_evidence_url": clean_str(row.get("sector_evidence_url")),
+        "sector_evidence_quote": clean_str(row.get("sector_evidence_quote")),
+        "sector_source_title": clean_str(row.get("sector_source_title")),
         "visible_icp_signal_scores": build_visible_icp_signal_scores(
             row, signal_rows, list_item["foreign_hq_detected_for_export"]),
         "evidence_snippets": evidence_snippets,

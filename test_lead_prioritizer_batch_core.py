@@ -191,6 +191,41 @@ class TestFlatten:
         assert row["employer_branding_evidence_quote"] == \
             "Recognized as a great place to work."
 
+    def test_sector_fields_included(self):
+        result = _sample_result(
+            detected_industry="Consumer goods",
+            detected_sub_industry="Consumer electronics",
+            detected_company_type="Subsidiary",
+            sector_confidence="High",
+            sector_reason="Matched sector keyword(s): consumer electronics.",
+            sector_evidence_url="https://acme.com/about",
+            sector_evidence_quote="Acme is a consumer electronics company.",
+            sector_source_title="About Acme",
+        )
+        row = flatten_result_for_excel(result, {"c": "Acme"}, 0, True, "")
+        assert row["detected_industry"] == "Consumer goods"
+        assert row["detected_sub_industry"] == "Consumer electronics"
+        assert row["detected_company_type"] == "Subsidiary"
+        assert row["sector_confidence"] == "High"
+        assert row["sector_reason"].startswith("Matched sector")
+        assert row["sector_evidence_url"] == "https://acme.com/about"
+        assert row["sector_evidence_quote"] == "Acme is a consumer electronics company."
+        assert row["sector_source_title"] == "About Acme"
+
+    def test_sector_industry_evidence_rows_flattened(self):
+        result = _sample_result(evidence_items=[
+            LeadEvidence(evidence_id="sector_industry:organic:1",
+                         signal_name="sector_industry",
+                         source_url="https://acme.com/about",
+                         source_title="About", source_snippet="a retail company",
+                         query_used="acme company industry sector",
+                         parser_source="serper_organic_1", source_type="organic"),
+        ])
+        rows = flatten_evidence_for_excel(result, source_index=2)
+        assert len(rows) == 1
+        assert rows[0]["signal_name"] == "sector_industry"
+        assert rows[0]["source_snippet"] == "a retail company"
+
     def test_error_row_has_metadata_only(self):
         row = flatten_result_for_excel(None, {"c": "Acme"}, 3, False, "Boom: x")
         assert row["run_success"] is False

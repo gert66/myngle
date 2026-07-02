@@ -610,6 +610,87 @@ def test_employer_branding_signal_maps_to_lovable_label(tmp_path):
     assert "employer_branding" in signal_names
 
 
+# ---------------------------------------------------------------------------
+# Sector / industry resolution
+# ---------------------------------------------------------------------------
+
+def test_existing_industry_not_overwritten_by_detected(tmp_path):
+    enriched = [enriched_row(detected_industry="Retail")]
+    _, out_dir = run_export(tmp_path, enriched)
+
+    item = load_list(out_dir)[0]
+    assert item["industry"] == "Manufacturing"  # input value preserved
+
+
+def test_blank_industry_filled_from_detected(tmp_path):
+    enriched = [enriched_row(industry="", detected_industry="Retail")]
+    _, out_dir = run_export(tmp_path, enriched)
+
+    item = load_list(out_dir)[0]
+    assert item["industry"] == "Retail"
+
+
+def test_unknown_industry_filled_from_detected(tmp_path):
+    enriched = [enriched_row(industry="Unknown", detected_industry="Consumer goods")]
+    _, out_dir = run_export(tmp_path, enriched)
+
+    item = load_list(out_dir)[0]
+    assert item["industry"] == "Consumer goods"
+
+
+def test_industry_falls_back_to_lusha_then_unknown(tmp_path):
+    enriched = [
+        enriched_row(source_index=1, industry="", lusha_industry="Insurance"),
+        enriched_row(source_index=2, company_name="Beta Ltd", domain="beta.com",
+                     industry="", lusha_industry=""),
+    ]
+    _, out_dir = run_export(tmp_path, enriched)
+
+    by_name = {item["company_name"]: item for item in load_list(out_dir)}
+    assert by_name["Acme Brasil"]["industry"] == "Insurance"
+    assert by_name["Beta Ltd"]["industry"] == "Unknown"
+
+
+def test_detail_exposes_detected_sector_fields(tmp_path):
+    enriched = [enriched_row(
+        industry="",
+        detected_industry="Consumer goods",
+        detected_sub_industry="Consumer electronics",
+        detected_company_type="Subsidiary",
+        sector_confidence="High",
+        sector_reason="Matched sector keyword(s): consumer electronics.",
+        sector_evidence_url="https://acme.com/about",
+        sector_evidence_quote="Acme is a consumer electronics company.",
+        sector_source_title="About Acme",
+    )]
+    _, out_dir = run_export(tmp_path, enriched)
+
+    detail = detail_for(out_dir, "Acme Brasil")
+    assert detail["industry"] == "Consumer goods"
+    assert detail["detected_industry"] == "Consumer goods"
+    assert detail["detected_sub_industry"] == "Consumer electronics"
+    assert detail["detected_company_type"] == "Subsidiary"
+    assert detail["sector_confidence"] == "High"
+    assert detail["sector_reason"].startswith("Matched sector")
+    assert detail["sector_evidence_url"] == "https://acme.com/about"
+    assert detail["sector_evidence_quote"] == "Acme is a consumer electronics company."
+    assert detail["sector_source_title"] == "About Acme"
+
+
+def test_sector_industry_not_a_visible_commercial_driver(tmp_path):
+    enriched = [enriched_row(detected_industry="Retail")]
+    evidence = [
+        {"source_index": 1, "signal_name": "sector_industry",
+         "source_url": "https://acme.com/about", "source_title": "About",
+         "source_snippet": "Acme is a retail company."},
+    ]
+    _, out_dir = run_export(tmp_path, enriched, evidence)
+
+    visible = detail_for(out_dir, "Acme Brasil")["visible_icp_signal_scores"]
+    labels = {row["label"].lower() for row in visible}
+    assert not any("sector" in label for label in labels)
+
+
 def test_c5_audit_and_debug_fields_not_removed(tmp_path):
     enriched = [enriched_row(
         c5_adjudication="foreign_parent_confirmed",

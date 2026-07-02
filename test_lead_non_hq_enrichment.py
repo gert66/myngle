@@ -44,17 +44,17 @@ class TestQueryBuilder:
         for spec in specs:
             assert spec["query"].startswith("some company ")
 
-    def test_at_most_five_queries(self):
+    def test_at_most_six_queries(self):
         specs = build_non_hq_enrichment_queries("Acme", "acme.com")
-        assert len(specs) <= 5
+        assert len(specs) <= 6
         assert {s["signal_name"] for s in specs} == {
             "international_profile", "onboarding_training_need",
             "company_size_complexity", "icp_keyword_match", "employer_branding",
+            "sector_industry",
         }
 
     def test_employer_branding_is_fifth_query(self):
         specs = build_non_hq_enrichment_queries("Acme", "acme.com")
-        assert len(specs) == 5
         assert specs[4]["signal_name"] == "employer_branding"
         q = specs[4]["query"].lower()
         assert "employer branding" in q
@@ -62,6 +62,17 @@ class TestQueryBuilder:
         assert "workplace culture" in q
         assert "great place to work" in q
         assert "glassdoor" in q
+
+    def test_sector_industry_is_sixth_query(self):
+        specs = build_non_hq_enrichment_queries("Acme", "acme.com")
+        assert len(specs) == 6
+        assert specs[5]["signal_name"] == "sector_industry"
+        q = specs[5]["query"].lower()
+        assert q.startswith("acme ")
+        assert "industry" in q
+        assert "sector" in q
+        assert "business activity" in q
+        assert "company profile" in q
 
     def test_no_competitor_or_growth_terms(self):
         specs = build_non_hq_enrichment_queries("Acme", "acme.com")

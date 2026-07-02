@@ -187,6 +187,10 @@ _RESULT_FLAT_FIELDS = [
     "international_profile_evidence_quote", "onboarding_training_need_evidence_quote",
     "company_size_complexity_evidence_quote", "icp_keyword_match_evidence_quote",
     "employer_branding_evidence_quote",
+    # sector / industry detection (audit & app metadata — never scoring)
+    "detected_industry", "detected_sub_industry", "detected_company_type",
+    "sector_confidence", "sector_reason", "sector_evidence_url",
+    "sector_evidence_quote", "sector_source_title",
     # score / tier
     "final_commercial_fit_score", "commercial_tier", "icp_similarity_score",
     "lean_model_prob", "lr_z_score", "scoring_profile", "scoring_notes",

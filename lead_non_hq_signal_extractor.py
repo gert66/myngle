@@ -8,6 +8,7 @@ intermediate signal scores, NOT the final commercial fit score.
 
 from __future__ import annotations
 
+import re
 from typing import Optional
 
 from lead_output_schema import LeadEvidence, LeadSignal
@@ -177,4 +178,218 @@ def summarize_non_hq_signals_for_result(signals: list[LeadSignal]) -> dict:
         out[fields["evidence_url"]] = sig.evidence_url
         out[fields["evidence_quote"]] = sig.evidence_quote
 
+    return out
+
+
+# ---------------------------------------------------------------------------
+# Sector / industry detection (audit & app metadata only — NEVER scoring)
+# ---------------------------------------------------------------------------
+#
+# ``sector_industry`` evidence is deliberately absent from ``_SIGNAL_KEYWORDS``
+# and ``_RESULT_FIELD_MAP`` above, so ``extract_non_hq_signals`` ignores it and
+# it can never become a commercial scoring signal.  The helper below turns that
+# evidence into descriptive metadata fields instead.
+
+# Sector keyword -> (industry category, optional sub-industry).  Matching is
+# word-boundary based on Serper title + snippet text only; nothing is invented.
+_SECTOR_KEYWORD_MAP: dict[str, tuple[str, Optional[str]]] = {
+    "financial services": ("Financial services", None),
+    "banking": ("Financial services", None),
+    "asset management": ("Financial services", None),
+    "fintech": ("Financial services", "Fintech"),
+    "insurance": ("Insurance", None),
+    "insurer": ("Insurance", None),
+    "healthcare": ("Healthcare", None),
+    "health care": ("Healthcare", None),
+    "hospital": ("Healthcare", None),
+    "medical devices": ("Healthcare", "Medical devices"),
+    "pharmaceutical": ("Pharmaceuticals", None),
+    "biotech": ("Pharmaceuticals", "Biotechnology"),
+    "technology company": ("Technology", None),
+    "tech company": ("Technology", None),
+    "information technology": ("Technology", None),
+    "it services": ("Technology", "IT services"),
+    "software": ("Software", None),
+    "telecommunications": ("Telecommunications", None),
+    "telecom": ("Telecommunications", None),
+    "retail": ("Retail", None),
+    "retailer": ("Retail", None),
+    "e-commerce": ("Retail", "E-commerce"),
+    "ecommerce": ("Retail", "E-commerce"),
+    "manufacturing": ("Manufacturing", None),
+    "manufacturer": ("Manufacturing", None),
+    "oil and gas": ("Energy", "Oil and gas"),
+    "renewable energy": ("Energy", "Renewable energy"),
+    "energy company": ("Energy", None),
+    "utility company": ("Energy", None),
+    "logistics": ("Logistics", None),
+    "freight": ("Logistics", None),
+    "transportation": ("Transportation", None),
+    "airline": ("Transportation", "Airline"),
+    "shipping company": ("Transportation", "Shipping"),
+    "education company": ("Education", None),
+    "university": ("Education", None),
+    "edtech": ("Education", "Edtech"),
+    "e-learning": ("Education", "E-learning"),
+    "consulting": ("Consulting", None),
+    "consultancy": ("Consulting", None),
+    "professional services": ("Consulting", None),
+    "advertising agency": ("Marketing and advertising", "Advertising agency"),
+    "marketing agency": ("Marketing and advertising", "Marketing agency"),
+    "advertising": ("Marketing and advertising", None),
+    "public relations": ("Marketing and advertising", "Public relations"),
+    "food and beverage": ("Food and beverage", None),
+    "food company": ("Food and beverage", None),
+    "beverage": ("Food and beverage", None),
+    "brewery": ("Food and beverage", "Brewery"),
+    "agriculture": ("Agriculture", None),
+    "agribusiness": ("Agriculture", None),
+    "chemical company": ("Chemicals", None),
+    "chemicals": ("Chemicals", None),
+    "construction": ("Construction", None),
+    "real estate": ("Real estate", None),
+    "hospitality": ("Hospitality", None),
+    "hotel": ("Hospitality", "Hotels"),
+    "media company": ("Media", None),
+    "broadcasting": ("Media", "Broadcasting"),
+    "publishing": ("Media", "Publishing"),
+    "consumer goods": ("Consumer goods", None),
+    "consumer electronics": ("Consumer goods", "Consumer electronics"),
+    "fmcg": ("Consumer goods", "FMCG"),
+    "automotive": ("Automotive", None),
+    "car manufacturer": ("Automotive", "Car manufacturer"),
+    # Public sector only on clearly governmental terms (per policy).
+    "government agency": ("Public sector / government", None),
+    "ministry": ("Public sector / government", None),
+    "municipality": ("Public sector / government", None),
+    "public agency": ("Public sector / government", None),
+    "public administration": ("Public sector / government", None),
+}
+
+# Company-type phrase -> label; first phrase found in evidence text wins.
+_COMPANY_TYPE_MAP: dict[str, str] = {
+    "state-owned": "State-owned company",
+    "government agency": "Government agency",
+    "subsidiary": "Subsidiary",
+    "publicly traded": "Public company",
+    "listed company": "Public company",
+    "public company": "Public company",
+    "privately held": "Private company",
+    "private company": "Private company",
+    "family-owned": "Family-owned company",
+    "joint venture": "Joint venture",
+    "multinational": "Multinational",
+    "nonprofit": "Nonprofit",
+    "non-profit": "Nonprofit",
+}
+
+_SECTOR_RESULT_KEYS = (
+    "detected_industry", "detected_sub_industry", "detected_company_type",
+    "sector_confidence", "sector_reason", "sector_evidence_url",
+    "sector_evidence_quote", "sector_source_title",
+)
+
+
+def _sector_evidence_priority(ev: LeadEvidence) -> int:
+    """Prefer official/profile-style sources over generic directory hits."""
+    if (ev.source_type or "") == "knowledge_graph":
+        return 0
+    url = (ev.source_url or "").lower()
+    if "linkedin.com" in url:
+        return 1
+    if (ev.source_type or "") == "answer_box":
+        return 2
+    return 3
+
+
+def _kw_match(keyword: str, text: str):
+    return re.search(rf"\b{re.escape(keyword)}\b", text)
+
+
+def extract_sector_industry(evidence_items: list[LeadEvidence]) -> dict:
+    """Derive descriptive sector/industry metadata from ``sector_industry``
+    evidence rows.
+
+    Conservative and deterministic: inspects Serper titles/snippets only, never
+    invents facts, and returns all-``None`` fields when nothing defensible was
+    found.  The output is audit/app metadata only — it feeds no commercial
+    score, C4, C5, HQ, or foreign-HQ filtering.
+    """
+    out: dict = {key: None for key in _SECTOR_RESULT_KEYS}
+
+    group = [e for e in (evidence_items or []) if e.signal_name == "sector_industry"]
+    if not group:
+        return out
+
+    ordered = sorted(group, key=_sector_evidence_priority)
+
+    # Collect keyword hits per industry across all sector evidence, remembering
+    # the first (highest-priority, earliest-position) hit per industry.
+    hits: dict[str, dict] = {}
+    for rank, ev in enumerate(ordered):
+        text = _evidence_text(ev)
+        if not text:
+            continue
+        for keyword, (industry, sub_industry) in _SECTOR_KEYWORD_MAP.items():
+            m = _kw_match(keyword, text)
+            if not m:
+                continue
+            entry = hits.setdefault(industry, {
+                "keywords": [], "first_pos": (rank, m.start()),
+                "evidence": ev, "sub_industry": None,
+            })
+            if keyword not in entry["keywords"]:
+                entry["keywords"].append(keyword)
+            if (rank, m.start()) < entry["first_pos"]:
+                entry["first_pos"] = (rank, m.start())
+                entry["evidence"] = ev
+            if entry["sub_industry"] is None and sub_industry:
+                entry["sub_industry"] = sub_industry
+
+    if not hits:
+        out["sector_confidence"] = "Low"
+        out["sector_reason"] = (
+            "No clear sector keywords matched in available evidence."
+        )
+        return out
+
+    # Most distinct keyword hits wins; ties go to the earliest hit in the
+    # highest-priority evidence (most specific defensible mention first).
+    chosen_industry = min(
+        hits, key=lambda ind: (-len(hits[ind]["keywords"]), hits[ind]["first_pos"]),
+    )
+    chosen = hits[chosen_industry]
+    ev = chosen["evidence"]
+
+    n_hits = len(chosen["keywords"])
+    if n_hits >= 2 and ev.source_url:
+        confidence = "High"
+    elif n_hits == 1 and ev.source_url:
+        confidence = "Medium"
+    else:
+        confidence = "Low"
+
+    reason = "Matched sector keyword(s): " + ", ".join(chosen["keywords"]) + "."
+    others = sorted(ind for ind in hits if ind != chosen_industry)
+    if others:
+        reason += (
+            " Other sector mentions in evidence: " + ", ".join(others)
+            + "; chose the most specific defensible match."
+        )
+
+    combined_text = " ".join(_evidence_text(e) for e in ordered)
+    company_type = None
+    for phrase, label in _COMPANY_TYPE_MAP.items():
+        if _kw_match(phrase, combined_text):
+            company_type = label
+            break
+
+    out["detected_industry"] = chosen_industry
+    out["detected_sub_industry"] = chosen["sub_industry"]
+    out["detected_company_type"] = company_type
+    out["sector_confidence"] = confidence
+    out["sector_reason"] = reason
+    out["sector_evidence_url"] = ev.source_url
+    out["sector_evidence_quote"] = ev.source_snippet
+    out["sector_source_title"] = ev.source_title
     return out

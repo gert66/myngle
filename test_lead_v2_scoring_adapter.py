@@ -72,6 +72,17 @@ class TestInputMapping:
             _result(sig_employer_branding_score=2.0))
         assert row_scored["sig_employer_branding_score"] == 2.0
 
+    def test_sector_fields_do_not_affect_score_input(self):
+        plain = build_score_company_input_from_v2_result(_result())
+        with_sector = build_score_company_input_from_v2_result(_result(
+            detected_industry="Retail",
+            detected_company_type="Subsidiary",
+            sector_confidence="High",
+        ))
+        assert plain == with_sector
+        assert not any("sector" in k.lower() or "industry" in k.lower()
+                       for k in with_sector)
+
     def test_no_competitor_field_anywhere(self):
         row = build_score_company_input_from_v2_result(
             _result(sig_foreign_hq_score_for_next_scoring=3.0))

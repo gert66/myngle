@@ -168,6 +168,15 @@ class LeadPrioritizationResult:
     company_size_complexity_evidence_quote: Optional[str] = None
     icp_keyword_match_evidence_quote: Optional[str] = None
     employer_branding_evidence_quote: Optional[str] = None
+    # ── Sector / industry detection (audit & app metadata — NEVER scoring) ─────
+    detected_industry: Optional[str] = None
+    detected_sub_industry: Optional[str] = None
+    detected_company_type: Optional[str] = None
+    sector_confidence: Optional[str] = None
+    sector_reason: Optional[str] = None
+    sector_evidence_url: Optional[str] = None
+    sector_evidence_quote: Optional[str] = None
+    sector_source_title: Optional[str] = None
     # App-facing text (placeholders)
     evidence_summary_app: Optional[str] = None
     key_source_links_app: Optional[str] = None

@@ -11,6 +11,7 @@ from unittest.mock import patch
 from lead_output_schema import LeadEvidence, LeadInput, HQDetectionResult
 from lead_non_hq_signal_extractor import (
     extract_non_hq_signals,
+    extract_sector_industry,
     summarize_non_hq_signals_for_result,
     SUPPORTED_SIGNALS,
 )
@@ -100,6 +101,17 @@ class TestExtractor:
         assert all(n in SUPPORTED_SIGNALS for n in names)
         assert "competitor" not in names
 
+    def test_sector_industry_evidence_yields_no_commercial_signal(self):
+        # sector_industry is audit/app metadata only — never a scoring signal.
+        ev = [
+            _ev("sector_industry", snippet="Acme is a retail company."),
+            _ev("international_profile", snippet="global markets"),
+        ]
+        sigs = extract_non_hq_signals(ev)
+        names = {s.signal_name for s in sigs}
+        assert names == {"international_profile"}
+        assert "sector_industry" not in SUPPORTED_SIGNALS
+
 
 # ---------------------------------------------------------------------------
 # Summary mapping
@@ -137,6 +149,64 @@ class TestSummary:
         assert summary["employer_branding_evidence_quote"] == \
             "Employee satisfaction and workplace culture are strong."
         assert "keyword match" in summary["employer_branding_reason"]
+
+
+# ---------------------------------------------------------------------------
+# Sector / industry extraction (audit metadata only)
+# ---------------------------------------------------------------------------
+
+class TestSectorIndustry:
+    def test_no_evidence_all_none(self):
+        out = extract_sector_industry([])
+        assert all(v is None for v in out.values())
+
+    def test_non_sector_evidence_ignored(self):
+        out = extract_sector_industry(
+            [_ev("international_profile", snippet="A retail company.")])
+        assert all(v is None for v in out.values())
+
+    def test_detects_consumer_electronics_manufacturer(self):
+        ev = [_ev("sector_industry",
+                  title="TCL SEMP | LinkedIn",
+                  snippet="TCL SEMP is a consumer electronics manufacturing "
+                          "company based in Brazil.",
+                  url="https://www.linkedin.com/company/tcl-semp")]
+        out = extract_sector_industry(ev)
+        assert out["detected_industry"] == "Consumer goods"
+        assert out["detected_sub_industry"] == "Consumer electronics"
+        assert out["sector_evidence_url"] == "https://www.linkedin.com/company/tcl-semp"
+        assert out["sector_source_title"] == "TCL SEMP | LinkedIn"
+        assert "consumer electronics" in out["sector_reason"]
+        # Manufacturing was also mentioned; reason should acknowledge it.
+        assert "Manufacturing" in out["sector_reason"]
+
+    def test_two_keywords_same_sector_high_confidence(self):
+        ev = [_ev("sector_industry",
+                  snippet="A financial services group focused on banking.")]
+        out = extract_sector_industry(ev)
+        assert out["detected_industry"] == "Financial services"
+        assert out["sector_confidence"] == "High"
+
+    def test_no_keyword_match_leaves_industry_blank_low_confidence(self):
+        ev = [_ev("sector_industry", snippet="Nothing recognizable here.")]
+        out = extract_sector_industry(ev)
+        assert out["detected_industry"] is None
+        assert out["sector_confidence"] == "Low"
+        assert "No clear sector keywords" in out["sector_reason"]
+
+    def test_company_type_detected(self):
+        ev = [_ev("sector_industry",
+                  snippet="A pharmaceutical company and subsidiary of "
+                          "a multinational group.")]
+        out = extract_sector_industry(ev)
+        assert out["detected_industry"] == "Pharmaceuticals"
+        assert out["detected_company_type"] == "Subsidiary"
+
+    def test_public_sector_only_on_clear_government_terms(self):
+        ev = [_ev("sector_industry",
+                  snippet="A public company serving many customers.")]
+        out = extract_sector_industry(ev)
+        assert out["detected_industry"] != "Public sector / government"
 
 
 # ---------------------------------------------------------------------------
@@ -182,6 +252,24 @@ class TestCoreGating:
         r = self._run([], extract_non_hq_signals_flag=True)
         assert r.signals == []
         assert r.sig_international_profile_score is None
+
+    def test_sector_fields_flow_through_result(self):
+        r = self._run(
+            [_ev("sector_industry",
+                 snippet="Acme is a retail company with stores nationwide.",
+                 url="https://acme.com/about")],
+            collect_non_hq_evidence=True,
+        )
+        assert r.detected_industry == "Retail"
+        assert r.sector_evidence_url == "https://acme.com/about"
+        # Sector detection must not create signals or scores.
+        assert r.signals == []
+        assert r.final_commercial_fit_score is None
+
+    def test_no_evidence_means_no_sector_fields(self):
+        r = self._run([])
+        assert r.detected_industry is None
+        assert r.sector_confidence is None
 
     def test_employer_branding_flows_through_result(self):
         r = self._run(
