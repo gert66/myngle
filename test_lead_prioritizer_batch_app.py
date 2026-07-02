@@ -21,6 +21,11 @@ from lead_prioritizer_batch_app import (
     build_phase_progress_status_text,
     autosave_output_workbook,
     sanitize_run_mode_for_filename,
+    sanitize_filename_part,
+    clean_user_path,
+    resolve_batch_output_dir,
+    make_batch_output_filename,
+    make_parallel_run_folder_name,
     MODE_LABELS,
     SUPPORTED_DEFAULT_INPUT_COUNTRIES,
     DEFAULT_COUNTRY_PLACEHOLDER,
@@ -315,15 +320,20 @@ class TestAutosaveOutputWorkbook:
         out_dir = tmp_path / "nested" / "batch_outputs"
         assert not out_dir.exists()
         path = autosave_output_workbook(
-            b"workbook-bytes", str(out_dir), "full_foreign_hq_only", now=_FIXED_NOW)
+            b"workbook-bytes", str(out_dir), "full_foreign_hq_only",
+            country="Brazil", now=_FIXED_NOW)
         assert out_dir.is_dir()
-        assert path.name == "lead_prioritizer_v2_full_foreign_hq_only_20260702_021530.xlsx"
+        assert path.name == \
+            "lead_prioritizer_v2_Brazil_full_foreign_hq_only_enriched_20260702_021530.xlsx"
         assert path.read_bytes() == b"workbook-bytes"
 
     def test_does_not_overwrite_existing_files(self, tmp_path):
-        p1 = autosave_output_workbook(b"first", str(tmp_path), "full", now=_FIXED_NOW)
-        p2 = autosave_output_workbook(b"second", str(tmp_path), "full", now=_FIXED_NOW)
-        p3 = autosave_output_workbook(b"third", str(tmp_path), "full", now=_FIXED_NOW)
+        p1 = autosave_output_workbook(b"first", str(tmp_path), "full",
+                                      country="Italy", now=_FIXED_NOW)
+        p2 = autosave_output_workbook(b"second", str(tmp_path), "full",
+                                      country="Italy", now=_FIXED_NOW)
+        p3 = autosave_output_workbook(b"third", str(tmp_path), "full",
+                                      country="Italy", now=_FIXED_NOW)
         assert p1 != p2 != p3
         assert p1.read_bytes() == b"first"   # original untouched
         assert p2.read_bytes() == b"second"
@@ -332,22 +342,33 @@ class TestAutosaveOutputWorkbook:
 
     def test_relative_path_resolves_under_cwd(self, tmp_path, monkeypatch):
         monkeypatch.chdir(tmp_path)
-        path = autosave_output_workbook(b"x", "batch_outputs", "hq_only", now=_FIXED_NOW)
+        path = autosave_output_workbook(b"x", "batch_outputs", "hq_only",
+                                        country="Uruguay", now=_FIXED_NOW)
         assert path.parent == (tmp_path / "batch_outputs").resolve()
         assert path.exists()
 
     def test_run_mode_is_sanitized_in_filename(self, tmp_path):
         path = autosave_output_workbook(
-            b"x", str(tmp_path), "weird/../mode name!", now=_FIXED_NOW)
+            b"x", str(tmp_path), "weird/../mode name!", country="Italy", now=_FIXED_NOW)
         assert "/" not in path.name and ".." not in path.name and " " not in path.name
-        assert path.name.startswith("lead_prioritizer_v2_weird_mode_name_")
+        assert path.name.startswith("lead_prioritizer_v2_Italy_weird_mode_name_enriched_")
         assert path.suffix == ".xlsx"
+
+    def test_country_is_sanitized_in_filename(self, tmp_path):
+        path = autosave_output_workbook(
+            b"x", str(tmp_path), "hq_only", country="New Zealand", now=_FIXED_NOW)
+        assert path.name == "lead_prioritizer_v2_New_Zealand_hq_only_enriched_20260702_021530.xlsx"
+
+    def test_blank_country_falls_back_to_placeholder_token(self, tmp_path):
+        path = autosave_output_workbook(b"x", str(tmp_path), "full", now=_FIXED_NOW)
+        assert path.name == "lead_prioritizer_v2_Country_full_enriched_20260702_021530.xlsx"
 
     def test_unwritable_path_raises(self, tmp_path):
         blocker = tmp_path / "not_a_dir"
         blocker.write_bytes(b"i am a file")  # mkdir on a path through a file fails
         with pytest.raises(Exception):
-            autosave_output_workbook(b"x", str(blocker / "sub"), "full", now=_FIXED_NOW)
+            autosave_output_workbook(b"x", str(blocker / "sub"), "full",
+                                     country="Italy", now=_FIXED_NOW)
 
 
 class TestSanitizeRunMode:
@@ -441,3 +462,124 @@ class TestAustraliaNonEnglishModeWiring:
     def test_help_text_present(self):
         assert NON_ENGLISH_FOREIGN_HQ_ONLY_HELP_TEXT
         assert "Australia" in NON_ENGLISH_FOREIGN_HQ_ONLY_HELP_TEXT
+
+
+# ---------------------------------------------------------------------------
+# Country list, output-directory resolution, and filename/foldername builders
+# (country-organized outputs; see: Improve country output naming and folders)
+# ---------------------------------------------------------------------------
+
+class TestCountryListAlphabeticalAndComplete:
+    def test_alphabetically_sorted(self):
+        assert SUPPORTED_DEFAULT_INPUT_COUNTRIES == sorted(SUPPORTED_DEFAULT_INPUT_COUNTRIES)
+
+    def test_includes_required_countries(self):
+        for country in ("Australia", "Brazil", "Italy", "New Zealand", "Uruguay"):
+            assert country in SUPPORTED_DEFAULT_INPUT_COUNTRIES
+
+    def test_exact_list(self):
+        assert SUPPORTED_DEFAULT_INPUT_COUNTRIES == \
+            ["Australia", "Brazil", "Italy", "New Zealand", "Uruguay"]
+
+    def test_placeholder_is_first_in_dropdown_options(self):
+        options = [DEFAULT_COUNTRY_PLACEHOLDER] + SUPPORTED_DEFAULT_INPUT_COUNTRIES
+        assert options[0] == DEFAULT_COUNTRY_PLACEHOLDER
+        assert options[1:] == sorted(options[1:])
+
+    def test_new_zealand_is_valid_default_country(self):
+        country, error = resolve_default_input_country("New Zealand")
+        assert country == "New Zealand"
+        assert error is None
+
+
+class TestSanitizeFilenamePart:
+    def test_spaces_become_underscores(self):
+        assert sanitize_filename_part("New Zealand") == "New_Zealand"
+
+    def test_unsafe_characters_removed(self):
+        assert sanitize_filename_part('Bra<>zil:"/\\|?*') == "Bra_zil"
+
+    def test_blank_uses_fallback(self):
+        assert sanitize_filename_part("", fallback="Country") == "Country"
+        assert sanitize_filename_part(None, fallback="Country") == "Country"
+
+
+class TestCleanUserPath:
+    def test_strips_surrounding_double_quotes(self):
+        p = clean_user_path('"C:\\Data\\Brazil"')
+        assert str(p) == "C:\\Data\\Brazil"
+
+    def test_strips_surrounding_single_quotes(self):
+        p = clean_user_path("'/home/user/Brazil'")
+        assert str(p) == "/home/user/Brazil"
+
+    def test_blank_returns_none(self):
+        assert clean_user_path("") is None
+        assert clean_user_path("   ") is None
+        assert clean_user_path(None) is None
+
+    def test_expands_home(self):
+        p = clean_user_path("~/Brazil")
+        assert not str(p).startswith("~")
+
+    def test_plain_path_unchanged(self):
+        assert str(clean_user_path("/data/brazil")) == "/data/brazil"
+
+
+class TestResolveBatchOutputDir:
+    def test_resolves_from_source_folder(self):
+        result = resolve_batch_output_dir("C:/Data/Brazil")
+        assert str(result).replace("\\", "/") == "C:/Data/Brazil/lead_prioritizer_outputs"
+
+    def test_falls_back_to_batch_outputs_when_blank(self):
+        assert str(resolve_batch_output_dir("")) == "batch_outputs"
+        assert str(resolve_batch_output_dir(None)) == "batch_outputs"
+
+    def test_strips_quotes_around_windows_path(self):
+        result = resolve_batch_output_dir('"C:\\Data\\Brazil"')
+        assert str(result).replace("\\", "/").endswith("Data/Brazil/lead_prioritizer_outputs")
+
+    def test_never_downloads_as_fallback(self):
+        assert "Downloads" not in str(resolve_batch_output_dir(""))
+        assert "Downloads" not in str(resolve_batch_output_dir("C:/Data/Brazil"))
+
+
+class TestMakeBatchOutputFilename:
+    def test_brazil_foreign_hq_only(self):
+        stamp = _dt(2026, 7, 2, 23, 15, 0)
+        assert make_batch_output_filename("Brazil", "full_foreign_hq_only", stamp) == \
+            "lead_prioritizer_v2_Brazil_full_foreign_hq_only_enriched_20260702_231500.xlsx"
+
+    def test_australia_hq_only(self):
+        stamp = _dt(2026, 7, 2, 23, 15, 0)
+        assert make_batch_output_filename("Australia", "hq_only", stamp) == \
+            "lead_prioritizer_v2_Australia_hq_only_enriched_20260702_231500.xlsx"
+
+    def test_new_zealand_sanitizes_space(self):
+        stamp = _dt(2026, 7, 2, 23, 15, 0)
+        name = make_batch_output_filename("New Zealand", "full", stamp)
+        assert "New_Zealand" in name
+        assert " " not in name
+        assert name.startswith("lead_prioritizer_v2_New_Zealand_full_enriched_")
+        assert name.endswith(".xlsx")
+
+    def test_includes_all_required_components(self):
+        stamp = _dt(2026, 7, 2, 23, 15, 0)
+        name = make_batch_output_filename("Italy", "signals_no_score", stamp)
+        assert "Italy" in name
+        assert "signals_no_score" in name
+        assert "enriched" in name
+        assert "20260702_231500" in name
+
+
+class TestMakeParallelRunFolderName:
+    def test_shape(self):
+        stamp = _dt(2026, 7, 2, 23, 15, 0)
+        assert make_parallel_run_folder_name("Brazil", "full_foreign_hq_only", stamp) == \
+            "run_Brazil_full_foreign_hq_only_20260702_231500"
+
+    def test_new_zealand_sanitized(self):
+        stamp = _dt(2026, 7, 2, 23, 15, 0)
+        name = make_parallel_run_folder_name("New Zealand", "hq_only", stamp)
+        assert " " not in name
+        assert "New_Zealand" in name

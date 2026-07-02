@@ -16,10 +16,12 @@ from __future__ import annotations
 
 import io
 import json
+import re
 import uuid
 import zipfile
 from datetime import datetime
 from pathlib import Path
+from typing import Optional
 
 import streamlit as st
 
@@ -28,9 +30,15 @@ from export_lead_prioritizer_to_lovable_json import (
     export_workbook_to_lovable_json,
 )
 
-# Central country list — add future export countries here.
+# Central country list — add future export countries here. Kept alphabetical.
 COUNTRY_PLACEHOLDER = "Select country..."
-EXPORT_COUNTRIES = ["Italy", "Brazil", "Uruguay"]
+EXPORT_COUNTRIES = ["Australia", "Brazil", "Italy", "New Zealand", "Uruguay"]
+
+DEFAULT_LOVABLE_OUTPUT_DIR = "lovable_export"
+SOURCE_FOLDER_HELP_TEXT = (
+    "Paste the folder where this country workbook lives. JSON export will "
+    "default to a subfolder here."
+)
 
 # Stable local folder for uploaded workbooks. Deliberately not a
 # tempfile.TemporaryDirectory: on Windows, pandas/openpyxl can still hold a
@@ -82,6 +90,68 @@ def cleanup_uploaded_workbook(upload_path: Path) -> str | None:
         )
 
 
+def sanitize_filename_part(value, fallback: str = "value") -> str:
+    """Reduce a string to a Windows-safe filename/folder component.
+
+    Whitespace becomes ``_``; anything outside ``[A-Za-z0-9_-]`` is stripped.
+    Returns ``fallback`` when the result would otherwise be empty (blank,
+    None, or entirely unsafe characters).
+    """
+    safe = re.sub(r"\s+", "_", str(value or "").strip())
+    safe = re.sub(r"[^A-Za-z0-9_-]+", "_", safe).strip("_")
+    return safe or fallback
+
+
+def clean_user_path(value) -> Optional[Path]:
+    """Turn user-entered path text into a ``Path``, or ``None`` when blank.
+
+    Strips surrounding whitespace and a single pair of matching quotes (users
+    often paste Windows paths wrapped in quotes), then expands ``~``. Never
+    raises — an unparseable value is treated as blank.
+    """
+    text = str(value or "").strip()
+    if not text:
+        return None
+    if len(text) >= 2 and text[0] == text[-1] and text[0] in ("'", '"'):
+        text = text[1:-1].strip()
+    if not text:
+        return None
+    try:
+        return Path(text).expanduser()
+    except Exception:
+        return None
+
+
+def resolve_lovable_output_dir(source_folder) -> Path:
+    """Resolve the base output directory for a Lovable JSON export.
+
+    If ``source_folder`` is a usable path, exports default to
+    ``<source_folder>/lovable_export`` — organized next to the country
+    workbook. Otherwise falls back to the safe relative ``lovable_export``
+    folder. Never defaults to Downloads.
+    """
+    base = clean_user_path(source_folder)
+    if base is not None:
+        return base / "lovable_export"
+    return Path(DEFAULT_LOVABLE_OUTPUT_DIR)
+
+
+def make_lovable_export_folder_name(country: str, timestamp) -> str:
+    """Run-specific export folder name.
+
+    ``<Country>_lovable_json_enriched_<YYYYMMDD_HHMMSS>``, e.g.
+    ``Brazil_lovable_json_enriched_20260702_231500``.
+    """
+    country_part = sanitize_filename_part(country, fallback="Country")
+    stamp = timestamp.strftime("%Y%m%d_%H%M%S")
+    return f"{country_part}_lovable_json_enriched_{stamp}"
+
+
+def make_lovable_zip_filename(country: str, timestamp) -> str:
+    """Zip download filename — same pattern as the export folder, ``.zip``."""
+    return f"{make_lovable_export_folder_name(country, timestamp)}.zip"
+
+
 def build_zip_bytes(file_paths: list[str]) -> bytes:
     buf = io.BytesIO()
     with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
@@ -124,7 +194,23 @@ def main() -> None:
     bucket_size = st.number_input(
         "Detail bucket size", min_value=50, max_value=5000, value=500, step=50)
 
-    output_dir = st.text_input("Output directory", value="lovable_export")
+    # ── Output location ──────────────────────────────────────────────────────
+    source_folder_text = st.text_input(
+        "Input/source folder for JSON export", value="",
+        help=SOURCE_FOLDER_HELP_TEXT)
+    base_output_dir = resolve_lovable_output_dir(source_folder_text)
+    if not source_folder_text.strip():
+        st.caption(
+            "Streamlit cannot infer the original upload folder automatically; "
+            "paste the source folder if you want the export saved next to "
+            "your input workbook."
+        )
+    _country_for_preview = country if country != COUNTRY_PLACEHOLDER else "<Country>"
+    st.caption(
+        f"Resolved output directory: `{base_output_dir}` — each export "
+        f"creates its own subfolder: "
+        f"`{_country_for_preview}_lovable_json_enriched_<timestamp>/`"
+    )
 
     if st.button("Create Lovable JSON export", type="primary"):
         cold_callers = parse_cold_callers(callers_text)
@@ -138,9 +224,10 @@ def main() -> None:
         if not cold_callers:
             st.error("Enter at least one cold caller (one name per line).")
             return
-        if not (output_dir or "").strip():
-            st.error("Enter an output directory.")
-            return
+
+        export_timestamp = datetime.now()
+        folder_name = make_lovable_export_folder_name(country, export_timestamp)
+        resolved_output_dir = base_output_dir / folder_name
 
         # Written to a stable folder (not TemporaryDirectory) so Windows never
         # has to rmtree a file that pandas/openpyxl may still have open.
@@ -149,7 +236,7 @@ def main() -> None:
             with st.spinner("Exporting workbook to Lovable JSON..."):
                 manifest = export_workbook_to_lovable_json(
                     input_xlsx=upload_path,
-                    output_dir=output_dir.strip(),
+                    output_dir=resolved_output_dir,
                     export_country=country,
                     cold_callers=cold_callers,
                     include_skipped=include_skipped,
@@ -159,15 +246,35 @@ def main() -> None:
         except LovableExportError as exc:
             st.error(f"Export failed: {exc}")
             return
+        except Exception as exc:
+            st.error(f"Export failed: {exc}")
+            return
         finally:
             cleanup_warning = cleanup_uploaded_workbook(upload_path)
             if cleanup_warning:
                 st.warning(cleanup_warning)
 
+        # Record where this run actually landed. Adds two keys on top of the
+        # core export manifest and rewrites export_manifest.json to match —
+        # no change to export_lead_prioritizer_to_lovable_json.py itself.
+        manifest["output_folder_name"] = folder_name
+        manifest["resolved_output_dir"] = str(resolved_output_dir.resolve())
+        try:
+            manifest_path = resolved_output_dir / "export_manifest.json"
+            manifest_path.write_text(
+                json.dumps(manifest, ensure_ascii=False, indent=2, default=str),
+                encoding="utf-8")
+        except Exception as exc:
+            st.warning(
+                f"Export succeeded, but could not rewrite export_manifest.json "
+                f"with folder metadata: {exc}"
+            )
+
         st.success(
             f"Export complete: {manifest['rows_exported']} companies written "
             f"to {manifest['bucket_count']} detail bucket(s)."
         )
+        st.caption(f"Saved to: {manifest['resolved_output_dir']}")
 
         col1, col2, col3 = st.columns(3)
         col1.metric("Total rows read", manifest["total_rows_read"])
@@ -200,7 +307,7 @@ def main() -> None:
         st.download_button(
             "Download JSON files as zip",
             data=build_zip_bytes(manifest["output_files"]),
-            file_name="lovable_export.zip",
+            file_name=make_lovable_zip_filename(country, export_timestamp),
             mime="application/zip",
         )
 

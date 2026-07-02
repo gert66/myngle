@@ -99,8 +99,8 @@ DOMAIN_CANDIDATES = [
 COUNTRY_CANDIDATES = ["input_country", "country", "Country"]
 
 # Central list of default-input-country choices. Add new countries here only —
-# no other code path hardcodes a country name.
-SUPPORTED_DEFAULT_INPUT_COUNTRIES = ["Italy", "Brazil", "Uruguay", "Australia"]
+# no other code path hardcodes a country name. Kept alphabetically sorted.
+SUPPORTED_DEFAULT_INPUT_COUNTRIES = ["Australia", "Brazil", "Italy", "New Zealand", "Uruguay"]
 DEFAULT_COUNTRY_PLACEHOLDER = "Select country..."
 DEFAULT_COUNTRY_REQUIRED_MESSAGE = "Please select a default input country before running."
 
@@ -208,14 +208,87 @@ PARALLEL_WARNING_TEXT = (
 )
 
 
+def sanitize_filename_part(value, fallback: str = "value") -> str:
+    """Reduce a string to a Windows-safe filename/folder component.
+
+    Whitespace becomes ``_``; anything outside ``[A-Za-z0-9_-]`` is stripped.
+    Returns ``fallback`` when the result would otherwise be empty (blank,
+    None, or entirely unsafe characters).
+    """
+    safe = re.sub(r"\s+", "_", str(value or "").strip())
+    safe = re.sub(r"[^A-Za-z0-9_-]+", "_", safe).strip("_")
+    return safe or fallback
+
+
 def sanitize_run_mode_for_filename(run_mode: str) -> str:
     """Reduce a run mode to a filesystem-safe token (alnum, ``_``, ``-``)."""
-    safe = re.sub(r"[^A-Za-z0-9_-]+", "_", str(run_mode or "").strip()).strip("_")
-    return safe or "run"
+    return sanitize_filename_part(run_mode, fallback="run")
+
+
+def clean_user_path(value) -> Optional[Path]:
+    """Turn user-entered path text into a ``Path``, or ``None`` when blank.
+
+    Strips surrounding whitespace and a single pair of matching quotes (users
+    often paste Windows paths wrapped in quotes), then expands ``~``. Never
+    raises — an unparseable value is treated as blank.
+    """
+    text = str(value or "").strip()
+    if not text:
+        return None
+    if len(text) >= 2 and text[0] == text[-1] and text[0] in ("'", '"'):
+        text = text[1:-1].strip()
+    if not text:
+        return None
+    try:
+        return Path(text).expanduser()
+    except Exception:
+        return None
+
+
+def resolve_batch_output_dir(source_folder) -> Path:
+    """Resolve the default batch autosave/output directory.
+
+    If ``source_folder`` is a usable path, outputs default to
+    ``<source_folder>/lead_prioritizer_outputs`` — organized next to the
+    country input file instead of Downloads or a random temp folder.
+    Otherwise falls back to the safe relative ``batch_outputs`` folder. This
+    is only the *default value* shown to the user; the "Autosave directory"
+    field remains editable, and ``resolve_autosave_directory`` performs the
+    final ``~``-expansion / cwd-anchoring when the run actually saves.
+    """
+    base = clean_user_path(source_folder)
+    if base is not None:
+        return base / "lead_prioritizer_outputs"
+    return Path(DEFAULT_AUTOSAVE_DIR)
+
+
+def make_batch_output_filename(country: str, run_mode: str, timestamp) -> str:
+    """Build the completed-workbook filename.
+
+    ``lead_prioritizer_v2_<Country>_<run_mode>_enriched_<YYYYMMDD_HHMMSS>.xlsx``
+    e.g. ``lead_prioritizer_v2_Brazil_full_foreign_hq_only_enriched_
+    20260702_231500.xlsx``. Country and run mode are sanitized independently.
+    """
+    country_part = sanitize_filename_part(country, fallback="Country")
+    mode_part = sanitize_run_mode_for_filename(run_mode)
+    stamp = timestamp.strftime("%Y%m%d_%H%M%S")
+    return f"lead_prioritizer_v2_{country_part}_{mode_part}_enriched_{stamp}.xlsx"
+
+
+def make_parallel_run_folder_name(country: str, run_mode: str, timestamp) -> str:
+    """Folder name for a parallel autosave run: ``run_<Country>_<run_mode>_<stamp>``."""
+    country_part = sanitize_filename_part(country, fallback="Country")
+    mode_part = sanitize_run_mode_for_filename(run_mode)
+    stamp = timestamp.strftime("%Y%m%d_%H%M%S")
+    return f"run_{country_part}_{mode_part}_{stamp}"
 
 
 def resolve_autosave_directory(output_dir: str) -> Path:
-    """Resolve the autosave directory: expand ``~``, anchor relative paths to cwd."""
+    """Resolve the autosave directory: expand ``~``, anchor relative paths to cwd.
+
+    Never fails just because ``output_dir`` is blank — falls back to
+    ``DEFAULT_AUTOSAVE_DIR`` (``batch_outputs``).
+    """
     directory = Path(output_dir or DEFAULT_AUTOSAVE_DIR).expanduser()
     if not directory.is_absolute():
         directory = Path.cwd() / directory
@@ -230,31 +303,33 @@ def write_parallel_run_manifest(run_dir, manifest: dict) -> Path:
 
 
 def autosave_output_workbook(output_bytes: bytes, output_dir: str, run_mode: str,
-                             now=None) -> Path:
+                             country: str = "", now=None) -> Path:
     """Write the completed workbook bytes to ``output_dir`` and return the path.
 
     - Creates the directory (and parents) when missing.
     - Relative paths resolve against the current working directory; ``~`` is
       expanded. Windows-safe via ``pathlib``.
-    - Filename: ``lead_prioritizer_v2_{run_mode}_{YYYYMMDD_HHMMSS}.xlsx`` with
-      the run mode sanitized. Never overwrites: an existing name gets a ``_2``,
-      ``_3``, … suffix.
+    - Filename: ``make_batch_output_filename(country, run_mode, timestamp)``,
+      e.g. ``lead_prioritizer_v2_Brazil_full_foreign_hq_only_enriched_
+      20260702_231500.xlsx``. Never overwrites: an existing name gets a
+      ``_2``, ``_3``, … suffix.
     - Writes only the already-built workbook bytes — no keys, no secrets.
     - Raises on failure (unwritable path etc.); the caller decides how to
       surface the error.
     """
     from datetime import datetime as _dt
 
-    stamp = (now or _dt.now()).strftime("%Y%m%d_%H%M%S")
-    base = f"lead_prioritizer_v2_{sanitize_run_mode_for_filename(run_mode)}_{stamp}"
+    timestamp = now or _dt.now()
+    full_name = make_batch_output_filename(country, run_mode, timestamp)
+    stem = full_name[:-5] if full_name.endswith(".xlsx") else full_name
 
     directory = resolve_autosave_directory(output_dir)
     directory.mkdir(parents=True, exist_ok=True)
 
-    target = directory / f"{base}.xlsx"
+    target = directory / f"{stem}.xlsx"
     counter = 2
     while target.exists():
-        target = directory / f"{base}_{counter}.xlsx"
+        target = directory / f"{stem}_{counter}.xlsx"
         counter += 1
 
     target.write_bytes(output_bytes)
@@ -358,6 +433,7 @@ def build_phase_progress_status_text(
 
 def main() -> None:  # pragma: no cover - exercised only under `streamlit run`
     import io
+    from datetime import datetime as _dt
 
     import pandas as pd
     import streamlit as st
@@ -473,7 +549,19 @@ def main() -> None:  # pragma: no cover - exercised only under `streamlit run`
         "Autosave output workbook when run completes", value=False)
     autosave_dir = DEFAULT_AUTOSAVE_DIR
     if autosave_enabled:
-        autosave_dir = st.text_input("Autosave directory", value=DEFAULT_AUTOSAVE_DIR)
+        source_folder_text = st.text_input(
+            "Input/source folder for outputs", value="",
+            help="Because browsers do not expose the uploaded file path, paste "
+                 "the folder where this country input file lives. Outputs "
+                 "will default to this folder.")
+        autosave_dir = st.text_input(
+            "Autosave directory", value=str(resolve_batch_output_dir(source_folder_text)))
+        if not source_folder_text.strip():
+            st.caption(
+                "Streamlit cannot infer the original upload folder "
+                "automatically; paste the source folder if you want outputs "
+                "saved next to your input files."
+            )
         st.caption(AUTOSAVE_HELP_TEXT)
 
     # ── Parallel processing ───────────────────────────────────────────────────
@@ -575,7 +663,8 @@ def main() -> None:  # pragma: no cover - exercised only under `streamlit run`
             status.info(build_progress_status_text(payload, started_at))
 
         use_parallel = parallel_enabled and parallel_workers > 1
-        run_stamp = _time.strftime("%Y%m%d_%H%M%S")
+        run_timestamp = _dt.now()
+        run_stamp = run_timestamp.strftime("%Y%m%d_%H%M%S")
         run_dir = None
         chunk_files: dict = {}
         chunk_reports: list = []
@@ -585,7 +674,9 @@ def main() -> None:  # pragma: no cover - exercised only under `streamlit run`
             # path as a sequential smaller batch (incl. FHO mode and C5 config).
             if autosave_enabled:
                 try:
-                    run_dir = resolve_autosave_directory(autosave_dir) / f"run_{run_stamp}"
+                    run_folder_name = make_parallel_run_folder_name(
+                        default_country, run_mode, run_timestamp)
+                    run_dir = resolve_autosave_directory(autosave_dir) / run_folder_name
                     run_dir.mkdir(parents=True, exist_ok=True)
                 except Exception as exc:
                     st.error(
@@ -727,6 +818,8 @@ def main() -> None:  # pragma: no cover - exercised only under `streamlit run`
         st.session_state["v2_batch_output_bytes"] = data
         st.session_state["v2_batch_tables"] = tables
         st.session_state["v2_batch_mode"] = run_mode
+        st.session_state["v2_batch_country"] = default_country
+        st.session_state["v2_batch_run_timestamp"] = run_timestamp
 
         # ── Optional autosave (same bytes as the download button) ─────────────
         if autosave_enabled:
@@ -734,10 +827,8 @@ def main() -> None:  # pragma: no cover - exercised only under `streamlit run`
                 # Parallel run: combined workbook + manifest in the run dir,
                 # next to the chunk checkpoint workbooks saved during the run.
                 try:
-                    combined_name = (
-                        f"lead_prioritizer_v2_{sanitize_run_mode_for_filename(run_mode)}"
-                        f"_combined_{run_stamp}.xlsx"
-                    )
+                    combined_name = make_batch_output_filename(
+                        default_country, run_mode, run_timestamp)
                     (run_dir / combined_name).write_bytes(data)
                     _summary_row = (tables["run_summary"].iloc[0].to_dict()
                                     if len(tables["run_summary"]) else {})
@@ -764,7 +855,9 @@ def main() -> None:  # pragma: no cover - exercised only under `streamlit run`
                     )
             else:
                 try:
-                    saved_path = autosave_output_workbook(data, autosave_dir, run_mode)
+                    saved_path = autosave_output_workbook(
+                        data, autosave_dir, run_mode,
+                        country=default_country, now=run_timestamp)
                     st.success(f"Autosaved output workbook to: {saved_path}")
                 except Exception as exc:
                     st.error(
@@ -797,10 +890,13 @@ def main() -> None:  # pragma: no cover - exercised only under `streamlit run`
                 st.dataframe(errors[_err_cols] if _err_cols else errors,
                              use_container_width=True)
 
+        _dl_country = st.session_state.get("v2_batch_country") or default_country
+        _dl_mode = st.session_state.get("v2_batch_mode", run_mode)
+        _dl_timestamp = st.session_state.get("v2_batch_run_timestamp") or _dt.now()
         st.download_button(
             "⬇️ Download enriched workbook",
             data=data,
-            file_name=build_download_filename(st.session_state.get("v2_batch_mode", run_mode)),
+            file_name=make_batch_output_filename(_dl_country, _dl_mode, _dl_timestamp),
             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         )
 
