@@ -19,6 +19,10 @@ from lead_prioritizer_batch_app import (
     format_duration,
     build_progress_status_text,
     build_phase_progress_status_text,
+    build_parallel_progress_status_text,
+    format_local_time,
+    PARALLEL_PROGRESS_NOTE_TEXT,
+    RUN_BUTTON_NOTE_TEXT,
     autosave_output_workbook,
     sanitize_run_mode_for_filename,
     sanitize_filename_part,
@@ -583,3 +587,82 @@ class TestMakeParallelRunFolderName:
         name = make_parallel_run_folder_name("New Zealand", "hq_only", stamp)
         assert " " not in name
         assert "New_Zealand" in name
+
+
+# ---------------------------------------------------------------------------
+# format_local_time / build_parallel_progress_status_text
+# ---------------------------------------------------------------------------
+
+class TestFormatLocalTime:
+    def test_returns_hh_mm_ss_shape(self):
+        text = format_local_time(1000.0)
+        assert len(text) == 8
+        assert text.count(":") == 2
+
+    def test_defaults_to_now_without_error(self):
+        assert len(format_local_time()) == 8
+
+
+class TestParallelProgressStatusText:
+    def test_heartbeat_headline(self):
+        payload = {
+            "heartbeat": True, "parallel_chunks_total": 4, "parallel_chunks_completed": 1,
+            "parallel_workers": 4, "processed_rows": 120, "selected_rows": 671,
+            "success_count": 115, "error_count": 5, "current_company_name": "Acme Brasil",
+            "active_chunks": [
+                {"chunk_index": 2, "processed": 40, "selected": 168,
+                 "phase_label": "HQ screening", "current_company_name": "Acme Brasil"},
+            ],
+        }
+        text = build_parallel_progress_status_text(payload, started_at=1000.0, now=1090.0)
+        assert "Still running; waiting for worker results..." in text
+        assert "Chunks 1/4" in text
+        assert "Workers 4" in text
+        assert "Processed 120/671" in text
+        assert "Success 115" in text
+        assert "Errors 5" in text
+        assert "Phase: HQ screening" in text
+        assert "Current: Acme Brasil" in text
+        assert "Elapsed 00:01:30" in text
+        assert "Last update" in text
+        assert "0/0" not in text  # never a misleadingly empty progress line
+
+    def test_chunk_completion_headline(self):
+        payload = {
+            "heartbeat": False, "chunk_index": 2, "chunk_row_count": 168,
+            "chunk_success": True, "parallel_chunks_total": 4, "parallel_chunks_completed": 2,
+            "parallel_workers": 4, "processed_rows": 336, "selected_rows": 671,
+            "success_count": 330, "error_count": 6, "current_company_name": "Beta Corp",
+        }
+        text = build_parallel_progress_status_text(payload, started_at=0.0, now=60.0)
+        assert "Chunk 2 (168 rows) ok" in text
+        assert "Chunks 2/4" in text
+
+    def test_chunk_failure_headline(self):
+        payload = {
+            "heartbeat": False, "chunk_index": 3, "chunk_row_count": 168,
+            "chunk_success": False, "parallel_chunks_total": 4, "parallel_chunks_completed": 3,
+            "parallel_workers": 4, "processed_rows": 504, "selected_rows": 671,
+            "success_count": 400, "error_count": 104,
+        }
+        text = build_parallel_progress_status_text(payload, started_at=0.0, now=10.0)
+        assert "Chunk 3 (168 rows) FAILED" in text
+
+    def test_no_secrets_in_text(self):
+        payload = {"heartbeat": True, "parallel_chunks_total": 1, "parallel_chunks_completed": 0,
+                   "parallel_workers": 1, "processed_rows": 1, "selected_rows": 2,
+                   "success_count": 1, "error_count": 0, "current_company_name": "Acme"}
+        text = build_parallel_progress_status_text(payload, started_at=0.0, now=5.0)
+        assert "api_key" not in text.lower() and "sk-ant" not in text.lower()
+
+
+class TestParallelUINoteText:
+    def test_notes_present_and_match_spec(self):
+        assert PARALLEL_PROGRESS_NOTE_TEXT == (
+            "Parallel progress updates when a row/chunk completes. Long rows may "
+            "take several minutes."
+        )
+        assert RUN_BUTTON_NOTE_TEXT == (
+            "For large full enrichment runs, progress may update slowly while "
+            "external API calls are in flight."
+        )

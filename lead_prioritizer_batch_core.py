@@ -17,13 +17,15 @@ unless ``include_raw_ai_json=True``.
 
 from __future__ import annotations
 
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 from dataclasses import dataclass, replace
 from datetime import datetime
 from typing import Callable, Optional
 
 import io
 import re
+import threading
+import time
 
 import pandas as pd
 
@@ -1256,6 +1258,11 @@ def run_batch_non_english_foreign_hq_only(
 
 MAX_PARALLEL_WORKERS = 4
 
+# How often (seconds) the parallel runner's main-thread polling loop wakes up
+# to emit a progress event even if no chunk has finished yet. Keeps the UI
+# from looking frozen during long chunks. Overridable per-call for tests.
+DEFAULT_PARALLEL_HEARTBEAT_INTERVAL_SECONDS = 3.0
+
 _PARALLEL_C5_COUNT_KEYS = (
     "c5_rows_attempted", "c5_success_count", "c5_error_count",
     "c5_foreign_parent_confirmed_count", "c5_domestic_confirmed_count",
@@ -1364,6 +1371,85 @@ def run_single_batch_unit(
     return tables
 
 
+def aggregate_parallel_chunk_progress(
+    chunk_snapshot: dict,
+    reports: list,
+    *,
+    total_selected_rows: int = 0,
+) -> dict:
+    """Pure aggregation of per-chunk progress into one summary dict.
+
+    ``chunk_snapshot`` maps chunk index (0-based) to a live progress entry —
+    typically a lock-copied snapshot of shared state written by row/phase
+    progress callbacks running on worker threads (see
+    ``run_batch_dataframe_parallel``). ``reports`` is the same list the
+    parallel runner tracks per chunk (``success`` is ``None`` while running,
+    ``True``/``False`` once finished). No threading, no I/O — safe to call
+    from the main thread and safe to unit test directly with hand-built
+    dicts.
+
+    For a finished chunk, ``row_count`` (from ``reports``) is trusted as the
+    processed count so completed chunks are never under/over-counted; for a
+    still-running chunk, the live snapshot's ``processed`` count is used.
+    Returns ``processed_rows`` / ``success_count`` / ``error_count`` (summed
+    across all chunks), ``current_company_name`` (from the most recently
+    updated still-running chunk), and ``active_chunks`` (one summary dict per
+    still-running chunk: index, processed/selected, phase info if available,
+    current company).
+    """
+    processed = success = error = 0
+    active_chunks: list = []
+    latest_company = ""
+    latest_ts = -1.0
+
+    for i, report in enumerate(reports):
+        entry = chunk_snapshot.get(i) or {}
+        row_count = int(report.get("row_count", 0) or 0)
+        finished = report.get("success") is not None
+
+        if finished and not report.get("success"):
+            # Failed chunk: its rows become placeholder error rows downstream.
+            processed += row_count
+            error += row_count
+            continue
+        if finished:
+            processed += row_count
+            success += int(entry.get("success", row_count) or 0)
+            error += int(entry.get("error", 0) or 0)
+            continue
+
+        entry_processed = int(entry.get("processed", 0) or 0)
+        entry_success = int(entry.get("success", 0) or 0)
+        entry_error = int(entry.get("error", 0) or 0)
+        processed += entry_processed
+        success += entry_success
+        error += entry_error
+        active_chunks.append({
+            "chunk_index": report.get("chunk_index", i + 1),
+            "processed": entry_processed,
+            "selected": int(entry.get("selected") or row_count),
+            "phase": entry.get("phase"),
+            "phase_label": entry.get("phase_label"),
+            "phase_processed": entry.get("phase_processed"),
+            "phase_total": entry.get("phase_total"),
+            "current_company_name": entry.get("current_company_name") or "",
+        })
+        ts = entry.get("last_update") or -1.0
+        if entry.get("current_company_name") and ts >= latest_ts:
+            latest_ts = ts
+            latest_company = entry.get("current_company_name")
+
+    return {
+        "processed_rows": processed,
+        "selected_rows": total_selected_rows,
+        "success_count": success,
+        "error_count": error,
+        "current_company_name": latest_company,
+        "active_chunks": active_chunks,
+        "chunks_active_count": len(active_chunks),
+    }
+
+
 def run_batch_dataframe_parallel(
     df: pd.DataFrame,
     config: BatchRunConfig,
@@ -1378,6 +1464,7 @@ def run_batch_dataframe_parallel(
     c5_model_tier: str = "",
     progress_callback: Optional[Callable[[dict], None]] = None,
     chunk_result_callback: Optional[Callable[[dict, dict], None]] = None,
+    heartbeat_interval_seconds: float = DEFAULT_PARALLEL_HEARTBEAT_INTERVAL_SECONDS,
 ) -> dict:
     """Run the selected rows as parallel chunks and combine the outputs.
 
@@ -1389,12 +1476,32 @@ def run_batch_dataframe_parallel(
       ``chunk_reports`` list; Enriched Leads preserves the original selected-row
       order. A failed chunk contributes placeholder error rows and never
       discards other chunks' results.
-    - ``progress_callback`` (main thread) receives chunk-level payloads:
-      ``parallel_chunks_total`` / ``parallel_chunks_completed`` /
-      ``chunk_index`` / ``chunk_row_count`` / ``chunk_success`` /
-      ``chunk_error``. ``chunk_result_callback(report, tables)`` fires (main
-      thread) for each successful chunk, e.g. for checkpoint autosave; both
-      callbacks are exception-proofed.
+
+    Progress reporting: each chunk's ``run_single_batch_unit`` gets its own
+    row/phase-level ``progress_callback`` (reused, not duplicated — the same
+    callback ``run_batch_dataframe`` / ``run_batch_foreign_hq_only`` /
+    ``run_batch_non_english_foreign_hq_only`` already support). That callback
+    runs on the WORKER thread, so it only ever writes into a
+    ``threading.Lock``-protected shared snapshot — it never touches Streamlit
+    or any other main-thread-only API. The MAIN thread polls
+    ``concurrent.futures.wait(..., timeout=heartbeat_interval_seconds)`` in a
+    loop: on every wake-up (whether a chunk just finished or the timeout
+    merely elapsed with nothing done yet — a "heartbeat") it aggregates the
+    shared snapshot via ``aggregate_parallel_chunk_progress`` and invokes the
+    caller-supplied ``progress_callback`` — always from the main thread, so
+    it's safe for that callback to call ``st.*``.
+
+    ``progress_callback`` payloads always include: ``parallel_chunks_total``,
+    ``parallel_chunks_completed``, ``parallel_workers``, ``heartbeat`` (True
+    for a no-completion wake-up), ``selected_rows``, ``processed_rows``,
+    ``success_count``, ``error_count``, ``current_company_name``,
+    ``active_chunks`` (per-still-running-chunk summaries, including phase
+    info when the mode is phase-based). Chunk-completion events additionally
+    include ``chunk_index`` / ``chunk_row_count`` / ``chunk_success`` /
+    ``chunk_error`` (same keys as before — existing consumers keep working).
+    ``chunk_result_callback(report, tables)`` fires (main thread) for each
+    successful chunk, e.g. for checkpoint autosave. Both callbacks are
+    exception-proofed.
     """
     workers = max(1, min(int(workers or 1), MAX_PARALLEL_WORKERS))
     selected = select_batch_rows(df, config)
@@ -1413,18 +1520,67 @@ def run_batch_dataframe_parallel(
     results: list = [None] * len(chunks)
     completed = 0
 
-    def _emit_chunk(report: dict) -> None:
+    # ── Thread-safe shared per-chunk live progress ────────────────────────────
+    # Written from worker threads (via each chunk's own progress_callback);
+    # only ever read from the main thread, and only through ``_snapshot()``.
+    progress_lock = threading.Lock()
+    chunk_progress: dict = {
+        i: {
+            "processed": 0, "selected": len(chunk), "success": 0, "error": 0,
+            "current_company_name": "", "phase": None, "phase_label": None,
+            "phase_processed": 0, "phase_total": 0, "last_update": time.time(),
+        }
+        for i, chunk in enumerate(chunks)
+    }
+
+    def _make_chunk_progress_callback(chunk_idx: int):
+        def _on_chunk_row_progress(payload: dict) -> None:
+            # Runs on a WORKER thread — must never call Streamlit or anything
+            # else that assumes the main thread. Only touches the lock-
+            # protected shared snapshot.
+            with progress_lock:
+                entry = chunk_progress[chunk_idx]
+                if "processed_rows" in payload:
+                    entry["processed"] = int(payload.get("processed_rows") or 0)
+                if "selected_rows" in payload:
+                    entry["selected"] = int(payload.get("selected_rows") or 0)
+                if "success_count" in payload:
+                    entry["success"] = int(payload.get("success_count") or 0)
+                if "error_count" in payload:
+                    entry["error"] = int(payload.get("error_count") or 0)
+                if payload.get("current_company_name"):
+                    entry["current_company_name"] = payload["current_company_name"]
+                if "phase" in payload:
+                    entry["phase"] = payload.get("phase")
+                    entry["phase_label"] = payload.get("phase_label")
+                    entry["phase_processed"] = payload.get("phase_processed")
+                    entry["phase_total"] = payload.get("phase_total")
+                entry["last_update"] = time.time()
+        return _on_chunk_row_progress
+
+    def _snapshot() -> dict:
+        with progress_lock:
+            return {i: dict(v) for i, v in chunk_progress.items()}
+
+    def _emit(*, heartbeat: bool, chunk_report: Optional[dict] = None) -> None:
         if progress_callback is None:
             return
+        agg = aggregate_parallel_chunk_progress(
+            _snapshot(), reports, total_selected_rows=len(selected))
+        payload = {
+            "parallel_chunks_total": len(chunks),
+            "parallel_chunks_completed": completed,
+            "parallel_workers": workers,
+            "heartbeat": heartbeat,
+            **agg,
+        }
+        if chunk_report is not None:
+            payload["chunk_index"] = chunk_report["chunk_index"]
+            payload["chunk_row_count"] = chunk_report["row_count"]
+            payload["chunk_success"] = chunk_report["success"]
+            payload["chunk_error"] = chunk_report["error"]
         try:
-            progress_callback({
-                "parallel_chunks_total": len(chunks),
-                "parallel_chunks_completed": completed,
-                "chunk_index": report["chunk_index"],
-                "chunk_row_count": report["row_count"],
-                "chunk_success": report["success"],
-                "chunk_error": report["error"],
-            })
+            progress_callback(payload)
         except Exception:
             pass  # a broken callback must never break the run
 
@@ -1439,24 +1595,33 @@ def run_batch_dataframe_parallel(
                     c5_scope=c5_scope,
                     c5_model_used=c5_model_used,
                     c5_model_tier=c5_model_tier,
+                    progress_callback=_make_chunk_progress_callback(i),
                 ): i
                 for i, chunk in enumerate(chunks)
             }
-            for future in as_completed(futures):
-                i = futures[future]
-                try:
-                    results[i] = future.result()
-                    reports[i]["success"] = True
-                except Exception as exc:  # chunk-level isolation
-                    reports[i]["success"] = False
-                    reports[i]["error"] = f"{type(exc).__name__}: {str(exc)[:300]}"
-                completed += 1
-                _emit_chunk(reports[i])
-                if reports[i]["success"] and chunk_result_callback is not None:
+            pending = set(futures)
+            while pending:
+                done, pending = wait(
+                    pending, timeout=heartbeat_interval_seconds,
+                    return_when=FIRST_COMPLETED)
+                if not done:
+                    _emit(heartbeat=True)  # timeout elapsed, nothing finished yet
+                    continue
+                for future in done:
+                    i = futures[future]
                     try:
-                        chunk_result_callback(dict(reports[i]), results[i])
-                    except Exception:
-                        pass  # checkpoint saving must never break the run
+                        results[i] = future.result()
+                        reports[i]["success"] = True
+                    except Exception as exc:  # chunk-level isolation
+                        reports[i]["success"] = False
+                        reports[i]["error"] = f"{type(exc).__name__}: {str(exc)[:300]}"
+                    completed += 1
+                    _emit(heartbeat=False, chunk_report=reports[i])
+                    if reports[i]["success"] and chunk_result_callback is not None:
+                        try:
+                            chunk_result_callback(dict(reports[i]), results[i])
+                        except Exception:
+                            pass  # checkpoint saving must never break the run
 
     # ── Combine in chunk order (original selected-row order) ─────────────────
     enriched_frames, evidence_frames, signal_frames = [], [], []

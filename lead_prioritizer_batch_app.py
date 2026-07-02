@@ -427,6 +427,87 @@ def build_phase_progress_status_text(
     return " | ".join(parts)
 
 
+def format_local_time(ts: Optional[float] = None) -> str:
+    """Local wall-clock time as HH:MM:SS — used for a 'last update' display."""
+    import time as _time
+
+    t = ts if ts is not None else _time.time()
+    return _time.strftime("%H:%M:%S", _time.localtime(t))
+
+
+PARALLEL_PROGRESS_NOTE_TEXT = (
+    "Parallel progress updates when a row/chunk completes. Long rows may "
+    "take several minutes."
+)
+
+RUN_BUTTON_NOTE_TEXT = (
+    "For large full enrichment runs, progress may update slowly while "
+    "external API calls are in flight."
+)
+
+
+def build_parallel_progress_status_text(
+    payload: dict, started_at: float, now: Optional[float] = None,
+) -> str:
+    """Rich status line for parallel/chunk-based batch runs.
+
+    Renders the payload shape emitted by ``run_batch_dataframe_parallel``:
+    chunk counts, worker count, aggregated processed/success/error counts,
+    the current phase/company from whichever chunk is still running, elapsed
+    time, and a local-time "last update" stamp. Distinguishes a heartbeat
+    wake-up (``payload["heartbeat"]`` — timeout elapsed with nothing finished
+    yet) from a chunk-completion event, satisfying the "still running" /
+    "chunk N completed" UI requirement without needing Streamlit itself.
+    Contains no secrets — safe to call from the main Streamlit thread only
+    (the payload itself is produced by a thread-safe aggregation in
+    ``lead_prioritizer_batch_core``).
+    """
+    import time as _time
+
+    if now is None:
+        now = _time.time()
+
+    chunks_total = int(payload.get("parallel_chunks_total", 0) or 0)
+    chunks_done = int(payload.get("parallel_chunks_completed", 0) or 0)
+    workers = int(payload.get("parallel_workers", 0) or 0)
+    processed = int(payload.get("processed_rows", 0) or 0)
+    selected = int(payload.get("selected_rows", 0) or 0)
+    success = int(payload.get("success_count", 0) or 0)
+    errors = int(payload.get("error_count", 0) or 0)
+    current = str(payload.get("current_company_name") or "?")
+    active_chunks = payload.get("active_chunks") or []
+    elapsed = max(0.0, now - started_at)
+
+    if payload.get("heartbeat"):
+        headline = "Still running; waiting for worker results..."
+    elif payload.get("chunk_index") is not None:
+        outcome = "ok" if payload.get("chunk_success") else "FAILED"
+        headline = (
+            f"Chunk {payload.get('chunk_index')} "
+            f"({payload.get('chunk_row_count')} rows) {outcome}"
+        )
+    else:
+        headline = "Parallel batch running..."
+
+    phase_label = next(
+        (c.get("phase_label") for c in active_chunks if c.get("phase_label")), None)
+
+    parts = [
+        headline,
+        f"Chunks {chunks_done}/{chunks_total}",
+        f"Workers {workers}",
+        f"Processed {processed}/{selected}",
+        f"Success {success}",
+        f"Errors {errors}",
+    ]
+    if phase_label:
+        parts.append(f"Phase: {phase_label}")
+    parts.append(f"Current: {current}")
+    parts.append(f"Elapsed {format_duration(elapsed)}")
+    parts.append(f"Last update {format_local_time(now)}")
+    return " | ".join(parts)
+
+
 # ---------------------------------------------------------------------------
 # Streamlit UI
 # ---------------------------------------------------------------------------
@@ -575,6 +656,7 @@ def main() -> None:  # pragma: no cover - exercised only under `streamlit run`
         st.caption(PARALLEL_HELP_TEXT)
         if parallel_workers > 1:
             st.warning(PARALLEL_WARNING_TEXT)
+        st.caption(PARALLEL_PROGRESS_NOTE_TEXT)
 
     selected_count = count_selected_rows(len(df), int(start_row), int(row_limit))
     st.caption(f"Selected rows: **{selected_count}**")
@@ -636,6 +718,7 @@ def main() -> None:  # pragma: no cover - exercised only under `streamlit run`
         or bool(c5_block_reason) or bool(default_country_error)
 
     # ── Run ─────────────────────────────────────────────────────────────────
+    st.caption(RUN_BUTTON_NOTE_TEXT)
     if st.button("Run batch enrichment", type="primary", disabled=run_disabled):
         if default_country_error:
             st.error(default_country_error)
@@ -697,17 +780,42 @@ def main() -> None:  # pragma: no cover - exercised only under `streamlit run`
                 except Exception as exc:
                     st.warning(f"Chunk checkpoint save failed: {exc}")
 
+            chunk_detail = st.empty()
+
             def _on_chunk_progress(payload: dict) -> None:
-                total = int(payload.get("parallel_chunks_total", 0) or 0)
-                done = int(payload.get("parallel_chunks_completed", 0) or 0)
-                progress_bar.progress(min(1.0, done / total) if total else 0.0)
-                outcome = "ok" if payload.get("chunk_success") else "FAILED"
-                status.info(
-                    f"Chunks completed {done}/{total} | "
-                    f"Last: chunk {payload.get('chunk_index')} "
-                    f"({payload.get('chunk_row_count')} rows) {outcome} | "
-                    f"Elapsed {format_duration(_time.time() - started_at)}"
-                )
+                # Runs on the main Streamlit thread only — run_batch_dataframe_parallel
+                # collects progress from worker threads into a lock-protected shared
+                # snapshot and invokes this callback itself from the main thread
+                # (both on heartbeat wake-ups and chunk completions), so it's always
+                # safe to call st.* here.
+                selected = int(payload.get("selected_rows", 0) or 0)
+                processed = int(payload.get("processed_rows", 0) or 0)
+                frac = (processed / selected) if selected else 0.0
+                progress_bar.progress(min(1.0, max(0.0, frac)))
+                status.info(build_parallel_progress_status_text(payload, started_at))
+
+                if payload.get("chunk_index") is not None and payload.get("chunk_success") is False:
+                    st.warning(
+                        f"Chunk {payload.get('chunk_index')} failed: "
+                        f"{payload.get('chunk_error') or 'unknown error'}"
+                    )
+
+                active = payload.get("active_chunks") or []
+                if active:
+                    lines = []
+                    for c in active:
+                        bit = (
+                            f"Chunk {c.get('chunk_index')}: "
+                            f"{c.get('processed', 0)}/{c.get('selected', 0)} rows"
+                        )
+                        if c.get("phase_label"):
+                            bit += f" — {c['phase_label']}"
+                        if c.get("current_company_name"):
+                            bit += f" — {c['current_company_name']}"
+                        lines.append(bit)
+                    chunk_detail.caption("  \n".join(lines))
+                else:
+                    chunk_detail.empty()
 
             with st.spinner(f"Running parallel batch ({parallel_workers} workers)..."):
                 tables = run_batch_dataframe_parallel(

@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+import time
 from unittest.mock import patch
 
 import pandas as pd
@@ -385,6 +386,7 @@ from lead_prioritizer_batch_core import (  # noqa: E402
     run_batch_dataframe_parallel,
     run_single_batch_unit,
     split_dataframe_into_chunks,
+    aggregate_parallel_chunk_progress,
     classify_parent_hq_language_market,
     resolve_parent_hq_country_for_export,
     FOREIGN_HQ_ONLY_MODE,
@@ -1411,3 +1413,153 @@ class TestParallelNonEnglishMode:
         assert summary["full_enrichment_attempted_count"] == 4
         assert summary["full_enrichment_skipped_count"] == 2
         assert summary["parallel_chunk_count"] == 3
+
+
+# ---------------------------------------------------------------------------
+# aggregate_parallel_chunk_progress (pure helper) + live parallel progress
+# ---------------------------------------------------------------------------
+
+class TestAggregateParallelChunkProgress:
+    def test_running_chunks_use_live_snapshot(self):
+        reports = [
+            {"chunk_index": 1, "row_count": 10, "success": None, "error": ""},
+            {"chunk_index": 2, "row_count": 10, "success": None, "error": ""},
+        ]
+        snapshot = {
+            0: {"processed": 4, "success": 4, "error": 0, "selected": 10,
+                "current_company_name": "Co4", "last_update": 5.0,
+                "phase_label": None, "phase": None, "phase_processed": 0, "phase_total": 0},
+            1: {"processed": 2, "success": 1, "error": 1, "selected": 10,
+                "current_company_name": "Co12", "last_update": 9.0,
+                "phase_label": None, "phase": None, "phase_processed": 0, "phase_total": 0},
+        }
+        agg = aggregate_parallel_chunk_progress(snapshot, reports, total_selected_rows=20)
+        assert agg["processed_rows"] == 6
+        assert agg["success_count"] == 5
+        assert agg["error_count"] == 1
+        assert agg["selected_rows"] == 20
+        # most recently updated running chunk wins for "current company"
+        assert agg["current_company_name"] == "Co12"
+        assert agg["chunks_active_count"] == 2
+        assert {c["chunk_index"] for c in agg["active_chunks"]} == {1, 2}
+
+    def test_finished_successful_chunk_trusts_row_count(self):
+        reports = [{"chunk_index": 1, "row_count": 10, "success": True, "error": ""}]
+        snapshot = {0: {"processed": 10, "success": 9, "error": 1, "selected": 10,
+                       "current_company_name": "LastCo", "last_update": 1.0}}
+        agg = aggregate_parallel_chunk_progress(snapshot, reports)
+        assert agg["processed_rows"] == 10
+        assert agg["success_count"] == 9
+        assert agg["error_count"] == 1
+        assert agg["chunks_active_count"] == 0  # finished chunks are not "active"
+
+    def test_finished_failed_chunk_counts_all_rows_as_errors(self):
+        reports = [{"chunk_index": 1, "row_count": 10, "success": False, "error": "boom"}]
+        agg = aggregate_parallel_chunk_progress({}, reports)
+        assert agg["processed_rows"] == 10
+        assert agg["error_count"] == 10
+        assert agg["success_count"] == 0
+
+    def test_phase_info_surfaced_for_active_chunks(self):
+        reports = [{"chunk_index": 1, "row_count": 5, "success": None, "error": ""}]
+        snapshot = {0: {"processed": 2, "success": 2, "error": 0, "selected": 5,
+                       "current_company_name": "Acme", "last_update": 1.0,
+                       "phase": 1, "phase_label": "HQ screening",
+                       "phase_processed": 2, "phase_total": 5}}
+        agg = aggregate_parallel_chunk_progress(snapshot, reports)
+        assert agg["active_chunks"][0]["phase_label"] == "HQ screening"
+        assert agg["active_chunks"][0]["phase_total"] == 5
+
+    def test_empty_reports_yields_zeroed_aggregate(self):
+        agg = aggregate_parallel_chunk_progress({}, [])
+        assert agg["processed_rows"] == 0
+        assert agg["success_count"] == 0
+        assert agg["error_count"] == 0
+        assert agg["active_chunks"] == []
+        assert agg["current_company_name"] == ""
+
+
+class TestParallelLiveProgress:
+    """Regression guard: parallel mode must emit progress before every chunk
+    finishes (row-level heartbeat), not just once per chunk completion."""
+
+    def _slow_prioritize(self, sleep_seconds):
+        def _fake(lead_input, **kwargs):
+            time.sleep(sleep_seconds)
+            return _sample_result(company_name=lead_input.company_name,
+                                  domain=lead_input.domain)
+        return _fake
+
+    def test_heartbeat_and_row_level_events_fire_before_completion(self):
+        df = pd.DataFrame({"company": [f"Co{i}" for i in range(6)],
+                           "domain": [f"co{i}.com" for i in range(6)]})
+        cfg = BatchRunConfig(company_name_column="company", domain_column="domain",
+                             run_mode="hq_only", row_limit=0)
+        events = []
+        with patch("lead_prioritizer_batch_core.prioritize_single_lead",
+                   side_effect=self._slow_prioritize(0.05)):
+            out = run_batch_dataframe_parallel(
+                df, cfg, "S", "A", workers=2, progress_callback=events.append,
+                heartbeat_interval_seconds=0.02,
+            )
+        assert len(events) > 2  # far more than the old "one event per chunk"
+        heartbeats = [e for e in events if e.get("heartbeat")]
+        completions = [e for e in events if not e.get("heartbeat")]
+        assert heartbeats, "expected at least one heartbeat wake-up before chunks finished"
+        assert len(completions) == 2  # one per chunk
+        # heartbeat payloads carry live, incrementally-growing row counts —
+        # not just a static "still waiting" message with no numbers.
+        assert any(e["processed_rows"] > 0 for e in heartbeats)
+        assert all("current_company_name" in e for e in events)
+        assert all("parallel_workers" in e and e["parallel_workers"] == 2 for e in events)
+        assert len(out["enriched_leads"]) == 6
+
+    def test_progress_callback_never_called_from_worker_thread_unsafely(self):
+        # The callback we pass to run_batch_dataframe_parallel must only ever
+        # be invoked by the polling loop (main thread), never directly by a
+        # chunk's internal row callback — verified by checking every payload
+        # has the aggregate shape (not a bare per-row payload).
+        df = pd.DataFrame({"company": ["A", "B", "C", "D"],
+                           "domain": ["a.com", "b.com", "c.com", "d.com"]})
+        cfg = BatchRunConfig(company_name_column="company", domain_column="domain",
+                             run_mode="hq_only", row_limit=0)
+        events = []
+        with patch("lead_prioritizer_batch_core.prioritize_single_lead",
+                   side_effect=_fake_prioritize_named):
+            run_batch_dataframe_parallel(
+                df, cfg, "S", "A", workers=2, progress_callback=events.append,
+                heartbeat_interval_seconds=0.05,
+            )
+        assert events
+        for e in events:
+            assert "parallel_chunks_total" in e
+            assert "active_chunks" in e
+
+    def test_chunk_failure_reported_without_hiding_error(self):
+        df = pd.DataFrame({"company": ["Good1", "Good2", "Bad1", "Bad2"],
+                           "domain": ["g1.com", "g2.com", "b1.com", "b2.com"]})
+        cfg = BatchRunConfig(company_name_column="company", domain_column="domain",
+                             run_mode="hq_only", row_limit=0)
+
+        def _fake(lead_input, **kwargs):
+            return _sample_result(company_name=lead_input.company_name)
+
+        original_unit = run_single_batch_unit
+
+        def _unit(chunk_df, cfg2, s, a, **kw):
+            if "Bad1" in list(chunk_df["company"]):
+                raise RuntimeError("chunk exploded")
+            return original_unit(chunk_df, cfg2, s, a, **kw)
+
+        events = []
+        with patch("lead_prioritizer_batch_core.prioritize_single_lead", side_effect=_fake), \
+             patch("lead_prioritizer_batch_core.run_single_batch_unit", side_effect=_unit):
+            out = run_batch_dataframe_parallel(
+                df, cfg, "S", "A", workers=2, progress_callback=events.append,
+                heartbeat_interval_seconds=0.02,
+            )
+        failure_events = [e for e in events if e.get("chunk_success") is False]
+        assert failure_events
+        assert "chunk exploded" in failure_events[0]["chunk_error"]
+        assert failure_events[0]["error_count"] >= 2  # failed chunk's rows counted
+        assert len(out["enriched_leads"]) == 4  # nothing silently dropped
