@@ -387,6 +387,23 @@ def build_serper_result_titles(evidence_rows: list[dict]) -> list[str]:
     return titles
 
 
+# Trailing internal C5 adjudication fragment appended for audit purposes,
+# e.g. ". C5: foreign_parent_confirmed." or " C5: unclear." -- never
+# caller-facing; stripped by sanitize_caller_facing_evidence() below.
+_TRAILING_C5_FRAGMENT_RE = re.compile(r"\s+C5:\s*[A-Za-z0-9_]+\.?\s*$")
+
+
+def sanitize_caller_facing_evidence(text) -> "str | None":
+    """Strip trailing internal C5 adjudication fragments from evidence text
+    meant for visible_icp_signal_scores. Leaves the useful text before the
+    fragment intact; never blanks the text if nothing else is left."""
+    text = clean_str(text)
+    if not text:
+        return text
+    sanitized = _TRAILING_C5_FRAGMENT_RE.sub("", text).strip()
+    return sanitized or text
+
+
 def build_foreign_hq_evidence_text(row: dict) -> str:
     """Concise evidence line for the foreign-HQ visible signal row."""
     parent = clean_str(row.get("c5_parent_company"))
@@ -411,7 +428,7 @@ def build_foreign_hq_evidence_text(row: dict) -> str:
         text += f" C5: {adjudication}."
     elif reason:
         text += f" {reason[:200]}"
-    return text
+    return sanitize_caller_facing_evidence(text)
 
 
 def build_visible_icp_signal_scores(

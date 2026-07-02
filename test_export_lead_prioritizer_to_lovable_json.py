@@ -17,6 +17,7 @@ from export_lead_prioritizer_to_lovable_json import (
     export_workbook_to_lovable_json,
     is_technical_reason,
     parse_key_source_links,
+    sanitize_caller_facing_evidence,
 )
 
 # ---------------------------------------------------------------------------
@@ -434,7 +435,9 @@ def test_builds_visible_icp_signal_scores_with_foreign_hq_row(tmp_path):
     assert hq_row["score"] == 3
     assert "Nissan Motor Corporation" in hq_row["evidence"]
     assert "Japan" in hq_row["evidence"]
-    assert "foreign_parent_confirmed" in hq_row["evidence"]
+    # Internal C5 adjudication token must not leak into caller-facing text.
+    assert "foreign_parent_confirmed" not in hq_row["evidence"]
+    assert "C5" not in hq_row["evidence"]
 
     intl = by_label["International business context"]
     assert intl["score"] == 2
@@ -517,6 +520,93 @@ def test_is_technical_reason_detects_internal_text(reason):
 ])
 def test_is_technical_reason_allows_user_facing_text(reason):
     assert is_technical_reason(reason) is False
+
+
+def test_foreign_hq_visible_evidence_strips_c5_fragment(tmp_path):
+    enriched = [enriched_row(
+        c5_adjudication="foreign_parent_confirmed",
+        c5_parent_company="Prudential Financial",
+        c5_parent_hq_country="United States",
+        c5_parent_hq_city="Newark",
+    )]
+    _, out_dir = run_export(tmp_path, enriched)
+
+    visible = detail_for(out_dir, "Acme Brasil")["visible_icp_signal_scores"]
+    hq_row = {row["label"]: row for row in visible}[FOREIGN_HQ_SIGNAL_LABEL]
+
+    assert hq_row["evidence"] == (
+        "Confirmed foreign parent: Prudential Financial, "
+        "HQ United States (Newark)."
+    )
+    assert "C5" not in hq_row["evidence"]
+    assert "foreign_parent_confirmed" not in hq_row["evidence"]
+
+
+@pytest.mark.parametrize("adjudication", [
+    "foreign_parent_confirmed",
+    "domestic_confirmed",
+    "unclear",
+])
+def test_sanitize_caller_facing_evidence_strips_c5_fragment_forms(adjudication):
+    text_with_period = (
+        f"Confirmed foreign parent: Acme Corp, HQ Germany (Berlin). "
+        f"C5: {adjudication}."
+    )
+    text_without_period = (
+        f"Foreign headquarters detected: Germany C5: {adjudication}."
+    )
+    assert sanitize_caller_facing_evidence(text_with_period) == (
+        "Confirmed foreign parent: Acme Corp, HQ Germany (Berlin)."
+    )
+    assert sanitize_caller_facing_evidence(text_without_period) == (
+        "Foreign headquarters detected: Germany"
+    )
+
+
+def test_sanitize_caller_facing_evidence_never_blanks_text():
+    # A fragment preceded by real text is fully stripped, leaving the useful part.
+    with_prefix = "Detected foreign HQ. C5: unclear."
+    assert sanitize_caller_facing_evidence(with_prefix) == "Detected foreign HQ."
+    assert sanitize_caller_facing_evidence(None) is None
+    assert sanitize_caller_facing_evidence("") is None
+
+
+def test_non_hq_evidence_quote_unaffected_by_c5_sanitization(tmp_path):
+    enriched = [enriched_row()]
+    signals = [
+        {"source_index": 1, "signal_name": "international_profile", "signal_score": 2,
+         "evidence_quote": "Runs regional offices across three countries. "
+                            "C5 was never mentioned here."},
+    ]
+    _, out_dir = run_export(tmp_path, enriched, signals=signals)
+
+    visible = detail_for(out_dir, "Acme Brasil")["visible_icp_signal_scores"]
+    by_label = {row["label"]: row for row in visible}
+
+    row = by_label["International business context"]
+    assert row["evidence"] == (
+        "Runs regional offices across three countries. "
+        "C5 was never mentioned here."
+    )
+
+
+def test_c5_audit_and_debug_fields_not_removed(tmp_path):
+    enriched = [enriched_row(
+        c5_adjudication="foreign_parent_confirmed",
+        c5_parent_company="Prudential Financial",
+        c5_parent_hq_country="United States",
+        c5_parent_hq_city="Newark",
+    )]
+    _, out_dir = run_export(tmp_path, enriched)
+
+    detail = detail_for(out_dir, "Acme Brasil")
+
+    assert detail["evidence_audit"]["c5_audit"]["c5_adjudication"] == \
+        "foreign_parent_confirmed"
+    assert detail["evidence_audit"]["c5_audit"]["c5_parent_company"] == \
+        "Prudential Financial"
+    assert detail["debug"]["lead_prioritizer_row"]["c5_adjudication"] == \
+        "foreign_parent_confirmed"
 
 
 # ---------------------------------------------------------------------------
