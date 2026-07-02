@@ -195,6 +195,7 @@ _RESULT_FLAT_FIELDS = [
     "what_is_hot_app", "what_is_not_app", "why_relevant_app",
     "caller_angle_app", "call_starter_app", "caution_app",
     "foreign_hq_signal_used_in_app", "foreign_hq_country_app", "foreign_hq_city_app",
+    "cold_caller_summary_app", "parent_hq_summary_app",
 ]
 
 

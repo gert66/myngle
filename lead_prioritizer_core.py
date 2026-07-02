@@ -267,5 +267,7 @@ def prioritize_single_lead(
         result.foreign_hq_signal_used_in_app = caller_fields["foreign_hq_signal_used_in_app"]
         result.foreign_hq_country_app = caller_fields["foreign_hq_country_app"]
         result.foreign_hq_city_app = caller_fields["foreign_hq_city_app"]
+        result.cold_caller_summary_app = caller_fields["cold_caller_summary_app"]
+        result.parent_hq_summary_app = caller_fields["parent_hq_summary_app"]
 
     return result

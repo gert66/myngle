@@ -204,6 +204,8 @@ class LeadPrioritizationResult:
     foreign_hq_signal_used_in_app: Optional[str] = None
     foreign_hq_country_app: Optional[str] = None
     foreign_hq_city_app: Optional[str] = None
+    cold_caller_summary_app: Optional[str] = None
+    parent_hq_summary_app: Optional[str] = None
 
     # ── Run metadata ──────────────────────────────────────────────────────────
     # "hq_only" | "partial_v2" | "full_v2_single_lead"

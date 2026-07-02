@@ -564,6 +564,8 @@ def test_ui_payload_and_array_fields(tmp_path):
         what_is_not_app="No competitor signal",
         caller_angle_app="Lead with onboarding angle.",
         call_starter_app="I saw you are part of a Japanese group...",
+        cold_caller_summary_app="Concrete reason to explore cross-border alignment.",
+        parent_hq_summary_app="The enrichment data identifies Acme Group as the parent company.",
         evidence_summary_app="Two strong sources.",
         buyer_route_app="HR Director | L&D Manager",
         likely_training_interest_app="Business English; Onboarding English",
@@ -579,12 +581,17 @@ def test_ui_payload_and_array_fields(tmp_path):
     assert detail["buyer_route_app"] == ["HR Director", "L&D Manager"]
     assert detail["likely_training_interest_app"] == [
         "Business English", "Onboarding English"]
+    assert detail["cold_caller_summary_app"] == "Concrete reason to explore cross-border alignment."
+    assert detail["parent_hq_summary_app"] == \
+        "The enrichment data identifies Acme Group as the parent company."
     assert detail["ui_payload"] == {
         "why_relevant": "Strong foreign parent and L&D hiring.",
         "what_is_hot": ["Foreign parent confirmed", "Hiring L&D manager"],
         "what_is_not": ["No competitor signal"],
         "caller_angle": "Lead with onboarding angle.",
         "call_starter": "I saw you are part of a Japanese group...",
+        "cold_caller_summary": "Concrete reason to explore cross-border alignment.",
+        "parent_hq_summary": "The enrichment data identifies Acme Group as the parent company.",
         "evidence_summary": "Two strong sources.",
         "source_urls": ["https://e.com/1"],
     }
