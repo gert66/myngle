@@ -191,6 +191,15 @@ class TestFlatten:
         assert row["employer_branding_evidence_quote"] == \
             "Recognized as a great place to work."
 
+    def test_employer_branding_fields_default_to_none_when_absent(self):
+        # A result without any employer branding data must still emit the
+        # columns (as None) instead of crashing or dropping them.
+        row = flatten_result_for_excel(_sample_result(), {"c": "Acme"}, 0, True, "")
+        assert row["sig_employer_branding_score"] is None
+        assert row["employer_branding_reason"] is None
+        assert row["employer_branding_evidence_url"] is None
+        assert row["employer_branding_evidence_quote"] is None
+
     def test_sector_fields_included(self):
         result = _sample_result(
             detected_industry="Consumer goods",

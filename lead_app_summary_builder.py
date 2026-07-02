@@ -5,7 +5,7 @@ text fields (`evidence_summary_app`, `key_source_links_app`,
 `advanced_notes_app`).  Everything is deterministic and traceable:
 
 - no live Serper calls, no AI,
-- no competitor content (only the four supported non-HQ signals are used),
+- no competitor content (only the supported non-HQ signals are used),
 - rapid growth is never presented as a positive driver,
 - nothing (quotes / URLs / facts) is invented — only existing field values are
   reused.
@@ -25,7 +25,17 @@ _SIGNAL_LABELS: dict[str, str] = {
     "onboarding_training_need": "Onboarding / training need",
     "company_size_complexity": "Company size / complexity",
     "icp_keyword_match": "ICP keyword match",
+    "employer_branding": "Employer branding",
 }
+
+
+def _signal_label(signal_name: str) -> str:
+    """Label for a supported signal; derives a readable fallback so a signal
+    added to the extractor can never crash summary building with a KeyError."""
+    label = _SIGNAL_LABELS.get(signal_name)
+    if label:
+        return label
+    return (signal_name or "").replace("_", " ").strip().capitalize()
 
 
 def _fmt_score(score: Optional[float]) -> str:
@@ -48,7 +58,7 @@ def build_evidence_summary_app(
         sig = by_name.get(name)
         if sig is None:
             continue
-        label = _SIGNAL_LABELS[name]
+        label = _signal_label(name)
         parts: list[str] = []
         score_str = _fmt_score(sig.signal_score)
         if score_str:
@@ -85,7 +95,7 @@ def build_key_source_links_app(
         if not url or url in seen:
             return
         seen.add(url)
-        label = _SIGNAL_LABELS[signal_name]
+        label = _signal_label(signal_name)
         title = (title or "").strip()
         lines.append(f"{label} — {title}: {url}" if title else f"{label}: {url}")
 
