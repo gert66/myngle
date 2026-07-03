@@ -439,6 +439,8 @@ from lead_hq_sonnet_adjudicator import SonnetHQAdjudicationResult  # noqa: E402
 from lead_prioritizer_batch_core import (  # noqa: E402
     apply_c5_adjudication,
     add_c5_summary_fields,
+    foreign_hq_skip_reason,
+    is_confirmed_foreign_hq_for_full_enrichment,
     row_selected_for_c5,
     run_batch_foreign_hq_only,
     run_batch_non_english_foreign_hq_only,
@@ -679,6 +681,90 @@ def _fake_prioritize_for_foreign_hq(scores: dict):
     return _fake
 
 
+class TestConfirmedForeignHQGate:
+    """Unit tests for is_confirmed_foreign_hq_for_full_enrichment /
+    foreign_hq_skip_reason — the phase-3 eligibility gate."""
+
+    def _c5_row(self, **kw):
+        row = {
+            "sig_foreign_hq_score_for_next_scoring": 0.0,
+            "c5_call_attempted": True,
+            "c5_call_success": True,
+            "c5_adjudication": "foreign_parent_confirmed",
+            "c5_target_company_match": "yes",
+            "c5_recommended_hq_score": 3.0,
+        }
+        row.update(kw)
+        return row
+
+    def test_c5_confirmed_target_yes_score_3_is_eligible(self):
+        assert is_confirmed_foreign_hq_for_full_enrichment(
+            self._c5_row(), c5_enabled=True) is True
+
+    def test_target_match_boolean_true_is_eligible(self):
+        row = self._c5_row(c5_target_company_match=True)
+        assert is_confirmed_foreign_hq_for_full_enrichment(row, c5_enabled=True) is True
+
+    def test_uppercase_yes_and_string_score_are_normalized(self):
+        row = self._c5_row(c5_target_company_match="YES",
+                           c5_recommended_hq_score="3")
+        assert is_confirmed_foreign_hq_for_full_enrichment(row, c5_enabled=True) is True
+
+    def test_missing_recommended_score_column_does_not_block(self):
+        row = self._c5_row()
+        del row["c5_recommended_hq_score"]
+        assert is_confirmed_foreign_hq_for_full_enrichment(row, c5_enabled=True) is True
+
+    def test_recommended_score_other_than_3_blocks(self):
+        row = self._c5_row(c5_recommended_hq_score=0.0)
+        assert is_confirmed_foreign_hq_for_full_enrichment(row, c5_enabled=True) is False
+
+    def test_target_mismatch_not_eligible(self):
+        row = self._c5_row(c5_target_company_match="no")
+        assert is_confirmed_foreign_hq_for_full_enrichment(row, c5_enabled=True) is False
+        assert foreign_hq_skip_reason(row, c5_enabled=True) == "C5 target mismatch"
+
+    def test_c5_unclear_not_eligible(self):
+        row = self._c5_row(c5_adjudication="unclear", c5_target_company_match="unclear",
+                           c5_recommended_hq_score=0.0)
+        assert is_confirmed_foreign_hq_for_full_enrichment(row, c5_enabled=True) is False
+        assert foreign_hq_skip_reason(row, c5_enabled=True) == "C5 unclear"
+
+    def test_c5_error_not_eligible(self):
+        row = self._c5_row(c5_call_success=False, c5_error="boom")
+        assert is_confirmed_foreign_hq_for_full_enrichment(row, c5_enabled=True) is False
+        assert foreign_hq_skip_reason(row, c5_enabled=True) == "C5 error"
+
+    def test_c5_disabled_ignores_c5_columns(self):
+        # Even a fully C5-confirmed row is not eligible via C5 when disabled;
+        # only the final HQ score counts (previous behavior preserved).
+        assert is_confirmed_foreign_hq_for_full_enrichment(
+            self._c5_row(), c5_enabled=False) is False
+        assert is_confirmed_foreign_hq_for_full_enrichment(
+            {"sig_foreign_hq_score_for_next_scoring": 3.0}, c5_enabled=False) is True
+        assert foreign_hq_skip_reason(self._c5_row(), c5_enabled=False) == \
+            "Not confirmed foreign HQ"
+
+    def test_final_score_3_is_always_eligible(self):
+        row = self._c5_row(sig_foreign_hq_score_for_next_scoring="3")
+        assert is_confirmed_foreign_hq_for_full_enrichment(row, c5_enabled=True) is True
+
+    def test_c4_suppressed_then_c5_confirmed_is_eligible(self):
+        row = self._c5_row(hq_positive_score_suppressed_for_review="Yes",
+                           needs_manual_review=True)
+        assert is_confirmed_foreign_hq_for_full_enrichment(row, c5_enabled=True) is True
+
+    def test_c5_not_attempted_row_stays_conservative(self):
+        row = {
+            "sig_foreign_hq_score_for_next_scoring": 0.0,
+            "c5_call_attempted": False, "c5_call_success": False,
+            "c5_adjudication": "", "c5_target_company_match": "",
+            "c5_recommended_hq_score": None,
+        }
+        assert is_confirmed_foreign_hq_for_full_enrichment(row, c5_enabled=True) is False
+        assert foreign_hq_skip_reason(row, c5_enabled=True) == "Not confirmed foreign HQ"
+
+
 class TestForeignHQOnlyMode:
     _df = pd.DataFrame({
         "company": ["Confirmed Foreign Co", "Local Domestic Co"],
@@ -730,9 +816,12 @@ class TestForeignHQOnlyMode:
         summary = out["run_summary"].iloc[0].to_dict()
         assert summary["c5_downgraded_score_3_count"] == 1
 
-    def test_c5_possible_foreign_parent_review_still_skipped(self):
-        # Old HQ score 0; C5 flags a possible foreign parent → conservative
-        # mode never auto-upgrades → the row stays unconfirmed → still skipped.
+    def test_c5_confirmed_score0_row_is_now_enriched(self):
+        # Old HQ score 0; C5 confirms a foreign parent (target match yes,
+        # High confidence → recommended score 3). The score is still never
+        # auto-upgraded, but the row IS now eligible for full enrichment —
+        # this was the Brazil bug where 22 C5-confirmed rows were skipped
+        # with "Not confirmed foreign HQ".
         fake = _fake_prioritize_for_foreign_hq(
             {"Confirmed Foreign Co": 3.0, "Local Domestic Co": 0.0})
         with patch("lead_prioritizer_batch_core.prioritize_single_lead", side_effect=fake), \
@@ -743,10 +832,67 @@ class TestForeignHQOnlyMode:
                 c5_scope="all_rows", c5_model_used="claude-sonnet-5", c5_model_tier="sonnet",
             )
         rows = out["enriched_leads"].set_index("company_name")
+        row = rows.loc["Local Domestic Co"]
+        assert row["enrichment_skipped"] == False  # noqa: E712
+        assert row["enrichment_skip_reason"] == ""
+        assert row["full_enrichment_gate_reason"] == \
+            "Confirmed by C5 foreign-parent adjudication"
+        assert row["final_commercial_fit_score"] == 99.0
+        # The screening score itself is never rewritten by the gate.
+        assert row["sig_foreign_hq_score_for_next_scoring"] == 0.0
+        summary = out["run_summary"].iloc[0].to_dict()
+        assert summary["confirmed_foreign_hq_count"] == 2
+        assert summary["full_enrichment_attempted_count"] == 2
+
+    def test_run_summary_counts_reconcile_when_c5_confirms_all(self):
+        # Brazil symptom was c5_foreign_parent_confirmed_count (110) >
+        # confirmed_foreign_hq_count (88). With the fixed gate, all otherwise
+        # valid C5-confirmed rows are eligible, so the counts reconcile.
+        fake = _fake_prioritize_for_foreign_hq(
+            {"Confirmed Foreign Co": 3.0, "Local Domestic Co": 0.0})
+        with patch("lead_prioritizer_batch_core.prioritize_single_lead", side_effect=fake), \
+             _patch_adjudicator(_mk_result("foreign_parent_confirmed", "High", "yes")):
+            out = run_batch_foreign_hq_only(
+                self._df, self._cfg, "S", "A",
+                c5_enabled=True, c5_scoring_behavior="append_only",
+                c5_scope="all_rows", c5_model_used="claude-sonnet-5", c5_model_tier="sonnet",
+            )
+        summary = out["run_summary"].iloc[0].to_dict()
+        assert summary["c5_foreign_parent_confirmed_count"] == 2
+        assert summary["confirmed_foreign_hq_count"] == 2
+        assert summary["full_enrichment_attempted_count"] == 2
+        assert summary["full_enrichment_skipped_count"] == 0
+        # Scoring columns are untouched by the gate (append_only never
+        # rewrites the screening score).
+        rows = out["enriched_leads"].set_index("company_name")
+        assert rows.loc["Confirmed Foreign Co", "sig_foreign_hq_score_for_next_scoring"] == 3.0
         assert rows.loc["Local Domestic Co", "sig_foreign_hq_score_for_next_scoring"] == 0.0
-        assert rows.loc["Local Domestic Co", "c5_possible_foreign_parent_for_review"] == True  # noqa: E712
-        assert rows.loc["Local Domestic Co", "enrichment_skipped"] == True  # noqa: E712
-        assert rows.loc["Local Domestic Co", "enrichment_skip_reason"] == "Not confirmed foreign HQ"
+        assert rows.loc["Confirmed Foreign Co", "full_enrichment_gate_reason"] == \
+            "Confirmed foreign HQ (final HQ score 3)"
+
+    def test_c5_unclear_and_error_rows_get_specific_skip_reasons(self):
+        def _adjudicate(**kwargs):
+            if kwargs.get("company_name") == "Confirmed Foreign Co":
+                return _mk_result("unclear", "Low", "unclear")
+            return _mk_result("unclear", "Low", "unclear",
+                              call_success=False, error="api down")
+
+        fake = _fake_prioritize_for_foreign_hq(
+            {"Confirmed Foreign Co": 0.0, "Local Domestic Co": 0.0})
+        with patch("lead_prioritizer_batch_core.prioritize_single_lead", side_effect=fake), \
+             _patch_adjudicator(_adjudicate):
+            out = run_batch_foreign_hq_only(
+                self._df, self._cfg, "S", "A",
+                c5_enabled=True, c5_scoring_behavior="append_only",
+                c5_scope="all_rows", c5_model_used="claude-sonnet-5", c5_model_tier="sonnet",
+            )
+        rows = out["enriched_leads"].set_index("company_name")
+        assert rows.loc["Confirmed Foreign Co", "enrichment_skipped"] == True  # noqa: E712
+        assert rows.loc["Confirmed Foreign Co", "enrichment_skip_reason"] == "C5 unclear"
+        assert rows.loc["Local Domestic Co", "enrichment_skip_reason"] == "C5 error"
+        summary = out["run_summary"].iloc[0].to_dict()
+        assert summary["confirmed_foreign_hq_count"] == 0
+        assert summary["full_enrichment_attempted_count"] == 0
 
     def test_output_columns_present_for_both_confirmed_and_skipped(self):
         fake = _fake_prioritize_for_foreign_hq(

@@ -486,7 +486,7 @@ _C5_BLANK_DEFAULTS = {
 def _c5_truthy(v) -> bool:
     if isinstance(v, bool):
         return v
-    return str(v).strip().lower() in ("yes", "true", "1")
+    return str(v).strip().lower() in ("yes", "true", "1", "y")
 
 
 def _c5_score(v):
@@ -784,6 +784,54 @@ def _run_hq_and_c5_screening(
     return rows, c5_counts
 
 
+def is_confirmed_foreign_hq_for_full_enrichment(row: dict, c5_enabled: bool) -> bool:
+    """Phase-3 full-enrichment eligibility gate for the foreign-HQ-only mode.
+
+    A row is eligible when either:
+    - the FINAL post-C4/post-C5 HQ score is 3 (the pre-existing path; the only
+      path when ``c5_enabled`` is False), or
+    - C5 is enabled and explicitly confirmed a foreign parent for the target
+      company: a successful C5 call with ``c5_adjudication ==
+      "foreign_parent_confirmed"``, a yes/true ``c5_target_company_match``,
+      and — when the column carries a value — ``c5_recommended_hq_score == 3``.
+
+    C5 unclear/domestic results, target mismatches, and C5 errors are never
+    auto-included. This gates enrichment eligibility only: it does not change
+    ``sig_foreign_hq_score_for_next_scoring``, C4 suppression, or any C5
+    output field. Bool/string values ("yes"/"true"/"1"/"y", any case) and
+    numeric strings ("3", 3, 3.0) are normalized safely.
+    """
+    if _c5_score(row.get("sig_foreign_hq_score_for_next_scoring")) == 3.0:
+        return True
+    if not c5_enabled:
+        return False
+    if not _c5_truthy(row.get("c5_call_success")):
+        return False
+    adjudication = str(row.get("c5_adjudication") or "").strip().lower()
+    if adjudication != "foreign_parent_confirmed":
+        return False
+    if not _c5_truthy(row.get("c5_target_company_match")):
+        return False
+    recommended = _c5_score(row.get("c5_recommended_hq_score"))
+    if recommended is not None and recommended != 3.0:
+        return False
+    return True
+
+
+def foreign_hq_skip_reason(row: dict, c5_enabled: bool) -> str:
+    """Specific skip reason for a row not eligible for full enrichment."""
+    if c5_enabled and _c5_truthy(row.get("c5_call_attempted")):
+        if not _c5_truthy(row.get("c5_call_success")):
+            return "C5 error"
+        adjudication = str(row.get("c5_adjudication") or "").strip().lower()
+        if adjudication == "unclear":
+            return "C5 unclear"
+        if adjudication == "foreign_parent_confirmed" and not _c5_truthy(
+                row.get("c5_target_company_match")):
+            return "C5 target mismatch"
+    return "Not confirmed foreign HQ"
+
+
 def run_batch_foreign_hq_only(
     df: pd.DataFrame,
     config: BatchRunConfig,
@@ -799,18 +847,21 @@ def run_batch_foreign_hq_only(
 ) -> dict:
     """Run the "Full enrichment, confirmed foreign-HQ only" batch mode.
 
-    "Confirmed foreign-HQ" is the FINAL post-C4/post-C5 value of
-    ``sig_foreign_hq_score_for_next_scoring == 3.0``. If C5 is disabled the
-    decision is based on the post-C4 HQ score; if C5 is enabled with
-    ``conservative_adjustment`` the decision uses the C5-adjusted score. C5's
-    ``c5_possible_foreign_parent_for_review`` flag is never treated as
-    confirmation, and a previous score of 0 is never auto-upgraded to 3 (this
-    already holds by construction — ``apply_c5_adjudication`` never sets a
-    score-0 row to 3.0).
+    A row receives full enrichment when
+    ``is_confirmed_foreign_hq_for_full_enrichment`` says so: either the FINAL
+    post-C4/post-C5 ``sig_foreign_hq_score_for_next_scoring`` is 3.0 (the only
+    path when C5 is disabled), or C5 explicitly confirmed a foreign parent for
+    the target company (foreign_parent_confirmed + target match yes +
+    recommended HQ score 3). The eligibility gate never mutates scores: C4
+    suppression and the C5 no-auto-upgrade rule for
+    ``sig_foreign_hq_score_for_next_scoring`` still hold — a C5-confirmed
+    score-0 row is enriched but its screening score is not rewritten.
 
-    Rows that are not confirmed are kept in the output, unenriched, with
-    ``enrichment_skipped=True`` / ``enrichment_skip_reason`` set; confirmed
-    rows get ``enrichment_skipped=False`` / ``""`` and the full v2 fields.
+    Rows that are not eligible are kept in the output, unenriched, with
+    ``enrichment_skipped=True`` and a specific ``enrichment_skip_reason``
+    ("C5 unclear" / "C5 target mismatch" / "C5 error" / "Not confirmed
+    foreign HQ"); eligible rows get ``enrichment_skipped=False`` / ``""``,
+    a ``full_enrichment_gate_reason`` audit value, and the full v2 fields.
 
     Returns the same dict shape as ``run_batch_dataframe``: ``enriched_leads``,
     ``evidence``, ``signals``, ``run_summary`` (extended with the mode's own
@@ -829,10 +880,10 @@ def run_batch_foreign_hq_only(
     attempted = skipped = confirmed = 0
     p3_success = p3_error = 0
 
-    # Same confirmation expression as before, precomputed so progress can
-    # report a fixed phase-3 total; enrich/skip decisions are unchanged.
+    # Eligibility precomputed so progress can report a fixed phase-3 total.
     confirmed_flags = [
-        _c5_score(r.get("sig_foreign_hq_score_for_next_scoring")) == 3.0 for r in rows
+        is_confirmed_foreign_hq_for_full_enrichment(r, c5_enabled=c5_enabled)
+        for r in rows
     ]
     total_confirmed = sum(confirmed_flags)
 
@@ -840,13 +891,18 @@ def run_batch_foreign_hq_only(
         if not is_confirmed:
             out_row = dict(row)
             out_row["enrichment_skipped"] = True
-            out_row["enrichment_skip_reason"] = "Not confirmed foreign HQ"
+            out_row["enrichment_skip_reason"] = foreign_hq_skip_reason(row, c5_enabled)
+            out_row["full_enrichment_gate_reason"] = ""
             out_rows.append(out_row)
             skipped += 1
             continue
 
         confirmed += 1
         attempted += 1
+        if _c5_score(row.get("sig_foreign_hq_score_for_next_scoring")) == 3.0:
+            gate_reason = "Confirmed foreign HQ (final HQ score 3)"
+        else:
+            gate_reason = "Confirmed by C5 foreign-parent adjudication"
         company = str(row.get(config.company_name_column, "") or "").strip()
         domain = str(row.get(config.domain_column, "") or "").strip() or None
         country = None
@@ -876,6 +932,7 @@ def run_batch_foreign_hq_only(
 
         out_row["enrichment_skipped"] = False
         out_row["enrichment_skip_reason"] = ""
+        out_row["full_enrichment_gate_reason"] = gate_reason
         out_rows.append(out_row)
 
         _emit_batch_phase_progress(progress_callback, FOREIGN_HQ_ONLY_PHASE_LABELS, 3,
