@@ -30,6 +30,7 @@ _COUNTRY_FOLDER_SLUGS = {
     "australia": "australia",
     "uruguay": "uruguay",
     "new zealand": "new-zealand",
+    "netherlands": "netherlands",
 }
 
 

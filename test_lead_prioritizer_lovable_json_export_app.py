@@ -245,11 +245,14 @@ class TestExportCountries:
         assert EXPORT_COUNTRIES == sorted(EXPORT_COUNTRIES)
 
     def test_includes_required_countries(self):
-        for country in ("Australia", "Brazil", "Italy", "New Zealand", "Uruguay"):
+        for country in ("Australia", "Brazil", "Italy", "Netherlands",
+                        "New Zealand", "Uruguay"):
             assert country in EXPORT_COUNTRIES
 
     def test_exact_list(self):
-        assert EXPORT_COUNTRIES == ["Australia", "Brazil", "Italy", "New Zealand", "Uruguay"]
+        assert EXPORT_COUNTRIES == [
+            "Australia", "Brazil", "Italy", "Netherlands", "New Zealand", "Uruguay",
+        ]
 
     def test_placeholder_first_in_dropdown_options(self):
         options = [COUNTRY_PLACEHOLDER] + EXPORT_COUNTRIES

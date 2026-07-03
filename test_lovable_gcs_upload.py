@@ -30,6 +30,7 @@ class TestCountryFolderSlug:
         assert country_folder_slug("Australia") == "australia"
         assert country_folder_slug("Uruguay") == "uruguay"
         assert country_folder_slug("New Zealand") == "new-zealand"
+        assert country_folder_slug("Netherlands") == "netherlands"
 
     def test_case_and_whitespace_insensitive(self):
         assert country_folder_slug("  new   zealand  ") == "new-zealand"

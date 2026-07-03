@@ -825,6 +825,28 @@ def test_export_country_is_authoritative_and_original_preserved(tmp_path):
     assert item["original_input_country"] == "Brasil (BR)"
 
 
+def test_netherlands_export_produces_standard_structure(tmp_path):
+    # The exporter is country-agnostic; Netherlands must behave exactly like
+    # the existing countries: same standard files, country fields verbatim.
+    enriched = [enriched_row(input_country="Nederland (NL)")]
+    manifest, out_dir = run_export(
+        tmp_path, enriched, export_country="Netherlands")
+
+    assert (out_dir / "companies.list.json").exists()
+    assert (out_dir / "company-details-000.json").exists()
+    assert (out_dir / "export_manifest.json").exists()
+    assert manifest["export_country"] == "Netherlands"
+
+    item = load_list(out_dir)[0]
+    assert item["country"] == "Netherlands"
+    assert item["input_country"] == "Netherlands"
+    assert item["display_country_app"] == "Netherlands"
+    assert item["export_country"] == "Netherlands"
+
+    detail = detail_for(out_dir, "Acme Brasil")
+    assert detail["export_country"] == "Netherlands"
+
+
 def test_ui_payload_and_array_fields(tmp_path):
     enriched = [enriched_row(
         why_relevant_app="Strong foreign parent and L&D hiring.",

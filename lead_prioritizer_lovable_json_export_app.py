@@ -33,7 +33,7 @@ from export_lead_prioritizer_to_lovable_json import (
 
 # Central country list — add future export countries here. Kept alphabetical.
 COUNTRY_PLACEHOLDER = "Select country..."
-EXPORT_COUNTRIES = ["Australia", "Brazil", "Italy", "New Zealand", "Uruguay"]
+EXPORT_COUNTRIES = ["Australia", "Brazil", "Italy", "Netherlands", "New Zealand", "Uruguay"]
 
 DEFAULT_LOVABLE_OUTPUT_DIR = "lovable_export"
 SOURCE_FOLDER_HELP_TEXT = (
