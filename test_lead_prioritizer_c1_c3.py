@@ -291,6 +291,38 @@ class TestUruguayNormalization:
         assert r.hq_structure_type == "foreign_parent"
 
 
+class TestNetherlandsNormalization:
+    """Netherlands aliases (Netherlands / The Netherlands / Nederland / NL /
+    Holland) must normalize equal to input Netherlands, so a domestic Dutch
+    company is not misclassified as foreign. Uses a non-risky domain root
+    ('bedrijf') so the C4 safety layer does not interfere with the assertions."""
+
+    _nl = LeadInput(company_name="Bedrijf Nederland B.V.", domain="bedrijf.nl",
+                    input_country="Netherlands")
+
+    def test_netherlands_variants_are_domestic(self):
+        for parent_variant in (
+            "Netherlands", "The Netherlands", "Nederland", "NL", "Holland",
+        ):
+            ai = json.dumps(dict(
+                classification="foreign_parent", confidence="High",
+                parent_hq_country=parent_variant, reason="same country",
+            ))
+            r = _run(self._nl, ai)
+            assert r.hq_structure_type == "domestic", parent_variant
+            assert r.sig_foreign_hq_score_for_next_scoring == 0.0, parent_variant
+
+    def test_genuine_foreign_parent_still_scores_3(self):
+        ai = json.dumps(dict(
+            classification="foreign_parent", confidence="High",
+            parent_hq_country="Germany",
+            evidence_url="https://www.bedrijf.nl/", reason="German parent",
+        ))
+        r = _run(self._nl, ai)
+        assert r.sig_foreign_hq_score_for_next_scoring == 3.0
+        assert r.hq_structure_type == "foreign_parent"
+
+
 class TestHQPositiveScoreSafety:
     """C4 — a risky short/generic domain root with blank/mismatched evidence
     must not blindly score a domestic company as foreign; route to review."""

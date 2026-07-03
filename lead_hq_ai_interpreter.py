@@ -243,6 +243,7 @@ def _normalize_country_for_hq(value: object) -> str:
         "america": "united states",
         "ch": "switzerland", "switzerland": "switzerland", "swiss": "switzerland",
         "nl": "netherlands", "netherlands": "netherlands", "holland": "netherlands",
+        "the netherlands": "netherlands", "nederland": "netherlands",
         "be": "belgium", "belgium": "belgium",
         "at": "austria", "austria": "austria",
         "es": "spain", "spain": "spain",
