@@ -20,6 +20,7 @@ from lead_prioritizer_batch_app import (
     build_progress_status_text,
     build_phase_progress_status_text,
     build_parallel_progress_status_text,
+    build_chunk_detail_line,
     format_local_time,
     PARALLEL_PROGRESS_NOTE_TEXT,
     RUN_BUTTON_NOTE_TEXT,
@@ -654,6 +655,70 @@ class TestParallelProgressStatusText:
                    "success_count": 1, "error_count": 0, "current_company_name": "Acme"}
         text = build_parallel_progress_status_text(payload, started_at=0.0, now=5.0)
         assert "api_key" not in text.lower() and "sk-ant" not in text.lower()
+
+
+class TestChunkDetailLine:
+    def test_c5_phase_uses_phase_progress_not_chunk_rows(self):
+        # Regression: a chunk in C5 adjudication used to render its phase-1
+        # end state ("168/168 rows"), looking finished while C5 was running.
+        chunk = {
+            "chunk_index": 2, "processed": 168, "selected": 168,
+            "phase": 2, "phase_label": "C5 adjudication",
+            "phase_processed": 43, "phase_total": 168,
+            "current_company_name": "SKG Radiology",
+        }
+        line = build_chunk_detail_line(chunk)
+        assert line == "Chunk 2: C5 adjudication 43/168 — current: SKG Radiology"
+        assert "168/168" not in line
+
+    def test_hq_screening_phase_shows_phase_progress(self):
+        chunk = {
+            "chunk_index": 1, "processed": 42, "selected": 168,
+            "phase": 1, "phase_label": "HQ screening",
+            "phase_processed": 42, "phase_total": 168,
+            "current_company_name": "Acme Brasil",
+        }
+        assert build_chunk_detail_line(chunk) == \
+            "Chunk 1: HQ screening 42/168 — current: Acme Brasil"
+
+    def test_full_enrichment_phase_labels_render(self):
+        for label in (
+            "Full enrichment for confirmed foreign-HQ leads",
+            "Full enrichment for confirmed non-English foreign-HQ leads",
+        ):
+            chunk = {
+                "chunk_index": 3, "processed": 168, "selected": 168,
+                "phase": 3, "phase_label": label,
+                "phase_processed": 7, "phase_total": 31,
+                "current_company_name": "Beta Corp",
+            }
+            assert build_chunk_detail_line(chunk) == \
+                f"Chunk 3: {label} 7/31 — current: Beta Corp"
+
+    def test_non_phased_chunk_keeps_rows_format(self):
+        chunk = {
+            "chunk_index": 4, "processed": 12, "selected": 168,
+            "phase": None, "phase_label": None,
+            "phase_processed": 0, "phase_total": 0,
+            "current_company_name": "Gamma Ltd",
+        }
+        assert build_chunk_detail_line(chunk) == \
+            "Chunk 4: 12/168 rows — current: Gamma Ltd"
+
+    def test_phase_label_without_total_falls_back_to_rows(self):
+        chunk = {
+            "chunk_index": 5, "processed": 10, "selected": 20,
+            "phase": 2, "phase_label": "C5 adjudication",
+            "phase_processed": 0, "phase_total": 0,
+            "current_company_name": "",
+        }
+        assert build_chunk_detail_line(chunk) == \
+            "Chunk 5: 10/20 rows — C5 adjudication"
+
+    def test_no_company_suffix_when_blank(self):
+        chunk = {"chunk_index": 1, "processed": 1, "selected": 2,
+                 "phase_label": None, "current_company_name": ""}
+        assert build_chunk_detail_line(chunk) == "Chunk 1: 1/2 rows"
 
 
 class TestParallelUINoteText:

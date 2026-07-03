@@ -508,6 +508,36 @@ def build_parallel_progress_status_text(
     return " | ".join(parts)
 
 
+def build_chunk_detail_line(chunk: dict) -> str:
+    """One caption line for a still-running parallel chunk.
+
+    Phase-based modes (the foreign-HQ-only family) report per-phase progress
+    via ``phase_label`` / ``phase_processed`` / ``phase_total``; rendering
+    those instead of the chunk's overall processed/selected counts avoids the
+    confusing "168/168 rows — C5 adjudication" display where a chunk looked
+    finished while C5 adjudication was still running. Chunks without phase
+    info keep the original "processed/selected rows" format.
+    """
+    idx = chunk.get("chunk_index")
+    label = str(chunk.get("phase_label") or "")
+    phase_done = int(chunk.get("phase_processed") or 0)
+    phase_total = int(chunk.get("phase_total") or 0)
+
+    if label and phase_total > 0:
+        line = f"Chunk {idx}: {label} {phase_done}/{phase_total}"
+    else:
+        line = (
+            f"Chunk {idx}: {int(chunk.get('processed') or 0)}/"
+            f"{int(chunk.get('selected') or 0)} rows"
+        )
+        if label:
+            line += f" — {label}"
+    company = chunk.get("current_company_name") or ""
+    if company:
+        line += f" — current: {company}"
+    return line
+
+
 # ---------------------------------------------------------------------------
 # Streamlit UI
 # ---------------------------------------------------------------------------
@@ -802,18 +832,8 @@ def main() -> None:  # pragma: no cover - exercised only under `streamlit run`
 
                 active = payload.get("active_chunks") or []
                 if active:
-                    lines = []
-                    for c in active:
-                        bit = (
-                            f"Chunk {c.get('chunk_index')}: "
-                            f"{c.get('processed', 0)}/{c.get('selected', 0)} rows"
-                        )
-                        if c.get("phase_label"):
-                            bit += f" — {c['phase_label']}"
-                        if c.get("current_company_name"):
-                            bit += f" — {c['current_company_name']}"
-                        lines.append(bit)
-                    chunk_detail.caption("  \n".join(lines))
+                    chunk_detail.caption(
+                        "  \n".join(build_chunk_detail_line(c) for c in active))
                 else:
                     chunk_detail.empty()
 
