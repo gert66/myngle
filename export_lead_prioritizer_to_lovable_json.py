@@ -741,26 +741,33 @@ def _build_detail_record(
 # ---------------------------------------------------------------------------
 
 def _read_workbook(input_xlsx: Path, warnings: list[str]):
-    """Read the workbook sheets. Enriched Leads is required."""
-    xls = pd.ExcelFile(input_xlsx)
-    sheets_found = list(xls.sheet_names)
+    """Read the workbook sheets. Enriched Leads is required.
 
-    if ENRICHED_SHEET not in xls.sheet_names:
-        raise LovableExportError(
-            f"Required sheet {ENRICHED_SHEET!r} not found in "
-            f"{input_xlsx.name!r}. Sheets present: {sheets_found}"
-        )
-    enriched = xls.parse(ENRICHED_SHEET)
+    Uses ``pd.ExcelFile`` as a context manager so the underlying file handle
+    is closed before this returns — on Windows a lingering open handle makes
+    the source .xlsx appear locked ([WinError 32]) to any follow-up
+    operation (cleanup, re-export, download).
+    """
+    with pd.ExcelFile(input_xlsx) as xls:
+        sheets_found = list(xls.sheet_names)
 
-    def _optional(sheet):
-        if sheet in xls.sheet_names:
-            return xls.parse(sheet)
-        warnings.append(f"Optional sheet {sheet!r} not found; continuing without it.")
-        return pd.DataFrame()
+        if ENRICHED_SHEET not in xls.sheet_names:
+            raise LovableExportError(
+                f"Required sheet {ENRICHED_SHEET!r} not found in "
+                f"{input_xlsx.name!r}. Sheets present: {sheets_found}"
+            )
+        enriched = xls.parse(ENRICHED_SHEET)
 
-    evidence = _optional(EVIDENCE_SHEET)
-    signals = _optional(SIGNALS_SHEET)
-    run_summary = _optional(RUN_SUMMARY_SHEET)
+        def _optional(sheet):
+            if sheet in xls.sheet_names:
+                return xls.parse(sheet)
+            warnings.append(
+                f"Optional sheet {sheet!r} not found; continuing without it.")
+            return pd.DataFrame()
+
+        evidence = _optional(EVIDENCE_SHEET)
+        signals = _optional(SIGNALS_SHEET)
+        run_summary = _optional(RUN_SUMMARY_SHEET)
     return enriched, evidence, signals, run_summary, sheets_found
 
 

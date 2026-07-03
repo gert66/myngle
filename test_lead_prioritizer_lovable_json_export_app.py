@@ -22,7 +22,11 @@ from lead_prioritizer_lovable_json_export_app import (
     COUNTRY_PLACEHOLDER,
     EXPORT_COUNTRIES,
     DEFAULT_LOVABLE_OUTPUT_DIR,
+    WORKBOOK_LOCKED_MESSAGE,
+    WorkbookSourceLockedError,
+    _is_lock_error,
     cleanup_uploaded_workbook,
+    make_export_source_path,
     make_upload_path,
     save_uploaded_workbook,
     sanitize_filename_part,
@@ -31,6 +35,7 @@ from lead_prioritizer_lovable_json_export_app import (
     make_lovable_export_folder_name,
     make_lovable_zip_filename,
     parse_cold_callers,
+    write_export_source_workbook,
 )
 
 _FIXED_NOW = _dt(2026, 7, 2, 23, 15, 0)
@@ -133,6 +138,102 @@ def test_cleanup_permission_error_does_not_raise(tmp_path):
     assert warning is not None
     assert str(upload_path) in warning
     assert upload_path.exists()  # unlink was mocked away, file still there
+
+
+# ---------------------------------------------------------------------------
+# Export-specific source copy (WinError 32 lock fix)
+# ---------------------------------------------------------------------------
+
+def test_write_export_source_workbook_writes_fresh_copy(tmp_path):
+    path = write_export_source_workbook(
+        b"fake-xlsx-bytes", "Brazil", _FIXED_NOW, upload_dir=tmp_path)
+
+    assert path.parent == tmp_path
+    assert path.name.startswith("lovable_json_source_Brazil_20260702_231500_")
+    assert path.suffix == ".xlsx"
+    assert path.read_bytes() == b"fake-xlsx-bytes"
+    # Handle is closed: the file can be removed immediately.
+    path.unlink()
+
+
+def test_make_export_source_path_unique_and_sanitized(tmp_path):
+    p1 = make_export_source_path("New Zealand", _FIXED_NOW, upload_dir=tmp_path)
+    p2 = make_export_source_path("New Zealand", _FIXED_NOW, upload_dir=tmp_path)
+
+    assert p1 != p2  # unique per call, retry-safe within the same second
+    assert "New_Zealand" in p1.name
+    assert p1.name.startswith("lovable_json_source_New_Zealand_")
+
+
+def test_write_export_source_workbook_retries_with_fresh_name(tmp_path, monkeypatch):
+    import builtins
+    import lead_prioritizer_lovable_json_export_app as app_module
+
+    real_open = builtins.open
+    calls = {"n": 0}
+
+    def flaky_open(*args, **kwargs):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise PermissionError(
+                13, "The process cannot access the file", None, 32)
+        return real_open(*args, **kwargs)
+
+    monkeypatch.setattr(builtins, "open", flaky_open)
+    monkeypatch.setattr(app_module.time, "sleep", lambda _s: None)
+
+    path = write_export_source_workbook(
+        b"data", "Brazil", _FIXED_NOW, upload_dir=tmp_path)
+
+    assert calls["n"] == 2  # first attempt locked, second succeeded
+    assert path.read_bytes() == b"data"
+
+
+def test_write_export_source_workbook_raises_friendly_error_when_locked(
+        tmp_path, monkeypatch):
+    import builtins
+    import pytest
+    import lead_prioritizer_lovable_json_export_app as app_module
+
+    def always_locked(*args, **kwargs):
+        raise PermissionError(13, "The process cannot access the file", None, 32)
+
+    monkeypatch.setattr(builtins, "open", always_locked)
+    monkeypatch.setattr(app_module.time, "sleep", lambda _s: None)
+
+    with pytest.raises(WorkbookSourceLockedError):
+        write_export_source_workbook(
+            b"data", "Brazil", _FIXED_NOW, upload_dir=tmp_path, attempts=2)
+
+
+def test_write_export_source_workbook_propagates_non_lock_errors(
+        tmp_path, monkeypatch):
+    import builtins
+    import pytest
+
+    def disk_full(*args, **kwargs):
+        raise OSError(28, "No space left on device")
+
+    monkeypatch.setattr(builtins, "open", disk_full)
+
+    with pytest.raises(OSError) as excinfo:
+        write_export_source_workbook(
+            b"data", "Brazil", _FIXED_NOW, upload_dir=tmp_path)
+    assert not isinstance(excinfo.value, WorkbookSourceLockedError)
+
+
+def test_is_lock_error_detection():
+    assert _is_lock_error(PermissionError("locked")) is True
+    winerror32 = OSError("sharing violation")
+    winerror32.winerror = 32
+    assert _is_lock_error(winerror32) is True
+    assert _is_lock_error(OSError("other")) is False
+
+
+def test_workbook_locked_message_is_friendly():
+    assert "still open or locked" in WORKBOOK_LOCKED_MESSAGE
+    assert "close Excel" in WORKBOOK_LOCKED_MESSAGE
+    assert "WinError" not in WORKBOOK_LOCKED_MESSAGE
 
 
 # ---------------------------------------------------------------------------

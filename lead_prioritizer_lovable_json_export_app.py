@@ -17,6 +17,7 @@ from __future__ import annotations
 import io
 import json
 import re
+import time
 import uuid
 import zipfile
 from datetime import datetime
@@ -72,6 +73,69 @@ def save_uploaded_workbook(uploaded_file, upload_dir: Path = UPLOAD_TEMP_DIR) ->
     with open(upload_path, "wb") as f:
         f.write(uploaded_file.getvalue())
     return upload_path
+
+
+WORKBOOK_LOCKED_MESSAGE = (
+    "The workbook file is still open or locked. "
+    "Please close Excel/preview and try again."
+)
+
+
+class WorkbookSourceLockedError(RuntimeError):
+    """Raised when the export source workbook cannot be written because
+    another process (Excel, a preview pane, antivirus) holds a lock."""
+
+
+def _is_lock_error(exc: OSError) -> bool:
+    """True for Windows sharing-violation style locks (WinError 32) and
+    PermissionError on any platform."""
+    return isinstance(exc, PermissionError) or getattr(exc, "winerror", None) == 32
+
+
+def make_export_source_path(
+    country: str, timestamp, upload_dir: Path = UPLOAD_TEMP_DIR,
+) -> Path:
+    """Unique, export-specific source workbook path, e.g.
+    ``lovable_json_source_Brazil_20260703_141530_ab12cd34.xlsx``."""
+    upload_dir.mkdir(parents=True, exist_ok=True)
+    country_part = sanitize_filename_part(country, fallback="Country")
+    stamp = timestamp.strftime("%Y%m%d_%H%M%S")
+    return upload_dir / (
+        f"lovable_json_source_{country_part}_{stamp}_{uuid.uuid4().hex[:8]}.xlsx"
+    )
+
+
+def write_export_source_workbook(
+    data: bytes,
+    country: str,
+    timestamp,
+    upload_dir: Path = UPLOAD_TEMP_DIR,
+    attempts: int = 3,
+    retry_delay_seconds: float = 0.5,
+) -> Path:
+    """Copy in-memory workbook bytes to a fresh export-specific file.
+
+    The JSON export never reads a possibly-locked upload/download path
+    directly: it always gets its own copy, written from bytes with the file
+    handle closed before this returns. Retry-safe: each attempt uses a fresh
+    unique filename, so a file locked by Excel/preview/antivirus never blocks
+    the next attempt. Raises ``WorkbookSourceLockedError`` when every attempt
+    hits a lock; other I/O errors propagate unchanged.
+    """
+    last_exc: OSError | None = None
+    for attempt in range(attempts):
+        path = make_export_source_path(country, timestamp, upload_dir)
+        try:
+            with open(path, "wb") as f:
+                f.write(data)
+            return path
+        except OSError as exc:
+            if not _is_lock_error(exc):
+                raise
+            last_exc = exc
+            if attempt < attempts - 1:
+                time.sleep(retry_delay_seconds)
+    raise WorkbookSourceLockedError(str(last_exc))
 
 
 def cleanup_uploaded_workbook(upload_path: Path) -> str | None:
@@ -229,9 +293,17 @@ def main() -> None:
         folder_name = make_lovable_export_folder_name(country, export_timestamp)
         resolved_output_dir = base_output_dir / folder_name
 
-        # Written to a stable folder (not TemporaryDirectory) so Windows never
-        # has to rmtree a file that pandas/openpyxl may still have open.
-        upload_path = save_uploaded_workbook(uploaded)
+        # The export never reads a possibly-locked upload/download path
+        # directly: the in-memory upload bytes are copied to a fresh,
+        # export-specific file in a stable folder (not TemporaryDirectory),
+        # with the handle closed before pandas/openpyxl sees the path.
+        try:
+            upload_path = write_export_source_workbook(
+                uploaded.getvalue(), country, export_timestamp)
+        except WorkbookSourceLockedError:
+            st.error(WORKBOOK_LOCKED_MESSAGE)
+            return
+
         try:
             with st.spinner("Exporting workbook to Lovable JSON..."):
                 manifest = export_workbook_to_lovable_json(
@@ -245,6 +317,12 @@ def main() -> None:
                 )
         except LovableExportError as exc:
             st.error(f"Export failed: {exc}")
+            return
+        except OSError as exc:
+            if _is_lock_error(exc):
+                st.error(WORKBOOK_LOCKED_MESSAGE)
+            else:
+                st.error(f"Export failed: {exc}")
             return
         except Exception as exc:
             st.error(f"Export failed: {exc}")
