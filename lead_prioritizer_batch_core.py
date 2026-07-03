@@ -1073,6 +1073,10 @@ _PARALLEL_NON_ENGLISH_COUNT_KEYS = (
     "english_speaking_parent_hq_count", "review_parent_hq_count",
     "unclear_parent_hq_count", "full_enrichment_attempted_count",
     "full_enrichment_skipped_count",
+    "direct_target_count", "manual_review_count",
+    "high_priority_manual_review_count", "medium_priority_manual_review_count",
+    "excluded_count", "skipped_not_relevant_count",
+    "non_english_foreign_hq_review_count",
 )
 
 
@@ -1154,6 +1158,162 @@ def _non_english_export_decision(row: dict) -> dict:
     }
 
 
+# ---------------------------------------------------------------------------
+# Post-C5 export/review buckets for the non-English foreign-HQ mode
+# ---------------------------------------------------------------------------
+#
+# ``_non_english_export_decision`` above answers a single yes/no question
+# ("does this row get full v2 enrichment?"). The audit of Australia runs
+# showed that "no" was hiding good NEC-style leads: C5 can confirm
+# ``foreign_parent_confirmed`` + a target-company match against a
+# non-English parent, yet the FINAL post-C4/post-C5 HQ score can still be
+# 0 (the conservative C5 scoring rule never auto-upgrades a score-0 row —
+# see ``_apply_conservative_adjustment`` — by design). Those rows were being
+# silently dropped into the same "Not confirmed foreign HQ" skip bucket as
+# genuine non-matches.
+#
+# This layer adds a strictly-additive export/review classification on top:
+# it never changes C4, never changes C5, and never changes
+# ``sig_foreign_hq_score_for_next_scoring``. It only decides which
+# "bucket" a row is shown in and whether it gets full v2 enrichment
+# (still ONLY ``direct_target`` rows do — identical gate to before).
+
+EXPORT_BUCKETS = ("direct_target", "manual_review", "excluded", "skipped_not_relevant")
+
+# Country -> characteristic wrong-country domain suffix, used by the safety
+# check below. Only ever consulted for Australia/New Zealand input rows.
+_WRONG_COUNTRY_HINTS = {
+    "bolivia": ".bo",
+    "costa rica": ".cr",
+}
+
+
+def wrong_country_export_exclusion_reason(row: dict) -> str:
+    """Light safety net for obvious wrong-country data in AU/NZ export runs.
+
+    Returns a human-readable exclude reason, or ``""`` when nothing looks
+    wrong. Only checked when the row's (effective) ``input_country`` is
+    Australia or New Zealand — for any other input country this is a no-op.
+    """
+    input_country = _normalize_country_token(row.get("input_country"))
+    if input_country not in ("australia", "new zealand"):
+        return ""
+    domain = str(row.get("domain") or "").strip().lower()
+    company = str(row.get("company_name") or "").strip().lower()
+    for name, suffix in _WRONG_COUNTRY_HINTS.items():
+        if domain.endswith(suffix):
+            return f"Wrong country / {name.title()} domain"
+        if name in company:
+            return f"Wrong country / {name.title()} in company name"
+    return ""
+
+
+def classify_non_english_foreign_hq_export_row(row: dict) -> dict:
+    """Assign export bucket / review fields for one non-English-HQ-mode row.
+
+    Wraps ``_non_english_export_decision`` (the existing, unchanged
+    country-agnostic gate) and layers the following on top, in order:
+
+    1. Wrong-country safety exclusion (always checked first; overrides
+       everything else) -> ``excluded``.
+    2. The existing eligibility decision recommends full enrichment
+       -> ``direct_target`` (unchanged gate/condition).
+    3. Input country missing, or parent HQ country equals input country
+       (genuinely domestic) -> kept as their own edge-case buckets with the
+       original diagnostic text (not one of the six numbered rules).
+    4. C5 confirmed a non-English foreign parent
+       (``c5_adjudication == "foreign_parent_confirmed"`` + a truthy
+       ``c5_target_company_match``) but the final score is not 3
+       -> ``manual_review`` / high priority (the NEC-style miss this layer
+       exists to fix).
+    5. Parent HQ market is English-speaking -> ``skipped_not_relevant``.
+    6. Parent HQ market is "review" (nuanced/multilingual) -> ``manual_review``
+       / medium priority.
+    7. Parent HQ market is "unclear" (blank/unrecognised country)
+       -> ``manual_review`` / medium priority.
+    8. Anything else left (a non-English parent market that simply isn't
+       score-3 and wasn't C5-confirmed) -> ``manual_review`` / medium
+       priority, so it stays visible instead of disappearing.
+
+    Never mutates ``row``; never touches C4/C5 output or
+    ``sig_foreign_hq_score_for_next_scoring``. Full v2 enrichment remains
+    gated on ``export_bucket == "direct_target"`` only.
+    """
+    decision = _non_english_export_decision(row)
+    skip_reason = decision["_skip_reason"]
+    market_type = decision["parent_hq_language_market_type"]
+    is_confirmed_score3 = decision["foreign_hq_detected_for_export"]
+    base = {k: v for k, v in decision.items() if k != "_skip_reason"}
+
+    def _result(export_bucket, *, review=False, review_reason="", priority="",
+                excluded=False, exclude_reason="", recommended=None,
+                skip=True, reason="") -> dict:
+        return {
+            **base,
+            "export_bucket": export_bucket,
+            "non_english_foreign_hq_review": review,
+            "non_english_foreign_hq_review_reason": review_reason,
+            "review_priority": priority,
+            "exclude_from_export": excluded,
+            "exclude_reason": exclude_reason,
+            "recommended_for_non_english_foreign_hq_export": (
+                base["recommended_for_non_english_foreign_hq_export"]
+                if recommended is None else recommended),
+            "enrichment_skipped": skip,
+            "enrichment_skip_reason": reason,
+        }
+
+    wrong_country_reason = wrong_country_export_exclusion_reason(row)
+    if wrong_country_reason:
+        return _result("excluded", excluded=True, exclude_reason=wrong_country_reason,
+                        recommended=False, skip=True, reason=wrong_country_reason)
+
+    if decision["recommended_for_non_english_foreign_hq_export"]:
+        return _result("direct_target", recommended=True, skip=False, reason="")
+
+    if skip_reason == "Input country is missing":
+        return _result("manual_review", priority="medium", recommended=False,
+                        skip=True, reason=skip_reason)
+
+    if skip_reason == "Parent HQ country matches input country (not foreign)":
+        return _result("skipped_not_relevant", recommended=False, skip=True, reason=skip_reason)
+
+    c5_adjudication = str(row.get("c5_adjudication") or "").strip().lower()
+    c5_confirmed_foreign_parent = (
+        c5_adjudication == "foreign_parent_confirmed"
+        and _c5_truthy(row.get("c5_target_company_match")))
+
+    if (not is_confirmed_score3 and c5_confirmed_foreign_parent
+            and market_type == "non_english_speaking"):
+        return _result(
+            "manual_review", review=True, priority="high",
+            review_reason="C5 confirmed a non-English foreign parent, but final HQ score was not 3.",
+            recommended=False, skip=True,
+            reason="Manual review: C5 confirmed non-English foreign parent, but final HQ score was not 3")
+
+    if market_type == "english_speaking":
+        return _result(
+            "skipped_not_relevant", recommended=False, skip=True,
+            reason="Parent HQ country is English-speaking/lower-priority for this non-English foreign-HQ run")
+
+    if market_type == "review":
+        return _result(
+            "manual_review", priority="medium", recommended=False, skip=True,
+            reason="Parent HQ country is review/nuanced for language-market trigger")
+
+    if market_type == "unclear":
+        return _result(
+            "manual_review", priority="medium", recommended=False, skip=True,
+            reason="Parent HQ country or language-market type unclear")
+
+    # Non-English parent market, but not eligible for direct_target or the
+    # high-priority C5-confirmed manual review above (e.g. C5 disabled, or
+    # C5 did not confirm a foreign parent for the target company). Still
+    # worth a medium-priority look rather than a silent drop.
+    return _result("manual_review", priority="medium", recommended=False, skip=True,
+                    reason=skip_reason or "Not confirmed foreign HQ")
+
+
 def run_batch_non_english_foreign_hq_only(
     df: pd.DataFrame,
     config: BatchRunConfig,
@@ -1200,27 +1360,36 @@ def run_batch_non_english_foreign_hq_only(
     )
 
     # ── Classify every row first (country-agnostic; needed for both the
-    # export fields and the Phase-3 eligibility gate) ─────────────────────────
+    # export/review buckets and the Phase-3 eligibility gate) ────────────────
     decisions: list[dict] = []
     confirmed_count = non_english_count = 0
     english_count = review_count = unclear_count = 0
+    bucket_counts = {b: 0 for b in EXPORT_BUCKETS}
+    high_priority_review_count = medium_priority_review_count = 0
+    non_english_foreign_hq_review_count = 0
     for row in rows:
-        decision = _non_english_export_decision(row)
-        if decision["foreign_hq_detected_for_export"]:
+        classification = classify_non_english_foreign_hq_export_row(row)
+        if classification["foreign_hq_detected_for_export"]:
             confirmed_count += 1
-        market_type = decision["parent_hq_language_market_type"]
+        market_type = classification["parent_hq_language_market_type"]
         if market_type == "english_speaking":
             english_count += 1
         elif market_type == "review":
             review_count += 1
         elif market_type == "unclear":
             unclear_count += 1
-        if decision["non_english_foreign_hq_detected"]:
+        if classification["non_english_foreign_hq_detected"]:
             non_english_count += 1
-        decisions.append(decision)
+        bucket_counts[classification["export_bucket"]] += 1
+        if classification["review_priority"] == "high":
+            high_priority_review_count += 1
+        elif classification["review_priority"] == "medium":
+            medium_priority_review_count += 1
+        if classification["non_english_foreign_hq_review"]:
+            non_english_foreign_hq_review_count += 1
+        decisions.append(classification)
 
-    total_eligible = sum(
-        1 for d in decisions if d["recommended_for_non_english_foreign_hq_export"])
+    total_eligible = bucket_counts["direct_target"]
 
     out_rows: list[dict] = []
     evidence_rows: list[dict] = []
@@ -1228,14 +1397,11 @@ def run_batch_non_english_foreign_hq_only(
     attempted = skipped = 0
     p3_success = p3_error = 0
 
-    for row, decision in zip(rows, decisions):
+    for row, classification in zip(rows, decisions):
         out_row = dict(row)
-        skip_reason = decision.pop("_skip_reason")
-        out_row.update(decision)
+        out_row.update(classification)
 
-        if not decision["recommended_for_non_english_foreign_hq_export"]:
-            out_row["enrichment_skipped"] = True
-            out_row["enrichment_skip_reason"] = skip_reason
+        if classification["export_bucket"] != "direct_target":
             out_rows.append(out_row)
             skipped += 1
             continue
@@ -1293,6 +1459,13 @@ def run_batch_non_english_foreign_hq_only(
     run_summary["unclear_parent_hq_count"] = unclear_count
     run_summary["full_enrichment_attempted_count"] = attempted
     run_summary["full_enrichment_skipped_count"] = skipped
+    run_summary["direct_target_count"] = bucket_counts["direct_target"]
+    run_summary["manual_review_count"] = bucket_counts["manual_review"]
+    run_summary["high_priority_manual_review_count"] = high_priority_review_count
+    run_summary["medium_priority_manual_review_count"] = medium_priority_review_count
+    run_summary["excluded_count"] = bucket_counts["excluded"]
+    run_summary["skipped_not_relevant_count"] = bucket_counts["skipped_not_relevant"]
+    run_summary["non_english_foreign_hq_review_count"] = non_english_foreign_hq_review_count
     run_summary = add_c5_summary_fields(
         run_summary,
         c5_enabled=c5_enabled,

@@ -1369,8 +1369,9 @@ class TestNonEnglishForeignHqOnlyMode:
         for co in ("USCo", "UKCo", "CanadaCo", "NZCo", "IrelandCo"):
             assert rows.loc[co, "enrichment_skipped"] == True, co  # noqa: E712
             assert rows.loc[co, "parent_hq_language_market_type"] == "english_speaking", co
+            assert rows.loc[co, "export_bucket"] == "skipped_not_relevant", co
             assert rows.loc[co, "enrichment_skip_reason"] == \
-                "Parent HQ country is English-speaking/lower-priority for language/training export"
+                "Parent HQ country is English-speaking/lower-priority for this non-English foreign-HQ run"
             assert pd.isna(rows.loc[co, "final_commercial_fit_score"])
 
     def test_review_markets_not_enriched(self):
@@ -1381,16 +1382,21 @@ class TestNonEnglishForeignHqOnlyMode:
         for co in ("SGCo", "IndiaCo", "SACo", "UAECo"):
             assert rows.loc[co, "enrichment_skipped"] == True, co  # noqa: E712
             assert rows.loc[co, "parent_hq_language_market_type"] == "review", co
+            assert rows.loc[co, "export_bucket"] == "manual_review", co
+            assert rows.loc[co, "review_priority"] == "medium", co
             assert rows.loc[co, "enrichment_skip_reason"] == \
-                "Parent HQ language market is review/nuanced"
+                "Parent HQ country is review/nuanced for language-market trigger"
 
     def test_not_confirmed_row_skipped(self):
         with patch("lead_prioritizer_batch_core.prioritize_single_lead",
                    side_effect=_fake_prioritize_for_au(self._rows)):
             out = run_batch_non_english_foreign_hq_only(self._df, self._cfg, "S", "A")
         rows = out["enriched_leads"].set_index("company_name")
+        # DomesticCo's parent country is "Australia" (English-speaking market),
+        # so it now lands in the same skipped_not_relevant bucket as the other
+        # English-speaking-parent rows, regardless of confirmation score.
         assert rows.loc["DomesticCo", "enrichment_skipped"] == True  # noqa: E712
-        assert rows.loc["DomesticCo", "enrichment_skip_reason"] == "Not confirmed foreign HQ"
+        assert rows.loc["DomesticCo", "export_bucket"] == "skipped_not_relevant"
 
     def test_run_summary_counts(self):
         with patch("lead_prioritizer_batch_core.prioritize_single_lead",
@@ -1527,7 +1533,10 @@ class TestNonEnglishForeignHqOnlyModeCountryAgnostic:
     def test_nz_unclear_result_skipped_manual_review(self):
         rows = self._run_nz()["enriched_leads"].set_index("company_name")
         assert rows.loc["UnclearCo", "enrichment_skipped"] == True  # noqa: E712
-        assert rows.loc["UnclearCo", "enrichment_skip_reason"] == "Not confirmed foreign HQ"
+        assert rows.loc["UnclearCo", "export_bucket"] == "manual_review"
+        assert rows.loc["UnclearCo", "review_priority"] == "medium"
+        assert rows.loc["UnclearCo", "enrichment_skip_reason"] == \
+            "Parent HQ country or language-market type unclear"
 
     def test_missing_input_country_skipped(self):
         df = pd.DataFrame({"company": ["NoCountryCo"], "domain": ["nocountryco.com"]})
@@ -1559,7 +1568,12 @@ class TestNonEnglishForeignHqOnlyModeCountryAgnostic:
             out = run_batch_non_english_foreign_hq_only(df, cfg, "S", "A")
         row = out["enriched_leads"].iloc[0]
         assert row["enrichment_skipped"] == True  # noqa: E712
-        assert row["enrichment_skip_reason"] == "Parent HQ country is missing"
+        # A blank parent country classifies as an "unclear" language market,
+        # so it now lands in the manual_review/medium bucket like any other
+        # unrecognised parent country.
+        assert row["export_bucket"] == "manual_review"
+        assert row["review_priority"] == "medium"
+        assert row["enrichment_skip_reason"] == "Parent HQ country or language-market type unclear"
 
 
 class TestExistingForeignHqOnlyModeUnaffected:
@@ -1768,3 +1782,148 @@ class TestParallelLiveProgress:
         assert "chunk exploded" in failure_events[0]["chunk_error"]
         assert failure_events[0]["error_count"] >= 2  # failed chunk's rows counted
         assert len(out["enriched_leads"]) == 4  # nothing silently dropped
+
+
+# ---------------------------------------------------------------------------
+# classify_non_english_foreign_hq_export_row — post-C5 export/review buckets
+# ---------------------------------------------------------------------------
+#
+# Australia audit fix: C5 can confirm foreign_parent_confirmed + a target
+# match against a non-English parent while the final HQ score stays 0 (the
+# conservative C5 rule never auto-upgrades score-0 rows). This layer makes
+# those NEC-style near-misses (e.g. NEC Australia -> NEC Corporation, Japan)
+# visible as a high-priority manual_review bucket instead of silently
+# dropping them in "Not confirmed foreign HQ".
+
+class TestNonEnglishForeignHqExportBuckets:
+    def _row(self, **kw):
+        base = {
+            "company_name": "Acme", "domain": "acme.com", "input_country": "Australia",
+            "sig_foreign_hq_score_for_next_scoring": 0.0,
+            "ai_parent_hq_country": "", "hq_detected_country": "", "c5_parent_hq_country": "",
+            "c5_adjudication": "", "c5_target_company_match": "",
+        }
+        base.update(kw)
+        return base
+
+    def test_score_3_germany_parent_is_direct_target(self):
+        row = self._row(sig_foreign_hq_score_for_next_scoring=3.0, ai_parent_hq_country="Germany")
+        result = bc.classify_non_english_foreign_hq_export_row(row)
+        assert result["export_bucket"] == "direct_target"
+        assert result["recommended_for_non_english_foreign_hq_export"] is True
+        assert result["enrichment_skipped"] is False
+
+    def test_c5_confirmed_japan_parent_score_0_is_high_priority_manual_review(self):
+        row = self._row(sig_foreign_hq_score_for_next_scoring=0.0,
+                        ai_parent_hq_country="Japan",
+                        c5_adjudication="foreign_parent_confirmed",
+                        c5_target_company_match="yes")
+        result = bc.classify_non_english_foreign_hq_export_row(row)
+        assert result["export_bucket"] == "manual_review"
+        assert result["review_priority"] == "high"
+        assert result["non_english_foreign_hq_review"] is True
+        assert result["recommended_for_non_english_foreign_hq_export"] is False
+        assert result["enrichment_skipped"] is True  # not full enriched in this mode
+
+    def test_c5_confirmed_united_states_parent_is_skipped_not_relevant(self):
+        row = self._row(sig_foreign_hq_score_for_next_scoring=0.0,
+                        ai_parent_hq_country="United States",
+                        c5_adjudication="foreign_parent_confirmed",
+                        c5_target_company_match="yes")
+        result = bc.classify_non_english_foreign_hq_export_row(row)
+        assert result["export_bucket"] == "skipped_not_relevant"
+        assert result["recommended_for_non_english_foreign_hq_export"] is False
+
+    def test_review_market_parents_are_manual_review_not_direct_target(self):
+        for parent in ("Singapore", "India", "Hong Kong"):
+            row = self._row(sig_foreign_hq_score_for_next_scoring=3.0, ai_parent_hq_country=parent)
+            result = bc.classify_non_english_foreign_hq_export_row(row)
+            assert result["export_bucket"] != "direct_target", parent
+            assert result["export_bucket"] == "manual_review", parent
+            assert result["review_priority"] == "medium", parent
+
+    def test_bolivia_domain_with_australia_input_is_excluded(self):
+        row = self._row(domain="entel.bo", input_country="Australia")
+        result = bc.classify_non_english_foreign_hq_export_row(row)
+        assert result["export_bucket"] == "excluded"
+        assert result["exclude_from_export"] is True
+        assert "Bolivia" in result["exclude_reason"]
+
+    def test_company_name_entel_bolivia_is_excluded(self):
+        row = self._row(company_name="Entel Bolivia", domain="entel.com", input_country="Australia")
+        result = bc.classify_non_english_foreign_hq_export_row(row)
+        assert result["export_bucket"] == "excluded"
+        assert result["exclude_from_export"] is True
+
+    def test_costa_rica_domain_and_name_also_excluded(self):
+        row = self._row(domain="empresa.cr", input_country="New Zealand")
+        result = bc.classify_non_english_foreign_hq_export_row(row)
+        assert result["export_bucket"] == "excluded"
+
+        row2 = self._row(company_name="Costa Rica Traders", domain="crt.com",
+                         input_country="New Zealand")
+        result2 = bc.classify_non_english_foreign_hq_export_row(row2)
+        assert result2["export_bucket"] == "excluded"
+
+    def test_exclusion_only_applies_for_australia_or_new_zealand_input(self):
+        row = self._row(domain="entel.bo", input_country="Chile")
+        result = bc.classify_non_english_foreign_hq_export_row(row)
+        assert result["export_bucket"] != "excluded"
+
+    def test_foreign_hq_only_mode_unaffected_by_new_bucket_layer(self):
+        rows = {"GermanCo": (3.0, "Germany"), "USCo": (3.0, "United States"),
+                "DomesticCo": (0.0, "Australia")}
+        df = pd.DataFrame({"company": list(rows), "domain": [f"{c.lower()}.com" for c in rows]})
+        cfg = BatchRunConfig(company_name_column="company", domain_column="domain",
+                             run_mode=FOREIGN_HQ_ONLY_MODE, row_limit=0)
+        with patch("lead_prioritizer_batch_core.prioritize_single_lead",
+                   side_effect=_fake_prioritize_for_au(rows)):
+            out = run_batch_foreign_hq_only(df, cfg, "S", "A")
+        enriched = out["enriched_leads"].set_index("company_name")
+        assert enriched.loc["GermanCo", "enrichment_skipped"] == False  # noqa: E712
+        assert enriched.loc["USCo", "enrichment_skipped"] == False  # noqa: E712
+        assert enriched.loc["DomesticCo", "enrichment_skipped"] == True  # noqa: E712
+        for col in ("export_bucket", "non_english_foreign_hq_review", "review_priority"):
+            assert col not in out["enriched_leads"].columns
+
+    def test_c5_conservative_adjustment_never_upgrades_score_0_to_3(self):
+        rows = {"JapanCo": (0.0, "Japan")}
+        df = pd.DataFrame({"company": ["JapanCo"], "domain": ["japanco.com"]})
+        cfg = BatchRunConfig(company_name_column="company", domain_column="domain",
+                             run_mode=NON_ENGLISH_FOREIGN_HQ_ONLY_MODE, row_limit=1,
+                             default_input_country="Australia")
+        with patch("lead_prioritizer_batch_core.prioritize_single_lead",
+                   side_effect=_fake_prioritize_for_au(rows)), \
+             _patch_adjudicator(_mk_result("foreign_parent_confirmed", "High", "yes")):
+            out = run_batch_non_english_foreign_hq_only(
+                df, cfg, "S", "A", c5_enabled=True,
+                c5_scoring_behavior="conservative_adjustment", c5_scope="all_rows",
+                c5_model_used="claude-sonnet-5", c5_model_tier="sonnet")
+        row = out["enriched_leads"].iloc[0]
+        # Conservative C5 never auto-upgrades a score-0 row to 3 ...
+        assert row["sig_foreign_hq_score_for_next_scoring"] == 0.0
+        # ... but the row is still surfaced as a high-priority manual review
+        # instead of silently disappearing (this is the whole point of the
+        # export-bucket layer).
+        assert row["enrichment_skipped"] == True  # noqa: E712
+        assert row["export_bucket"] == "manual_review"
+        assert row["review_priority"] == "high"
+        assert row["non_english_foreign_hq_review"] == True  # noqa: E712
+
+    def test_run_summary_includes_new_bucket_counts(self):
+        rows = {"GermanCo": (3.0, "Germany"), "USCo": (3.0, "United States")}
+        df = pd.DataFrame({"company": list(rows), "domain": [f"{c.lower()}.com" for c in rows]})
+        cfg = BatchRunConfig(company_name_column="company", domain_column="domain",
+                             run_mode=NON_ENGLISH_FOREIGN_HQ_ONLY_MODE, row_limit=0,
+                             default_input_country="Australia")
+        with patch("lead_prioritizer_batch_core.prioritize_single_lead",
+                   side_effect=_fake_prioritize_for_au(rows)):
+            out = run_batch_non_english_foreign_hq_only(df, cfg, "S", "A")
+        summary = out["run_summary"].iloc[0].to_dict()
+        assert summary["direct_target_count"] == 1  # GermanCo
+        assert summary["skipped_not_relevant_count"] == 1  # USCo
+        assert summary["manual_review_count"] == 0
+        assert summary["excluded_count"] == 0
+        assert summary["high_priority_manual_review_count"] == 0
+        assert summary["medium_priority_manual_review_count"] == 0
+        assert summary["non_english_foreign_hq_review_count"] == 0
