@@ -731,3 +731,103 @@ class TestParallelUINoteText:
             "For large full enrichment runs, progress may update slowly while "
             "external API calls are in flight."
         )
+
+
+# ---------------------------------------------------------------------------
+# Lovable JSON export section — pure helpers
+# ---------------------------------------------------------------------------
+
+from datetime import datetime as _dt2  # noqa: E402
+
+from lead_prioritizer_batch_app import (  # noqa: E402
+    parse_cold_callers,
+    default_foreign_hq_only_export,
+    default_lovable_output_folder,
+    zip_directory_bytes,
+    DEFAULT_COLD_CALLERS_TEXT,
+)
+from lead_prioritizer_batch_core import (  # noqa: E402
+    FOREIGN_HQ_ONLY_MODE,
+    NON_ENGLISH_FOREIGN_HQ_ONLY_MODE,
+)
+
+
+class TestParseColdCallers:
+    def test_default_caller_text(self):
+        assert parse_cold_callers(DEFAULT_COLD_CALLERS_TEXT) == \
+            ["Vanessa", "Francesca", "Lorenzo", "Matteo"]
+
+    def test_strips_whitespace_and_drops_blanks(self):
+        assert parse_cold_callers(" Jantje ,, Pietje ,  ") == ["Jantje", "Pietje"]
+
+    def test_blank_input_yields_empty_list(self):
+        assert parse_cold_callers("") == []
+        assert parse_cold_callers(None) == []
+
+    def test_single_caller(self):
+        assert parse_cold_callers("Marietje") == ["Marietje"]
+
+
+class TestDefaultForeignHqOnlyExport:
+    def test_true_for_foreign_hq_only_modes(self):
+        assert default_foreign_hq_only_export(FOREIGN_HQ_ONLY_MODE) is True
+        assert default_foreign_hq_only_export(NON_ENGLISH_FOREIGN_HQ_ONLY_MODE) is True
+
+    def test_false_for_other_modes(self):
+        for mode in ("full", "hq_only", "evidence_only", "signals_no_score", "full_no_score"):
+            assert default_foreign_hq_only_export(mode) is False, mode
+
+    def test_false_for_blank_or_unknown(self):
+        assert default_foreign_hq_only_export("") is False
+        assert default_foreign_hq_only_export("something_else") is False
+
+
+class TestDefaultLovableOutputFolder:
+    def test_folder_shape(self):
+        stamp = _dt2(2026, 7, 3, 10, 30, 0)
+        folder = default_lovable_output_folder("Brazil", stamp)
+        assert folder == str(
+            __import__("pathlib").Path("lovable_json_exports") / "Brazil" / "20260703_103000")
+
+    def test_sanitizes_country_with_spaces(self):
+        stamp = _dt2(2026, 7, 3, 10, 30, 0)
+        folder = default_lovable_output_folder("New Zealand", stamp)
+        assert "New_Zealand" in folder
+        assert " " not in folder
+
+    def test_blank_country_falls_back(self):
+        stamp = _dt2(2026, 7, 3, 10, 30, 0)
+        folder = default_lovable_output_folder("", stamp)
+        assert "export" in folder
+
+
+class TestZipDirectoryBytes:
+    def test_zips_existing_files(self, tmp_path):
+        (tmp_path / "companies.list.json").write_text("[]")
+        (tmp_path / "export_manifest.json").write_text("{}")
+        data = zip_directory_bytes(
+            tmp_path, ["companies.list.json", "export_manifest.json"])
+
+        import io
+        import zipfile
+        with zipfile.ZipFile(io.BytesIO(data)) as zf:
+            names = sorted(zf.namelist())
+            assert names == ["companies.list.json", "export_manifest.json"]
+            assert zf.read("companies.list.json") == b"[]"
+
+    def test_skips_missing_files_without_raising(self, tmp_path):
+        (tmp_path / "companies.list.json").write_text("[]")
+        data = zip_directory_bytes(
+            tmp_path, ["companies.list.json", "does-not-exist.json"])
+
+        import io
+        import zipfile
+        with zipfile.ZipFile(io.BytesIO(data)) as zf:
+            assert zf.namelist() == ["companies.list.json"]
+
+    def test_empty_filename_list_yields_empty_zip(self, tmp_path):
+        data = zip_directory_bytes(tmp_path, [])
+        import io
+        import zipfile
+        with zipfile.ZipFile(io.BytesIO(data)) as zf:
+            assert zf.namelist() == []

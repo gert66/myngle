@@ -1025,6 +1025,54 @@ def export_workbook_to_lovable_json(
 
 
 # ---------------------------------------------------------------------------
+# In-memory batch output tables -> Lovable JSON (no separate saved .xlsx step)
+# ---------------------------------------------------------------------------
+
+def export_batch_output_tables_to_lovable_json(
+    output_tables: dict,
+    output_dir: str | Path,
+    export_country: str,
+    cold_callers: list[str],
+    include_skipped: bool = False,
+    foreign_hq_only: bool = True,
+    bucket_size: int = 500,
+) -> dict:
+    """Export Lead Prioritizer batch output tables straight to Lovable JSON.
+
+    ``output_tables`` is the same ``{"enriched_leads": ..., "evidence": ...,
+    "signals": ..., "run_summary": ...}`` dict of DataFrames the Streamlit
+    batch app already builds before writing the Excel workbook (see
+    ``lead_prioritizer_batch_core.build_excel_workbook_bytes``). This avoids
+    the manual "download Excel, then re-upload it to a separate exporter"
+    step without duplicating any of the exporter logic above: it writes the
+    tables to a temporary workbook and delegates straight to
+    ``export_workbook_to_lovable_json``.
+    """
+    import tempfile
+    # Lazy import: keeps this module's CLI/workbook-path entry point free of
+    # a hard dependency on the Streamlit batch core (mirrors the C5 layer's
+    # lazy-import pattern in lead_prioritizer_batch_core.py).
+    from lead_prioritizer_batch_core import build_excel_workbook_bytes
+
+    excel_bytes = build_excel_workbook_bytes(output_tables)
+    with tempfile.NamedTemporaryFile(suffix=".xlsx", delete=False) as tmp:
+        tmp.write(excel_bytes)
+        tmp_path = Path(tmp.name)
+    try:
+        return export_workbook_to_lovable_json(
+            input_xlsx=tmp_path,
+            output_dir=output_dir,
+            export_country=export_country,
+            cold_callers=cold_callers,
+            include_skipped=include_skipped,
+            foreign_hq_only=foreign_hq_only,
+            bucket_size=bucket_size,
+        )
+    finally:
+        tmp_path.unlink(missing_ok=True)
+
+
+# ---------------------------------------------------------------------------
 # CLI
 # ---------------------------------------------------------------------------
 

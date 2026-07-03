@@ -49,6 +49,17 @@ from run_hq_sonnet_adjudication_probe import (
     check_opus_guardrail,
     _OPUS_WARNING,
 )
+from export_lead_prioritizer_to_lovable_json import (
+    export_batch_output_tables_to_lovable_json,
+)
+from lovable_gcs_upload import (
+    DEFAULT_GCS_BUCKET,
+    country_folder_slug,
+    default_gcs_run_folder,
+    public_url as gcs_public_url,
+    build_upload_plan,
+    run_upload_plan,
+)
 
 CONFIRM_THRESHOLD = 50
 _C5_OPUS_ROW_CAP = 10
@@ -536,6 +547,77 @@ def build_chunk_detail_line(chunk: dict) -> str:
     if company:
         line += f" — current: {company}"
     return line
+
+
+# ---------------------------------------------------------------------------
+# Lovable JSON export section (pure helpers — UI wiring lives in main())
+# ---------------------------------------------------------------------------
+#
+# Integrates the existing standalone exporter (export_lead_prioritizer_to_
+# lovable_json.py) and the GCS upload helper (lovable_gcs_upload.py) into this
+# app so a run's output can go straight to Lovable JSON (and, optionally, GCS)
+# without the manual "download Excel, open the separate exporter app, export,
+# manually upload" workflow. No enrichment/scoring/HQ/C4/C5 logic lives here.
+
+DEFAULT_COLD_CALLERS_TEXT = "Vanessa, Francesca, Lorenzo, Matteo"
+
+# Run modes whose whole point is "only confirmed foreign-HQ rows get full
+# enrichment" — the Lovable export's foreign-HQ-only toggle defaults to True
+# for these, and False for every other run mode.
+_FOREIGN_HQ_ONLY_EXPORT_DEFAULT_MODES = (
+    FOREIGN_HQ_ONLY_MODE,
+    NON_ENGLISH_FOREIGN_HQ_ONLY_MODE,
+)
+
+
+def parse_cold_callers(text) -> list[str]:
+    """Parse a comma-separated cold-caller string into a clean name list.
+
+    Blank entries (double commas, leading/trailing commas, whitespace-only
+    names) are dropped; surrounding whitespace on each name is stripped.
+    """
+    return [part.strip() for part in str(text or "").split(",") if part.strip()]
+
+
+def default_foreign_hq_only_export(run_mode: str) -> bool:
+    """Default state for the "Foreign-HQ-only export" toggle.
+
+    True for the two confirmed-foreign-HQ-only batch run modes, False for
+    every other mode; always user-overridable in the UI.
+    """
+    return run_mode in _FOREIGN_HQ_ONLY_EXPORT_DEFAULT_MODES
+
+
+def default_lovable_output_folder(export_country: str, timestamp) -> str:
+    """Default local output folder: ``lovable_json_exports/<country>/<stamp>/``.
+
+    Lives next to the Excel autosave output, not in a temp directory, so a
+    user can find the generated JSON files afterwards.
+    """
+    country_part = sanitize_filename_part(export_country, fallback="export")
+    stamp = timestamp.strftime("%Y%m%d_%H%M%S")
+    return str(Path("lovable_json_exports") / country_part / stamp)
+
+
+def zip_directory_bytes(directory, filenames: list[str]) -> bytes:
+    """Zip the given filenames from ``directory`` into an in-memory archive.
+
+    Silently skips any filename that doesn't exist (defensive — the caller
+    always passes filenames the exporter just wrote, but a partial export
+    should still produce a downloadable zip of whatever *did* get written).
+    """
+    import io
+    import zipfile
+
+    directory = Path(directory)
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
+        for filename in filenames:
+            path = directory / filename
+            if path.exists():
+                zf.write(path, arcname=filename)
+    buf.seek(0)
+    return buf.getvalue()
 
 
 # ---------------------------------------------------------------------------
@@ -1029,6 +1111,159 @@ def main() -> None:  # pragma: no cover - exercised only under `streamlit run`
             file_name=make_batch_output_filename(_dl_country, _dl_mode, _dl_timestamp),
             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         )
+
+        # ── Lovable JSON export ─────────────────────────────────────────────
+        st.subheader("Lovable JSON export")
+        st.caption(
+            "Optional: export this run straight to Lovable Company Hub JSON, "
+            "download it as a zip, and (only if you choose to) upload it to "
+            "Google Cloud Storage. Local Excel download above always works "
+            "regardless of anything below — nothing here runs automatically."
+        )
+
+        lc1, lc2 = st.columns(2)
+        lovable_export_country = lc1.text_input(
+            "Export country", value=_dl_country, key="lovable_export_country")
+        lovable_cold_callers_raw = lc2.text_input(
+            "Cold callers (comma-separated)", value=DEFAULT_COLD_CALLERS_TEXT,
+            key="lovable_cold_callers")
+
+        lc3, lc4 = st.columns(2)
+        lovable_foreign_hq_only = lc3.checkbox(
+            "Foreign-HQ-only export",
+            value=default_foreign_hq_only_export(_dl_mode),
+            key="lovable_foreign_hq_only",
+            help="Only export rows with a detected/confirmed foreign HQ.")
+        lovable_bucket_size = lc4.number_input(
+            "Bucket size", min_value=1, value=500, step=50, key="lovable_bucket_size")
+
+        lovable_output_dir = st.text_input(
+            "Local output folder",
+            value=default_lovable_output_folder(lovable_export_country, _dl_timestamp),
+            key="lovable_output_dir")
+
+        if st.button("Export to Lovable JSON", key="lovable_export_button"):
+            cold_callers = parse_cold_callers(lovable_cold_callers_raw)
+            if not (lovable_export_country or "").strip():
+                st.error("Export country is required.")
+            elif not cold_callers:
+                st.error("At least one cold caller is required.")
+            else:
+                try:
+                    with st.spinner("Exporting to Lovable JSON..."):
+                        manifest = export_batch_output_tables_to_lovable_json(
+                            tables, lovable_output_dir, lovable_export_country,
+                            cold_callers,
+                            foreign_hq_only=lovable_foreign_hq_only,
+                            bucket_size=int(lovable_bucket_size),
+                        )
+                    st.session_state["lovable_manifest"] = manifest
+                    st.session_state["lovable_manifest_output_dir"] = lovable_output_dir
+                except Exception as exc:
+                    st.error(f"Lovable JSON export failed: {exc}")
+
+        manifest = st.session_state.get("lovable_manifest")
+        manifest_output_dir = st.session_state.get("lovable_manifest_output_dir")
+        if manifest is not None and manifest_output_dir:
+            validation = manifest.get("validation_summary", {}) or {}
+            validation_ok = (
+                validation.get("status") == "ok"
+                and int(validation.get("structural_errors", 0) or 0) == 0
+            )
+
+            st.markdown("**Export result**")
+            v1, v2, v3, v4 = st.columns(4)
+            v1.metric("Rows exported", manifest.get("rows_exported", 0))
+            v2.metric("Skipped rows excluded", manifest.get("skipped_rows_excluded", 0))
+            v3.metric("Foreign-HQ rows exported", manifest.get("foreign_hq_rows_exported", 0))
+            v4.metric("Bucket count", manifest.get("bucket_count", 0))
+            st.write("Foreign-HQ-only export:", manifest.get("foreign_hq_only"))
+            st.write("Caller distribution:", manifest.get("caller_distribution", {}))
+            if validation_ok:
+                st.success(f"Validation status: {validation.get('status')}")
+            else:
+                st.error(
+                    f"Validation status: {validation.get('status')} — "
+                    f"structural_errors: {validation.get('structural_errors', 0)}"
+                )
+            warnings = manifest.get("warnings") or []
+            if warnings:
+                with st.expander(f"Warnings ({len(warnings)})"):
+                    for warning in warnings:
+                        st.write("-", warning)
+
+            output_filenames = sorted({Path(p).name for p in manifest.get("output_files", [])})
+            zip_bytes = zip_directory_bytes(manifest_output_dir, output_filenames)
+            st.download_button(
+                "⬇️ Download Lovable JSON (zip)",
+                data=zip_bytes,
+                file_name=f"lovable_json_{sanitize_filename_part(lovable_export_country)}.zip",
+                mime="application/zip",
+                key="lovable_zip_download",
+            )
+
+            st.markdown("---")
+            lovable_gcs_enabled = st.checkbox(
+                "Upload JSON to Google Cloud Storage", value=False,
+                key="lovable_gcs_enabled")
+            if lovable_gcs_enabled:
+                gc1, gc2 = st.columns(2)
+                gcs_bucket = gc1.text_input(
+                    "GCS bucket", value=DEFAULT_GCS_BUCKET, key="lovable_gcs_bucket")
+                gcs_country_folder = gc2.text_input(
+                    "GCS country folder",
+                    value=country_folder_slug(lovable_export_country),
+                    key="lovable_gcs_country_folder")
+                gcs_run_folder = st.text_input(
+                    "GCS run folder",
+                    value=default_gcs_run_folder(_dl_mode, _dl_timestamp),
+                    key="lovable_gcs_run_folder")
+
+                gu1, gu2 = st.columns(2)
+                upload_current = gu1.checkbox(
+                    "Overwrite <country>/current/", value=True,
+                    key="lovable_gcs_upload_current")
+                upload_archive = gu2.checkbox(
+                    "Archive to <country>/runs/<run_folder>/", value=True,
+                    key="lovable_gcs_upload_archive")
+
+                override_invalid = False
+                if not validation_ok:
+                    st.error(
+                        "Export validation did not pass — upload is blocked "
+                        "by default."
+                    )
+                    override_invalid = st.checkbox(
+                        "Override and upload anyway (not recommended)",
+                        value=False, key="lovable_gcs_override")
+
+                upload_disabled = not (upload_current or upload_archive) or (
+                    not validation_ok and not override_invalid)
+                if st.button("Upload to Google Cloud Storage",
+                            key="lovable_gcs_upload_button", disabled=upload_disabled):
+                    jobs = build_upload_plan(
+                        manifest_output_dir, output_filenames, gcs_bucket,
+                        gcs_country_folder, gcs_run_folder,
+                        upload_current=upload_current, upload_archive=upload_archive,
+                    )
+                    with st.spinner("Uploading to Google Cloud Storage..."):
+                        results = run_upload_plan(jobs)
+                    failures = [r for r in results if not r["success"]]
+                    if failures:
+                        st.error(f"{len(failures)} of {len(results)} uploads failed.")
+                        for r in failures:
+                            st.code(f"{r['destination']}: {r.get('error') or r.get('stderr') or ''}")
+                    else:
+                        st.success(f"Uploaded {len(results)} file(s) to Google Cloud Storage.")
+                    if upload_current:
+                        st.markdown("**Public URLs**")
+                        for filename in output_filenames:
+                            st.write(gcs_public_url(gcs_bucket, gcs_country_folder, filename))
+            else:
+                st.caption(
+                    "GCS upload is off by default. Check the box above to "
+                    "upload this export's JSON files."
+                )
 
 
 if __name__ == "__main__":

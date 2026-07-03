@@ -7,6 +7,8 @@ pandas/openpyxl. No API calls, no network, no real sample data.
 from __future__ import annotations
 
 import json
+import tempfile
+from pathlib import Path
 
 import pandas as pd
 import pytest
@@ -14,6 +16,7 @@ import pytest
 from export_lead_prioritizer_to_lovable_json import (
     FOREIGN_HQ_SIGNAL_LABEL,
     LovableExportError,
+    export_batch_output_tables_to_lovable_json,
     export_workbook_to_lovable_json,
     is_technical_reason,
     parse_key_source_links,
@@ -895,3 +898,76 @@ def test_stable_company_ids_avoid_collisions(tmp_path):
     assert len(set(ids)) == 3
     assert "same-com" in ids
     assert any(cid.startswith("no-domain") for cid in ids)
+
+
+# ---------------------------------------------------------------------------
+# export_batch_output_tables_to_lovable_json — in-memory DataFrames -> JSON
+# (integrates the Streamlit batch app's output_tables without a manual
+# save-Excel-then-reupload step; delegates straight to
+# export_workbook_to_lovable_json via a temporary workbook)
+# ---------------------------------------------------------------------------
+
+class TestExportBatchOutputTablesToLovableJson:
+    def _output_tables(self):
+        enriched = pd.DataFrame([
+            enriched_row(source_index=1, company_name="Acme Brasil", domain="acme.com.br"),
+            enriched_row(source_index=2, company_name="Beta Brasil", domain="beta.com.br",
+                        sig_foreign_hq_score_for_next_scoring=0,
+                        enrichment_skipped=True, enrichment_skip_reason="Not confirmed foreign HQ"),
+        ])
+        evidence = pd.DataFrame([
+            {"source_index": 1, "signal_name": "international_profile",
+             "source_url": "https://acme.com.br/about", "source_title": "About",
+             "source_snippet": "Global footprint."},
+        ])
+        signals = pd.DataFrame([
+            {"source_index": 1, "signal_name": "international_profile",
+             "signal_score": 2, "signal_value": "yes"},
+        ])
+        run_summary = pd.DataFrame([{"run_mode": "full_foreign_hq_only"}])
+        return {
+            "enriched_leads": enriched, "evidence": evidence,
+            "signals": signals, "run_summary": run_summary,
+        }
+
+    def test_generates_expected_json_files(self, tmp_path):
+        out_dir = tmp_path / "lovable_export"
+        manifest = export_batch_output_tables_to_lovable_json(
+            self._output_tables(), out_dir, export_country="Brazil",
+            cold_callers=["Jantje", "Pietje"],
+        )
+        assert (out_dir / "companies.list.json").exists()
+        assert (out_dir / "company-details-000.json").exists()
+        assert (out_dir / "export_manifest.json").exists()
+        assert manifest["rows_exported"] == 1  # Beta Brasil skipped (not confirmed)
+        assert manifest["validation_summary"]["status"] == "ok"
+
+    def test_does_not_leak_a_temp_workbook_on_disk(self, tmp_path):
+        out_dir = tmp_path / "lovable_export"
+        before = set(Path(tempfile.gettempdir()).glob("*.xlsx"))
+        export_batch_output_tables_to_lovable_json(
+            self._output_tables(), out_dir, export_country="Brazil",
+            cold_callers=["Jantje"],
+        )
+        after = set(Path(tempfile.gettempdir()).glob("*.xlsx"))
+        assert after == before  # the temp workbook is always cleaned up
+
+    def test_matches_export_workbook_to_lovable_json_output(self, tmp_path):
+        tables = self._output_tables()
+        manifest_a = export_batch_output_tables_to_lovable_json(
+            tables, tmp_path / "from_tables", export_country="Brazil",
+            cold_callers=["Jantje", "Pietje"],
+        )
+
+        xlsx = tmp_path / "workbook.xlsx"
+        write_workbook(xlsx, tables["enriched_leads"].to_dict("records"),
+                       tables["evidence"].to_dict("records"),
+                       tables["signals"].to_dict("records"),
+                       tables["run_summary"].to_dict("records"))
+        manifest_b = export_workbook_to_lovable_json(
+            xlsx, tmp_path / "from_workbook", export_country="Brazil",
+            cold_callers=["Jantje", "Pietje"],
+        )
+        assert manifest_a["rows_exported"] == manifest_b["rows_exported"]
+        assert manifest_a["caller_distribution"] == manifest_b["caller_distribution"]
+        assert manifest_a["validation_summary"] == manifest_b["validation_summary"]
