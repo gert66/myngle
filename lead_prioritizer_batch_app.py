@@ -43,6 +43,7 @@ from lead_prioritizer_batch_core import (
 from lead_hq_ai_interpreter import (
     DEFAULT_OPENAI_MODEL,
     SUPPORTED_OPENAI_MODELS,
+    DEFAULT_DEEPSEEK_MODEL,
 )
 from compare_ai_providers_lead_prioritizer import (
     run_comparison,
@@ -51,7 +52,6 @@ from compare_ai_providers_lead_prioritizer import (
     build_cost_totals,
     TWO_WAY_COST_PROVIDERS,
     TRIPLE_COST_PROVIDERS,
-    DEFAULT_OPENAI_NANO_MODEL,
     DEFAULT_OPENAI_MINI_MODEL,
 )
 
@@ -136,33 +136,37 @@ DEFAULT_COUNTRY_REQUIRED_MESSAGE = "Please select a default input country before
 _SERPER_KEY_NAME = "SERPER_API_KEY"
 _ANTHROPIC_KEY_NAME = "ANTHROPIC_API_KEY"
 _OPENAI_KEY_NAME = "OPENAI_API_KEY"
+_DEEPSEEK_KEY_NAME = "DEEPSEEK_API_KEY"
 _GCS_BUCKET_NAME_KEY = "GCS_BUCKET_NAME"
 _GCS_BASE_PREFIX_KEY = "GCS_BASE_PREFIX"
 
 # Experimental AI-provider selection for HQ interpretation. The first label is
 # the default and preserves the existing Anthropic-only behavior exactly.
+# OpenAI nano was removed from the comparison workflow — it returned too many
+# unclear cases in real-company testing; OpenAI mini performed much closer to
+# Anthropic and is now the two-way/triple compare default.
 AI_PROVIDER_LABELS: list[str] = [
     "Anthropic only (default)",
     "OpenAI only (experimental)",
     "Compare Anthropic vs OpenAI (experimental)",
-    "Compare Anthropic vs OpenAI nano vs OpenAI mini (experimental)",
+    "Compare Anthropic vs OpenAI mini vs DeepSeek flash (experimental)",
 ]
 _AI_PROVIDER_LABEL_TO_MODE: dict[str, str] = {
     "Anthropic only (default)": "anthropic",
     "OpenAI only (experimental)": "openai",
     "Compare Anthropic vs OpenAI (experimental)": "compare",
-    "Compare Anthropic vs OpenAI nano vs OpenAI mini (experimental)": "compare_triple",
+    "Compare Anthropic vs OpenAI mini vs DeepSeek flash (experimental)": "compare_triple",
 }
 
 COMPARE_MODE_WARNING_TEXT = (
     "EXPERIMENTAL: compare mode runs every selected row TWICE — once with "
-    "Anthropic and once with OpenAI — doubling AI calls and cost. "
+    "Anthropic and once with OpenAI (mini) — doubling AI calls and cost. "
     "Recommended row limit: 5-10 rows."
 )
 
 COMPARE_TRIPLE_MODE_WARNING_TEXT = (
     "EXPERIMENTAL: this mode runs every selected row THREE times — Anthropic, "
-    "OpenAI nano, and OpenAI mini — tripling AI calls and cost. "
+    "OpenAI mini, and DeepSeek flash — tripling AI calls and cost. "
     "Recommended row limit: 5-10 rows."
 )
 
@@ -180,6 +184,11 @@ _OPENAI_KEY_MISSING_TEXT = (
     "OPENAI_API_KEY is missing. Set it in .streamlit/secrets.toml or the "
     "environment to use the experimental OpenAI provider options."
 )
+_DEEPSEEK_KEY_MISSING_TEXT = (
+    "DEEPSEEK_API_KEY is missing. Set it in .streamlit/secrets.toml or the "
+    "environment to use the \"Compare Anthropic vs OpenAI mini vs DeepSeek "
+    "flash\" option."
+)
 
 
 def ai_provider_label_to_mode(label: str) -> str:
@@ -195,12 +204,15 @@ def validate_ai_provider_run(
     run_mode: str,
     c5_enabled: bool,
     openai_api_key: str,
+    deepseek_api_key: str = "",
 ) -> Optional[str]:
     """Validate an experimental provider selection against the run settings.
 
     Returns a user-facing error message when the run must be blocked, or
     ``None`` when the run may proceed. "anthropic" is always allowed — the
-    existing SERPER/ANTHROPIC key handling stays authoritative for it.
+    existing SERPER/ANTHROPIC key handling stays authoritative for it. The
+    OpenAI key is required for "openai" and both compare modes; the DeepSeek
+    key is only required for the triple ("compare_triple") mode.
     """
     if provider_mode == "anthropic":
         return None
@@ -212,6 +224,8 @@ def validate_ai_provider_run(
         return _EXPERIMENTAL_PROVIDER_C5_BLOCK_TEXT
     if not openai_api_key:
         return _OPENAI_KEY_MISSING_TEXT
+    if provider_mode == "compare_triple" and not deepseek_api_key:
+        return _DEEPSEEK_KEY_MISSING_TEXT
     return None
 
 
@@ -878,6 +892,7 @@ def main() -> None:  # pragma: no cover - exercised only under `streamlit run`
     serper = get_secret_or_env(_SERPER_KEY_NAME)
     anthropic = get_secret_or_env(_ANTHROPIC_KEY_NAME)
     openai_key = get_secret_or_env(_OPENAI_KEY_NAME)
+    deepseek_key = get_secret_or_env(_DEEPSEEK_KEY_NAME)
     with st.sidebar:
         st.header("API keys (secrets or environment)")
         st.write(f"{_SERPER_KEY_NAME}:", "✅ set" if serper else "❌ missing")
@@ -885,6 +900,9 @@ def main() -> None:  # pragma: no cover - exercised only under `streamlit run`
         st.write(f"{_OPENAI_KEY_NAME}:",
                  "✅ set" if openai_key else "➖ not set (only needed for the "
                  "experimental OpenAI provider)")
+        st.write(f"{_DEEPSEEK_KEY_NAME}:",
+                 "✅ set" if deepseek_key else "➖ not set (only needed for the "
+                 "\"Compare Anthropic vs OpenAI mini vs DeepSeek flash\" option)")
         st.caption(
             "Local secrets in `.streamlit/secrets.toml`, or environment "
             "variables. Key values are never shown or written to output."
@@ -970,21 +988,26 @@ def main() -> None:  # pragma: no cover - exercised only under `streamlit run`
     provider_label = st.selectbox(
         "AI provider for HQ interpretation", AI_PROVIDER_LABELS, index=0,
         help="Anthropic only is the production default. The OpenAI and "
-             "compare options (including the nano-vs-mini triple compare) "
-             "are experimental and only available for the standard batch "
-             "modes without C5.")
+             "compare options (including the OpenAI-mini-vs-DeepSeek-flash "
+             "triple compare) are experimental and only available for the "
+             "standard batch modes without C5.")
     ai_provider_mode = ai_provider_label_to_mode(provider_label)
     openai_model = DEFAULT_OPENAI_MODEL
     if ai_provider_mode in ("openai", "compare"):
+        # Two-way compare now defaults to OpenAI mini (nano returned too many
+        # unclear cases in real-company testing); "OpenAI only" keeps its own
+        # default and stays freely user-selectable either way.
+        _default_openai_model = (
+            DEFAULT_OPENAI_MINI_MODEL if ai_provider_mode == "compare" else DEFAULT_OPENAI_MODEL)
         openai_model = st.selectbox(
             "OpenAI model", list(SUPPORTED_OPENAI_MODELS),
-            index=list(SUPPORTED_OPENAI_MODELS).index(DEFAULT_OPENAI_MODEL))
+            index=list(SUPPORTED_OPENAI_MODELS).index(_default_openai_model))
     if ai_provider_mode == "compare":
         st.warning(COMPARE_MODE_WARNING_TEXT)
     if ai_provider_mode == "compare_triple":
         st.caption(
-            f"Fixed models for this mode: OpenAI nano = **{DEFAULT_OPENAI_NANO_MODEL}**, "
-            f"OpenAI mini = **{DEFAULT_OPENAI_MINI_MODEL}**.")
+            f"Fixed models for this mode: OpenAI mini = **{DEFAULT_OPENAI_MINI_MODEL}**, "
+            f"DeepSeek flash = **{DEFAULT_DEEPSEEK_MODEL}**.")
         st.warning(COMPARE_TRIPLE_MODE_WARNING_TEXT)
 
     # ── Row controls ──────────────────────────────────────────────────────────
@@ -1085,7 +1108,7 @@ def main() -> None:  # pragma: no cover - exercised only under `streamlit run`
             st.error(c5_block_reason)
 
     ai_provider_error = validate_ai_provider_run(
-        ai_provider_mode, run_mode, c5_enabled, openai_key)
+        ai_provider_mode, run_mode, c5_enabled, openai_key, deepseek_key)
     if ai_provider_error:
         st.error(ai_provider_error)
 
@@ -1236,11 +1259,12 @@ def main() -> None:  # pragma: no cover - exercised only under `streamlit run`
                         domain_column=domain_col,
                         country_column=input_country_column or "",
                         default_input_country=default_country,
-                        openai_nano_model=DEFAULT_OPENAI_NANO_MODEL,
                         openai_mini_model=DEFAULT_OPENAI_MINI_MODEL,
+                        deepseek_model=DEFAULT_DEEPSEEK_MODEL,
                         serper_api_key=serper,
                         anthropic_api_key=anthropic,
                         openai_api_key=openai_key,
+                        deepseek_api_key=deepseek_key,
                     )
                 else:
                     comparison_df = run_comparison(

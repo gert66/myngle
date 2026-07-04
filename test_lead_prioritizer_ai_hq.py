@@ -472,6 +472,145 @@ class TestOpenAIProvider:
         assert result.ai_hq_estimated_cost_usd is None
 
 
+def _mock_deepseek(ai_json_str: str, prompt_tokens=800, completion_tokens=120):
+    """Patch the module-level _openai_lib.OpenAI in lead_hq_ai_interpreter —
+    DeepSeek reuses the same openai client package, pointed at a different
+    base_url (see _call_deepseek_hq)."""
+    mock_resp = MagicMock()
+    mock_resp.choices = [MagicMock(message=MagicMock(content=ai_json_str))]
+    mock_resp.usage = SimpleNamespace(
+        prompt_tokens=prompt_tokens,
+        completion_tokens=completion_tokens,
+        total_tokens=prompt_tokens + completion_tokens,
+    )
+    mock_client = MagicMock()
+    mock_client.chat.completions.create.return_value = mock_resp
+    mock_lib = MagicMock()
+    mock_lib.OpenAI.return_value = mock_client
+    return patch("lead_hq_ai_interpreter._openai_lib", mock_lib)
+
+
+class TestDeepSeekProvider:
+    _lead = LeadInput(company_name="Thales Italia", domain="thalesgroup.com",
+                      input_country="Italy")
+
+    _ai = _ai_json(
+        classification="foreign_parent",
+        confidence="High",
+        parent_company="Thales Group",
+        parent_hq_country="France",
+        parent_hq_city="Paris",
+        evidence_url="https://www.thalesgroup.com/en/group/overview",
+        evidence_quote="Thales is a French multinational headquartered in Paris.",
+        reason="Ultimate parent HQ is in France.",
+    )
+
+    def _run_deepseek(self, **kwargs):
+        base = dict(
+            serper_api_key="fake-serper",
+            anthropic_api_key="",
+            deepseek_api_key="fake-deepseek",
+            ai_provider="deepseek",
+            ai_model="deepseek-v4-flash",
+        )
+        base.update(kwargs)
+        with _mock_serper(_EMPTY_SERPER), _mock_deepseek(self._ai):
+            return prioritize_single_lead(self._lead, **base)
+
+    def test_same_post_ai_scoring_as_anthropic_path(self):
+        result = self._run_deepseek()
+        assert result.sig_foreign_hq_score_for_next_scoring == 3.0
+        assert result.foreign_hq_simple is True
+        assert result.hq_structure_type == "foreign_parent"
+        assert result.ai_hq_classification == "foreign_parent"
+        assert result.ai_parent_hq_country == "France"
+        assert result.needs_manual_review is False
+
+    def test_provider_and_model_recorded(self):
+        result = self._run_deepseek()
+        assert result.ai_hq_provider == "deepseek"
+        assert result.ai_hq_model == "deepseek-v4-flash"
+
+    def test_usage_tokens_recorded(self):
+        result = self._run_deepseek()
+        assert result.ai_hq_input_tokens == 800
+        assert result.ai_hq_output_tokens == 120
+        assert result.ai_hq_total_tokens == 920
+
+    def test_cost_computed_for_deepseek_flash(self):
+        # deepseek-v4-flash: 800/1M*0.14 + 120/1M*0.28 = 0.000146
+        result = self._run_deepseek()
+        assert result.ai_hq_estimated_cost_usd == 0.000146
+
+    def test_missing_deepseek_key_routes_to_manual_review(self):
+        with _mock_serper(_EMPTY_SERPER), _mock_deepseek(self._ai):
+            result = prioritize_single_lead(
+                self._lead,
+                serper_api_key="fake-serper",
+                anthropic_api_key="fake-anthropic",  # anthropic key must NOT be used
+                deepseek_api_key="",
+                ai_provider="deepseek",
+            )
+        assert result.ai_hq_error == "no_deepseek_api_key"
+        assert result.needs_manual_review is True
+        assert result.ai_call_attempted == "No"
+
+    def test_deepseek_call_failure_is_isolated(self):
+        mock_lib = MagicMock()
+        mock_lib.OpenAI.side_effect = RuntimeError("boom")
+        with _mock_serper(_EMPTY_SERPER), \
+             patch("lead_hq_ai_interpreter._openai_lib", mock_lib):
+            result = prioritize_single_lead(
+                self._lead,
+                serper_api_key="fake-serper",
+                deepseek_api_key="fake-deepseek",
+                ai_provider="deepseek",
+            )
+        assert result.ai_hq_error.startswith("deepseek_call_failed:")
+        assert result.needs_manual_review is True
+
+    def test_uses_openai_compatible_client_with_deepseek_base_url(self):
+        from lead_hq_ai_interpreter import DEEPSEEK_BASE_URL
+
+        with _mock_serper(_EMPTY_SERPER), _mock_deepseek(self._ai) as mock_lib:
+            prioritize_single_lead(
+                self._lead, serper_api_key="fake-serper",
+                deepseek_api_key="fake-deepseek", ai_provider="deepseek",
+                ai_model="deepseek-v4-flash",
+            )
+            mock_lib.OpenAI.assert_called_once_with(
+                api_key="fake-deepseek", base_url=DEEPSEEK_BASE_URL)
+
+    def test_deepseek_uses_same_system_prompt_and_user_message(self):
+        captured = {}
+
+        def _create(**kwargs):
+            captured.update(kwargs)
+            resp = MagicMock()
+            resp.choices = [MagicMock(message=MagicMock(content=self._ai))]
+            resp.usage = None
+            return resp
+
+        mock_client = MagicMock()
+        mock_client.chat.completions.create.side_effect = _create
+        mock_lib = MagicMock()
+        mock_lib.OpenAI.return_value = mock_client
+
+        from lead_hq_ai_interpreter import _SYSTEM_PROMPT
+
+        with _mock_serper(_EMPTY_SERPER), \
+             patch("lead_hq_ai_interpreter._openai_lib", mock_lib):
+            prioritize_single_lead(
+                self._lead, serper_api_key="fake-serper",
+                deepseek_api_key="fake-deepseek", ai_provider="deepseek",
+                ai_model="deepseek-v4-flash",
+            )
+        messages = captured["messages"]
+        assert messages[0] == {"role": "system", "content": _SYSTEM_PROMPT}
+        assert "thalesgroup" in messages[1]["content"]
+        assert captured["model"] == "deepseek-v4-flash"
+
+
 class TestAnthropicUsageAndCost:
     _lead = LeadInput(company_name="Thales Italia", domain="thalesgroup.com",
                       input_country="Italy")
@@ -513,6 +652,12 @@ class TestEstimateAiCost:
         assert estimate_ai_cost_usd("gpt-5.4-nano", 1000, 100) == 0.000325
         # gpt-5.4-mini: 1000/1M*0.75 + 100/1M*4.50 = 0.00120
         assert estimate_ai_cost_usd("gpt-5.4-mini", 1000, 100) == 0.0012
+
+    def test_deepseek_flash_and_pro_pricing(self):
+        # deepseek-v4-flash: 1000/1M*0.14 + 100/1M*0.28 = 0.000168
+        assert estimate_ai_cost_usd("deepseek-v4-flash", 1000, 100) == 0.000168
+        # deepseek-v4-pro: 1000/1M*0.435 + 100/1M*0.87 = 0.000522
+        assert estimate_ai_cost_usd("deepseek-v4-pro", 1000, 100) == 0.000522
 
     def test_missing_tokens_return_none(self):
         assert estimate_ai_cost_usd("claude-haiku-4-5-20251001", None, 100) is None

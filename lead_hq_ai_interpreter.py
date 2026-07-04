@@ -32,12 +32,19 @@ if TYPE_CHECKING:
 # Default model for AI HQ interpretation
 _DEFAULT_AI_MODEL = "claude-haiku-4-5-20251001"
 
-# Experimental OpenAI provider (opt-in only; production default stays
-# Anthropic). Same prompt, parser, and post-AI scoring — only the API call
-# differs.
-SUPPORTED_AI_PROVIDERS = ("anthropic", "openai")
+# Experimental OpenAI / DeepSeek providers (opt-in only; production default
+# stays Anthropic). Same prompt, parser, and post-AI scoring — only the API
+# call differs.
+SUPPORTED_AI_PROVIDERS = ("anthropic", "openai", "deepseek")
 DEFAULT_OPENAI_MODEL = "gpt-5.4-nano"
 SUPPORTED_OPENAI_MODELS = ("gpt-5.4-nano", "gpt-5.4-mini")
+
+# DeepSeek uses the OpenAI-compatible chat completions API at a different
+# base_url (see _call_deepseek_hq) — same openai client package, no separate
+# SDK dependency.
+DEFAULT_DEEPSEEK_MODEL = "deepseek-v4-flash"
+SUPPORTED_DEEPSEEK_MODELS = ("deepseek-v4-flash", "deepseek-v4-pro")
+DEEPSEEK_BASE_URL = "https://api.deepseek.com"
 
 # ---------------------------------------------------------------------------
 # Model pricing for cost comparison (audit only — never affects scoring)
@@ -58,6 +65,11 @@ MODEL_PRICING_USD_PER_MTOK: dict[str, "tuple[float, float] | None"] = {
     # OpenAI (experimental, provisional pricing — verify before production use)
     "gpt-5.4-nano": (0.20, 1.25),
     "gpt-5.4-mini": (0.75, 4.50),
+    # DeepSeek (experimental, provisional pricing, cache-miss input price —
+    # verify at https://api-docs.deepseek.com/quick_start/pricing before
+    # production use)
+    "deepseek-v4-flash": (0.14, 0.28),
+    "deepseek-v4-pro": (0.435, 0.87),
 }
 
 
@@ -465,6 +477,39 @@ def _call_openai_hq(api_key: str, model: str, user_msg: str) -> tuple[str, dict]
     }
 
 
+def _call_deepseek_hq(api_key: str, model: str, user_msg: str) -> tuple[str, dict]:
+    """One DeepSeek HQ call via the OpenAI-compatible chat completions API —
+    same system prompt and user message as the Anthropic/OpenAI paths, same
+    ``openai`` client package pointed at DeepSeek's ``base_url``. Returns
+    ``(raw_text, usage)``; raises on failure."""
+    if _openai_lib is None:
+        raise ImportError("openai package not installed")
+    client = _openai_lib.OpenAI(api_key=api_key, base_url=DEEPSEEK_BASE_URL)
+    response = client.chat.completions.create(
+        model=model,
+        max_completion_tokens=512,
+        messages=[
+            {"role": "system", "content": _SYSTEM_PROMPT},
+            {"role": "user", "content": user_msg},
+        ],
+    )
+    raw_text = (
+        response.choices[0].message.content if getattr(response, "choices", None)
+        else ""
+    ) or ""
+    usage_obj = getattr(response, "usage", None)
+    input_tokens = _usage_field(usage_obj, "prompt_tokens", "input_tokens")
+    output_tokens = _usage_field(usage_obj, "completion_tokens", "output_tokens")
+    total = _usage_field(usage_obj, "total_tokens")
+    if total is None and input_tokens is not None and output_tokens is not None:
+        total = input_tokens + output_tokens
+    return raw_text, {
+        "input_tokens": input_tokens,
+        "output_tokens": output_tokens,
+        "total_tokens": total,
+    }
+
+
 def interpret_hq_with_ai(
     *,
     lead_input: "LeadInput",
@@ -475,13 +520,14 @@ def interpret_hq_with_ai(
     model: str = _DEFAULT_AI_MODEL,
     ai_provider: str = "anthropic",
     openai_api_key: str = "",
+    deepseek_api_key: str = "",
 ) -> "HQDetectionResult":
     """Interpret HQ from a Serper payload using Anthropic (Haiku by default).
 
-    ``ai_provider`` selects the experimental OpenAI path ("openai") — same
-    system prompt, user message, JSON parser, and post-AI scoring; only the
-    API call differs. The default ("anthropic") is byte-for-byte the existing
-    behavior. Usage/cost audit fields (``ai_hq_provider`` /
+    ``ai_provider`` selects an experimental path ("openai" or "deepseek") —
+    same system prompt, user message, JSON parser, and post-AI scoring; only
+    the API call differs. The default ("anthropic") is byte-for-byte the
+    existing behavior. Usage/cost audit fields (``ai_hq_provider`` /
     ``ai_hq_*_tokens`` / ``ai_hq_estimated_cost_usd``) are populated when the
     provider reports usage; they stay blank rather than guessed.
 
@@ -509,7 +555,8 @@ def interpret_hq_with_ai(
             sig_foreign_hq_score_for_next_scoring=None,
         )
 
-    provider_api_key = openai_api_key if provider == "openai" else anthropic_api_key
+    _PROVIDER_API_KEYS = {"openai": openai_api_key, "deepseek": deepseek_api_key}
+    provider_api_key = _PROVIDER_API_KEYS.get(provider, anthropic_api_key)
     if not provider_api_key:
         return HQDetectionResult(
             **{**_base, "ai_call_attempted": "No"},
@@ -529,6 +576,8 @@ def interpret_hq_with_ai(
         )
         if provider == "openai":
             raw_text, usage = _call_openai_hq(provider_api_key, model, user_msg)
+        elif provider == "deepseek":
+            raw_text, usage = _call_deepseek_hq(provider_api_key, model, user_msg)
         else:
             raw_text, usage = _call_anthropic_hq(provider_api_key, model, user_msg)
     except Exception as exc:

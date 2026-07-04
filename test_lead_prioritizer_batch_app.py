@@ -891,11 +891,20 @@ class TestValidateAiProviderRun:
         assert err is not None and "C5" in err
 
     def test_compare_triple_allowed_and_blocked_like_compare(self):
-        assert validate_ai_provider_run("compare_triple", "hq_only", False, "k") is None
-        err = validate_ai_provider_run("compare_triple", "full", True, "k")
+        assert validate_ai_provider_run(
+            "compare_triple", "hq_only", False, "k", "dk") is None
+        err = validate_ai_provider_run("compare_triple", "full", True, "k", "dk")
         assert err is not None and "C5" in err
-        err2 = validate_ai_provider_run("compare_triple", "full", False, "")
+        err2 = validate_ai_provider_run("compare_triple", "full", False, "", "dk")
         assert err2 is not None and "OPENAI_API_KEY" in err2
+
+    def test_compare_triple_blocked_without_deepseek_key(self):
+        err = validate_ai_provider_run("compare_triple", "hq_only", False, "k", "")
+        assert err is not None and "DEEPSEEK_API_KEY" in err
+
+    def test_openai_and_two_way_compare_do_not_require_deepseek_key(self):
+        assert validate_ai_provider_run("openai", "full", False, "k") is None
+        assert validate_ai_provider_run("compare", "hq_only", False, "k") is None
 
     def test_blocked_for_foreign_hq_only_modes(self):
         err = validate_ai_provider_run("compare", FOREIGN_HQ_ONLY_MODE, False, "k")
@@ -962,13 +971,13 @@ class TestCostSummaryDataframe:
         df = pd.DataFrame([{
             "anthropic_model": "claude-haiku-4-5-20251001",
             "anthropic_estimated_cost_usd": 0.0015,
-            "openai_nano_model": "gpt-5.4-nano",
-            "openai_nano_estimated_cost_usd": 0.0003,
             "openai_mini_model": "gpt-5.4-mini",
             "openai_mini_estimated_cost_usd": 0.0011,
+            "deepseek_flash_model": "deepseek-v4-flash",
+            "deepseek_flash_estimated_cost_usd": 0.0002,
         }])
         out = build_cost_summary_dataframe(df, TRIPLE_COST_PROVIDERS)
-        assert list(out["provider"]) == ["anthropic", "openai_nano", "openai_mini"]
+        assert list(out["provider"]) == ["anthropic", "openai_mini", "deepseek_flash"]
         assert out.loc[0, "estimated_cost_usd"] == 0.0015
 
 

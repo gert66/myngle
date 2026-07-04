@@ -33,6 +33,7 @@ def prioritize_single_lead(
     ai_model: str = _DEFAULT_AI_MODEL,
     ai_provider: str = "anthropic",
     openai_api_key: str = "",
+    deepseek_api_key: str = "",
     default_input_country: str = "Italy",
     collect_non_hq_evidence: bool = False,
     extract_non_hq_signals_flag: bool = False,
@@ -135,6 +136,7 @@ def prioritize_single_lead(
         model=ai_model,
         ai_provider=ai_provider,
         openai_api_key=openai_api_key,
+        deepseek_api_key=deepseek_api_key,
     )
 
     # ── Step 2: non-HQ evidence collection (evidence only, no scores) ─────────

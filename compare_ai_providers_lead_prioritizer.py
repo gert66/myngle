@@ -2,8 +2,10 @@
 
 Runs the same input rows twice through ``prioritize_single_lead`` — once with
 the Anthropic provider (default claude-haiku-4-5-20251001) and once with the
-experimental OpenAI provider (default gpt-5.4-nano) — and writes a comparison
-Excel with classifications, scores, deltas, and usage/cost fields.
+experimental OpenAI provider (default gpt-5.4-mini — OpenAI nano returned too
+many unclear cases in real-company testing and is no longer part of the
+comparison workflow) — and writes a comparison Excel with classifications,
+scores, deltas, and usage/cost fields.
 
 Comparison-only tooling: it changes no scoring, C4, C5, HQ, Serper, Excel, or
 Lovable export behavior, and it never runs unless invoked explicitly. Each row
@@ -33,18 +35,17 @@ import pandas as pd
 
 from lead_hq_ai_interpreter import (
     _DEFAULT_AI_MODEL as DEFAULT_ANTHROPIC_MODEL,
-    DEFAULT_OPENAI_MODEL,
     SUPPORTED_OPENAI_MODELS,
+    DEFAULT_DEEPSEEK_MODEL,
 )
 from lead_output_schema import LeadInput
 from lead_prioritizer_core import prioritize_single_lead
 
 DEFAULT_ROW_LIMIT = 5
 
-# Fixed OpenAI models for the nano-vs-mini triple comparison (Anthropic vs
-# OpenAI nano vs OpenAI mini). Comparison-only — does not change which model
-# "OpenAI only" / two-way "compare" use.
-DEFAULT_OPENAI_NANO_MODEL = "gpt-5.4-nano"
+# Fixed models for the three-way comparison (Anthropic vs OpenAI mini vs
+# DeepSeek flash). Comparison-only — does not change which model "OpenAI
+# only" uses by default.
 DEFAULT_OPENAI_MINI_MODEL = "gpt-5.4-mini"
 
 COMPARISON_COLUMNS = [
@@ -150,7 +151,7 @@ def run_comparison(
     country_column: str = "",
     default_input_country: str = "Italy",
     anthropic_model: str = DEFAULT_ANTHROPIC_MODEL,
-    openai_model: str = DEFAULT_OPENAI_MODEL,
+    openai_model: str = DEFAULT_OPENAI_MINI_MODEL,
     serper_api_key: str = "",
     anthropic_api_key: str = "",
     openai_api_key: str = "",
@@ -158,9 +159,11 @@ def run_comparison(
 ) -> pd.DataFrame:
     """Run each row once per provider and return the comparison DataFrame.
 
-    ``prioritize_fn`` is injectable for tests; live runs use
-    ``prioritize_single_lead`` with ``calculate_commercial_score_flag=True``
-    (HQ + commercial score only — no non-HQ enrichment, no C5).
+    ``openai_model`` defaults to OpenAI mini (nano returned too many unclear
+    cases in real-company testing). ``prioritize_fn`` is injectable for
+    tests; live runs use ``prioritize_single_lead`` with
+    ``calculate_commercial_score_flag=True`` (HQ + commercial score only —
+    no non-HQ enrichment, no C5).
     """
     records = []
     for _, raw in df.iterrows():
@@ -192,85 +195,88 @@ def run_comparison(
 
 
 # ---------------------------------------------------------------------------
-# Triple comparison: Anthropic vs OpenAI nano vs OpenAI mini
+# Triple comparison: Anthropic vs OpenAI mini vs DeepSeek flash
 # ---------------------------------------------------------------------------
 # Same comparison-only contract as the two-way compare above: no scoring, C4,
 # C5, HQ, Serper, Excel, or Lovable export behavior changes; never runs unless
 # invoked explicitly. Each row costs one Serper call plus three AI calls
-# (Anthropic + OpenAI nano + OpenAI mini), so keep --row-limit small.
+# (Anthropic + OpenAI mini + DeepSeek flash), so keep --row-limit small.
+# OpenAI nano was removed from this workflow — it returned too many unclear
+# cases in real-company testing; OpenAI mini performed much closer to
+# Anthropic.
 
 TRIPLE_COMPARISON_COLUMNS = [
     "company_name", "domain", "input_country",
-    "anthropic_hq_classification", "openai_nano_hq_classification",
-    "openai_mini_hq_classification",
-    "anthropic_parent_hq_country", "openai_nano_parent_hq_country",
-    "openai_mini_parent_hq_country",
-    "anthropic_foreign_hq_score", "openai_nano_foreign_hq_score",
-    "openai_mini_foreign_hq_score",
-    "anthropic_final_score", "openai_nano_final_score", "openai_mini_final_score",
-    "anthropic_tier", "openai_nano_tier", "openai_mini_tier",
-    "anthropic_model", "openai_nano_model", "openai_mini_model",
+    "anthropic_hq_classification", "openai_mini_hq_classification",
+    "deepseek_flash_hq_classification",
+    "anthropic_parent_hq_country", "openai_mini_parent_hq_country",
+    "deepseek_flash_parent_hq_country",
+    "anthropic_foreign_hq_score", "openai_mini_foreign_hq_score",
+    "deepseek_flash_foreign_hq_score",
+    "anthropic_final_score", "openai_mini_final_score", "deepseek_flash_final_score",
+    "anthropic_tier", "openai_mini_tier", "deepseek_flash_tier",
+    "anthropic_model", "openai_mini_model", "deepseek_flash_model",
     "anthropic_input_tokens", "anthropic_output_tokens",
     "anthropic_total_tokens", "anthropic_estimated_cost_usd",
-    "openai_nano_input_tokens", "openai_nano_output_tokens",
-    "openai_nano_total_tokens", "openai_nano_estimated_cost_usd",
     "openai_mini_input_tokens", "openai_mini_output_tokens",
     "openai_mini_total_tokens", "openai_mini_estimated_cost_usd",
-    "anthropic_ai_error", "openai_nano_ai_error", "openai_mini_ai_error",
+    "deepseek_flash_input_tokens", "deepseek_flash_output_tokens",
+    "deepseek_flash_total_tokens", "deepseek_flash_estimated_cost_usd",
+    "anthropic_ai_error", "openai_mini_ai_error", "deepseek_flash_ai_error",
 ]
 
 
 def build_triple_comparison_row(
-    row_input: dict, anthropic_result, nano_result, mini_result,
+    row_input: dict, anthropic_result, openai_mini_result, deepseek_flash_result,
 ) -> dict:
     """Flatten three per-provider results into one triple-comparison record."""
-    a, n, m = anthropic_result, nano_result, mini_result
+    a, m, d = anthropic_result, openai_mini_result, deepseek_flash_result
 
     a_score = a.final_commercial_fit_score
-    n_score = n.final_commercial_fit_score
     m_score = m.final_commercial_fit_score
+    d_score = d.final_commercial_fit_score
 
     a_tier = a.commercial_tier or ""
-    n_tier = n.commercial_tier or ""
     m_tier = m.commercial_tier or ""
+    d_tier = d.commercial_tier or ""
 
     return {
         "company_name": row_input.get("company_name", ""),
         "domain": row_input.get("domain", ""),
         "input_country": row_input.get("input_country", ""),
         "anthropic_hq_classification": a.ai_hq_classification or "",
-        "openai_nano_hq_classification": n.ai_hq_classification or "",
         "openai_mini_hq_classification": m.ai_hq_classification or "",
+        "deepseek_flash_hq_classification": d.ai_hq_classification or "",
         "anthropic_parent_hq_country": a.ai_parent_hq_country or "",
-        "openai_nano_parent_hq_country": n.ai_parent_hq_country or "",
         "openai_mini_parent_hq_country": m.ai_parent_hq_country or "",
+        "deepseek_flash_parent_hq_country": d.ai_parent_hq_country or "",
         "anthropic_foreign_hq_score": a.sig_foreign_hq_score_for_next_scoring,
-        "openai_nano_foreign_hq_score": n.sig_foreign_hq_score_for_next_scoring,
         "openai_mini_foreign_hq_score": m.sig_foreign_hq_score_for_next_scoring,
+        "deepseek_flash_foreign_hq_score": d.sig_foreign_hq_score_for_next_scoring,
         "anthropic_final_score": a_score,
-        "openai_nano_final_score": n_score,
         "openai_mini_final_score": m_score,
+        "deepseek_flash_final_score": d_score,
         "anthropic_tier": a_tier,
-        "openai_nano_tier": n_tier,
         "openai_mini_tier": m_tier,
+        "deepseek_flash_tier": d_tier,
         "anthropic_model": a.ai_hq_model or "",
-        "openai_nano_model": n.ai_hq_model or "",
         "openai_mini_model": m.ai_hq_model or "",
+        "deepseek_flash_model": d.ai_hq_model or "",
         "anthropic_input_tokens": a.ai_hq_input_tokens,
         "anthropic_output_tokens": a.ai_hq_output_tokens,
         "anthropic_total_tokens": a.ai_hq_total_tokens,
         "anthropic_estimated_cost_usd": a.ai_hq_estimated_cost_usd,
-        "openai_nano_input_tokens": n.ai_hq_input_tokens,
-        "openai_nano_output_tokens": n.ai_hq_output_tokens,
-        "openai_nano_total_tokens": n.ai_hq_total_tokens,
-        "openai_nano_estimated_cost_usd": n.ai_hq_estimated_cost_usd,
         "openai_mini_input_tokens": m.ai_hq_input_tokens,
         "openai_mini_output_tokens": m.ai_hq_output_tokens,
         "openai_mini_total_tokens": m.ai_hq_total_tokens,
         "openai_mini_estimated_cost_usd": m.ai_hq_estimated_cost_usd,
+        "deepseek_flash_input_tokens": d.ai_hq_input_tokens,
+        "deepseek_flash_output_tokens": d.ai_hq_output_tokens,
+        "deepseek_flash_total_tokens": d.ai_hq_total_tokens,
+        "deepseek_flash_estimated_cost_usd": d.ai_hq_estimated_cost_usd,
         "anthropic_ai_error": a.ai_hq_error or "",
-        "openai_nano_ai_error": n.ai_hq_error or "",
         "openai_mini_ai_error": m.ai_hq_error or "",
+        "deepseek_flash_ai_error": d.ai_hq_error or "",
     }
 
 
@@ -282,15 +288,16 @@ def run_triple_comparison(
     country_column: str = "",
     default_input_country: str = "Italy",
     anthropic_model: str = DEFAULT_ANTHROPIC_MODEL,
-    openai_nano_model: str = DEFAULT_OPENAI_NANO_MODEL,
     openai_mini_model: str = DEFAULT_OPENAI_MINI_MODEL,
+    deepseek_model: str = DEFAULT_DEEPSEEK_MODEL,
     serper_api_key: str = "",
     anthropic_api_key: str = "",
     openai_api_key: str = "",
+    deepseek_api_key: str = "",
     prioritize_fn=prioritize_single_lead,
 ) -> pd.DataFrame:
-    """Run each row once per provider/model (Anthropic, OpenAI nano, OpenAI
-    mini) and return the triple-comparison DataFrame.
+    """Run each row once per provider/model (Anthropic, OpenAI mini, DeepSeek
+    flash) and return the triple-comparison DataFrame.
 
     ``prioritize_fn`` is injectable for tests; live runs use
     ``prioritize_single_lead`` with ``calculate_commercial_score_flag=True``
@@ -308,20 +315,21 @@ def run_triple_comparison(
             serper_api_key=serper_api_key,
             anthropic_api_key=anthropic_api_key,
             openai_api_key=openai_api_key,
+            deepseek_api_key=deepseek_api_key,
             default_input_country=default_input_country,
             calculate_commercial_score_flag=True,
         )
         anthropic_result = prioritize_fn(
             lead, ai_provider="anthropic", ai_model=anthropic_model, **common)
-        nano_result = prioritize_fn(
-            lead, ai_provider="openai", ai_model=openai_nano_model, **common)
-        mini_result = prioritize_fn(
+        openai_mini_result = prioritize_fn(
             lead, ai_provider="openai", ai_model=openai_mini_model, **common)
+        deepseek_flash_result = prioritize_fn(
+            lead, ai_provider="deepseek", ai_model=deepseek_model, **common)
 
         records.append(build_triple_comparison_row(
             {"company_name": company, "domain": domain or "",
              "input_country": country or default_input_country},
-            anthropic_result, nano_result, mini_result,
+            anthropic_result, openai_mini_result, deepseek_flash_result,
         ))
 
     return pd.DataFrame(records, columns=TRIPLE_COMPARISON_COLUMNS)
@@ -340,8 +348,8 @@ COST_PROJECTION_COMPANY_COUNTS = (100, 1_000, 10_000)
 TWO_WAY_COST_PROVIDERS = [("anthropic", "anthropic"), ("openai", "openai")]
 TRIPLE_COST_PROVIDERS = [
     ("anthropic", "anthropic"),
-    ("openai_nano", "openai_nano"),
     ("openai_mini", "openai_mini"),
+    ("deepseek_flash", "deepseek_flash"),
 ]
 
 
@@ -436,7 +444,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
                         help="Optional input-country column.")
     parser.add_argument("--default-input-country", default="Italy")
     parser.add_argument("--anthropic-model", default=DEFAULT_ANTHROPIC_MODEL)
-    parser.add_argument("--openai-model", default=DEFAULT_OPENAI_MODEL,
+    parser.add_argument("--openai-model", default=DEFAULT_OPENAI_MINI_MODEL,
                         choices=list(SUPPORTED_OPENAI_MODELS))
     parser.add_argument("--start-row", type=int, default=0)
     parser.add_argument("--row-limit", type=int, default=DEFAULT_ROW_LIMIT,
