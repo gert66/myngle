@@ -56,6 +56,89 @@ def default_gcs_run_folder(run_mode: str, now: Optional[datetime] = None) -> str
     return f"{now.strftime('%Y-%m-%d')}_{mode_slug or 'run'}"
 
 
+# Filename patterns export_lead_prioritizer_to_lovable_json produces. Only
+# these are ever candidates for upload — no old/unrelated file in the export
+# folder is ever selected.
+_ALLOWED_GLOB_PATTERNS = ("companies.list.json", "company-details-*.json",
+                          "export_manifest.json")
+
+_BUCKET_NAME_RE = re.compile(r"^[a-z0-9][a-z0-9._-]{1,61}[a-z0-9]$")
+
+
+def select_lovable_export_files(export_dir) -> list[str]:
+    """Return only the Lovable-export filenames present in ``export_dir``.
+
+    Matches exactly ``companies.list.json``, ``company-details-*.json``, and
+    ``export_manifest.json`` — nothing else in the folder is ever selected,
+    so a stale file from a previous run (or anything unrelated) is never
+    uploaded. Returns a sorted list of filenames (not full paths); an
+    absent/empty directory yields an empty list rather than raising.
+    """
+    export_dir = Path(export_dir)
+    if not export_dir.is_dir():
+        return []
+    found: set[str] = set()
+    for pattern in _ALLOWED_GLOB_PATTERNS:
+        for path in export_dir.glob(pattern):
+            if path.is_file():
+                found.add(path.name)
+    return sorted(found)
+
+
+def validate_gcs_bucket(bucket: str) -> Optional[str]:
+    """Return a user-facing error for an invalid/blank bucket name, else
+    ``None``. Conservative check against GCS bucket naming rules (lowercase
+    letters, digits, dots, hyphens, underscores; 3-63 characters) — not
+    exhaustive, just enough to catch an empty or obviously wrong value
+    before shelling out."""
+    text = str(bucket or "").strip()
+    if not text:
+        return "GCS bucket name is required."
+    if not _BUCKET_NAME_RE.match(text):
+        return (
+            f"{text!r} does not look like a valid GCS bucket name "
+            "(lowercase letters, digits, dots, hyphens, underscores; "
+            "3-63 characters, must start/end with a letter or digit)."
+        )
+    return None
+
+
+def gcs_flat_path(bucket: str, prefix: str, filename: str) -> str:
+    """``gs://`` destination for a single flat prefix (no current/archive
+    split) — used by the standalone Lovable JSON export app, where the
+    prefix itself already encodes the desired subfolder (e.g. "brazil/current")."""
+    prefix_norm = normalize_gcs_prefix(prefix)
+    path = f"{prefix_norm}/{filename}" if prefix_norm else filename
+    return f"gs://{bucket}/{path}"
+
+
+def public_url_flat(bucket: str, prefix: str, filename: str) -> str:
+    """Public HTTPS URL matching ``gcs_flat_path``'s destination."""
+    prefix_norm = normalize_gcs_prefix(prefix)
+    path = f"{prefix_norm}/{filename}" if prefix_norm else filename
+    return f"https://storage.googleapis.com/{bucket}/{path}"
+
+
+def build_flat_upload_plan(
+    export_dir, filenames: list[str], bucket: str, prefix: str,
+) -> list[dict]:
+    """Build upload jobs for a single flat ``gs://bucket/prefix/`` destination.
+
+    Each job is ``{"local_path", "destination", "target"}`` (``target`` is
+    always ``"flat"``, kept only for shape-compatibility with
+    ``run_upload_plan``/the batch app's current/archive jobs).
+    """
+    export_dir = Path(export_dir)
+    return [
+        {
+            "local_path": str(export_dir / filename),
+            "destination": gcs_flat_path(bucket, prefix, filename),
+            "target": "flat",
+        }
+        for filename in filenames
+    ]
+
+
 def gcs_current_path(bucket: str, country_folder: str, filename: str) -> str:
     """``gs://`` destination for the "always current" copy of one file."""
     return f"gs://{bucket}/{country_folder}/current/{filename}"

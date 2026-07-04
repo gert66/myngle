@@ -30,6 +30,17 @@ from export_lead_prioritizer_to_lovable_json import (
     LovableExportError,
     export_workbook_to_lovable_json,
 )
+from lovable_gcs_upload import (
+    DEFAULT_GCS_BUCKET,
+    build_flat_upload_plan,
+    check_gcloud_available,
+    country_folder_slug,
+    describe_gcloud_environment,
+    public_url_flat,
+    run_upload_plan,
+    select_lovable_export_files,
+    validate_gcs_bucket,
+)
 
 # Central country list — add future export countries here. Kept alphabetical.
 COUNTRY_PLACEHOLDER = "Select country..."
@@ -348,6 +359,23 @@ def main() -> None:
                 f"with folder metadata: {exc}"
             )
 
+        # Stored so the result view (and the GCS upload button below) survives
+        # the rerun triggered by later widget interactions — Streamlit reruns
+        # the whole script on every click, so this state would otherwise be
+        # lost the moment the user touches the GCS section.
+        st.session_state["lovable_export_manifest"] = manifest
+        st.session_state["lovable_export_output_dir"] = str(resolved_output_dir)
+        st.session_state["lovable_export_country"] = country
+        st.session_state["lovable_export_timestamp"] = export_timestamp
+        st.session_state["lovable_export_upload_path"] = str(upload_path)
+
+    # ── Export result (persists across reruns via session_state) ──────────────
+    manifest = st.session_state.get("lovable_export_manifest")
+    manifest_output_dir = st.session_state.get("lovable_export_output_dir")
+    if manifest is not None and manifest_output_dir:
+        result_country = st.session_state.get("lovable_export_country", "")
+        result_timestamp = st.session_state.get("lovable_export_timestamp") or datetime.now()
+
         st.success(
             f"Export complete: {manifest['rows_exported']} companies written "
             f"to {manifest['bucket_count']} detail bucket(s)."
@@ -385,12 +413,84 @@ def main() -> None:
         st.download_button(
             "Download JSON files as zip",
             data=build_zip_bytes(manifest["output_files"]),
-            file_name=make_lovable_zip_filename(country, export_timestamp),
+            file_name=make_lovable_zip_filename(result_country, result_timestamp),
             mime="application/zip",
+            key="lovable_zip_download",
         )
 
-        with st.expander("Debug: upload temp file"):
-            st.code(str(upload_path), language=None)
+        upload_path = st.session_state.get("lovable_export_upload_path")
+        if upload_path:
+            with st.expander("Debug: upload temp file"):
+                st.code(upload_path, language=None)
+
+        # ── Optional Google Cloud Storage upload ───────────────────────────
+        st.markdown("---")
+        st.markdown("**Optional Google Cloud Storage upload**")
+        st.caption(
+            "Experimental / manual only: uses your local gcloud CLI. "
+            "Nothing uploads until you check the box and click the button "
+            "below. Local download above always works regardless."
+        )
+        gcs_enabled = st.checkbox(
+            "Upload generated Lovable JSON to Google Cloud Storage",
+            value=False, key="lovable_gcs_enabled")
+        if gcs_enabled:
+            gcloud_info = check_gcloud_available()
+            if not gcloud_info["available"]:
+                st.warning(
+                    "Neither gcloud nor gsutil was found on PATH. Install or "
+                    "authenticate the Google Cloud SDK before uploading."
+                )
+            else:
+                env_info = describe_gcloud_environment()
+                st.caption(
+                    f"Detected CLI: `{gcloud_info['tool']}`"
+                    + (f" ({gcloud_info['version']})" if gcloud_info["version"] else "")
+                    + (f" — account: {env_info['account']}" if env_info["account"] else "")
+                    + (f" — project: {env_info['project']}" if env_info["project"] else "")
+                )
+
+            gc1, gc2 = st.columns(2)
+            gcs_bucket = gc1.text_input(
+                "GCS bucket", value=DEFAULT_GCS_BUCKET, key="lovable_gcs_bucket")
+            gcs_prefix = gc2.text_input(
+                "GCS prefix/path",
+                value=f"{country_folder_slug(result_country)}/current",
+                key="lovable_gcs_prefix")
+
+            export_files = select_lovable_export_files(manifest_output_dir)
+            bucket_error = validate_gcs_bucket(gcs_bucket)
+            if bucket_error:
+                st.error(bucket_error)
+            if not export_files:
+                st.error(
+                    "No exportable JSON files found in the export folder "
+                    f"({manifest_output_dir})."
+                )
+
+            upload_disabled = bool(bucket_error) or not export_files
+            if st.button("Upload JSON to GCS", key="lovable_gcs_upload_button",
+                        disabled=upload_disabled):
+                jobs = build_flat_upload_plan(
+                    manifest_output_dir, export_files, gcs_bucket.strip(), gcs_prefix)
+                with st.spinner("Uploading to Google Cloud Storage..."):
+                    results = run_upload_plan(jobs)
+                failures = [r for r in results if not r["success"]]
+                if failures:
+                    st.error(f"{len(failures)} of {len(results)} uploads failed.")
+                    for r in failures:
+                        st.code(f"{r['destination']}: "
+                               f"{r.get('error') or r.get('stderr') or ''}")
+                else:
+                    st.success(f"Uploaded {len(results)} file(s) to Google Cloud Storage.")
+                    st.markdown("**Public URLs**")
+                    for filename in export_files:
+                        st.write(public_url_flat(gcs_bucket.strip(), gcs_prefix, filename))
+        else:
+            st.caption(
+                "GCS upload is off by default. Check the box above to "
+                "upload this export's JSON files."
+            )
 
 
 if __name__ == "__main__":

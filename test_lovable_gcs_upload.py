@@ -10,15 +10,20 @@ import pytest
 
 from lovable_gcs_upload import (
     DEFAULT_GCS_BUCKET,
+    build_flat_upload_plan,
     check_gcloud_available,
     country_folder_slug,
     default_gcs_run_folder,
     describe_gcloud_environment,
     gcs_current_path,
     gcs_archive_path,
+    gcs_flat_path,
     normalize_gcs_prefix,
     public_url,
+    public_url_flat,
     resolve_gcs_upload_tool,
+    select_lovable_export_files,
+    validate_gcs_bucket,
     build_upload_command,
     build_upload_plan,
     upload_file,
@@ -287,3 +292,112 @@ class TestDescribeGcloudEnvironment:
             info = describe_gcloud_environment()
         assert "ya29." not in info["account"]
         assert "ya29." not in info["project"]
+
+
+class TestSelectLovableExportFiles:
+    def test_selects_only_allowed_patterns(self, tmp_path):
+        (tmp_path / "companies.list.json").write_text("[]")
+        (tmp_path / "company-details-000.json").write_text("{}")
+        (tmp_path / "company-details-001.json").write_text("{}")
+        (tmp_path / "export_manifest.json").write_text("{}")
+        (tmp_path / "old_run.xlsx").write_text("stale")
+        (tmp_path / "notes.txt").write_text("unrelated")
+
+        files = select_lovable_export_files(tmp_path)
+
+        assert files == [
+            "companies.list.json", "company-details-000.json",
+            "company-details-001.json", "export_manifest.json",
+        ]
+
+    def test_missing_directory_returns_empty_list(self, tmp_path):
+        assert select_lovable_export_files(tmp_path / "does_not_exist") == []
+
+    def test_empty_directory_returns_empty_list(self, tmp_path):
+        assert select_lovable_export_files(tmp_path) == []
+
+    def test_never_selects_unrelated_files(self, tmp_path):
+        (tmp_path / "companies.list.json").write_text("[]")
+        (tmp_path / "secrets.env").write_text("API_KEY=x")
+        (tmp_path / "workbook.xlsx").write_text("stale")
+        files = select_lovable_export_files(tmp_path)
+        assert files == ["companies.list.json"]
+        assert "secrets.env" not in files
+        assert "workbook.xlsx" not in files
+
+
+class TestValidateGcsBucket:
+    def test_blank_bucket_is_invalid(self):
+        assert validate_gcs_bucket("") is not None
+        assert validate_gcs_bucket(None) is not None
+
+    def test_valid_bucket_names_pass(self):
+        assert validate_gcs_bucket("myngle-company-data-104527058436") is None
+        assert validate_gcs_bucket("my.bucket_name-123") is None
+
+    def test_uppercase_bucket_is_invalid(self):
+        assert validate_gcs_bucket("MyBucket") is not None
+
+    def test_bucket_with_spaces_is_invalid(self):
+        assert validate_gcs_bucket("my bucket") is not None
+
+    def test_error_message_never_empty(self):
+        err = validate_gcs_bucket("")
+        assert err and "required" in err.lower()
+
+
+class TestFlatGcsPathBuilders:
+    def test_gcs_flat_path_with_prefix(self):
+        assert gcs_flat_path("bucket-a", "brazil/current", "companies.list.json") == \
+            "gs://bucket-a/brazil/current/companies.list.json"
+
+    def test_gcs_flat_path_normalizes_prefix(self):
+        assert gcs_flat_path("bucket-a", "/brazil//current/", "f.json") == \
+            "gs://bucket-a/brazil/current/f.json"
+
+    def test_gcs_flat_path_blank_prefix(self):
+        assert gcs_flat_path("bucket-a", "", "f.json") == "gs://bucket-a/f.json"
+
+    def test_public_url_flat_matches_destination_layout(self):
+        assert public_url_flat("bucket-a", "brazil/current", "companies.list.json") == \
+            "https://storage.googleapis.com/bucket-a/brazil/current/companies.list.json"
+
+
+class TestBuildFlatUploadPlan:
+    def test_builds_one_job_per_file(self, tmp_path):
+        jobs = build_flat_upload_plan(
+            tmp_path, ["companies.list.json", "export_manifest.json"],
+            "bucket-a", "brazil/current")
+        assert len(jobs) == 2
+        assert jobs[0]["local_path"] == str(tmp_path / "companies.list.json")
+        assert jobs[0]["destination"] == \
+            "gs://bucket-a/brazil/current/companies.list.json"
+        assert all(j["target"] == "flat" for j in jobs)
+
+    def test_empty_filenames_yields_no_jobs(self, tmp_path):
+        assert build_flat_upload_plan(tmp_path, [], "bucket-a", "brazil/current") == []
+
+
+class TestFlatPlanRunsWithoutRealGcloud:
+    def test_flat_plan_runs_through_run_upload_plan(self, tmp_path):
+        local = tmp_path / "companies.list.json"
+        local.write_text("[]")
+        jobs = build_flat_upload_plan(
+            tmp_path, ["companies.list.json"], "bucket-a", "brazil/current")
+        mock_proc = MagicMock(returncode=0, stdout="", stderr="")
+        with patch("lovable_gcs_upload.resolve_gcs_upload_tool",
+                   return_value=["gcloud", "storage", "cp"]), \
+             patch("lovable_gcs_upload.subprocess.run", return_value=mock_proc) as mock_run:
+            results = run_upload_plan(jobs)
+        assert all(r["success"] for r in results)
+        mock_run.assert_called_once()
+
+    def test_flat_plan_reports_missing_gcloud_without_subprocess(self, tmp_path):
+        jobs = build_flat_upload_plan(
+            tmp_path, ["companies.list.json"], "bucket-a", "brazil/current")
+        with patch("lovable_gcs_upload.resolve_gcs_upload_tool", return_value=None), \
+             patch("lovable_gcs_upload.subprocess.run") as mock_run:
+            results = run_upload_plan(jobs)
+        assert all(r["success"] is False for r in results)
+        assert all("Google Cloud SDK" in r["error"] for r in results)
+        mock_run.assert_not_called()
