@@ -23,10 +23,20 @@ from export_lead_prioritizer_to_lovable_json import (
     sanitize_caller_facing_evidence,
     normalize_content_language,
     should_localize_content,
-    localize_known_label,
-    localize_dutch_text_value,
-    localize_dutch_list,
     localize_detail_record_for_dutch,
+)
+from lovable_content_localization import (
+    translate_known_label,
+    localize_why_relevant_app,
+    localize_caller_angle_app,
+    localize_call_starter_app,
+    localize_caution_app,
+    localize_cold_caller_summary_app,
+    localize_parent_hq_summary_app,
+    localize_evidence_summary_app,
+    localize_foreign_hq_evidence_text,
+    localize_what_is_hot_item,
+    localize_what_is_not_item,
 )
 
 # ---------------------------------------------------------------------------
@@ -1079,84 +1089,268 @@ class TestShouldLocalizeContent:
         assert should_localize_content(None) is False
 
 
-class TestLocalizeKnownLabel:
-    def test_known_label_translated_for_dutch(self):
-        assert localize_known_label(
-            "Employer branding or employee satisfaction", "Dutch") == (
+class TestTranslateKnownLabel:
+    def test_known_label_translated(self):
+        assert translate_known_label(
+            "Employer branding or employee satisfaction") == (
             "Employer branding of medewerkerstevredenheid")
-        assert localize_known_label(
-            FOREIGN_HQ_SIGNAL_LABEL, "Dutch") == (
+        assert translate_known_label(FOREIGN_HQ_SIGNAL_LABEL) == (
             "Buitenlands hoofdkantoor of groepsstructuur")
 
     def test_unknown_label_left_unchanged(self):
-        assert localize_known_label("Some custom label", "Dutch") == "Some custom label"
-
-    def test_english_never_translates(self):
-        assert localize_known_label(
-            "Employer branding or employee satisfaction", "English") == (
-            "Employer branding or employee satisfaction")
+        assert translate_known_label("Some custom label") == "Some custom label"
 
     def test_blank_passes_through(self):
-        assert localize_known_label("", "Dutch") == ""
-        assert localize_known_label(None, "Dutch") is None
+        assert translate_known_label("") == ""
+        assert translate_known_label(None) is None
 
 
-class TestLocalizeDutchTextValue:
-    def test_known_phrase_replaced(self):
-        text, changed = localize_dutch_text_value("Confirmed foreign parent: Acme, HQ Germany.")
-        assert changed is True
-        assert text == "Bevestigd buitenlands moederbedrijf: Acme, hoofdkantoor Germany."
+# ---------------------------------------------------------------------------
+# Whole-template rebuilders (lovable_content_localization) — each function
+# matches a *complete* known English sentence built by
+# lead_caller_app_fields_builder.py / lead_app_summary_builder.py and rebuilds
+# it as a complete Dutch sentence; nothing is patched fragment-by-fragment,
+# so there is no risk of the old bug's mixed-language output (e.g. "The
+# hoofdkantoor evidence source...").
+# ---------------------------------------------------------------------------
 
-    def test_unmatched_text_left_in_english_no_error(self):
-        text, changed = localize_dutch_text_value("Some free-text sentence with no match.")
-        assert changed is False
-        assert text == "Some free-text sentence with no match."
+class TestLocalizeWhyRelevantApp:
+    def test_foreign_hq_with_signal_rebuilt_fully_in_dutch(self):
+        text = (
+            "Acme Brasil is relevant because it combines a foreign-parent or "
+            "international group signal with evidence of international "
+            "operations, onboarding, training, or company complexity. That "
+            "makes it a practical target for a first conversation about "
+            "language, communication, or training support for Brazil-based "
+            "teams.")
+        result = localize_why_relevant_app(text)
+        assert result == (
+            "Acme Brasil is relevant omdat het een signaal van een "
+            "buitenlandse moeder- of hoofdkantoororganisatie combineert met "
+            "bewijs van internationale activiteiten, onboarding, training of "
+            "bedrijfscomplexiteit. Dat maakt het een praktisch "
+            "aanknopingspunt voor een eerste gesprek over taal, communicatie "
+            "of trainingsondersteuning voor in Brazil gevestigde teams.")
+        assert "is relevant because" not in result
+        assert "The hoofdkantoor" not in result
 
-    def test_blank_or_none_passes_through(self):
-        assert localize_dutch_text_value("") == ("", False)
-        assert localize_dutch_text_value(None) == (None, False)
+    def test_unmatched_custom_text_left_in_english(self):
+        text = "Some custom analyst note that no template produced."
+        assert localize_why_relevant_app(text) == text
 
 
-class TestLocalizeDutchList:
-    def test_mixed_known_and_unknown_items(self):
-        values, changed_count = localize_dutch_list([
-            "No obvious caution flags detected.",
-            "Some unrelated custom note.",
-        ])
-        assert values == [
-            "Geen duidelijke aandachtspunten gevonden.",
-            "Some unrelated custom note.",
-        ]
-        assert changed_count == 1
+class TestLocalizeWhatIsHotApp:
+    def test_known_item_rebuilt_fully_in_dutch(self):
+        item = (
+            "Foreign-parent context gives a clear reason to discuss "
+            "cross-border communication and team alignment.")
+        result = localize_what_is_hot_item(item)
+        assert "Foreign-parent context" not in result
+        assert result == (
+            "Buitenlandse moedercontext geeft een duidelijke reden om "
+            "grensoverschrijdende communicatie en teamafstemming te "
+            "bespreken.")
 
-    def test_blank_or_none_passes_through(self):
-        assert localize_dutch_list([]) == ([], 0)
-        assert localize_dutch_list(None) == (None, 0)
+    def test_unknown_item_left_in_english(self):
+        assert localize_what_is_hot_item("A custom hot item.") == "A custom hot item."
+
+
+class TestLocalizeCallerAngleApp:
+    def test_foreign_hq_variant_rebuilt_fully_in_dutch(self):
+        text = (
+            "Open around how the Brazil team stays aligned with "
+            "international business expectations, especially in "
+            "customer-facing, sales, service, onboarding, or internal "
+            "communication roles.")
+        result = localize_caller_angle_app(text)
+        assert "Open around" not in result
+        assert result == (
+            "Open het gesprek met hoe het Brazil-team aansluiting houdt bij "
+            "internationale zakelijke verwachtingen, vooral in klantgerichte "
+            "functies, sales, service, onboarding of interne communicatie.")
+
+    def test_fixed_fallback_variant_translated(self):
+        text = (
+            "Use a light discovery angle: ask a few open questions to "
+            "validate whether international training or communication "
+            "needs exist before proposing anything specific.")
+        assert "Open around" not in localize_caller_angle_app(text)
+
+
+class TestLocalizeCallStarterApp:
+    def test_foreign_hq_variant_rebuilt_fully_in_dutch(self):
+        text = (
+            "I saw that Acme Brasil appears to operate in Brazil within a "
+            "wider international group context. I was wondering how you "
+            "currently support teams that need to work across local "
+            "priorities and international expectations.")
+        result = localize_call_starter_app(text)
+        assert "I saw that" not in result
+        assert result == (
+            "Ik zag dat Acme Brasil in Brazil lijkt te opereren binnen een "
+            "bredere internationale groepscontext. Ik vroeg me af hoe jullie "
+            "momenteel teams ondersteunen die moeten schakelen tussen lokale "
+            "prioriteiten en internationale verwachtingen.")
+
+
+class TestLocalizeCautionApp:
+    def test_domain_mismatch_item_rebuilt_fully_in_dutch(self):
+        text = (
+            "Manual review recommended before outreach.; The HQ evidence "
+            "source does not clearly match the lead's own domain; verify "
+            "the HQ signal before relying on it.")
+        result = localize_caution_app(text)
+        assert "The HQ evidence source" not in result
+        assert "The hoofdkantoor" not in result
+        assert result == (
+            "Handmatige controle aanbevolen vóór contactopname.; De bron van "
+            "het hoofdkantoorbewijs komt niet duidelijk overeen met het "
+            "domein van de lead zelf; controleer het signaal voordat je erop "
+            "vertrouwt.")
+
+
+class TestLocalizeParentHqSummaryApp:
+    def test_parent_and_location_rebuilt_fully_in_dutch(self):
+        text = (
+            "The enrichment data identifies Foreign Group as the parent "
+            "company, with HQ context in Germany / Munich.")
+        result = localize_parent_hq_summary_app(text)
+        assert result == (
+            "De verrijkte data identificeert Foreign Group als het "
+            "moederbedrijf, met hoofdkantoorcontext in Germany / Munich.")
+        assert "The enrichment data" not in result
+
+
+class TestLocalizeColdCallerSummaryApp:
+    def test_foreign_hq_composite_rebuilt_fully_in_dutch(self):
+        text = (
+            "The company appears to be a Brazil-based operation connected "
+            "to a foreign parent or HQ context in Germany. This creates a "
+            "concrete reason to explore cross-border communication, "
+            "onboarding, and alignment with international group "
+            "expectations. Open around how the Brazil team stays aligned "
+            "with international business expectations, especially in "
+            "customer-facing, sales, service, onboarding, or internal "
+            "communication roles.")
+        result = localize_cold_caller_summary_app(text)
+        assert "The company appears to be" not in result
+        assert "Open around" not in result
+        assert result == (
+            "Het bedrijf lijkt een in Brazil gevestigde activiteit te zijn "
+            "die verbonden is met een buitenlandse moeder- of "
+            "hoofdkantoorcontext in Germany. Dit vormt een concrete reden om "
+            "grensoverschrijdende communicatie, onboarding en afstemming met "
+            "internationale groepsverwachtingen te verkennen. Open het "
+            "gesprek met hoe het Brazil-team aansluiting houdt bij "
+            "internationale zakelijke verwachtingen, vooral in klantgerichte "
+            "functies, sales, service, onboarding of interne communicatie.")
+
+
+class TestLocalizeForeignHqEvidenceText:
+    def test_parent_country_and_city_rebuilt_fully_in_dutch(self):
+        text = "Confirmed foreign parent: Prudential Financial, HQ United States (Newark)."
+        result = localize_foreign_hq_evidence_text(text)
+        assert result == (
+            "Bevestigd buitenlands moederbedrijf: Prudential Financial, "
+            "hoofdkantoor United States (Newark).")
+        assert "Confirmed foreign parent" not in result
+
+
+class TestLocalizeEvidenceSummaryApp:
+    def test_translates_label_score_and_confidence_and_drops_reason(self):
+        text = (
+            "International profile: score 2, High confidence. Operates "
+            "offices in three countries.")
+        result = localize_evidence_summary_app(text)
+        assert result == "Internationaal profiel: score 2, Hoge betrouwbaarheid."
+        assert "Operates offices" not in result
+
+    def test_technical_reason_never_surfaces(self):
+        text = (
+            "ICP keyword match: score 2, High confidence. 3 distinct keyword "
+            "match(es) in evidence: training, learning, development")
+        result = localize_evidence_summary_app(text)
+        assert "distinct keyword match" not in result
+        assert result == "ICP-trefwoordovereenkomst: score 2, Hoge betrouwbaarheid."
 
 
 class TestLocalizeDetailRecordForDutch:
     def _sample_detail(self) -> dict:
+        why_relevant = (
+            "Acme Brasil is relevant because it combines a foreign-parent or "
+            "international group signal with evidence of international "
+            "operations, onboarding, training, or company complexity. That "
+            "makes it a practical target for a first conversation about "
+            "language, communication, or training support for Brazil-based "
+            "teams.")
+        caller_angle = (
+            "Open around how the Brazil team stays aligned with "
+            "international business expectations, especially in "
+            "customer-facing, sales, service, onboarding, or internal "
+            "communication roles.")
+        call_starter = (
+            "I saw that Acme Brasil appears to operate in Brazil within a "
+            "wider international group context. I was wondering how you "
+            "currently support teams that need to work across local "
+            "priorities and international expectations.")
+        cold_caller_summary = (
+            "The company appears to be a Brazil-based operation connected "
+            "to a foreign parent or HQ context in Germany. This creates a "
+            "concrete reason to explore cross-border communication, "
+            "onboarding, and alignment with international group "
+            "expectations. " + caller_angle)
+        parent_hq_summary = (
+            "The enrichment data identifies Foreign Group as the parent "
+            "company, with HQ context in Germany / Munich.")
+        evidence_summary = (
+            "International profile: score 2, High confidence. Operates "
+            "offices in three countries.")
+        caution = (
+            "Manual review recommended before outreach.; The HQ evidence "
+            "source does not clearly match the lead's own domain; verify "
+            "the HQ signal before relying on it.")
+        what_is_hot = [
+            "Foreign-parent context gives a clear reason to discuss "
+            "cross-border communication and team alignment.",
+            "A custom hot item no template covers.",
+        ]
+        what_is_not = ["Source evidence should be checked before outreach."]
+
         return {
             "company_id": "abc123",
             "company_name": "Acme Brasil",
             "domain": "acme.com.br",
             "commercial_fit_score": 80,
             "commercial_tier": "A",
-            "why_relevant_app": "Foreign headquarters or group structure detected.",
-            "what_is_hot_app": ["Use this as a warm entry point"],
-            "caution_app": "No obvious caution flags detected.",
+            "why_relevant_app": why_relevant,
+            "what_is_hot_app": list(what_is_hot),
+            "what_is_not_app": list(what_is_not),
+            "caller_angle_app": caller_angle,
+            "call_starter_app": call_starter,
+            "caution_app": caution,
+            "cold_caller_summary_app": cold_caller_summary,
+            "parent_hq_summary_app": parent_hq_summary,
+            "evidence_summary_app": evidence_summary,
+            "advanced_notes_app": "Non-HQ evidence items: 1. Extracted signals: 1.",
             "source_urls": ["https://acme.com/about"],
             "evidence_audit": {"raw_google_evidence_count": 1},
             "debug": {"lead_prioritizer_row": {"foo": "bar"}},
             "ui_payload": {
-                "why_relevant": "Foreign headquarters or group structure detected.",
-                "what_is_hot": ["Use this as a warm entry point"],
+                "why_relevant": why_relevant,
+                "what_is_hot": list(what_is_hot),
+                "what_is_not": list(what_is_not),
+                "caller_angle": caller_angle,
+                "call_starter": call_starter,
+                "cold_caller_summary": cold_caller_summary,
+                "parent_hq_summary": parent_hq_summary,
+                "evidence_summary": evidence_summary,
                 "source_urls": ["https://acme.com/about"],
             },
             "visible_icp_signal_scores": [
                 {"label": FOREIGN_HQ_SIGNAL_LABEL,
-                 "evidence": "Confirmed foreign parent: Acme, HQ Germany."},
-                {"label": "Some custom label", "evidence": "Custom text."},
+                 "evidence": "Confirmed foreign parent: Foreign Group, HQ Germany (Munich)."},
+                {"label": "Some custom label",
+                 "evidence": "Custom text quoted directly from a source."},
             ],
         }
 
@@ -1165,19 +1359,51 @@ class TestLocalizeDetailRecordForDutch:
         localized, localized_n, unchanged_n = localize_detail_record_for_dutch(detail)
 
         assert localized["why_relevant_app"] == (
-            "Buitenlands hoofdkantoor of groepsstructuur gedetecteerd.")
-        assert localized["what_is_hot_app"] == ["Gebruik dit als warme opening"]
-        assert localized["caution_app"] == "Geen duidelijke aandachtspunten gevonden."
-        assert localized["ui_payload"]["why_relevant"] == (
-            "Buitenlands hoofdkantoor of groepsstructuur gedetecteerd.")
-        assert localized["ui_payload"]["what_is_hot"] == ["Gebruik dit als warme opening"]
+            "Acme Brasil is relevant omdat het een signaal van een "
+            "buitenlandse moeder- of hoofdkantoororganisatie combineert met "
+            "bewijs van internationale activiteiten, onboarding, training of "
+            "bedrijfscomplexiteit. Dat maakt het een praktisch "
+            "aanknopingspunt voor een eerste gesprek over taal, communicatie "
+            "of trainingsondersteuning voor in Brazil gevestigde teams.")
+        assert localized["what_is_hot_app"][0] == (
+            "Buitenlandse moedercontext geeft een duidelijke reden om "
+            "grensoverschrijdende communicatie en teamafstemming te "
+            "bespreken.")
+        assert localized["what_is_hot_app"][1] == "A custom hot item no template covers."
+        assert localized["what_is_not_app"] == [
+            "Controleer de brondata voordat je contact opneemt."]
+        assert "Open around" not in localized["caller_angle_app"]
+        assert "I saw that" not in localized["call_starter_app"]
+        assert "The HQ evidence source" not in localized["caution_app"]
+        assert localized["parent_hq_summary_app"].startswith("De verrijkte data")
+        assert localized["evidence_summary_app"] == (
+            "Internationaal profiel: score 2, Hoge betrouwbaarheid.")
+        # Not translated — no known template for this field.
+        assert localized["advanced_notes_app"] == detail["advanced_notes_app"]
+
+        for field in ("why_relevant_app", "caller_angle_app", "call_starter_app",
+                      "caution_app", "cold_caller_summary_app",
+                      "parent_hq_summary_app", "evidence_summary_app"):
+            assert "The hoofdkantoor" not in localized[field]
+
+        ui = localized["ui_payload"]
+        assert ui["why_relevant"] == localized["why_relevant_app"]
+        assert ui["caller_angle"] == localized["caller_angle_app"]
+        assert ui["call_starter"] == localized["call_starter_app"]
+        assert ui["cold_caller_summary"] == localized["cold_caller_summary_app"]
+        assert ui["parent_hq_summary"] == localized["parent_hq_summary_app"]
+        assert ui["evidence_summary"] == localized["evidence_summary_app"]
+        assert ui["what_is_hot"] == localized["what_is_hot_app"]
+        assert ui["what_is_not"] == localized["what_is_not_app"]
 
         scores = localized["visible_icp_signal_scores"]
         assert scores[0]["label"] == "Buitenlands hoofdkantoor of groepsstructuur"
         assert scores[0]["evidence"] == (
-            "Bevestigd buitenlands moederbedrijf: Acme, hoofdkantoor Germany.")
+            "Bevestigd buitenlands moederbedrijf: Foreign Group, "
+            "hoofdkantoor Germany (Munich).")
         assert scores[1]["label"] == "Some custom label"  # unknown label untouched
-        assert scores[1]["evidence"] == "Custom text."  # no matching phrase
+        # Non-foreign-HQ evidence is never touched — it may be an external quote.
+        assert scores[1]["evidence"] == "Custom text quoted directly from a source."
 
         assert localized_n > 0
         assert unchanged_n > 0  # the untranslatable entries above
@@ -1206,9 +1432,20 @@ class TestLocalizeDetailRecordForDutch:
 # End-to-end: content_language on export_workbook_to_lovable_json
 # ---------------------------------------------------------------------------
 
+_FOREIGN_HQ_WHY_RELEVANT_EN = (
+    "Acme Brasil is relevant because it shows a foreign-parent or HQ context "
+    "outside Brazil. That alone is a practical reason to open a conversation "
+    "about how the local team stays aligned with the wider group.")
+_FOREIGN_HQ_WHY_RELEVANT_NL = (
+    "Acme Brasil is relevant omdat het een buitenlandse moeder- of "
+    "hoofdkantoorcontext buiten Brazil laat zien. Dat alleen al is een "
+    "praktische reden om een gesprek te openen over hoe het lokale team "
+    "afgestemd blijft met de bredere groep.")
+
+
 def _foreign_hq_row(**overrides) -> dict:
     row = dict(
-        why_relevant_app="Foreign headquarters or group structure detected.",
+        why_relevant_app=_FOREIGN_HQ_WHY_RELEVANT_EN,
         c5_parent_company="Foreign Group",
         c5_parent_hq_country="Germany",
     )
@@ -1225,8 +1462,7 @@ class TestContentLanguageEnglishUnchanged:
         assert manifest["localization"] == {"enabled": False}
 
         detail = detail_for(out_dir, "Acme Brasil")
-        assert detail["why_relevant_app"] == (
-            "Foreign headquarters or group structure detected.")
+        assert detail["why_relevant_app"] == _FOREIGN_HQ_WHY_RELEVANT_EN
         foreign_row = next(
             s for s in detail["visible_icp_signal_scores"]
             if s["label"] == FOREIGN_HQ_SIGNAL_LABEL)
@@ -1277,10 +1513,9 @@ class TestContentLanguageDutch:
         _, out_dir = run_export(tmp_path, enriched, content_language="Dutch")
 
         detail = detail_for(out_dir, "Acme Brasil")
-        assert detail["why_relevant_app"] == (
-            "Buitenlands hoofdkantoor of groepsstructuur gedetecteerd.")
-        assert detail["ui_payload"]["why_relevant"] == (
-            "Buitenlands hoofdkantoor of groepsstructuur gedetecteerd.")
+        assert detail["why_relevant_app"] == _FOREIGN_HQ_WHY_RELEVANT_NL
+        assert detail["ui_payload"]["why_relevant"] == _FOREIGN_HQ_WHY_RELEVANT_NL
+        assert "is relevant because" not in detail["why_relevant_app"]
 
     def test_ids_domain_scores_tiers_and_debug_unchanged(self, tmp_path):
         enriched = [_foreign_hq_row()]
@@ -1320,5 +1555,4 @@ class TestContentLanguageDutch:
         assert manifest["content_language"] == "English"
         assert manifest["localization"] == {"enabled": False}
         detail = detail_for(out_dir, "Acme Brasil")
-        assert detail["why_relevant_app"] == (
-            "Foreign headquarters or group structure detected.")
+        assert detail["why_relevant_app"] == _FOREIGN_HQ_WHY_RELEVANT_EN

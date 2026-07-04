@@ -36,6 +36,20 @@ from urllib.parse import urlparse
 
 import pandas as pd
 
+from lovable_content_localization import (
+    localize_caller_angle_app,
+    localize_call_starter_app,
+    localize_caution_app,
+    localize_cold_caller_summary_app,
+    localize_evidence_summary_app,
+    localize_foreign_hq_evidence_text,
+    localize_parent_hq_summary_app,
+    localize_what_is_hot_item,
+    localize_what_is_not_item,
+    localize_why_relevant_app,
+    translate_known_label,
+)
+
 # ---------------------------------------------------------------------------
 # Constants
 # ---------------------------------------------------------------------------
@@ -769,64 +783,52 @@ def _build_detail_record(
 # ---------------------------------------------------------------------------
 # Optional Dutch content localization (DEMO ONLY)
 # ---------------------------------------------------------------------------
-# Deterministic phrase/label replacement — no AI translation, no external
-# calls, no new dependency. English stays the byte-for-byte default behavior.
-# Only caller-facing text values in the detail records are ever touched;
-# JSON field names (schema) never change, and IDs/domains/URLs/scores/tiers/
-# source titles/snippets/evidence_audit/debug fields are always copied
-# through unchanged.
+# Deterministic template rebuild (see lovable_content_localization.py) — no
+# AI translation, no external calls, no new dependency. English stays the
+# byte-for-byte default behavior. Only caller-facing text values in the
+# detail records are ever touched; JSON field names (schema) never change,
+# and IDs/domains/URLs/scores/tiers/source titles/snippets/evidence_audit/
+# debug fields are always copied through unchanged.
 
 SUPPORTED_CONTENT_LANGUAGES: tuple[str, ...] = ("English", "Dutch")
 DEFAULT_CONTENT_LANGUAGE = "English"
 
-# Known visible_icp_signal_scores display labels -> Dutch demo translation.
-_DUTCH_LABEL_TRANSLATIONS: dict[str, str] = {
-    "Foreign ownership or group structure":
-        "Buitenlands hoofdkantoor of groepsstructuur",
-    "International business context": "Internationale bedrijfscontext",
-    "L&D or onboarding signal": "L&D- of onboarding-signaal",
-    "Possible onboarding need": "Mogelijke onboardingbehoefte",
-    "Explicit learning and development signal":
-        "Expliciet learning & development-signaal",
-    "Employer branding or employee satisfaction":
-        "Employer branding of medewerkerstevredenheid",
-    "Multicultural or international workforce":
-        "Multicultureel of internationaal personeelsbestand",
-    "Rapid growth signal": "Signaal van snelle groei",
-    "Merger or acquisition signal": "Fusie- of overnamesignaal",
+# Flat caller-facing text fields on a detail record eligible for demo
+# localization, mapped to their whole-template Dutch rebuilder. Everything
+# else (IDs, URLs, scores, evidence_audit, debug, source titles/snippets,
+# advanced_notes_app, buyer_route_app, likely_training_interest_app, ...) is
+# left alone — there is no known safe template to rebuild them from.
+_APP_FIELD_LOCALIZERS: dict[str, "Callable[[object], object]"] = {
+    "why_relevant_app": localize_why_relevant_app,
+    "caller_angle_app": localize_caller_angle_app,
+    "call_starter_app": localize_call_starter_app,
+    "caution_app": localize_caution_app,
+    "cold_caller_summary_app": localize_cold_caller_summary_app,
+    "parent_hq_summary_app": localize_parent_hq_summary_app,
+    "evidence_summary_app": localize_evidence_summary_app,
 }
 
-# Safe, deterministic phrase replacements for known English app-template
-# text. Applied in order; text that doesn't match any entry is left in
-# English untouched — this is a demo, never a guessed/free translation.
-_DUTCH_PHRASE_REPLACEMENTS: tuple[tuple[str, str], ...] = (
-    ("Confirmed foreign parent:", "Bevestigd buitenlands moederbedrijf:"),
-    ("Foreign headquarters detected:", "Buitenlands hoofdkantoor gedetecteerd:"),
-    ("Foreign headquarters or group structure detected.",
-     "Buitenlands hoofdkantoor of groepsstructuur gedetecteerd."),
-    ("No obvious caution flags detected.",
-     "Geen duidelijke aandachtspunten gevonden."),
-    ("Use this as a warm entry point", "Gebruik dit als warme opening"),
-    ("HQ ", "hoofdkantoor "),
-)
+# List fields (already split into individual items by parse_array_field)
+# localized item-by-item.
+_APP_LIST_FIELD_ITEM_LOCALIZERS: dict[str, "Callable[[object], object]"] = {
+    "what_is_hot_app": localize_what_is_hot_item,
+    "what_is_not_app": localize_what_is_not_item,
+}
 
-# Flat caller-facing text/list fields on a detail record eligible for demo
-# localization. Everything else (IDs, URLs, scores, evidence_audit, debug,
-# source titles/snippets, ...) is left alone.
-_LOCALIZABLE_DETAIL_TEXT_FIELDS: tuple[str, ...] = (
-    "why_relevant_app", "what_is_hot_app", "what_is_not_app",
-    "caller_angle_app", "call_starter_app", "caution_app",
-    "cold_caller_summary_app", "parent_hq_summary_app",
-    "evidence_summary_app", "advanced_notes_app",
-    "buyer_route_app", "likely_training_interest_app",
-)
-
-# Nested ui_payload mirror fields eligible for the same demo localization.
-_LOCALIZABLE_UI_PAYLOAD_TEXT_FIELDS: tuple[str, ...] = (
-    "why_relevant", "what_is_hot", "what_is_not", "caller_angle",
-    "call_starter", "cold_caller_summary", "parent_hq_summary",
-    "evidence_summary",
-)
+# Nested ui_payload mirror fields eligible for the same demo localization —
+# same rebuild logic as the matching flat *_app field above.
+_UI_PAYLOAD_FIELD_LOCALIZERS: dict[str, "Callable[[object], object]"] = {
+    "why_relevant": localize_why_relevant_app,
+    "caller_angle": localize_caller_angle_app,
+    "call_starter": localize_call_starter_app,
+    "cold_caller_summary": localize_cold_caller_summary_app,
+    "parent_hq_summary": localize_parent_hq_summary_app,
+    "evidence_summary": localize_evidence_summary_app,
+}
+_UI_PAYLOAD_LIST_FIELD_ITEM_LOCALIZERS: dict[str, "Callable[[object], object]"] = {
+    "what_is_hot": localize_what_is_hot_item,
+    "what_is_not": localize_what_is_not_item,
+}
 
 
 def normalize_content_language(language) -> str:
@@ -851,61 +853,17 @@ def should_localize_content(language) -> bool:
     return normalize_content_language(language) == "Dutch"
 
 
-def localize_known_label(text, language) -> str:
-    """Translate a known ``visible_icp_signal_scores`` label for Dutch.
-
-    Returns ``text`` unchanged when ``language`` isn't Dutch, when ``text``
-    is falsy, or when it isn't one of the known display labels — this never
-    guesses at a translation.
-    """
-    if not text or not should_localize_content(language):
-        return text
-    return _DUTCH_LABEL_TRANSLATIONS.get(text, text)
-
-
-def localize_dutch_text_value(text) -> tuple[object, bool]:
-    """Demo phrase-replacement localization for one caller-facing string.
-
-    Returns ``(new_value, changed)``. Blank/``None`` values pass through
-    unchanged. Only the known safe phrases in
-    ``_DUTCH_PHRASE_REPLACEMENTS`` are ever replaced; any other text is left
-    in English exactly as-is — never guessed, never an error.
-    """
-    if not text:
-        return text, False
-    result = str(text)
-    changed = False
-    for english, dutch in _DUTCH_PHRASE_REPLACEMENTS:
-        if english in result:
-            result = result.replace(english, dutch)
-            changed = True
-    return result, changed
-
-
-def localize_dutch_list(values) -> tuple[object, int]:
-    """Apply ``localize_dutch_text_value`` to every item of a list.
-
-    Returns ``(new_list, changed_count)``. Non-list/blank input passes
-    through unchanged with a ``changed_count`` of 0.
-    """
-    if not values:
-        return values, 0
-    new_values = []
-    changed_count = 0
-    for value in values:
-        new_value, changed = localize_dutch_text_value(value)
-        new_values.append(new_value)
-        if changed:
-            changed_count += 1
-    return new_values, changed_count
-
-
 def localize_detail_record_for_dutch(detail: dict) -> tuple[dict, int, int]:
     """Return a Dutch-localized copy of one detail record for the demo.
 
     Only the caller-facing fields in scope are touched: the flat ``*_app``
     text/list fields, their ``ui_payload`` mirrors, and the
-    ``visible_icp_signal_scores`` label/evidence. Every other key (IDs,
+    ``visible_icp_signal_scores`` label/evidence (the evidence only for the
+    app-generated foreign-HQ row — never another signal's evidence_quote or
+    reason, which may hold external source text). Every field is rebuilt
+    from a matched whole English template into a complete Dutch sentence
+    (see ``lovable_content_localization.py``); unmatched/custom text is left
+    in English untouched rather than guessed at. Every other key (IDs,
     domain, URLs, scores, tiers, ``source_urls``, ``evidence_snippets``,
     ``evidence_audit``, ``debug``, sector/HQ/C5 technical fields, ...) is
     carried over unchanged — the input ``detail`` dict itself is never
@@ -917,30 +875,45 @@ def localize_detail_record_for_dutch(detail: dict) -> tuple[dict, int, int]:
     localized_count = 0
     unchanged_count = 0
 
-    def _apply_field(container: dict, field: str) -> None:
+    def _apply_flat(container: dict, field: str, localizer) -> None:
         nonlocal localized_count, unchanged_count
         value = container.get(field)
-        if isinstance(value, list):
-            new_value, changed_items = localize_dutch_list(value)
-            container[field] = new_value
-            localized_count += changed_items
-            unchanged_count += max(0, len(value) - changed_items)
-        elif value:
-            new_value, changed = localize_dutch_text_value(value)
-            container[field] = new_value
-            if changed:
+        if not value:
+            return
+        new_value = localizer(value)
+        container[field] = new_value
+        if new_value != value:
+            localized_count += 1
+        else:
+            unchanged_count += 1
+
+    def _apply_list(container: dict, field: str, item_localizer) -> None:
+        nonlocal localized_count, unchanged_count
+        values = container.get(field)
+        if not values:
+            return
+        new_values = []
+        for value in values:
+            new_value = item_localizer(value)
+            new_values.append(new_value)
+            if new_value != value:
                 localized_count += 1
             else:
                 unchanged_count += 1
+        container[field] = new_values
 
-    for field in _LOCALIZABLE_DETAIL_TEXT_FIELDS:
-        _apply_field(localized, field)
+    for field, localizer in _APP_FIELD_LOCALIZERS.items():
+        _apply_flat(localized, field, localizer)
+    for field, item_localizer in _APP_LIST_FIELD_ITEM_LOCALIZERS.items():
+        _apply_list(localized, field, item_localizer)
 
     ui_payload = localized.get("ui_payload")
     if isinstance(ui_payload, dict):
         new_ui_payload = dict(ui_payload)
-        for field in _LOCALIZABLE_UI_PAYLOAD_TEXT_FIELDS:
-            _apply_field(new_ui_payload, field)
+        for field, localizer in _UI_PAYLOAD_FIELD_LOCALIZERS.items():
+            _apply_flat(new_ui_payload, field, localizer)
+        for field, item_localizer in _UI_PAYLOAD_LIST_FIELD_ITEM_LOCALIZERS.items():
+            _apply_list(new_ui_payload, field, item_localizer)
         localized["ui_payload"] = new_ui_payload
 
     signal_scores = localized.get("visible_icp_signal_scores")
@@ -953,20 +926,21 @@ def localize_detail_record_for_dutch(detail: dict) -> tuple[dict, int, int]:
             new_entry = dict(entry)
             label = new_entry.get("label")
             if label:
-                translated_label = localize_known_label(label, "Dutch")
+                translated_label = translate_known_label(label)
                 new_entry["label"] = translated_label
                 if translated_label != label:
                     localized_count += 1
                 else:
                     unchanged_count += 1
-            evidence = new_entry.get("evidence")
-            if evidence:
-                new_evidence, changed = localize_dutch_text_value(evidence)
-                new_entry["evidence"] = new_evidence
-                if changed:
-                    localized_count += 1
-                else:
-                    unchanged_count += 1
+            if label == FOREIGN_HQ_SIGNAL_LABEL:
+                evidence = new_entry.get("evidence")
+                if evidence:
+                    new_evidence = localize_foreign_hq_evidence_text(evidence)
+                    new_entry["evidence"] = new_evidence
+                    if new_evidence != evidence:
+                        localized_count += 1
+                    else:
+                        unchanged_count += 1
             new_scores.append(new_entry)
         localized["visible_icp_signal_scores"] = new_scores
 
@@ -1088,7 +1062,7 @@ def _validate_export(
             # is about the signal row being present, not its display language.
             _valid_foreign_hq_labels = {
                 FOREIGN_HQ_SIGNAL_LABEL,
-                _DUTCH_LABEL_TRANSLATIONS.get(FOREIGN_HQ_SIGNAL_LABEL),
+                translate_known_label(FOREIGN_HQ_SIGNAL_LABEL),
             }
             if not any(label in _valid_foreign_hq_labels for label in labels):
                 errors.append(
@@ -1142,9 +1116,10 @@ def export_workbook_to_lovable_json(
 
     ``content_language`` is a small demo option ("English" default, or
     "Dutch"): when Dutch is selected, only caller-facing text values in the
-    detail records are localized via deterministic phrase/label replacement
-    (see ``localize_detail_record_for_dutch``) — no AI translation, no
-    external calls. "English" (or any unrecognized value) leaves behavior
+    detail records are localized via deterministic whole-template rebuild
+    (see ``localize_detail_record_for_dutch`` and
+    ``lovable_content_localization.py``) — no AI translation, no external
+    calls. "English" (or any unrecognized value) leaves behavior
     byte-for-byte identical to before this option existed. The JSON schema
     (field names) never changes either way.
 
