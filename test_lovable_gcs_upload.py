@@ -101,21 +101,59 @@ class TestUploadCommandBuilder:
             "gs://bucket/brazil/current/companies.list.json",
         ]
 
+    def test_full_windows_executable_path_preserved(self):
+        # The resolved tool_cmd may carry a full .cmd shim path (see
+        # TestResolveGcsUploadTool) — build_upload_command must pass it
+        # through untouched as command[0].
+        windows_path = r"C:\Google\Cloud SDK\google-cloud-sdk\bin\gcloud.cmd"
+        cmd = build_upload_command(
+            [windows_path, "storage", "cp"], r"C:\out\companies.list.json",
+            "gs://bucket/brazil/current/companies.list.json")
+        assert cmd == [
+            windows_path, "storage", "cp", r"C:\out\companies.list.json",
+            "gs://bucket/brazil/current/companies.list.json",
+        ]
+
 
 class TestResolveGcsUploadTool:
     def test_prefers_gcloud_when_both_present(self):
         with patch("lovable_gcs_upload.shutil.which", side_effect=lambda x: f"/usr/bin/{x}"):
-            assert resolve_gcs_upload_tool() == ["gcloud", "storage", "cp"]
+            assert resolve_gcs_upload_tool() == ["/usr/bin/gcloud", "storage", "cp"]
 
     def test_falls_back_to_gsutil(self):
         def _which(name):
             return "/usr/bin/gsutil" if name == "gsutil" else None
         with patch("lovable_gcs_upload.shutil.which", side_effect=_which):
-            assert resolve_gcs_upload_tool() == ["gsutil", "cp"]
+            assert resolve_gcs_upload_tool() == ["/usr/bin/gsutil", "cp"]
 
     def test_none_when_neither_present(self):
         with patch("lovable_gcs_upload.shutil.which", return_value=None):
             assert resolve_gcs_upload_tool() is None
+
+    def test_windows_uses_exact_gcloud_cmd_shim_path(self):
+        # shutil.which("gcloud") on Windows resolves to the .cmd shim — that
+        # exact path must become command[0], since subprocess.run (no
+        # shell=True) cannot find the bare "gcloud" name on Windows.
+        windows_path = r"C:\Google\Cloud SDK\google-cloud-sdk\bin\gcloud.cmd"
+
+        def _which(name):
+            return windows_path if name == "gcloud" else None
+
+        with patch("lovable_gcs_upload.shutil.which", side_effect=_which):
+            cmd = resolve_gcs_upload_tool()
+        assert cmd[0] == windows_path
+        assert cmd == [windows_path, "storage", "cp"]
+
+    def test_windows_uses_exact_gsutil_cmd_shim_path(self):
+        windows_path = r"C:\Google\Cloud SDK\google-cloud-sdk\bin\gsutil.cmd"
+
+        def _which(name):
+            return windows_path if name == "gsutil" else None
+
+        with patch("lovable_gcs_upload.shutil.which", side_effect=_which):
+            cmd = resolve_gcs_upload_tool()
+        assert cmd[0] == windows_path
+        assert cmd == [windows_path, "cp"]
 
 
 class TestBuildUploadPlan:

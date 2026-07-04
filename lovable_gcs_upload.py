@@ -156,11 +156,20 @@ def public_url(bucket: str, country_folder: str, filename: str) -> str:
 
 def resolve_gcs_upload_tool() -> Optional[list[str]]:
     """Base argv prefix for uploads: prefers ``gcloud storage cp``, falls
-    back to ``gsutil cp``. Returns ``None`` if neither is on ``PATH``."""
-    if shutil.which("gcloud"):
-        return ["gcloud", "storage", "cp"]
-    if shutil.which("gsutil"):
-        return ["gsutil", "cp"]
+    back to ``gsutil cp``. Returns ``None`` if neither is on ``PATH``.
+
+    Uses the exact path from ``shutil.which`` as ``command[0]`` — on Windows
+    the bare name ``"gcloud"``/``"gsutil"`` is a ``.cmd`` shim that
+    ``subprocess.run`` (no ``shell=True``) cannot execute directly, which
+    raises ``FileNotFoundError: [WinError 2]`` even though ``shutil.which``
+    resolves it fine.
+    """
+    gcloud_path = shutil.which("gcloud")
+    if gcloud_path:
+        return [gcloud_path, "storage", "cp"]
+    gsutil_path = shutil.which("gsutil")
+    if gsutil_path:
+        return [gsutil_path, "cp"]
     return None
 
 
