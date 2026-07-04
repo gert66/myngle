@@ -735,6 +735,102 @@ def default_lovable_output_folder(export_country: str, timestamp) -> str:
     return str(Path("lovable_json_exports") / country_part / stamp)
 
 
+def default_auto_lovable_base_folder(export_country: str) -> str:
+    """Base folder for the auto (after-run) Lovable export.
+
+    Same ``lovable_json_exports/<country>`` shape as
+    ``default_lovable_output_folder``, but without a timestamp — the run
+    timestamp isn't known yet while this is shown in the pre-run UI. The
+    actual run appends its own run-specific timestamp subfolder underneath
+    this base directory once the batch completes.
+    """
+    country_part = sanitize_filename_part(export_country, fallback="export")
+    return str(Path("lovable_json_exports") / country_part)
+
+
+# Underscore/hyphen treated as spaces so "New_Zealand", "new-zealand", and
+# "New Zealand" all normalize the same way for filename matching.
+def _normalize_for_filename_match(text: str) -> str:
+    normalized = re.sub(r"[_\-]+", " ", str(text or "")).strip().lower()
+    return re.sub(r"\s+", " ", normalized)
+
+
+def suggest_country_from_filename(filename: str, supported_countries: list[str]) -> str:
+    """Guess a supported country from an uploaded filename, or ``""``.
+
+    Case-insensitive; underscores/hyphens/spaces are treated the same, so
+    "New_Zealand", "new-zealand", and "New Zealand" all match "New Zealand".
+    Never raises and never fuzzy-matches — a plain substring check against
+    each supported country name, first match wins. Purely a suggestion: the
+    caller always lets the user override it.
+    """
+    normalized_name = _normalize_for_filename_match(filename)
+    if not normalized_name:
+        return ""
+    for country in supported_countries:
+        if _normalize_for_filename_match(country) in normalized_name:
+            return country
+    return ""
+
+
+def resolve_auto_export_country_default(
+    default_country: str, uploaded_filename: str, supported_countries: list[str],
+) -> str:
+    """Default value for the auto-export "Export country" field.
+
+    The already-chosen "Default input country" takes priority; otherwise
+    falls back to a country guessed from the uploaded filename; otherwise
+    blank. Always user-overridable in the UI.
+    """
+    if (default_country or "").strip():
+        return default_country
+    return suggest_country_from_filename(uploaded_filename, supported_countries)
+
+
+def default_gcs_country_prefix(export_country: str, base_prefix: str = "") -> str:
+    """Default GCS prefix/path for a country: ``<base_prefix>/<country-slug>``
+    when a base prefix (``GCS_BASE_PREFIX``) is configured, else just the
+    country slug."""
+    slug = country_folder_slug(export_country)
+    if (base_prefix or "").strip():
+        return normalize_gcs_prefix(f"{base_prefix}/{slug}")
+    return slug
+
+
+def validate_auto_export_settings(
+    *,
+    auto_export_enabled: bool,
+    export_country: str,
+    cold_callers: list[str],
+    auto_gcs_upload_enabled: bool,
+    gcs_bucket: str,
+    gcs_prefix: str,
+    upload_current: bool,
+    upload_archive: bool,
+) -> Optional[str]:
+    """Validate the after-run auto-export settings before the run starts.
+
+    Returns a user-facing error message, or ``None`` when settings are OK to
+    run with. Only checked when ``auto_export_enabled`` is True — the
+    checkbox stays fully optional and off by default.
+    """
+    if not auto_export_enabled:
+        return None
+    if not (export_country or "").strip():
+        return "Auto-export: export country is required."
+    if not cold_callers:
+        return "Auto-export: at least one cold caller is required."
+    if auto_gcs_upload_enabled:
+        if not (gcs_bucket or "").strip():
+            return "Auto-export: GCS bucket is required when GCS upload is enabled."
+        if not (gcs_prefix or "").strip():
+            return "Auto-export: GCS prefix/path is required when GCS upload is enabled."
+        if not (upload_current or upload_archive):
+            return ("Auto-export: select at least \"current\" or \"archive\" as "
+                    "the GCS upload target.")
+    return None
+
+
 def zip_directory_bytes(directory, filenames: list[str]) -> bytes:
     """Zip the given filenames from ``directory`` into an in-memory archive.
 
@@ -993,9 +1089,110 @@ def main() -> None:  # pragma: no cover - exercised only under `streamlit run`
     if ai_provider_error:
         st.error(ai_provider_error)
 
+    # ── After-run Lovable JSON / GCS export (optional, one-click/overnight) ───
+    st.subheader("After-run Lovable JSON / GCS export")
+    st.caption(
+        "Optional: set this up before running an overnight/unattended batch "
+        "so the enriched workbook, Lovable JSON export, and (if enabled) GCS "
+        "upload all happen automatically once the batch completes. Off by "
+        "default; the manual Lovable JSON export section after a run stays "
+        "available either way. Not available for the Compare provider modes "
+        "(those return a comparison workbook instead of batch tables)."
+    )
+    auto_lovable_export_enabled = st.checkbox(
+        "After batch completes, automatically export Lovable JSON",
+        value=False, key="auto_lovable_export_enabled")
+
+    auto_export_country = ""
+    auto_lovable_callers_raw = DEFAULT_COLD_CALLERS_TEXT
+    auto_foreign_hq_only = default_foreign_hq_only_export(run_mode)
+    auto_bucket_size = 500
+    auto_lovable_base_dir = ""
+    auto_gcs_upload_enabled = False
+    auto_gcs_bucket = ""
+    auto_gcs_country_folder = ""
+    auto_gcs_run_folder = ""
+    auto_upload_current = True
+    auto_upload_archive = True
+
+    if auto_lovable_export_enabled:
+        _uploaded_filename = getattr(uploaded, "name", "") or ""
+        _country_default = resolve_auto_export_country_default(
+            default_country or "", _uploaded_filename, SUPPORTED_DEFAULT_INPUT_COUNTRIES)
+
+        ae1, ae2 = st.columns(2)
+        auto_export_country = ae1.text_input(
+            "Export country", value=_country_default,
+            key="auto_lovable_export_country",
+            help="Defaults to the selected \"Default input country\", else a "
+                 "guess from the uploaded filename. Always overridable.")
+        auto_lovable_callers_raw = ae2.text_input(
+            "Cold callers (comma-separated)", value=DEFAULT_COLD_CALLERS_TEXT,
+            key="auto_lovable_callers")
+
+        ae3, ae4 = st.columns(2)
+        auto_foreign_hq_only = ae3.checkbox(
+            "Foreign-HQ-only export",
+            value=default_foreign_hq_only_export(run_mode),
+            key="auto_lovable_foreign_hq_only")
+        auto_bucket_size = ae4.number_input(
+            "Bucket size", min_value=1, value=500, step=50,
+            key="auto_lovable_bucket_size")
+
+        auto_lovable_base_dir = st.text_input(
+            "Local Lovable output folder (base)",
+            value=default_auto_lovable_base_folder(auto_export_country),
+            key="auto_lovable_output_base_dir",
+            help="A run-specific timestamped subfolder is created here "
+                 "automatically once the batch completes.")
+        st.caption(f"Preview: `{auto_lovable_base_dir}/<run_timestamp>/`")
+
+        auto_gcs_upload_enabled = st.checkbox(
+            "After Lovable JSON export, upload to Google Cloud Storage",
+            value=False, key="auto_lovable_gcs_upload_enabled")
+
+        if auto_gcs_upload_enabled:
+            _auto_default_bucket = get_secret_or_env(_GCS_BUCKET_NAME_KEY) or DEFAULT_GCS_BUCKET
+            _auto_base_prefix = get_secret_or_env(_GCS_BASE_PREFIX_KEY)
+            _auto_default_prefix = default_gcs_country_prefix(
+                auto_export_country, _auto_base_prefix)
+
+            ag1, ag2 = st.columns(2)
+            auto_gcs_bucket = ag1.text_input(
+                "GCS bucket", value=_auto_default_bucket, key="auto_lovable_gcs_bucket")
+            auto_gcs_country_folder = ag2.text_input(
+                "GCS prefix/path (e.g. <country>)", value=_auto_default_prefix,
+                key="auto_lovable_gcs_country_folder")
+            auto_gcs_run_folder = st.text_input(
+                "GCS run folder",
+                value=default_gcs_run_folder(run_mode, _dt.now()),
+                key="auto_lovable_gcs_run_folder")
+
+            au1, au2 = st.columns(2)
+            auto_upload_current = au1.checkbox(
+                f"Overwrite {normalize_gcs_prefix(auto_gcs_country_folder) or '<prefix>'}/current/",
+                value=True, key="auto_lovable_gcs_upload_current")
+            auto_upload_archive = au2.checkbox(
+                f"Archive to {normalize_gcs_prefix(auto_gcs_country_folder) or '<prefix>'}"
+                f"/runs/{normalize_gcs_prefix(auto_gcs_run_folder) or '<run_folder>'}/",
+                value=True, key="auto_lovable_gcs_upload_archive")
+
+    auto_export_error = validate_auto_export_settings(
+        auto_export_enabled=auto_lovable_export_enabled,
+        export_country=auto_export_country,
+        cold_callers=parse_cold_callers(auto_lovable_callers_raw),
+        auto_gcs_upload_enabled=auto_gcs_upload_enabled,
+        gcs_bucket=auto_gcs_bucket,
+        gcs_prefix=auto_gcs_country_folder,
+        upload_current=auto_upload_current,
+        upload_archive=auto_upload_archive,
+    )
+    if auto_export_error:
+        st.error(auto_export_error)
+
     run_disabled = (not keys_ok) or (not big_run_ok) or selected_count == 0 \
         or bool(c5_block_reason) or bool(default_country_error) \
-        or bool(ai_provider_error)
+        or bool(ai_provider_error) or bool(auto_export_error)
 
     # ── Run ─────────────────────────────────────────────────────────────────
     st.caption(RUN_BUTTON_NOTE_TEXT)
@@ -1331,6 +1528,88 @@ def main() -> None:  # pragma: no cover - exercised only under `streamlit run`
                         "You can still use the download button below."
                     )
 
+        # ── Automatic after-run Lovable JSON / GCS export (opt-in) ─────────────
+        # Only reached for the normal/parallel/foreign-HQ-only run paths above —
+        # the "compare" / "compare_triple" provider modes return early before
+        # this point and are left completely untouched.
+        st.session_state["auto_lovable_manifest"] = None
+        st.session_state["auto_lovable_manifest_output_dir"] = None
+        st.session_state["auto_lovable_gcs_upload_results"] = None
+        if auto_lovable_export_enabled:
+            auto_cold_callers = parse_cold_callers(auto_lovable_callers_raw)
+            auto_export_dir = str(
+                Path(auto_lovable_base_dir) / run_timestamp.strftime("%Y%m%d_%H%M%S"))
+            auto_manifest = None
+            try:
+                with st.spinner("Auto-exporting to Lovable JSON..."):
+                    auto_manifest = export_batch_output_tables_to_lovable_json(
+                        tables, auto_export_dir, auto_export_country,
+                        auto_cold_callers,
+                        foreign_hq_only=auto_foreign_hq_only,
+                        bucket_size=int(auto_bucket_size),
+                    )
+                st.session_state["auto_lovable_manifest"] = auto_manifest
+                st.session_state["auto_lovable_manifest_output_dir"] = auto_export_dir
+                st.success("Lovable JSON auto-export completed.")
+            except Exception as exc:
+                st.error(f"Lovable JSON auto-export failed: {exc}")
+
+            if auto_manifest is not None and auto_gcs_upload_enabled:
+                auto_validation = auto_manifest.get("validation_summary", {}) or {}
+                auto_validation_ok = (
+                    auto_validation.get("status") == "ok"
+                    and int(auto_validation.get("structural_errors", 0) or 0) == 0
+                )
+                auto_gcs_bucket_norm = auto_gcs_bucket.strip()
+                auto_gcs_prefix_norm = normalize_gcs_prefix(auto_gcs_country_folder)
+                auto_gcs_run_folder_norm = normalize_gcs_prefix(auto_gcs_run_folder)
+                can_auto_upload = (
+                    auto_validation_ok and bool(auto_gcs_bucket_norm)
+                    and bool(auto_gcs_prefix_norm)
+                    and (auto_upload_current or auto_upload_archive)
+                )
+                if not can_auto_upload:
+                    st.warning(
+                        "Skipped automatic GCS upload: export validation or "
+                        "bucket/prefix settings were not OK. The Lovable JSON "
+                        "was still exported and can be uploaded manually below."
+                    )
+                else:
+                    auto_output_filenames = sorted(
+                        {Path(p).name for p in auto_manifest.get("output_files", [])})
+                    auto_jobs = build_upload_plan(
+                        auto_export_dir, auto_output_filenames,
+                        auto_gcs_bucket_norm, auto_gcs_prefix_norm,
+                        auto_gcs_run_folder_norm,
+                        upload_current=auto_upload_current,
+                        upload_archive=auto_upload_archive,
+                    )
+                    with st.spinner(
+                        "Auto-uploading Lovable JSON to Google Cloud Storage..."
+                    ):
+                        auto_upload_results = run_upload_plan(auto_jobs)
+                    st.session_state["auto_lovable_gcs_upload_results"] = auto_upload_results
+                    auto_failures = [r for r in auto_upload_results if not r["success"]]
+                    if auto_failures:
+                        st.error(
+                            f"GCS auto-upload: {len(auto_failures)} of "
+                            f"{len(auto_upload_results)} uploads failed."
+                        )
+                        for r in auto_failures:
+                            st.code(f"{r['destination']}: {r.get('error') or r.get('stderr') or ''}")
+                    else:
+                        st.success(
+                            f"GCS upload completed: {len(auto_upload_results)} "
+                            "file(s) uploaded."
+                        )
+                        if auto_upload_current:
+                            st.markdown("**Public URLs**")
+                            for filename in auto_output_filenames:
+                                st.write(gcs_public_url(
+                                    auto_gcs_bucket_norm, auto_gcs_prefix_norm, filename))
+                        st.session_state["auto_lovable_gcs_bucket_used"] = auto_gcs_bucket_norm
+                        st.session_state["auto_lovable_gcs_prefix_used"] = auto_gcs_prefix_norm
+
     # ── Output ────────────────────────────────────────────────────────────────
     tables = st.session_state.get("v2_batch_tables")
     data = st.session_state.get("v2_batch_output_bytes")
@@ -1365,6 +1644,65 @@ def main() -> None:  # pragma: no cover - exercised only under `streamlit run`
             file_name=make_batch_output_filename(_dl_country, _dl_mode, _dl_timestamp),
             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         )
+
+        # ── Auto Lovable JSON / GCS export result (persists across reruns) ────
+        _auto_manifest = st.session_state.get("auto_lovable_manifest")
+        _auto_manifest_dir = st.session_state.get("auto_lovable_manifest_output_dir")
+        if _auto_manifest is not None and _auto_manifest_dir:
+            st.subheader("Auto Lovable JSON export result")
+            st.caption(f"Saved to: {_auto_manifest_dir}")
+            av1, av2, av3 = st.columns(3)
+            av1.metric("Rows exported", _auto_manifest.get("rows_exported", 0))
+            av2.metric("Foreign-HQ rows exported",
+                      _auto_manifest.get("foreign_hq_rows_exported", 0))
+            av3.metric("Bucket count", _auto_manifest.get("bucket_count", 0))
+
+            _auto_validation = _auto_manifest.get("validation_summary", {}) or {}
+            _auto_validation_ok = (
+                _auto_validation.get("status") == "ok"
+                and int(_auto_validation.get("structural_errors", 0) or 0) == 0
+            )
+            if _auto_validation_ok:
+                st.success(f"Validation status: {_auto_validation.get('status')}")
+            else:
+                st.error(
+                    f"Validation status: {_auto_validation.get('status')} — "
+                    f"structural_errors: {_auto_validation.get('structural_errors', 0)}"
+                )
+
+            _auto_output_filenames = sorted(
+                {Path(p).name for p in _auto_manifest.get("output_files", [])})
+            st.download_button(
+                "⬇️ Download auto-exported Lovable JSON (zip)",
+                data=zip_directory_bytes(_auto_manifest_dir, _auto_output_filenames),
+                file_name=(
+                    "lovable_json_auto_"
+                    f"{sanitize_filename_part(_auto_manifest.get('export_country', ''))}.zip"
+                ),
+                mime="application/zip",
+                key="auto_lovable_zip_download",
+            )
+
+            _auto_upload_results = st.session_state.get("auto_lovable_gcs_upload_results")
+            if _auto_upload_results:
+                _auto_failures = [r for r in _auto_upload_results if not r["success"]]
+                if _auto_failures:
+                    st.error(
+                        f"GCS auto-upload: {len(_auto_failures)} of "
+                        f"{len(_auto_upload_results)} uploads failed."
+                    )
+                else:
+                    st.success(
+                        f"GCS upload completed: {len(_auto_upload_results)} "
+                        "file(s) uploaded."
+                    )
+                    _auto_bucket_used = st.session_state.get("auto_lovable_gcs_bucket_used")
+                    _auto_prefix_used = st.session_state.get("auto_lovable_gcs_prefix_used")
+                    if _auto_bucket_used and _auto_prefix_used:
+                        st.markdown("**Public URLs**")
+                        for filename in _auto_output_filenames:
+                            st.write(gcs_public_url(
+                                _auto_bucket_used, _auto_prefix_used, filename))
 
         # ── Lovable JSON export ─────────────────────────────────────────────
         st.subheader("Lovable JSON export")

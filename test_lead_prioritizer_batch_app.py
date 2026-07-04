@@ -970,3 +970,168 @@ class TestCostSummaryDataframe:
         out = build_cost_summary_dataframe(df, TRIPLE_COST_PROVIDERS)
         assert list(out["provider"]) == ["anthropic", "openai_nano", "openai_mini"]
         assert out.loc[0, "estimated_cost_usd"] == 0.0015
+
+
+# ---------------------------------------------------------------------------
+# After-run Lovable JSON / GCS auto-export ("one-click / overnight" workflow)
+# ---------------------------------------------------------------------------
+
+from lead_prioritizer_batch_app import (  # noqa: E402
+    suggest_country_from_filename,
+    resolve_auto_export_country_default,
+    default_auto_lovable_base_folder,
+    default_gcs_country_prefix,
+    validate_auto_export_settings,
+)
+
+
+class TestSuggestCountryFromFilename:
+    def test_matches_plain_country_name(self):
+        assert suggest_country_from_filename(
+            "Netherlands_leads.xlsx", SUPPORTED_DEFAULT_INPUT_COUNTRIES) == "Netherlands"
+
+    def test_matches_underscore_separated_multiword_country(self):
+        assert suggest_country_from_filename(
+            "leads_New_Zealand_2026.xlsx", SUPPORTED_DEFAULT_INPUT_COUNTRIES) == "New Zealand"
+
+    def test_matches_hyphen_separated_multiword_country(self):
+        assert suggest_country_from_filename(
+            "leads-new-zealand.xlsx", SUPPORTED_DEFAULT_INPUT_COUNTRIES) == "New Zealand"
+
+    def test_matches_space_separated_multiword_country_case_insensitive(self):
+        assert suggest_country_from_filename(
+            "New Zealand Leads.xlsx", SUPPORTED_DEFAULT_INPUT_COUNTRIES) == "New Zealand"
+
+    def test_case_insensitive_single_word(self):
+        assert suggest_country_from_filename(
+            "BRAZIL_batch.xlsx", SUPPORTED_DEFAULT_INPUT_COUNTRIES) == "Brazil"
+
+    def test_no_match_returns_blank_without_raising(self):
+        assert suggest_country_from_filename(
+            "generic_leads.xlsx", SUPPORTED_DEFAULT_INPUT_COUNTRIES) == ""
+
+    def test_blank_filename_never_raises(self):
+        assert suggest_country_from_filename("", SUPPORTED_DEFAULT_INPUT_COUNTRIES) == ""
+        assert suggest_country_from_filename(None, SUPPORTED_DEFAULT_INPUT_COUNTRIES) == ""
+
+
+class TestResolveAutoExportCountryDefault:
+    def test_default_input_country_has_priority_over_filename(self):
+        assert resolve_auto_export_country_default(
+            "Italy", "brazil_leads.xlsx", SUPPORTED_DEFAULT_INPUT_COUNTRIES) == "Italy"
+
+    def test_falls_back_to_filename_guess_when_no_default_country(self):
+        assert resolve_auto_export_country_default(
+            "", "brazil_leads.xlsx", SUPPORTED_DEFAULT_INPUT_COUNTRIES) == "Brazil"
+
+    def test_blank_when_neither_available(self):
+        assert resolve_auto_export_country_default(
+            "", "generic_leads.xlsx", SUPPORTED_DEFAULT_INPUT_COUNTRIES) == ""
+
+
+class TestDefaultAutoLovableBaseFolder:
+    def test_builds_country_subfolder_without_timestamp(self):
+        import os
+
+        result = default_auto_lovable_base_folder("Brazil")
+        assert result == os.path.join("lovable_json_exports", "Brazil")
+
+    def test_blank_country_falls_back(self):
+        import os
+
+        result = default_auto_lovable_base_folder("")
+        assert result == os.path.join("lovable_json_exports", "export")
+
+
+class TestDefaultGcsCountryPrefix:
+    def test_without_base_prefix(self):
+        assert default_gcs_country_prefix("Brazil", "") == "brazil"
+
+    def test_with_base_prefix_from_env(self):
+        # GCS_BASE_PREFIX-style base prefix prepended and normalized.
+        assert default_gcs_country_prefix("Brazil", "myngle-data") == "myngle-data/brazil"
+
+    def test_base_prefix_with_slashes_normalized(self):
+        assert default_gcs_country_prefix("New Zealand", "/exports/") == "exports/new-zealand"
+
+
+class TestValidateAutoExportSettings:
+    def _base_kwargs(self, **overrides):
+        kwargs = dict(
+            auto_export_enabled=True,
+            export_country="Brazil",
+            cold_callers=["Vanessa"],
+            auto_gcs_upload_enabled=False,
+            gcs_bucket="",
+            gcs_prefix="",
+            upload_current=True,
+            upload_archive=True,
+        )
+        kwargs.update(overrides)
+        return kwargs
+
+    def test_disabled_is_always_none(self):
+        assert validate_auto_export_settings(
+            **self._base_kwargs(auto_export_enabled=False, export_country="",
+                                cold_callers=[])) is None
+
+    def test_valid_settings_without_gcs_pass(self):
+        assert validate_auto_export_settings(**self._base_kwargs()) is None
+
+    def test_empty_export_country_blocked(self):
+        err = validate_auto_export_settings(**self._base_kwargs(export_country=""))
+        assert err is not None and "export country" in err
+
+    def test_empty_callers_blocked(self):
+        err = validate_auto_export_settings(**self._base_kwargs(cold_callers=[]))
+        assert err is not None and "cold caller" in err
+
+    def test_gcs_enabled_requires_bucket(self):
+        err = validate_auto_export_settings(**self._base_kwargs(
+            auto_gcs_upload_enabled=True, gcs_bucket="", gcs_prefix="brazil"))
+        assert err is not None and "bucket" in err
+
+    def test_gcs_enabled_requires_prefix(self):
+        err = validate_auto_export_settings(**self._base_kwargs(
+            auto_gcs_upload_enabled=True, gcs_bucket="my-bucket", gcs_prefix=""))
+        assert err is not None and "prefix" in err
+
+    def test_gcs_enabled_requires_current_or_archive(self):
+        err = validate_auto_export_settings(**self._base_kwargs(
+            auto_gcs_upload_enabled=True, gcs_bucket="my-bucket", gcs_prefix="brazil",
+            upload_current=False, upload_archive=False))
+        assert err is not None and "current" in err
+
+    def test_gcs_enabled_with_all_fields_passes(self):
+        assert validate_auto_export_settings(**self._base_kwargs(
+            auto_gcs_upload_enabled=True, gcs_bucket="my-bucket",
+            gcs_prefix="brazil")) is None
+
+
+class TestAutoGcsUploadJobsForNewCountryPrefix:
+    def test_upload_jobs_target_new_country_prefix_without_directory_creation(self, tmp_path):
+        # GCS has no real directories — build_upload_plan must produce jobs
+        # for a brand-new country prefix without creating anything locally
+        # beyond the already-exported JSON files.
+        from lovable_gcs_upload import build_upload_plan
+
+        (tmp_path / "companies.list.json").write_text("[]")
+        jobs = build_upload_plan(
+            tmp_path, ["companies.list.json"], "my-bucket",
+            default_gcs_country_prefix("Newlandia", ""), "run1")
+        assert len(jobs) == 2
+        destinations = {job["destination"] for job in jobs}
+        assert "gs://my-bucket/newlandia/current/companies.list.json" in destinations
+        assert (
+            "gs://my-bucket/newlandia/runs/run1/companies.list.json" in destinations)
+
+    def test_no_upload_jobs_when_auto_gcs_upload_disabled(self):
+        # When auto GCS upload is off, the app must not call build_upload_plan
+        # at all — validate_auto_export_settings still passes (GCS fields are
+        # only required once auto_gcs_upload_enabled is True).
+        assert validate_auto_export_settings(
+            auto_export_enabled=True, export_country="Brazil",
+            cold_callers=["Vanessa"], auto_gcs_upload_enabled=False,
+            gcs_bucket="", gcs_prefix="", upload_current=True,
+            upload_archive=True,
+        ) is None
