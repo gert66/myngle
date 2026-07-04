@@ -21,6 +21,12 @@ from export_lead_prioritizer_to_lovable_json import (
     is_technical_reason,
     parse_key_source_links,
     sanitize_caller_facing_evidence,
+    normalize_content_language,
+    should_localize_content,
+    localize_known_label,
+    localize_dutch_text_value,
+    localize_dutch_list,
+    localize_detail_record_for_dutch,
 )
 
 # ---------------------------------------------------------------------------
@@ -1044,3 +1050,275 @@ class TestExportBatchOutputTablesToLovableJson:
         assert manifest_a["rows_exported"] == manifest_b["rows_exported"]
         assert manifest_a["caller_distribution"] == manifest_b["caller_distribution"]
         assert manifest_a["validation_summary"] == manifest_b["validation_summary"]
+
+
+# ---------------------------------------------------------------------------
+# Optional Dutch content localization (demo only)
+# ---------------------------------------------------------------------------
+
+class TestNormalizeContentLanguage:
+    def test_recognizes_english_and_dutch_case_insensitively(self):
+        assert normalize_content_language("English") == "English"
+        assert normalize_content_language("english") == "English"
+        assert normalize_content_language("Dutch") == "Dutch"
+        assert normalize_content_language("dutch") == "Dutch"
+        assert normalize_content_language("  Dutch  ") == "Dutch"
+
+    def test_unknown_or_blank_falls_back_to_english(self):
+        assert normalize_content_language("") == "English"
+        assert normalize_content_language(None) == "English"
+        assert normalize_content_language("French") == "English"
+
+
+class TestShouldLocalizeContent:
+    def test_true_only_for_dutch(self):
+        assert should_localize_content("Dutch") is True
+        assert should_localize_content("dutch") is True
+        assert should_localize_content("English") is False
+        assert should_localize_content("") is False
+        assert should_localize_content(None) is False
+
+
+class TestLocalizeKnownLabel:
+    def test_known_label_translated_for_dutch(self):
+        assert localize_known_label(
+            "Employer branding or employee satisfaction", "Dutch") == (
+            "Employer branding of medewerkerstevredenheid")
+        assert localize_known_label(
+            FOREIGN_HQ_SIGNAL_LABEL, "Dutch") == (
+            "Buitenlands hoofdkantoor of groepsstructuur")
+
+    def test_unknown_label_left_unchanged(self):
+        assert localize_known_label("Some custom label", "Dutch") == "Some custom label"
+
+    def test_english_never_translates(self):
+        assert localize_known_label(
+            "Employer branding or employee satisfaction", "English") == (
+            "Employer branding or employee satisfaction")
+
+    def test_blank_passes_through(self):
+        assert localize_known_label("", "Dutch") == ""
+        assert localize_known_label(None, "Dutch") is None
+
+
+class TestLocalizeDutchTextValue:
+    def test_known_phrase_replaced(self):
+        text, changed = localize_dutch_text_value("Confirmed foreign parent: Acme, HQ Germany.")
+        assert changed is True
+        assert text == "Bevestigd buitenlands moederbedrijf: Acme, hoofdkantoor Germany."
+
+    def test_unmatched_text_left_in_english_no_error(self):
+        text, changed = localize_dutch_text_value("Some free-text sentence with no match.")
+        assert changed is False
+        assert text == "Some free-text sentence with no match."
+
+    def test_blank_or_none_passes_through(self):
+        assert localize_dutch_text_value("") == ("", False)
+        assert localize_dutch_text_value(None) == (None, False)
+
+
+class TestLocalizeDutchList:
+    def test_mixed_known_and_unknown_items(self):
+        values, changed_count = localize_dutch_list([
+            "No obvious caution flags detected.",
+            "Some unrelated custom note.",
+        ])
+        assert values == [
+            "Geen duidelijke aandachtspunten gevonden.",
+            "Some unrelated custom note.",
+        ]
+        assert changed_count == 1
+
+    def test_blank_or_none_passes_through(self):
+        assert localize_dutch_list([]) == ([], 0)
+        assert localize_dutch_list(None) == (None, 0)
+
+
+class TestLocalizeDetailRecordForDutch:
+    def _sample_detail(self) -> dict:
+        return {
+            "company_id": "abc123",
+            "company_name": "Acme Brasil",
+            "domain": "acme.com.br",
+            "commercial_fit_score": 80,
+            "commercial_tier": "A",
+            "why_relevant_app": "Foreign headquarters or group structure detected.",
+            "what_is_hot_app": ["Use this as a warm entry point"],
+            "caution_app": "No obvious caution flags detected.",
+            "source_urls": ["https://acme.com/about"],
+            "evidence_audit": {"raw_google_evidence_count": 1},
+            "debug": {"lead_prioritizer_row": {"foo": "bar"}},
+            "ui_payload": {
+                "why_relevant": "Foreign headquarters or group structure detected.",
+                "what_is_hot": ["Use this as a warm entry point"],
+                "source_urls": ["https://acme.com/about"],
+            },
+            "visible_icp_signal_scores": [
+                {"label": FOREIGN_HQ_SIGNAL_LABEL,
+                 "evidence": "Confirmed foreign parent: Acme, HQ Germany."},
+                {"label": "Some custom label", "evidence": "Custom text."},
+            ],
+        }
+
+    def test_translates_flat_and_nested_fields(self):
+        detail = self._sample_detail()
+        localized, localized_n, unchanged_n = localize_detail_record_for_dutch(detail)
+
+        assert localized["why_relevant_app"] == (
+            "Buitenlands hoofdkantoor of groepsstructuur gedetecteerd.")
+        assert localized["what_is_hot_app"] == ["Gebruik dit als warme opening"]
+        assert localized["caution_app"] == "Geen duidelijke aandachtspunten gevonden."
+        assert localized["ui_payload"]["why_relevant"] == (
+            "Buitenlands hoofdkantoor of groepsstructuur gedetecteerd.")
+        assert localized["ui_payload"]["what_is_hot"] == ["Gebruik dit als warme opening"]
+
+        scores = localized["visible_icp_signal_scores"]
+        assert scores[0]["label"] == "Buitenlands hoofdkantoor of groepsstructuur"
+        assert scores[0]["evidence"] == (
+            "Bevestigd buitenlands moederbedrijf: Acme, hoofdkantoor Germany.")
+        assert scores[1]["label"] == "Some custom label"  # unknown label untouched
+        assert scores[1]["evidence"] == "Custom text."  # no matching phrase
+
+        assert localized_n > 0
+        assert unchanged_n > 0  # the untranslatable entries above
+
+    def test_ids_domain_scores_and_debug_fields_untouched(self):
+        detail = self._sample_detail()
+        localized, _, _ = localize_detail_record_for_dutch(detail)
+
+        assert localized["company_id"] == detail["company_id"]
+        assert localized["company_name"] == detail["company_name"]
+        assert localized["domain"] == detail["domain"]
+        assert localized["commercial_fit_score"] == detail["commercial_fit_score"]
+        assert localized["commercial_tier"] == detail["commercial_tier"]
+        assert localized["source_urls"] == detail["source_urls"]
+        assert localized["evidence_audit"] == detail["evidence_audit"]
+        assert localized["debug"] == detail["debug"]
+
+    def test_does_not_mutate_input_detail(self):
+        detail = self._sample_detail()
+        original_why_relevant = detail["why_relevant_app"]
+        localize_detail_record_for_dutch(detail)
+        assert detail["why_relevant_app"] == original_why_relevant
+
+
+# ---------------------------------------------------------------------------
+# End-to-end: content_language on export_workbook_to_lovable_json
+# ---------------------------------------------------------------------------
+
+def _foreign_hq_row(**overrides) -> dict:
+    row = dict(
+        why_relevant_app="Foreign headquarters or group structure detected.",
+        c5_parent_company="Foreign Group",
+        c5_parent_hq_country="Germany",
+    )
+    row.update(overrides)
+    return enriched_row(**row)
+
+
+class TestContentLanguageEnglishUnchanged:
+    def test_english_is_the_default_and_leaves_text_untouched(self, tmp_path):
+        enriched = [_foreign_hq_row()]
+        manifest, out_dir = run_export(tmp_path, enriched)
+
+        assert manifest["content_language"] == "English"
+        assert manifest["localization"] == {"enabled": False}
+
+        detail = detail_for(out_dir, "Acme Brasil")
+        assert detail["why_relevant_app"] == (
+            "Foreign headquarters or group structure detected.")
+        foreign_row = next(
+            s for s in detail["visible_icp_signal_scores"]
+            if s["label"] == FOREIGN_HQ_SIGNAL_LABEL)
+        assert foreign_row["evidence"] == (
+            "Confirmed foreign parent: Foreign Group, HQ Germany.")
+
+    def test_explicit_english_matches_omitted_default(self, tmp_path):
+        enriched = [_foreign_hq_row()]
+        (tmp_path / "a").mkdir()
+        (tmp_path / "b").mkdir()
+        manifest_default, out_default = run_export(tmp_path / "a", enriched)
+        manifest_explicit, out_explicit = run_export(
+            tmp_path / "b", enriched, content_language="English")
+
+        assert detail_for(out_default, "Acme Brasil") == detail_for(
+            out_explicit, "Acme Brasil")
+        assert manifest_default["content_language"] == manifest_explicit["content_language"]
+
+
+class TestContentLanguageDutch:
+    def test_localizes_known_visible_icp_signal_scores_label(self, tmp_path):
+        enriched = [enriched_row()]
+        signals = [
+            {"source_index": 1, "signal_name": "employer_branding", "signal_score": 2,
+             "evidence_quote": "Recognized as a great place to work by employees."},
+        ]
+        _, out_dir = run_export(tmp_path, enriched, signals=signals,
+                                content_language="Dutch")
+
+        detail = detail_for(out_dir, "Acme Brasil")
+        labels = {s["label"] for s in detail["visible_icp_signal_scores"]}
+        assert "Employer branding of medewerkerstevredenheid" in labels
+        assert "Employer branding or employee satisfaction" not in labels
+
+    def test_localizes_foreign_hq_evidence_text(self, tmp_path):
+        enriched = [_foreign_hq_row()]
+        _, out_dir = run_export(tmp_path, enriched, content_language="Dutch")
+
+        detail = detail_for(out_dir, "Acme Brasil")
+        foreign_row = next(
+            s for s in detail["visible_icp_signal_scores"]
+            if s["label"] == "Buitenlands hoofdkantoor of groepsstructuur")
+        assert foreign_row["evidence"] == (
+            "Bevestigd buitenlands moederbedrijf: Foreign Group, hoofdkantoor Germany.")
+
+    def test_localizes_nested_ui_payload_fields(self, tmp_path):
+        enriched = [_foreign_hq_row()]
+        _, out_dir = run_export(tmp_path, enriched, content_language="Dutch")
+
+        detail = detail_for(out_dir, "Acme Brasil")
+        assert detail["why_relevant_app"] == (
+            "Buitenlands hoofdkantoor of groepsstructuur gedetecteerd.")
+        assert detail["ui_payload"]["why_relevant"] == (
+            "Buitenlands hoofdkantoor of groepsstructuur gedetecteerd.")
+
+    def test_ids_domain_scores_tiers_and_debug_unchanged(self, tmp_path):
+        enriched = [_foreign_hq_row()]
+        (tmp_path / "en").mkdir()
+        (tmp_path / "nl").mkdir()
+        _, out_en = run_export(tmp_path / "en", enriched, content_language="English")
+        _, out_nl = run_export(tmp_path / "nl", enriched, content_language="Dutch")
+
+        item_en = load_list(out_en)[0]
+        item_nl = load_list(out_nl)[0]
+        assert item_en["company_id"] == item_nl["company_id"]
+        assert item_en["domain"] == item_nl["domain"]
+        assert item_en["commercial_fit_score"] == item_nl["commercial_fit_score"]
+        assert item_en["commercial_tier"] == item_nl["commercial_tier"]
+
+        detail_en = detail_for(out_en, "Acme Brasil")
+        detail_nl = detail_for(out_nl, "Acme Brasil")
+        assert detail_en["source_urls"] == detail_nl["source_urls"]
+        assert detail_en["evidence_audit"] == detail_nl["evidence_audit"]
+        assert detail_en["debug"] == detail_nl["debug"]
+
+    def test_manifest_reports_content_language_and_localization_summary(self, tmp_path):
+        enriched = [_foreign_hq_row()]
+        manifest, _ = run_export(tmp_path, enriched, content_language="Dutch")
+
+        assert manifest["content_language"] == "Dutch"
+        localization = manifest["localization"]
+        assert localization["enabled"] is True
+        assert localization["mode"] == "deterministic_demo"
+        assert localization["localized_field_count"] > 0
+        assert "unchanged_field_count" in localization
+
+    def test_unrecognized_language_falls_back_to_english_behavior(self, tmp_path):
+        enriched = [_foreign_hq_row()]
+        manifest, out_dir = run_export(tmp_path, enriched, content_language="French")
+
+        assert manifest["content_language"] == "English"
+        assert manifest["localization"] == {"enabled": False}
+        detail = detail_for(out_dir, "Acme Brasil")
+        assert detail["why_relevant_app"] == (
+            "Foreign headquarters or group structure detected.")

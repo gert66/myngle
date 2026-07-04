@@ -67,6 +67,8 @@ from run_hq_sonnet_adjudication_probe import (
 )
 from export_lead_prioritizer_to_lovable_json import (
     export_batch_output_tables_to_lovable_json,
+    SUPPORTED_CONTENT_LANGUAGES,
+    DEFAULT_CONTENT_LANGUAGE,
 )
 from lovable_gcs_upload import (
     DEFAULT_GCS_BUCKET,
@@ -712,6 +714,11 @@ def build_chunk_detail_line(chunk: dict) -> str:
 
 DEFAULT_COLD_CALLERS_TEXT = "Vanessa, Francesca, Lorenzo, Matteo"
 
+LOVABLE_CONTENT_LANGUAGE_HELP_TEXT = (
+    "Demo option. Only caller-facing JSON text values are localized. "
+    "Scores, IDs, URLs and audit fields stay unchanged."
+)
+
 # Run modes whose whole point is "only confirmed foreign-HQ rows get full
 # enrichment" — the Lovable export's foreign-HQ-only toggle defaults to True
 # for these, and False for every other run mode.
@@ -1137,6 +1144,7 @@ def main() -> None:  # pragma: no cover - exercised only under `streamlit run`
     auto_lovable_callers_raw = DEFAULT_COLD_CALLERS_TEXT
     auto_foreign_hq_only = default_foreign_hq_only_export(run_mode)
     auto_bucket_size = 500
+    auto_content_language = DEFAULT_CONTENT_LANGUAGE
     auto_lovable_base_dir = ""
     auto_gcs_upload_enabled = False
     auto_gcs_bucket = ""
@@ -1168,6 +1176,12 @@ def main() -> None:  # pragma: no cover - exercised only under `streamlit run`
         auto_bucket_size = ae4.number_input(
             "Bucket size", min_value=1, value=500, step=50,
             key="auto_lovable_bucket_size")
+
+        auto_content_language = st.selectbox(
+            "Lovable content language", list(SUPPORTED_CONTENT_LANGUAGES),
+            index=list(SUPPORTED_CONTENT_LANGUAGES).index(DEFAULT_CONTENT_LANGUAGE),
+            key="auto_lovable_content_language",
+            help=LOVABLE_CONTENT_LANGUAGE_HELP_TEXT)
 
         auto_lovable_base_dir = st.text_input(
             "Local Lovable output folder (base)",
@@ -1578,6 +1592,7 @@ def main() -> None:  # pragma: no cover - exercised only under `streamlit run`
                         auto_cold_callers,
                         foreign_hq_only=auto_foreign_hq_only,
                         bucket_size=int(auto_bucket_size),
+                        content_language=auto_content_language,
                     )
                 st.session_state["auto_lovable_manifest"] = auto_manifest
                 st.session_state["auto_lovable_manifest_output_dir"] = auto_export_dir
@@ -1760,6 +1775,12 @@ def main() -> None:  # pragma: no cover - exercised only under `streamlit run`
         lovable_bucket_size = lc4.number_input(
             "Bucket size", min_value=1, value=500, step=50, key="lovable_bucket_size")
 
+        lovable_content_language = st.selectbox(
+            "Lovable content language", list(SUPPORTED_CONTENT_LANGUAGES),
+            index=list(SUPPORTED_CONTENT_LANGUAGES).index(DEFAULT_CONTENT_LANGUAGE),
+            key="lovable_content_language",
+            help=LOVABLE_CONTENT_LANGUAGE_HELP_TEXT)
+
         lovable_output_dir = st.text_input(
             "Local output folder",
             value=default_lovable_output_folder(lovable_export_country, _dl_timestamp),
@@ -1779,6 +1800,7 @@ def main() -> None:  # pragma: no cover - exercised only under `streamlit run`
                             cold_callers,
                             foreign_hq_only=lovable_foreign_hq_only,
                             bucket_size=int(lovable_bucket_size),
+                            content_language=lovable_content_language,
                         )
                     st.session_state["lovable_manifest"] = manifest
                     st.session_state["lovable_manifest_output_dir"] = lovable_output_dir

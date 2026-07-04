@@ -29,6 +29,8 @@ import streamlit as st
 from export_lead_prioritizer_to_lovable_json import (
     LovableExportError,
     export_workbook_to_lovable_json,
+    SUPPORTED_CONTENT_LANGUAGES,
+    DEFAULT_CONTENT_LANGUAGE,
 )
 from lovable_gcs_upload import (
     DEFAULT_GCS_BUCKET,
@@ -269,6 +271,12 @@ def main() -> None:
     bucket_size = st.number_input(
         "Detail bucket size", min_value=50, max_value=5000, value=500, step=50)
 
+    content_language = st.selectbox(
+        "Lovable content language", list(SUPPORTED_CONTENT_LANGUAGES),
+        index=list(SUPPORTED_CONTENT_LANGUAGES).index(DEFAULT_CONTENT_LANGUAGE),
+        help="Demo option. Only caller-facing JSON text values are "
+             "localized. Scores, IDs, URLs and audit fields stay unchanged.")
+
     # ── Output location ──────────────────────────────────────────────────────
     source_folder_text = st.text_input(
         "Input/source folder for JSON export", value="",
@@ -325,6 +333,7 @@ def main() -> None:
                     include_skipped=include_skipped,
                     foreign_hq_only=foreign_hq_only,
                     bucket_size=int(bucket_size),
+                    content_language=content_language,
                 )
         except LovableExportError as exc:
             st.error(f"Export failed: {exc}")
