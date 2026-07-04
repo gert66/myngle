@@ -570,15 +570,45 @@ _CONSUMED_COLUMNS = {
 }
 
 
+# Input-column aliases for industry/sector, tried in this order. Every real
+# input-column alias is tried BEFORE "detected_industry" (v2 sector
+# detection), so a usable input industry is never overwritten by the
+# detector — detected_industry is purely a last-resort fallback.
+_INDUSTRY_COLUMN_ALIASES: tuple[str, ...] = (
+    "industry", "Industry",
+    "sector", "Sector",
+    "industry_name", "Industry Name",
+    "company_industry", "Company Industry",
+    "main_industry", "Main Industry", "main industry",
+    "lusha_industry", "Lusha Industry", "Lusha industry",
+    "detected_industry",
+)
+
+# Placeholder values that mean "no usable industry" — checked case-insensitively.
+_UNUSABLE_INDUSTRY_VALUES: frozenset = frozenset({"unknown", "n/a", "na", "none", "nan"})
+
+
+def _first_non_unknown(row: dict, columns) -> tuple[str | None, str | None]:
+    """``(value, source_column)`` for the first usable value across ``columns``.
+
+    Returns ``(None, None)`` when nothing usable is found. "Usable" excludes
+    blank/whitespace-only strings and common placeholder text in any casing
+    ("Unknown", "N/A", "None", "nan") — ``clean_str`` already collapses blank/
+    NaN/"none"/"nan" to ``None``; this adds "unknown" and "n/a" on top.
+    """
+    for column in columns:
+        value = clean_str(row.get(column))
+        if value and value.strip().lower() not in _UNUSABLE_INDUSTRY_VALUES:
+            return value, column
+    return None, None
+
+
 def _resolve_industry(row: dict) -> str:
     """Best usable industry: keep the input value when present, otherwise fall
-    back to v2 sector detection, then legacy firmographics, then "Unknown".
-    Never overwrites a user-provided industry."""
-    for column in ("industry", "detected_industry", "lusha_industry", "main_industry"):
-        value = clean_str(row.get(column))
-        if value and value.lower() != "unknown":
-            return value
-    return "Unknown"
+    back to v2 sector detection, then "Unknown". Never overwrites a usable
+    input industry with detected_industry."""
+    value, _source = _first_non_unknown(row, _INDUSTRY_COLUMN_ALIASES)
+    return value or "Unknown"
 
 
 def _build_list_item(row: dict, company_id: str, export_country: str,
@@ -948,6 +978,13 @@ def export_workbook_to_lovable_json(
     exported_rows: list[tuple[dict, dict]] = []
     caller_distribution = {caller: 0 for caller in cold_callers}
 
+    # Audit-only diagnostics for industry/sector resolution (never affects the
+    # exported schema) — which input-column alias supplied the industry, or
+    # "Unknown" when none did.
+    industry_unknown_count = 0
+    industry_known_count = 0
+    industry_source_counts: dict[str, int] = {}
+
     for rank, (row, detected, reason) in enumerate(selected, start=1):
         caller = cold_callers[(rank - 1) % len(cold_callers)]
         caller_distribution[caller] += 1
@@ -956,6 +993,14 @@ def export_workbook_to_lovable_json(
                                 detected, reason, now_iso)
         item["assigned_cold_caller"] = caller
         item["assigned_cold_caller_rank"] = rank
+
+        _, industry_source = _first_non_unknown(row, _INDUSTRY_COLUMN_ALIASES)
+        if industry_source is None:
+            industry_unknown_count += 1
+        else:
+            industry_known_count += 1
+            industry_source_counts[industry_source] = (
+                industry_source_counts.get(industry_source, 0) + 1)
 
         idx = normalize_source_index(row.get("source_index"))
         detail = _build_detail_record(
@@ -1018,6 +1063,11 @@ def export_workbook_to_lovable_json(
         "source_sheets_found": sheets_found,
         "warnings": warnings,
         "validation_summary": validation_summary,
+        "industry_resolution_summary": {
+            "unknown_count": industry_unknown_count,
+            "known_count": industry_known_count,
+            "source_counts": industry_source_counts,
+        },
         "output_files": output_files,
     }
 

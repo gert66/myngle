@@ -654,6 +654,57 @@ def test_industry_falls_back_to_lusha_then_unknown(tmp_path):
     assert by_name["Beta Ltd"]["industry"] == "Unknown"
 
 
+def test_sector_alias_column_is_used(tmp_path):
+    enriched = [enriched_row(industry="", **{"Sector": "Retail"})]
+    _, out_dir = run_export(tmp_path, enriched)
+
+    item = load_list(out_dir)[0]
+    assert item["industry"] == "Retail"
+
+
+def test_lusha_industry_alias_with_space_and_casing_is_used(tmp_path):
+    enriched = [enriched_row(industry="", **{"Lusha Industry": "Insurance"})]
+    _, out_dir = run_export(tmp_path, enriched)
+
+    item = load_list(out_dir)[0]
+    assert item["industry"] == "Insurance"
+
+
+@pytest.mark.parametrize("placeholder", ["Unknown", "unknown", "N/A", "n/a",
+                                         "None", "none", "nan", "", "   "])
+def test_placeholder_industry_values_are_skipped(tmp_path, placeholder):
+    enriched = [enriched_row(industry=placeholder, detected_industry="Consumer goods")]
+    _, out_dir = run_export(tmp_path, enriched)
+
+    item = load_list(out_dir)[0]
+    assert item["industry"] == "Consumer goods"
+
+
+def test_fallback_stays_unknown_when_nothing_usable(tmp_path):
+    enriched = [enriched_row(industry="N/A", detected_industry="none",
+                             lusha_industry="", main_industry="Unknown")]
+    _, out_dir = run_export(tmp_path, enriched)
+
+    item = load_list(out_dir)[0]
+    assert item["industry"] == "Unknown"
+
+
+def test_industry_resolution_summary_in_manifest(tmp_path):
+    enriched = [
+        enriched_row(source_index=1, industry="Manufacturing"),
+        enriched_row(source_index=2, company_name="Beta Ltd", domain="beta.com",
+                     industry="", **{"Sector": "Retail"}),
+        enriched_row(source_index=3, company_name="Gamma Ltd", domain="gamma.com",
+                     industry="", detected_industry=""),
+    ]
+    manifest, _ = run_export(tmp_path, enriched)
+
+    summary = manifest["industry_resolution_summary"]
+    assert summary["known_count"] == 2
+    assert summary["unknown_count"] == 1
+    assert summary["source_counts"] == {"industry": 1, "Sector": 1}
+
+
 def test_detail_exposes_detected_sector_fields(tmp_path):
     enriched = [enriched_row(
         industry="",
