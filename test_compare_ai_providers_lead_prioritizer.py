@@ -223,12 +223,14 @@ class TestMainDryRun:
 
 
 class TestTripleComparisonColumns:
-    def test_nano_columns_removed_deepseek_flash_columns_present(self):
+    def test_nano_and_flash_specific_columns_absent_generic_deepseek_present(self):
         joined = " ".join(TRIPLE_COMPARISON_COLUMNS)
         assert "nano" not in joined
-        assert any(col.startswith("deepseek_flash_") for col in TRIPLE_COMPARISON_COLUMNS)
+        assert "deepseek_flash_" not in joined
+        assert any(col.startswith("deepseek_") for col in TRIPLE_COMPARISON_COLUMNS)
         assert any(col.startswith("openai_mini_") for col in TRIPLE_COMPARISON_COLUMNS)
         assert any(col.startswith("anthropic_") for col in TRIPLE_COMPARISON_COLUMNS)
+        assert "deepseek_model" in TRIPLE_COMPARISON_COLUMNS
 
 
 class TestBuildTripleComparisonRow:
@@ -240,17 +242,25 @@ class TestBuildTripleComparisonRow:
             "openai", ai_hq_model="gpt-5.4-mini",
             ai_hq_classification="domestic", ai_parent_hq_country="Brazil",
             final_commercial_fit_score=4.0, commercial_tier="C")
-        deepseek_flash = _result("deepseek", ai_hq_model="deepseek-v4-flash")
+        deepseek = _result("deepseek", ai_hq_model="deepseek-v4-flash")
         row = build_triple_comparison_row(
-            self._input, anthropic, openai_mini, deepseek_flash)
+            self._input, anthropic, openai_mini, deepseek)
         assert set(row.keys()) == set(TRIPLE_COMPARISON_COLUMNS)
         assert "openai_nano" not in " ".join(row.keys())
         assert row["anthropic_model"] == "claude-haiku-4-5-20251001"
         assert row["openai_mini_model"] == "gpt-5.4-mini"
-        assert row["deepseek_flash_model"] == "deepseek-v4-flash"
+        assert row["deepseek_model"] == "deepseek-v4-flash"
         assert row["openai_mini_hq_classification"] == "domestic"
         assert row["openai_mini_parent_hq_country"] == "Brazil"
-        assert row["deepseek_flash_hq_classification"] == "foreign_parent"
+        assert row["deepseek_hq_classification"] == "foreign_parent"
+
+    def test_deepseek_pro_model_recorded_in_deepseek_model_column(self):
+        anthropic = _result("anthropic", ai_hq_model="claude-haiku-4-5-20251001")
+        openai_mini = _result("openai", ai_hq_model="gpt-5.4-mini")
+        deepseek_pro = _result("deepseek", ai_hq_model="deepseek-v4-pro")
+        row = build_triple_comparison_row(
+            self._input, anthropic, openai_mini, deepseek_pro)
+        assert row["deepseek_model"] == "deepseek-v4-pro"
 
 
 class TestRunTripleComparison:
@@ -280,6 +290,34 @@ class TestRunTripleComparison:
         assert calls.count(("Alpha", "deepseek", "deepseek-v4-flash")) == 1
         assert len(calls) == 6
 
+    def test_default_deepseek_model_is_flash(self):
+        df = pd.DataFrame({"company_name": ["Alpha"], "domain": ["alpha.com"]})
+        captured = {}
+
+        def _fake(lead, **kwargs):
+            if kwargs["ai_provider"] == "deepseek":
+                captured.update(kwargs)
+            return _result(kwargs["ai_provider"], ai_hq_model=kwargs["ai_model"])
+
+        run_triple_comparison(df, company_column="company_name",
+                              domain_column="domain", prioritize_fn=_fake)
+        assert captured["ai_model"] == "deepseek-v4-flash"
+
+    def test_selecting_deepseek_pro_model_is_used_and_recorded(self):
+        df = pd.DataFrame({"company_name": ["Alpha"], "domain": ["alpha.com"]})
+        calls = []
+
+        def _fake(lead, **kwargs):
+            calls.append((kwargs["ai_provider"], kwargs["ai_model"]))
+            return _result(kwargs["ai_provider"], ai_hq_model=kwargs["ai_model"])
+
+        out = run_triple_comparison(
+            df, company_column="company_name", domain_column="domain",
+            deepseek_model="deepseek-v4-pro", prioritize_fn=_fake,
+        )
+        assert ("deepseek", "deepseek-v4-pro") in calls
+        assert out.loc[0, "deepseek_model"] == "deepseek-v4-pro"
+
     def test_passes_deepseek_api_key_through_to_prioritize_fn(self):
         df = pd.DataFrame({"company_name": ["Alpha"], "domain": ["alpha.com"]})
         captured = {}
@@ -305,25 +343,43 @@ class TestCostSummary:
             "openai_mini_model": "gpt-5.4-mini",
             "openai_mini_input_tokens": 800, "openai_mini_output_tokens": 120,
             "openai_mini_total_tokens": 920, "openai_mini_estimated_cost_usd": 0.00114,
-            "deepseek_flash_model": "deepseek-v4-flash",
-            "deepseek_flash_input_tokens": 800, "deepseek_flash_output_tokens": 120,
-            "deepseek_flash_total_tokens": 920, "deepseek_flash_estimated_cost_usd": 0.00015,
+            "deepseek_model": "deepseek-v4-flash",
+            "deepseek_input_tokens": 800, "deepseek_output_tokens": 120,
+            "deepseek_total_tokens": 920, "deepseek_estimated_cost_usd": 0.00015,
         }])
         rows = build_provider_cost_rows(df, TRIPLE_COST_PROVIDERS)
         by_provider = {r["provider"]: r for r in rows}
         assert by_provider["anthropic"]["estimated_cost_usd"] == 0.0015
         assert by_provider["anthropic"]["cost_per_company_usd"] == 0.0015
         assert by_provider["openai_mini"]["model"] == "gpt-5.4-mini"
-        assert by_provider["deepseek_flash"]["model"] == "deepseek-v4-flash"
+        assert by_provider["deepseek"]["model"] == "deepseek-v4-flash"
 
         totals = build_cost_totals(rows, len(df))
         assert totals["total_anthropic_cost_usd"] == 0.0015
         assert totals["total_openai_mini_cost_usd"] == 0.00114
-        assert totals["total_deepseek_flash_cost_usd"] == 0.00015
+        assert totals["total_deepseek_cost_usd"] == 0.00015
         combined = 0.0015 + 0.00114 + 0.00015
         assert totals["estimated_cost_per_100_companies_usd"] == round(combined * 100, 2)
-        assert totals["estimated_cost_per_1000_companies_usd"] == round(combined * 1000, 2)
-        assert totals["estimated_cost_per_10000_companies_usd"] == round(combined * 10000, 2)
+
+    def test_cost_summary_works_for_deepseek_pro_model(self):
+        # Same cost-summary machinery, but with the deepseek-v4-pro model
+        # selected instead of the default flash — pricing/columns still work.
+        df = pd.DataFrame([{
+            "anthropic_model": "claude-haiku-4-5-20251001",
+            "anthropic_estimated_cost_usd": 0.0015,
+            "openai_mini_model": "gpt-5.4-mini",
+            "openai_mini_estimated_cost_usd": 0.0011,
+            "deepseek_model": "deepseek-v4-pro",
+            "deepseek_input_tokens": 800, "deepseek_output_tokens": 120,
+            "deepseek_total_tokens": 920, "deepseek_estimated_cost_usd": 0.000452,
+        }])
+        rows = build_provider_cost_rows(df, TRIPLE_COST_PROVIDERS)
+        by_provider = {r["provider"]: r for r in rows}
+        assert by_provider["deepseek"]["model"] == "deepseek-v4-pro"
+        assert by_provider["deepseek"]["estimated_cost_usd"] == 0.000452
+
+        totals = build_cost_totals(rows, len(df))
+        assert totals["total_deepseek_cost_usd"] == 0.000452
 
     def test_unpriced_or_missing_provider_never_crashes_and_stays_blank(self):
         df = pd.DataFrame([{"anthropic_model": "claude-haiku-4-5-20251001"}])

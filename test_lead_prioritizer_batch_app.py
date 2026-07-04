@@ -973,11 +973,11 @@ class TestCostSummaryDataframe:
             "anthropic_estimated_cost_usd": 0.0015,
             "openai_mini_model": "gpt-5.4-mini",
             "openai_mini_estimated_cost_usd": 0.0011,
-            "deepseek_flash_model": "deepseek-v4-flash",
-            "deepseek_flash_estimated_cost_usd": 0.0002,
+            "deepseek_model": "deepseek-v4-flash",
+            "deepseek_estimated_cost_usd": 0.0002,
         }])
         out = build_cost_summary_dataframe(df, TRIPLE_COST_PROVIDERS)
-        assert list(out["provider"]) == ["anthropic", "openai_mini", "deepseek_flash"]
+        assert list(out["provider"]) == ["anthropic", "openai_mini", "deepseek"]
         assert out.loc[0, "estimated_cost_usd"] == 0.0015
 
 

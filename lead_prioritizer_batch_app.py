@@ -44,6 +44,7 @@ from lead_hq_ai_interpreter import (
     DEFAULT_OPENAI_MODEL,
     SUPPORTED_OPENAI_MODELS,
     DEFAULT_DEEPSEEK_MODEL,
+    SUPPORTED_DEEPSEEK_MODELS,
 )
 from compare_ai_providers_lead_prioritizer import (
     run_comparison,
@@ -149,13 +150,13 @@ AI_PROVIDER_LABELS: list[str] = [
     "Anthropic only (default)",
     "OpenAI only (experimental)",
     "Compare Anthropic vs OpenAI (experimental)",
-    "Compare Anthropic vs OpenAI mini vs DeepSeek flash (experimental)",
+    "Compare Anthropic vs OpenAI mini vs DeepSeek (experimental)",
 ]
 _AI_PROVIDER_LABEL_TO_MODE: dict[str, str] = {
     "Anthropic only (default)": "anthropic",
     "OpenAI only (experimental)": "openai",
     "Compare Anthropic vs OpenAI (experimental)": "compare",
-    "Compare Anthropic vs OpenAI mini vs DeepSeek flash (experimental)": "compare_triple",
+    "Compare Anthropic vs OpenAI mini vs DeepSeek (experimental)": "compare_triple",
 }
 
 COMPARE_MODE_WARNING_TEXT = (
@@ -166,7 +167,7 @@ COMPARE_MODE_WARNING_TEXT = (
 
 COMPARE_TRIPLE_MODE_WARNING_TEXT = (
     "EXPERIMENTAL: this mode runs every selected row THREE times — Anthropic, "
-    "OpenAI mini, and DeepSeek flash — tripling AI calls and cost. "
+    "OpenAI mini, and DeepSeek — tripling AI calls and cost. "
     "Recommended row limit: 5-10 rows."
 )
 
@@ -186,8 +187,8 @@ _OPENAI_KEY_MISSING_TEXT = (
 )
 _DEEPSEEK_KEY_MISSING_TEXT = (
     "DEEPSEEK_API_KEY is missing. Set it in .streamlit/secrets.toml or the "
-    "environment to use the \"Compare Anthropic vs OpenAI mini vs DeepSeek "
-    "flash\" option."
+    "environment to use the \"Compare Anthropic vs OpenAI mini vs DeepSeek\" "
+    "option."
 )
 
 
@@ -902,7 +903,7 @@ def main() -> None:  # pragma: no cover - exercised only under `streamlit run`
                  "experimental OpenAI provider)")
         st.write(f"{_DEEPSEEK_KEY_NAME}:",
                  "✅ set" if deepseek_key else "➖ not set (only needed for the "
-                 "\"Compare Anthropic vs OpenAI mini vs DeepSeek flash\" option)")
+                 "\"Compare Anthropic vs OpenAI mini vs DeepSeek\" option)")
         st.caption(
             "Local secrets in `.streamlit/secrets.toml`, or environment "
             "variables. Key values are never shown or written to output."
@@ -988,11 +989,12 @@ def main() -> None:  # pragma: no cover - exercised only under `streamlit run`
     provider_label = st.selectbox(
         "AI provider for HQ interpretation", AI_PROVIDER_LABELS, index=0,
         help="Anthropic only is the production default. The OpenAI and "
-             "compare options (including the OpenAI-mini-vs-DeepSeek-flash "
+             "compare options (including the OpenAI-mini-vs-DeepSeek "
              "triple compare) are experimental and only available for the "
              "standard batch modes without C5.")
     ai_provider_mode = ai_provider_label_to_mode(provider_label)
     openai_model = DEFAULT_OPENAI_MODEL
+    deepseek_model = DEFAULT_DEEPSEEK_MODEL
     if ai_provider_mode in ("openai", "compare"):
         # Two-way compare now defaults to OpenAI mini (nano returned too many
         # unclear cases in real-company testing); "OpenAI only" keeps its own
@@ -1006,8 +1008,13 @@ def main() -> None:  # pragma: no cover - exercised only under `streamlit run`
         st.warning(COMPARE_MODE_WARNING_TEXT)
     if ai_provider_mode == "compare_triple":
         st.caption(
-            f"Fixed models for this mode: OpenAI mini = **{DEFAULT_OPENAI_MINI_MODEL}**, "
-            f"DeepSeek flash = **{DEFAULT_DEEPSEEK_MODEL}**.")
+            f"Fixed OpenAI model for this mode: OpenAI mini = "
+            f"**{DEFAULT_OPENAI_MINI_MODEL}**.")
+        deepseek_model = st.selectbox(
+            "DeepSeek model", list(SUPPORTED_DEEPSEEK_MODELS),
+            index=list(SUPPORTED_DEEPSEEK_MODELS).index(DEFAULT_DEEPSEEK_MODEL),
+            help="deepseek-v4-flash is cheaper; deepseek-v4-pro is being "
+                 "tested for better quality on unclear/blank cases.")
         st.warning(COMPARE_TRIPLE_MODE_WARNING_TEXT)
 
     # ── Row controls ──────────────────────────────────────────────────────────
@@ -1260,7 +1267,7 @@ def main() -> None:  # pragma: no cover - exercised only under `streamlit run`
                         country_column=input_country_column or "",
                         default_input_country=default_country,
                         openai_mini_model=DEFAULT_OPENAI_MINI_MODEL,
-                        deepseek_model=DEFAULT_DEEPSEEK_MODEL,
+                        deepseek_model=deepseek_model,
                         serper_api_key=serper,
                         anthropic_api_key=anthropic,
                         openai_api_key=openai_key,
