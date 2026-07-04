@@ -30,6 +30,7 @@ from lead_prioritizer_batch_core import (
     run_batch_foreign_hq_only,
     run_batch_non_english_foreign_hq_only,
     run_batch_dataframe_parallel,
+    select_batch_rows,
     FOREIGN_HQ_ONLY_MODE,
     NON_ENGLISH_FOREIGN_HQ_ONLY_MODE,
     MAX_PARALLEL_WORKERS,
@@ -39,6 +40,11 @@ from lead_prioritizer_batch_core import (
     C5_SCORING_BEHAVIORS,
     C5_SCOPES,
 )
+from lead_hq_ai_interpreter import (
+    DEFAULT_OPENAI_MODEL,
+    SUPPORTED_OPENAI_MODELS,
+)
+from compare_ai_providers_lead_prioritizer import run_comparison
 
 from lead_hq_sonnet_adjudicator import (
     DEFAULT_SONNET_ADJUDICATION_MODEL,
@@ -117,6 +123,95 @@ DEFAULT_COUNTRY_REQUIRED_MESSAGE = "Please select a default input country before
 
 _SERPER_KEY_NAME = "SERPER_API_KEY"
 _ANTHROPIC_KEY_NAME = "ANTHROPIC_API_KEY"
+_OPENAI_KEY_NAME = "OPENAI_API_KEY"
+
+# Experimental AI-provider selection for HQ interpretation. The first label is
+# the default and preserves the existing Anthropic-only behavior exactly.
+AI_PROVIDER_LABELS: list[str] = [
+    "Anthropic only (default)",
+    "OpenAI only (experimental)",
+    "Compare Anthropic vs OpenAI (experimental)",
+]
+_AI_PROVIDER_LABEL_TO_MODE: dict[str, str] = {
+    "Anthropic only (default)": "anthropic",
+    "OpenAI only (experimental)": "openai",
+    "Compare Anthropic vs OpenAI (experimental)": "compare",
+}
+
+COMPARE_MODE_WARNING_TEXT = (
+    "EXPERIMENTAL: compare mode runs every selected row TWICE — once with "
+    "Anthropic and once with OpenAI — doubling AI calls and cost. "
+    "Recommended row limit: 5-10 rows."
+)
+
+_EXPERIMENTAL_PROVIDER_MODE_BLOCK_TEXT = (
+    "The experimental OpenAI/compare provider options are only available for "
+    "the standard batch modes for now. Foreign-HQ-only modes stay "
+    "Anthropic-only; switch the run mode or select \"Anthropic only\"."
+)
+_EXPERIMENTAL_PROVIDER_C5_BLOCK_TEXT = (
+    "The experimental OpenAI/compare provider options are not available "
+    "together with C5 Sonnet adjudication yet. Disable C5 or select "
+    "\"Anthropic only\"."
+)
+_OPENAI_KEY_MISSING_TEXT = (
+    "OPENAI_API_KEY is missing. Set it in .streamlit/secrets.toml or the "
+    "environment to use the experimental OpenAI provider options."
+)
+
+
+def ai_provider_label_to_mode(label: str) -> str:
+    """Map an AI-provider UI label to "anthropic" | "openai" | "compare"."""
+    try:
+        return _AI_PROVIDER_LABEL_TO_MODE[label]
+    except KeyError:
+        raise ValueError(f"Unknown AI provider label: {label!r}")
+
+
+def validate_ai_provider_run(
+    provider_mode: str,
+    run_mode: str,
+    c5_enabled: bool,
+    openai_api_key: str,
+) -> Optional[str]:
+    """Validate an experimental provider selection against the run settings.
+
+    Returns a user-facing error message when the run must be blocked, or
+    ``None`` when the run may proceed. "anthropic" is always allowed — the
+    existing SERPER/ANTHROPIC key handling stays authoritative for it.
+    """
+    if provider_mode == "anthropic":
+        return None
+    if provider_mode not in ("openai", "compare"):
+        return f"Unknown AI provider mode: {provider_mode!r}"
+    if run_mode in (FOREIGN_HQ_ONLY_MODE, NON_ENGLISH_FOREIGN_HQ_ONLY_MODE):
+        return _EXPERIMENTAL_PROVIDER_MODE_BLOCK_TEXT
+    if c5_enabled:
+        return _EXPERIMENTAL_PROVIDER_C5_BLOCK_TEXT
+    if not openai_api_key:
+        return _OPENAI_KEY_MISSING_TEXT
+    return None
+
+
+def build_provider_comparison_workbook_bytes(comparison_df) -> bytes:
+    """Write the provider-comparison DataFrame to xlsx bytes (one sheet)."""
+    import io
+
+    import pandas as _pd
+
+    buf = io.BytesIO()
+    with _pd.ExcelWriter(buf, engine="openpyxl") as writer:
+        comparison_df.to_excel(writer, sheet_name="Provider Comparison", index=False)
+    buf.seek(0)
+    return buf.getvalue()
+
+
+def build_comparison_download_filename(timestamp) -> str:
+    """Download name for a provider-comparison workbook."""
+    return (
+        "lead_prioritizer_provider_comparison_"
+        f"{timestamp.strftime('%Y%m%d_%H%M%S')}.xlsx"
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -645,10 +740,14 @@ def main() -> None:  # pragma: no cover - exercised only under `streamlit run`
     # ── API keys ──────────────────────────────────────────────────────────────
     serper = get_secret_or_env(_SERPER_KEY_NAME)
     anthropic = get_secret_or_env(_ANTHROPIC_KEY_NAME)
+    openai_key = get_secret_or_env(_OPENAI_KEY_NAME)
     with st.sidebar:
         st.header("API keys (secrets or environment)")
         st.write(f"{_SERPER_KEY_NAME}:", "✅ set" if serper else "❌ missing")
         st.write(f"{_ANTHROPIC_KEY_NAME}:", "✅ set" if anthropic else "❌ missing")
+        st.write(f"{_OPENAI_KEY_NAME}:",
+                 "✅ set" if openai_key else "➖ not set (only needed for the "
+                 "experimental OpenAI provider)")
         st.caption(
             "Local secrets in `.streamlit/secrets.toml`, or environment "
             "variables. Key values are never shown or written to output."
@@ -728,6 +827,22 @@ def main() -> None:  # pragma: no cover - exercised only under `streamlit run`
         st.caption(FOREIGN_HQ_ONLY_HELP_TEXT)
     elif run_mode == NON_ENGLISH_FOREIGN_HQ_ONLY_MODE:
         st.caption(NON_ENGLISH_FOREIGN_HQ_ONLY_HELP_TEXT)
+
+    # ── AI provider (experimental) ────────────────────────────────────────────
+    st.subheader("AI provider")
+    provider_label = st.selectbox(
+        "AI provider for HQ interpretation", AI_PROVIDER_LABELS, index=0,
+        help="Anthropic only is the production default. The OpenAI and "
+             "compare options are experimental and only available for the "
+             "standard batch modes without C5.")
+    ai_provider_mode = ai_provider_label_to_mode(provider_label)
+    openai_model = DEFAULT_OPENAI_MODEL
+    if ai_provider_mode in ("openai", "compare"):
+        openai_model = st.selectbox(
+            "OpenAI model", list(SUPPORTED_OPENAI_MODELS),
+            index=list(SUPPORTED_OPENAI_MODELS).index(DEFAULT_OPENAI_MODEL))
+    if ai_provider_mode == "compare":
+        st.warning(COMPARE_MODE_WARNING_TEXT)
 
     # ── Row controls ──────────────────────────────────────────────────────────
     st.subheader("Rows")
@@ -826,8 +941,14 @@ def main() -> None:  # pragma: no cover - exercised only under `streamlit run`
         if c5_block_reason:
             st.error(c5_block_reason)
 
+    ai_provider_error = validate_ai_provider_run(
+        ai_provider_mode, run_mode, c5_enabled, openai_key)
+    if ai_provider_error:
+        st.error(ai_provider_error)
+
     run_disabled = (not keys_ok) or (not big_run_ok) or selected_count == 0 \
-        or bool(c5_block_reason) or bool(default_country_error)
+        or bool(c5_block_reason) or bool(default_country_error) \
+        or bool(ai_provider_error)
 
     # ── Run ─────────────────────────────────────────────────────────────────
     st.caption(RUN_BUTTON_NOTE_TEXT)
@@ -845,8 +966,46 @@ def main() -> None:  # pragma: no cover - exercised only under `streamlit run`
             row_limit=int(row_limit),
             continue_on_error=not stop_on_error,
             include_raw_ai_json=include_raw_ai_json,
+            # "compare" runs its own dedicated path below; the config itself
+            # stays anthropic unless OpenAI-only was explicitly selected.
+            ai_provider="openai" if ai_provider_mode == "openai" else "anthropic",
+            ai_model=openai_model if ai_provider_mode == "openai" else "",
         )
         import time as _time
+
+        # ── Experimental provider comparison (dedicated small-run path) ───────
+        if ai_provider_mode == "compare":
+            selected_rows_df = select_batch_rows(df, config)
+            run_timestamp = _dt.now()
+            with st.spinner(
+                f"Comparing providers on {len(selected_rows_df)} row(s) — "
+                "each row runs twice..."
+            ):
+                comparison_df = run_comparison(
+                    selected_rows_df,
+                    company_column=company_col,
+                    domain_column=domain_col,
+                    country_column=input_country_column or "",
+                    default_input_country=default_country,
+                    openai_model=openai_model,
+                    serper_api_key=serper,
+                    anthropic_api_key=anthropic,
+                    openai_api_key=openai_key,
+                )
+            matches = int(comparison_df["classification_match"].sum())
+            st.success(
+                f"Compared {len(comparison_df)} row(s) across both providers. "
+                f"Classification matches: {matches}/{len(comparison_df)}."
+            )
+            st.dataframe(comparison_df, use_container_width=True)
+            st.download_button(
+                "Download provider comparison workbook",
+                data=build_provider_comparison_workbook_bytes(comparison_df),
+                file_name=build_comparison_download_filename(run_timestamp),
+                mime=("application/vnd.openxmlformats-officedocument"
+                      ".spreadsheetml.sheet"),
+            )
+            return
 
         progress_bar = st.progress(0.0)
         status = st.empty()
@@ -928,6 +1087,7 @@ def main() -> None:  # pragma: no cover - exercised only under `streamlit run`
                     c5_scope=c5_scope,
                     c5_model_used=c5_model_used,
                     c5_model_tier=c5_model_tier,
+                    openai_api_key=openai_key,
                     progress_callback=_on_chunk_progress,
                     chunk_result_callback=_save_chunk if run_dir is not None else None,
                 )
@@ -977,7 +1137,9 @@ def main() -> None:  # pragma: no cover - exercised only under `streamlit run`
         else:
             with st.spinner("Running batch enrichment..."):
                 tables = run_batch_dataframe(
-                    df, config, serper, anthropic, progress_callback=_on_progress)
+                    df, config, serper, anthropic,
+                    progress_callback=_on_progress,
+                    openai_api_key=openai_key)
 
             progress_bar.progress(1.0)
 

@@ -1927,3 +1927,81 @@ class TestNonEnglishForeignHqExportBuckets:
         assert summary["high_priority_manual_review_count"] == 0
         assert summary["medium_priority_manual_review_count"] == 0
         assert summary["non_english_foreign_hq_review_count"] == 0
+
+
+# ---------------------------------------------------------------------------
+# Experimental AI-provider passthrough (defaults must stay Anthropic)
+# ---------------------------------------------------------------------------
+
+class TestAiProviderPassthrough:
+    _df = pd.DataFrame({"c": ["Acme"], "d": ["acme.com"]})
+
+    def _cfg(self, **kw):
+        base = dict(company_name_column="c", domain_column="d",
+                    run_mode="hq_only", row_limit=1)
+        base.update(kw)
+        return BatchRunConfig(**base)
+
+    def test_config_defaults_stay_anthropic(self):
+        cfg = self._cfg()
+        assert cfg.ai_provider == "anthropic"
+        assert cfg.ai_model == ""
+
+    def test_default_run_keeps_anthropic_and_pipeline_model(self):
+        captured = {}
+
+        def _fake(lead, **kw):
+            captured.update(kw)
+            return _sample_result()
+
+        with patch("lead_prioritizer_batch_core.prioritize_single_lead",
+                   side_effect=_fake):
+            run_batch_dataframe(self._df, self._cfg(), "S", "A")
+        assert captured["ai_provider"] == "anthropic"
+        assert captured["openai_api_key"] == ""
+        # ai_model must NOT be overridden — the pipeline default stays in charge.
+        assert "ai_model" not in captured
+
+    def test_openai_provider_kwargs_passed_through(self):
+        captured = {}
+
+        def _fake(lead, **kw):
+            captured.update(kw)
+            return _sample_result()
+
+        cfg = self._cfg(ai_provider="openai", ai_model="gpt-5.4-nano")
+        with patch("lead_prioritizer_batch_core.prioritize_single_lead",
+                   side_effect=_fake):
+            run_batch_dataframe(self._df, cfg, "S", "A", openai_api_key="OK")
+        assert captured["ai_provider"] == "openai"
+        assert captured["ai_model"] == "gpt-5.4-nano"
+        assert captured["openai_api_key"] == "OK"
+
+    def test_run_summary_records_provider_and_model_without_keys(self):
+        with patch("lead_prioritizer_batch_core.prioritize_single_lead",
+                   return_value=_sample_result()):
+            out = run_batch_dataframe(
+                self._df, self._cfg(ai_provider="openai", ai_model="gpt-5.4-mini"),
+                "S", "A", openai_api_key="SECRET-KEY")
+        summary = out["run_summary"].iloc[0].to_dict()
+        assert summary["ai_provider"] == "openai"
+        assert summary["ai_model"] == "gpt-5.4-mini"
+        # No API key may ever appear in any output table.
+        for table in out.values():
+            for col in table.columns:
+                assert "SECRET-KEY" not in table[col].astype(str).str.cat(sep=" ")
+
+    def test_single_batch_unit_passes_openai_key(self):
+        captured = {}
+
+        def _fake(lead, **kw):
+            captured.update(kw)
+            return _sample_result()
+
+        with patch("lead_prioritizer_batch_core.prioritize_single_lead",
+                   side_effect=_fake):
+            run_single_batch_unit(
+                self._df, self._cfg(ai_provider="openai"), "S", "A",
+                openai_api_key="OK")
+        assert captured["ai_provider"] == "openai"
+        assert captured["openai_api_key"] == "OK"

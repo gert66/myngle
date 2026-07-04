@@ -836,3 +836,92 @@ class TestZipDirectoryBytes:
         import zipfile
         with zipfile.ZipFile(io.BytesIO(data)) as zf:
             assert zf.namelist() == []
+
+
+# ---------------------------------------------------------------------------
+# Experimental AI-provider selection helpers
+# ---------------------------------------------------------------------------
+
+from lead_prioritizer_batch_app import (  # noqa: E402
+    AI_PROVIDER_LABELS,
+    COMPARE_MODE_WARNING_TEXT,
+    ai_provider_label_to_mode,
+    build_comparison_download_filename,
+    build_provider_comparison_workbook_bytes,
+    validate_ai_provider_run,
+)
+from lead_prioritizer_batch_core import FOREIGN_HQ_ONLY_MODE  # noqa: E402
+
+
+class TestAiProviderSelection:
+    def test_default_label_first_and_anthropic(self):
+        assert AI_PROVIDER_LABELS[0] == "Anthropic only (default)"
+        assert ai_provider_label_to_mode(AI_PROVIDER_LABELS[0]) == "anthropic"
+
+    def test_all_labels_map(self):
+        assert [ai_provider_label_to_mode(lbl) for lbl in AI_PROVIDER_LABELS] == \
+            ["anthropic", "openai", "compare"]
+
+    def test_unknown_label_raises(self):
+        with pytest.raises(ValueError):
+            ai_provider_label_to_mode("Gemini only")
+
+    def test_compare_warning_mentions_double_cost_and_row_limit(self):
+        assert "TWICE" in COMPARE_MODE_WARNING_TEXT
+        assert "5-10" in COMPARE_MODE_WARNING_TEXT
+        assert "EXPERIMENTAL" in COMPARE_MODE_WARNING_TEXT
+
+
+class TestValidateAiProviderRun:
+    def test_anthropic_always_allowed_without_openai_key(self):
+        assert validate_ai_provider_run("anthropic", "full", True, "") is None
+        assert validate_ai_provider_run(
+            "anthropic", FOREIGN_HQ_ONLY_MODE, True, "") is None
+
+    def test_openai_missing_key_blocked(self):
+        err = validate_ai_provider_run("openai", "full", False, "")
+        assert err is not None and "OPENAI_API_KEY" in err
+
+    def test_openai_with_key_and_normal_mode_allowed(self):
+        assert validate_ai_provider_run("openai", "full", False, "k") is None
+        assert validate_ai_provider_run("compare", "hq_only", False, "k") is None
+
+    def test_compare_blocked_with_c5(self):
+        err = validate_ai_provider_run("compare", "full", True, "k")
+        assert err is not None and "C5" in err
+
+    def test_blocked_for_foreign_hq_only_modes(self):
+        err = validate_ai_provider_run("compare", FOREIGN_HQ_ONLY_MODE, False, "k")
+        assert err is not None and "standard batch modes" in err
+        err2 = validate_ai_provider_run("openai", _NON_ENGLISH_MODE_CONST, False, "k")
+        assert err2 is not None and "standard batch modes" in err2
+
+    def test_unknown_mode_blocked(self):
+        assert validate_ai_provider_run("gemini", "full", False, "k") is not None
+
+    def test_no_key_material_in_messages(self):
+        err = validate_ai_provider_run("openai", "full", False, "")
+        assert "sk-" not in (err or "")
+
+
+class TestProviderComparisonWorkbook:
+    def test_workbook_bytes_round_trip(self, tmp_path):
+        import io
+
+        import pandas as pd
+
+        from compare_ai_providers_lead_prioritizer import COMPARISON_COLUMNS
+
+        df = pd.DataFrame([{col: "" for col in COMPARISON_COLUMNS}])
+        df.loc[0, "company_name"] = "Acme"
+
+        data = build_provider_comparison_workbook_bytes(df)
+        loaded = pd.read_excel(io.BytesIO(data), sheet_name="Provider Comparison")
+        assert list(loaded.columns) == COMPARISON_COLUMNS
+        assert loaded.loc[0, "company_name"] == "Acme"
+
+    def test_comparison_download_filename(self):
+        from datetime import datetime
+
+        name = build_comparison_download_filename(datetime(2026, 7, 4, 9, 30, 0))
+        assert name == "lead_prioritizer_provider_comparison_20260704_093000.xlsx"

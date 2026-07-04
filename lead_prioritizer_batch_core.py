@@ -94,6 +94,11 @@ class BatchRunConfig:
     continue_on_error: bool = True
     max_evidence_urls: int = 6
     include_raw_ai_json: bool = False
+    # Experimental AI-provider selection (audit-safe; never carries API keys).
+    # Defaults preserve the existing Anthropic behavior exactly: ai_model ""
+    # means "use the pipeline's own default model for the provider".
+    ai_provider: str = "anthropic"
+    ai_model: str = ""
 
 
 # ---------------------------------------------------------------------------
@@ -304,6 +309,8 @@ def build_run_summary_dataframe(
     return pd.DataFrame([{
         "timestamp": datetime.now().isoformat(timespec="seconds"),
         "run_mode": config.run_mode,
+        "ai_provider": config.ai_provider,
+        "ai_model": config.ai_model or "",
         "default_input_country": config.default_input_country,
         "total_input_rows": total_input_rows,
         "selected_rows": selected_rows,
@@ -328,12 +335,18 @@ def run_batch_dataframe(
     serper_api_key: str,
     anthropic_api_key: str,
     progress_callback: Optional[Callable[[dict], None]] = None,
+    openai_api_key: str = "",
 ) -> dict:
     """Run Lead Prioritizer v2 over selected rows.
 
     Returns a dict of DataFrames: ``enriched_leads``, ``evidence``, ``signals``,
     ``run_summary``.  API keys are passed through only; they are never printed or
     written into any output.
+
+    ``config.ai_provider`` / ``config.ai_model`` select the experimental AI
+    provider for HQ interpretation; defaults ("anthropic", "") preserve the
+    existing behavior exactly. ``openai_api_key`` is only used when the
+    provider is "openai".
 
     ``progress_callback`` (optional) is invoked once after each processed row —
     including rows that error — with a secret-free payload dict.  It defaults to
@@ -342,6 +355,14 @@ def run_batch_dataframe(
     never break enrichment.
     """
     flags = resolve_pipeline_flags(config.run_mode)
+    # Provider selection: only override the pipeline's own ai_model default
+    # when the config explicitly sets one.
+    ai_kwargs: dict = {
+        "ai_provider": config.ai_provider,
+        "openai_api_key": openai_api_key,
+    }
+    if config.ai_model:
+        ai_kwargs["ai_model"] = config.ai_model
     selected = select_batch_rows(df, config)
     selected_rows = len(selected)
 
@@ -368,6 +389,7 @@ def run_batch_dataframe(
                 serper_api_key=serper_api_key,
                 anthropic_api_key=anthropic_api_key,
                 default_input_country=config.default_input_country,
+                **ai_kwargs,
                 **flags,
             )
             success += 1
@@ -1549,6 +1571,7 @@ def run_single_batch_unit(
     c5_scope: str = "score_3_or_manual_review",
     c5_model_used: str = "",
     c5_model_tier: str = "",
+    openai_api_key: str = "",
     progress_callback: Optional[Callable[[dict], None]] = None,
 ) -> dict:
     """Run one batch unit through the same code path as a sequential run.
@@ -1584,6 +1607,7 @@ def run_single_batch_unit(
     tables = run_batch_dataframe(
         df, config, serper_api_key, anthropic_api_key,
         progress_callback=progress_callback,
+        openai_api_key=openai_api_key,
     )
     c5_counts: dict = {}
     if c5_enabled:
@@ -1700,6 +1724,7 @@ def run_batch_dataframe_parallel(
     c5_scope: str = "score_3_or_manual_review",
     c5_model_used: str = "",
     c5_model_tier: str = "",
+    openai_api_key: str = "",
     progress_callback: Optional[Callable[[dict], None]] = None,
     chunk_result_callback: Optional[Callable[[dict, dict], None]] = None,
     heartbeat_interval_seconds: float = DEFAULT_PARALLEL_HEARTBEAT_INTERVAL_SECONDS,
@@ -1833,6 +1858,7 @@ def run_batch_dataframe_parallel(
                     c5_scope=c5_scope,
                     c5_model_used=c5_model_used,
                     c5_model_tier=c5_model_tier,
+                    openai_api_key=openai_api_key,
                     progress_callback=_make_chunk_progress_callback(i),
                 ): i
                 for i, chunk in enumerate(chunks)
