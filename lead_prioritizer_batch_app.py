@@ -60,8 +60,11 @@ from export_lead_prioritizer_to_lovable_json import (
 )
 from lovable_gcs_upload import (
     DEFAULT_GCS_BUCKET,
+    check_gcloud_available,
     country_folder_slug,
     default_gcs_run_folder,
+    describe_gcloud_environment,
+    normalize_gcs_prefix,
     public_url as gcs_public_url,
     build_upload_plan,
     run_upload_plan,
@@ -124,6 +127,8 @@ DEFAULT_COUNTRY_REQUIRED_MESSAGE = "Please select a default input country before
 _SERPER_KEY_NAME = "SERPER_API_KEY"
 _ANTHROPIC_KEY_NAME = "ANTHROPIC_API_KEY"
 _OPENAI_KEY_NAME = "OPENAI_API_KEY"
+_GCS_BUCKET_NAME_KEY = "GCS_BUCKET_NAME"
+_GCS_BASE_PREFIX_KEY = "GCS_BASE_PREFIX"
 
 # Experimental AI-provider selection for HQ interpretation. The first label is
 # the default and preserves the existing Anthropic-only behavior exactly.
@@ -1365,16 +1370,44 @@ def main() -> None:  # pragma: no cover - exercised only under `streamlit run`
             )
 
             st.markdown("---")
+            st.markdown("**Optional Google Cloud Storage upload**")
+            st.caption(
+                "Experimental / manual only: uses your local gcloud CLI. "
+                "Nothing uploads until you explicitly check the box and "
+                "click the upload button below."
+            )
             lovable_gcs_enabled = st.checkbox(
-                "Upload JSON to Google Cloud Storage", value=False,
-                key="lovable_gcs_enabled")
+                "Upload generated Lovable JSON to Google Cloud Storage",
+                value=False, key="lovable_gcs_enabled")
             if lovable_gcs_enabled:
+                gcloud_info = check_gcloud_available()
+                if not gcloud_info["available"]:
+                    st.warning(
+                        "Neither gcloud nor gsutil was found on PATH. Install "
+                        "or authenticate the Google Cloud SDK before uploading."
+                    )
+                else:
+                    env_info = describe_gcloud_environment()
+                    st.caption(
+                        f"Detected CLI: `{gcloud_info['tool']}`"
+                        + (f" ({gcloud_info['version']})" if gcloud_info["version"] else "")
+                        + (f" — account: {env_info['account']}" if env_info["account"] else "")
+                        + (f" — project: {env_info['project']}" if env_info["project"] else "")
+                    )
+
+                _default_bucket = get_secret_or_env(_GCS_BUCKET_NAME_KEY) or DEFAULT_GCS_BUCKET
+                _base_prefix = get_secret_or_env(_GCS_BASE_PREFIX_KEY)
+                _default_country_folder = country_folder_slug(lovable_export_country)
+                if _base_prefix:
+                    _default_country_folder = normalize_gcs_prefix(
+                        f"{_base_prefix}/{_default_country_folder}")
+
                 gc1, gc2 = st.columns(2)
                 gcs_bucket = gc1.text_input(
-                    "GCS bucket", value=DEFAULT_GCS_BUCKET, key="lovable_gcs_bucket")
+                    "GCS bucket", value=_default_bucket, key="lovable_gcs_bucket")
                 gcs_country_folder = gc2.text_input(
-                    "GCS country folder",
-                    value=country_folder_slug(lovable_export_country),
+                    "GCS prefix/path (e.g. <country>)",
+                    value=_default_country_folder,
                     key="lovable_gcs_country_folder")
                 gcs_run_folder = st.text_input(
                     "GCS run folder",
@@ -1383,10 +1416,10 @@ def main() -> None:  # pragma: no cover - exercised only under `streamlit run`
 
                 gu1, gu2 = st.columns(2)
                 upload_current = gu1.checkbox(
-                    "Overwrite <country>/current/", value=True,
+                    "Overwrite <prefix>/current/", value=True,
                     key="lovable_gcs_upload_current")
                 upload_archive = gu2.checkbox(
-                    "Archive to <country>/runs/<run_folder>/", value=True,
+                    "Archive to <prefix>/runs/<run_folder>/", value=True,
                     key="lovable_gcs_upload_archive")
 
                 override_invalid = False
@@ -1399,13 +1432,20 @@ def main() -> None:  # pragma: no cover - exercised only under `streamlit run`
                         "Override and upload anyway (not recommended)",
                         value=False, key="lovable_gcs_override")
 
+                gcs_bucket_norm = gcs_bucket.strip()
+                gcs_country_folder_norm = normalize_gcs_prefix(gcs_country_folder)
+                gcs_run_folder_norm = normalize_gcs_prefix(gcs_run_folder)
+                missing_fields = not gcs_bucket_norm or not gcs_country_folder_norm
+                if missing_fields:
+                    st.error("GCS bucket and prefix/path are both required.")
+
                 upload_disabled = not (upload_current or upload_archive) or (
-                    not validation_ok and not override_invalid)
-                if st.button("Upload to Google Cloud Storage",
+                    not validation_ok and not override_invalid) or missing_fields
+                if st.button("Upload JSON to GCS",
                             key="lovable_gcs_upload_button", disabled=upload_disabled):
                     jobs = build_upload_plan(
-                        manifest_output_dir, output_filenames, gcs_bucket,
-                        gcs_country_folder, gcs_run_folder,
+                        manifest_output_dir, output_filenames, gcs_bucket_norm,
+                        gcs_country_folder_norm, gcs_run_folder_norm,
                         upload_current=upload_current, upload_archive=upload_archive,
                     )
                     with st.spinner("Uploading to Google Cloud Storage..."):
@@ -1420,7 +1460,8 @@ def main() -> None:  # pragma: no cover - exercised only under `streamlit run`
                     if upload_current:
                         st.markdown("**Public URLs**")
                         for filename in output_filenames:
-                            st.write(gcs_public_url(gcs_bucket, gcs_country_folder, filename))
+                            st.write(gcs_public_url(
+                                gcs_bucket_norm, gcs_country_folder_norm, filename))
             else:
                 st.caption(
                     "GCS upload is off by default. Check the box above to "

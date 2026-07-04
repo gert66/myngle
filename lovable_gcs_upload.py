@@ -81,6 +81,64 @@ def resolve_gcs_upload_tool() -> Optional[list[str]]:
     return None
 
 
+def normalize_gcs_prefix(value: str) -> str:
+    """Normalize a user-entered GCS path segment: no leading/trailing slash,
+    no doubled slashes. Never raises on blank/odd input."""
+    text = re.sub(r"/+", "/", str(value or "").strip())
+    return text.strip("/")
+
+
+def check_gcloud_available() -> dict:
+    """Informational upload-tool check (never gates the upload itself —
+    ``run_upload_plan`` already handles a missing tool with a clear error).
+
+    Returns ``{"available", "tool", "version"}``; ``version`` is only the
+    first output line, truncated, so nothing verbose ever reaches the UI.
+    """
+    tool_cmd = resolve_gcs_upload_tool()
+    if tool_cmd is None:
+        return {"available": False, "tool": None, "version": ""}
+    tool_name = tool_cmd[0]
+    version = ""
+    try:
+        proc = subprocess.run(
+            [tool_name, "--version"], capture_output=True, text=True, timeout=10)
+        first_line = (proc.stdout or proc.stderr or "").strip().splitlines()
+        version = first_line[0][:200] if first_line else ""
+    except Exception:
+        pass
+    return {"available": True, "tool": tool_name, "version": version}
+
+
+def describe_gcloud_environment() -> dict:
+    """Informational active gcloud account/project — never raises.
+
+    Only the active account email and project id are read (both already
+    visible locally via ``gcloud config list``); no tokens or other secrets
+    are read, printed, or returned.
+    """
+    account = ""
+    project = ""
+    if shutil.which("gcloud"):
+        try:
+            proc = subprocess.run(
+                ["gcloud", "auth", "list", "--filter=status:ACTIVE",
+                 "--format=value(account)"],
+                capture_output=True, text=True, timeout=10)
+            lines = (proc.stdout or "").strip().splitlines()
+            account = lines[0] if lines else ""
+        except Exception:
+            pass
+        try:
+            proc = subprocess.run(
+                ["gcloud", "config", "get-value", "project"],
+                capture_output=True, text=True, timeout=10)
+            project = (proc.stdout or "").strip()
+        except Exception:
+            pass
+    return {"account": account, "project": project}
+
+
 def build_upload_command(tool_cmd: list[str], local_path: str, destination: str) -> list[str]:
     """Build the argv list for one file upload. Never uses ``shell=True``."""
     return [*tool_cmd, local_path, destination]

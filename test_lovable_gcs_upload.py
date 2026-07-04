@@ -10,10 +10,13 @@ import pytest
 
 from lovable_gcs_upload import (
     DEFAULT_GCS_BUCKET,
+    check_gcloud_available,
     country_folder_slug,
     default_gcs_run_folder,
+    describe_gcloud_environment,
     gcs_current_path,
     gcs_archive_path,
+    normalize_gcs_prefix,
     public_url,
     resolve_gcs_upload_tool,
     build_upload_command,
@@ -202,3 +205,85 @@ class TestRunUploadPlan:
         assert len(results) == len(jobs)
         assert all(r["success"] for r in results)
         assert mock_run.call_count == len(jobs)
+
+
+class TestNormalizeGcsPrefix:
+    def test_strips_leading_and_trailing_slashes(self):
+        assert normalize_gcs_prefix("/brazil/current/") == "brazil/current"
+
+    def test_collapses_double_slashes(self):
+        assert normalize_gcs_prefix("brazil//current") == "brazil/current"
+
+    def test_blank_never_raises(self):
+        assert normalize_gcs_prefix("") == ""
+        assert normalize_gcs_prefix(None) == ""
+
+    def test_whitespace_stripped(self):
+        assert normalize_gcs_prefix("  brazil/current  ") == "brazil/current"
+
+
+class TestCheckGcloudAvailable:
+    def test_available_reports_tool_and_version(self):
+        mock_proc = MagicMock(returncode=0, stdout="Google Cloud SDK 500.0.0\n", stderr="")
+        with patch("lovable_gcs_upload.resolve_gcs_upload_tool",
+                   return_value=["gcloud", "storage", "cp"]), \
+             patch("lovable_gcs_upload.subprocess.run", return_value=mock_proc):
+            info = check_gcloud_available()
+        assert info["available"] is True
+        assert info["tool"] == "gcloud"
+        assert info["version"] == "Google Cloud SDK 500.0.0"
+
+    def test_unavailable_when_no_tool_on_path(self):
+        with patch("lovable_gcs_upload.resolve_gcs_upload_tool", return_value=None):
+            info = check_gcloud_available()
+        assert info["available"] is False
+        assert info["tool"] is None
+
+    def test_version_check_failure_does_not_raise(self):
+        with patch("lovable_gcs_upload.resolve_gcs_upload_tool",
+                   return_value=["gcloud", "storage", "cp"]), \
+             patch("lovable_gcs_upload.subprocess.run", side_effect=OSError("boom")):
+            info = check_gcloud_available()
+        assert info["available"] is True
+        assert info["version"] == ""
+
+
+class TestDescribeGcloudEnvironment:
+    def test_reads_account_and_project(self):
+        def _run(cmd, **kwargs):
+            if "auth" in cmd:
+                return MagicMock(returncode=0, stdout="user@example.com\n", stderr="")
+            return MagicMock(returncode=0, stdout="my-project\n", stderr="")
+
+        with patch("lovable_gcs_upload.shutil.which", return_value="/usr/bin/gcloud"), \
+             patch("lovable_gcs_upload.subprocess.run", side_effect=_run):
+            info = describe_gcloud_environment()
+        assert info["account"] == "user@example.com"
+        assert info["project"] == "my-project"
+
+    def test_no_gcloud_returns_blank_without_subprocess(self):
+        with patch("lovable_gcs_upload.shutil.which", return_value=None), \
+             patch("lovable_gcs_upload.subprocess.run") as mock_run:
+            info = describe_gcloud_environment()
+        assert info == {"account": "", "project": ""}
+        mock_run.assert_not_called()
+
+    def test_subprocess_failure_does_not_raise(self):
+        with patch("lovable_gcs_upload.shutil.which", return_value="/usr/bin/gcloud"), \
+             patch("lovable_gcs_upload.subprocess.run", side_effect=OSError("boom")):
+            info = describe_gcloud_environment()
+        assert info == {"account": "", "project": ""}
+
+    def test_never_returns_secret_like_values(self):
+        # Defensive: account/project must be plain identifiers, never a
+        # token-like string that could be mistaken for a secret.
+        def _run(cmd, **kwargs):
+            if "auth" in cmd:
+                return MagicMock(returncode=0, stdout="user@example.com\n", stderr="")
+            return MagicMock(returncode=0, stdout="my-project\n", stderr="")
+
+        with patch("lovable_gcs_upload.shutil.which", return_value="/usr/bin/gcloud"), \
+             patch("lovable_gcs_upload.subprocess.run", side_effect=_run):
+            info = describe_gcloud_environment()
+        assert "ya29." not in info["account"]
+        assert "ya29." not in info["project"]
