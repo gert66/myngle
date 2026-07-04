@@ -38,16 +38,27 @@ import pandas as pd
 
 from lovable_content_localization import (
     localize_caller_angle_app,
+    localize_caller_angle_app_it,
     localize_call_starter_app,
+    localize_call_starter_app_it,
     localize_caution_app,
+    localize_caution_app_it,
     localize_cold_caller_summary_app,
+    localize_cold_caller_summary_app_it,
     localize_evidence_summary_app,
+    localize_evidence_summary_app_it,
     localize_foreign_hq_evidence_text,
+    localize_foreign_hq_evidence_text_it,
     localize_parent_hq_summary_app,
+    localize_parent_hq_summary_app_it,
     localize_what_is_hot_item,
+    localize_what_is_hot_item_it,
     localize_what_is_not_item,
+    localize_what_is_not_item_it,
     localize_why_relevant_app,
+    localize_why_relevant_app_it,
     translate_known_label,
+    translate_known_label_it,
 )
 
 # ---------------------------------------------------------------------------
@@ -790,15 +801,15 @@ def _build_detail_record(
 # and IDs/domains/URLs/scores/tiers/source titles/snippets/evidence_audit/
 # debug fields are always copied through unchanged.
 
-SUPPORTED_CONTENT_LANGUAGES: tuple[str, ...] = ("English", "Dutch")
+SUPPORTED_CONTENT_LANGUAGES: tuple[str, ...] = ("English", "Dutch", "Italian")
 DEFAULT_CONTENT_LANGUAGE = "English"
 
 # Flat caller-facing text fields on a detail record eligible for demo
-# localization, mapped to their whole-template Dutch rebuilder. Everything
-# else (IDs, URLs, scores, evidence_audit, debug, source titles/snippets,
+# localization, mapped to their whole-template rebuilder. Everything else
+# (IDs, URLs, scores, evidence_audit, debug, source titles/snippets,
 # advanced_notes_app, buyer_route_app, likely_training_interest_app, ...) is
 # left alone — there is no known safe template to rebuild them from.
-_APP_FIELD_LOCALIZERS: dict[str, "Callable[[object], object]"] = {
+_APP_FIELD_LOCALIZERS_NL: dict[str, "Callable[[object], object]"] = {
     "why_relevant_app": localize_why_relevant_app,
     "caller_angle_app": localize_caller_angle_app,
     "call_starter_app": localize_call_starter_app,
@@ -807,17 +818,30 @@ _APP_FIELD_LOCALIZERS: dict[str, "Callable[[object], object]"] = {
     "parent_hq_summary_app": localize_parent_hq_summary_app,
     "evidence_summary_app": localize_evidence_summary_app,
 }
+_APP_FIELD_LOCALIZERS_IT: dict[str, "Callable[[object], object]"] = {
+    "why_relevant_app": localize_why_relevant_app_it,
+    "caller_angle_app": localize_caller_angle_app_it,
+    "call_starter_app": localize_call_starter_app_it,
+    "caution_app": localize_caution_app_it,
+    "cold_caller_summary_app": localize_cold_caller_summary_app_it,
+    "parent_hq_summary_app": localize_parent_hq_summary_app_it,
+    "evidence_summary_app": localize_evidence_summary_app_it,
+}
 
 # List fields (already split into individual items by parse_array_field)
 # localized item-by-item.
-_APP_LIST_FIELD_ITEM_LOCALIZERS: dict[str, "Callable[[object], object]"] = {
+_APP_LIST_FIELD_ITEM_LOCALIZERS_NL: dict[str, "Callable[[object], object]"] = {
     "what_is_hot_app": localize_what_is_hot_item,
     "what_is_not_app": localize_what_is_not_item,
+}
+_APP_LIST_FIELD_ITEM_LOCALIZERS_IT: dict[str, "Callable[[object], object]"] = {
+    "what_is_hot_app": localize_what_is_hot_item_it,
+    "what_is_not_app": localize_what_is_not_item_it,
 }
 
 # Nested ui_payload mirror fields eligible for the same demo localization —
 # same rebuild logic as the matching flat *_app field above.
-_UI_PAYLOAD_FIELD_LOCALIZERS: dict[str, "Callable[[object], object]"] = {
+_UI_PAYLOAD_FIELD_LOCALIZERS_NL: dict[str, "Callable[[object], object]"] = {
     "why_relevant": localize_why_relevant_app,
     "caller_angle": localize_caller_angle_app,
     "call_starter": localize_call_starter_app,
@@ -825,14 +849,26 @@ _UI_PAYLOAD_FIELD_LOCALIZERS: dict[str, "Callable[[object], object]"] = {
     "parent_hq_summary": localize_parent_hq_summary_app,
     "evidence_summary": localize_evidence_summary_app,
 }
-_UI_PAYLOAD_LIST_FIELD_ITEM_LOCALIZERS: dict[str, "Callable[[object], object]"] = {
+_UI_PAYLOAD_FIELD_LOCALIZERS_IT: dict[str, "Callable[[object], object]"] = {
+    "why_relevant": localize_why_relevant_app_it,
+    "caller_angle": localize_caller_angle_app_it,
+    "call_starter": localize_call_starter_app_it,
+    "cold_caller_summary": localize_cold_caller_summary_app_it,
+    "parent_hq_summary": localize_parent_hq_summary_app_it,
+    "evidence_summary": localize_evidence_summary_app_it,
+}
+_UI_PAYLOAD_LIST_FIELD_ITEM_LOCALIZERS_NL: dict[str, "Callable[[object], object]"] = {
     "what_is_hot": localize_what_is_hot_item,
     "what_is_not": localize_what_is_not_item,
+}
+_UI_PAYLOAD_LIST_FIELD_ITEM_LOCALIZERS_IT: dict[str, "Callable[[object], object]"] = {
+    "what_is_hot": localize_what_is_hot_item_it,
+    "what_is_not": localize_what_is_not_item_it,
 }
 
 
 def normalize_content_language(language) -> str:
-    """Canonical content-language name ("English" or "Dutch").
+    """Canonical content-language name ("English", "Dutch", or "Italian").
 
     Case/whitespace-insensitive; anything unrecognized (blank, typo, None)
     falls back to "English" — a demo option must never break the export.
@@ -845,29 +881,38 @@ def normalize_content_language(language) -> str:
 
 
 def should_localize_content(language) -> bool:
-    """True only when the (normalized) language is "Dutch".
+    """True only when the (normalized) language is "Dutch" or "Italian".
 
     Every other value means "keep English" — including unrecognized input,
     so English output is always the safe default.
     """
-    return normalize_content_language(language) == "Dutch"
+    return normalize_content_language(language) in ("Dutch", "Italian")
 
 
-def localize_detail_record_for_dutch(detail: dict) -> tuple[dict, int, int]:
-    """Return a Dutch-localized copy of one detail record for the demo.
+def _localize_detail_record(
+    detail: dict,
+    app_field_localizers: dict,
+    app_list_field_item_localizers: dict,
+    ui_payload_field_localizers: dict,
+    ui_payload_list_field_item_localizers: dict,
+    label_translator,
+    foreign_hq_evidence_localizer,
+) -> tuple[dict, int, int]:
+    """Return a localized copy of one detail record for the demo, given a
+    specific language's localizer functions.
 
     Only the caller-facing fields in scope are touched: the flat ``*_app``
     text/list fields, their ``ui_payload`` mirrors, and the
     ``visible_icp_signal_scores`` label/evidence (the evidence only for the
     app-generated foreign-HQ row — never another signal's evidence_quote or
     reason, which may hold external source text). Every field is rebuilt
-    from a matched whole English template into a complete Dutch sentence
-    (see ``lovable_content_localization.py``); unmatched/custom text is left
-    in English untouched rather than guessed at. Every other key (IDs,
-    domain, URLs, scores, tiers, ``source_urls``, ``evidence_snippets``,
-    ``evidence_audit``, ``debug``, sector/HQ/C5 technical fields, ...) is
-    carried over unchanged — the input ``detail`` dict itself is never
-    mutated. Returns
+    from a matched whole English template into a complete target-language
+    sentence (see ``lovable_content_localization.py``); unmatched/custom
+    text is left in English untouched rather than guessed at. Every other
+    key (IDs, domain, URLs, scores, tiers, ``source_urls``,
+    ``evidence_snippets``, ``evidence_audit``, ``debug``, sector/HQ/C5
+    technical fields, ...) is carried over unchanged — the input ``detail``
+    dict itself is never mutated. Returns
     ``(localized_detail, localized_field_count, unchanged_field_count)`` for
     the manifest's audit summary.
     """
@@ -902,17 +947,17 @@ def localize_detail_record_for_dutch(detail: dict) -> tuple[dict, int, int]:
                 unchanged_count += 1
         container[field] = new_values
 
-    for field, localizer in _APP_FIELD_LOCALIZERS.items():
+    for field, localizer in app_field_localizers.items():
         _apply_flat(localized, field, localizer)
-    for field, item_localizer in _APP_LIST_FIELD_ITEM_LOCALIZERS.items():
+    for field, item_localizer in app_list_field_item_localizers.items():
         _apply_list(localized, field, item_localizer)
 
     ui_payload = localized.get("ui_payload")
     if isinstance(ui_payload, dict):
         new_ui_payload = dict(ui_payload)
-        for field, localizer in _UI_PAYLOAD_FIELD_LOCALIZERS.items():
+        for field, localizer in ui_payload_field_localizers.items():
             _apply_flat(new_ui_payload, field, localizer)
-        for field, item_localizer in _UI_PAYLOAD_LIST_FIELD_ITEM_LOCALIZERS.items():
+        for field, item_localizer in ui_payload_list_field_item_localizers.items():
             _apply_list(new_ui_payload, field, item_localizer)
         localized["ui_payload"] = new_ui_payload
 
@@ -926,7 +971,7 @@ def localize_detail_record_for_dutch(detail: dict) -> tuple[dict, int, int]:
             new_entry = dict(entry)
             label = new_entry.get("label")
             if label:
-                translated_label = translate_known_label(label)
+                translated_label = label_translator(label)
                 new_entry["label"] = translated_label
                 if translated_label != label:
                     localized_count += 1
@@ -935,7 +980,7 @@ def localize_detail_record_for_dutch(detail: dict) -> tuple[dict, int, int]:
             if label == FOREIGN_HQ_SIGNAL_LABEL:
                 evidence = new_entry.get("evidence")
                 if evidence:
-                    new_evidence = localize_foreign_hq_evidence_text(evidence)
+                    new_evidence = foreign_hq_evidence_localizer(evidence)
                     new_entry["evidence"] = new_evidence
                     if new_evidence != evidence:
                         localized_count += 1
@@ -945,6 +990,32 @@ def localize_detail_record_for_dutch(detail: dict) -> tuple[dict, int, int]:
         localized["visible_icp_signal_scores"] = new_scores
 
     return localized, localized_count, unchanged_count
+
+
+def localize_detail_record_for_dutch(detail: dict) -> tuple[dict, int, int]:
+    """Dutch-localized copy of one detail record — see ``_localize_detail_record``."""
+    return _localize_detail_record(
+        detail,
+        _APP_FIELD_LOCALIZERS_NL,
+        _APP_LIST_FIELD_ITEM_LOCALIZERS_NL,
+        _UI_PAYLOAD_FIELD_LOCALIZERS_NL,
+        _UI_PAYLOAD_LIST_FIELD_ITEM_LOCALIZERS_NL,
+        translate_known_label,
+        localize_foreign_hq_evidence_text,
+    )
+
+
+def localize_detail_record_for_italian(detail: dict) -> tuple[dict, int, int]:
+    """Italian-localized copy of one detail record — see ``_localize_detail_record``."""
+    return _localize_detail_record(
+        detail,
+        _APP_FIELD_LOCALIZERS_IT,
+        _APP_LIST_FIELD_ITEM_LOCALIZERS_IT,
+        _UI_PAYLOAD_FIELD_LOCALIZERS_IT,
+        _UI_PAYLOAD_LIST_FIELD_ITEM_LOCALIZERS_IT,
+        translate_known_label_it,
+        localize_foreign_hq_evidence_text_it,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -1058,11 +1129,13 @@ def _validate_export(
                 errors.append(f"Company {cid}: {array_field} is not an array.")
         if detail.get("foreign_hq_detected_for_export"):
             labels = [s.get("label") for s in detail.get("visible_icp_signal_scores", [])]
-            # Accept the Dutch demo translation of the label too — this check
-            # is about the signal row being present, not its display language.
+            # Accept the Dutch/Italian demo translation of the label too —
+            # this check is about the signal row being present, not its
+            # display language.
             _valid_foreign_hq_labels = {
                 FOREIGN_HQ_SIGNAL_LABEL,
                 translate_known_label(FOREIGN_HQ_SIGNAL_LABEL),
+                translate_known_label_it(FOREIGN_HQ_SIGNAL_LABEL),
             }
             if not any(label in _valid_foreign_hq_labels for label in labels):
                 errors.append(
@@ -1114,10 +1187,11 @@ def export_workbook_to_lovable_json(
 ) -> dict:
     """Convert a Lead Prioritizer workbook into Lovable Company Hub JSON files.
 
-    ``content_language`` is a small demo option ("English" default, or
-    "Dutch"): when Dutch is selected, only caller-facing text values in the
-    detail records are localized via deterministic whole-template rebuild
-    (see ``localize_detail_record_for_dutch`` and
+    ``content_language`` is a small demo option ("English" default, "Dutch",
+    or "Italian"): when Dutch or Italian is selected, only caller-facing text
+    values in the detail records are localized via deterministic
+    whole-template rebuild (see ``localize_detail_record_for_dutch``,
+    ``localize_detail_record_for_italian``, and
     ``lovable_content_localization.py``) — no AI translation, no external
     calls. "English" (or any unrecognized value) leaves behavior
     byte-for-byte identical to before this option existed. The JSON schema
@@ -1212,17 +1286,20 @@ def export_workbook_to_lovable_json(
         detail_records.append(detail)
         exported_rows.append((row, item))
 
-    # ── Optional Dutch content localization (demo only) ───────────────────
+    # ── Optional Dutch/Italian content localization (demo only) ───────────
     # Applied only to detail records — the light list items never carry
     # caller-facing free text. English (the default) leaves detail_records
     # completely untouched.
     localized_field_count = 0
     unchanged_field_count = 0
     if should_localize_content(content_language):
+        localize_detail_record = (
+            localize_detail_record_for_dutch if content_language == "Dutch"
+            else localize_detail_record_for_italian)
         localized_details = []
         for detail in detail_records:
             localized_detail, localized_n, unchanged_n = (
-                localize_detail_record_for_dutch(detail))
+                localize_detail_record(detail))
             localized_details.append(localized_detail)
             localized_field_count += localized_n
             unchanged_field_count += unchanged_n
