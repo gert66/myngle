@@ -42,6 +42,13 @@ class HQDetectionResult:
     ai_call_success: Optional[str] = None        # "Yes" | "No"
     ai_hq_error: Optional[str] = None
     ai_hq_raw_json: Optional[str] = None         # raw model text (truncated), for debug
+    # Provider/usage audit (experimental multi-provider comparison; in-memory
+    # only — deliberately NOT flattened into Excel / Lovable exports)
+    ai_hq_provider: Optional[str] = None         # "anthropic" | "openai"
+    ai_hq_input_tokens: Optional[int] = None
+    ai_hq_output_tokens: Optional[int] = None
+    ai_hq_total_tokens: Optional[int] = None
+    ai_hq_estimated_cost_usd: Optional[float] = None
     # C4 positive-score safety audit (optional, backwards compatible)
     hq_query_risk_flag: Optional[str] = None                    # "Yes" | "No"
     hq_evidence_domain_match: Optional[str] = None              # "Yes" | "No" | ""
@@ -143,6 +150,14 @@ class LeadPrioritizationResult:
     ai_call_success: Optional[str] = None
     ai_hq_error: Optional[str] = None
     ai_hq_raw_json: Optional[str] = None
+    # Provider/usage audit (experimental multi-provider comparison; in-memory
+    # only — deliberately NOT in _RESULT_FLAT_FIELDS, so Excel / Lovable
+    # exports are unchanged)
+    ai_hq_provider: Optional[str] = None
+    ai_hq_input_tokens: Optional[int] = None
+    ai_hq_output_tokens: Optional[int] = None
+    ai_hq_total_tokens: Optional[int] = None
+    ai_hq_estimated_cost_usd: Optional[float] = None
 
     # ── Non-HQ v2 signal scores (placeholders — no live enrichment yet) ────────
     sig_international_profile_score: Optional[float] = None

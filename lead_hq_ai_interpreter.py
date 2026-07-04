@@ -21,11 +21,59 @@ try:
 except ImportError:
     _anthropic_lib = None  # type: ignore[assignment]
 
+try:
+    import openai as _openai_lib
+except ImportError:
+    _openai_lib = None  # type: ignore[assignment]
+
 if TYPE_CHECKING:
     from lead_output_schema import HQDetectionResult, LeadInput
 
 # Default model for AI HQ interpretation
 _DEFAULT_AI_MODEL = "claude-haiku-4-5-20251001"
+
+# Experimental OpenAI provider (opt-in only; production default stays
+# Anthropic). Same prompt, parser, and post-AI scoring — only the API call
+# differs.
+SUPPORTED_AI_PROVIDERS = ("anthropic", "openai")
+DEFAULT_OPENAI_MODEL = "gpt-5.4-nano"
+SUPPORTED_OPENAI_MODELS = ("gpt-5.4-nano", "gpt-5.4-mini")
+
+# ---------------------------------------------------------------------------
+# Model pricing for cost comparison (audit only — never affects scoring)
+# ---------------------------------------------------------------------------
+# USD per MILLION tokens as ``(input_price, output_price)``. Used only to fill
+# the ``ai_hq_estimated_cost_usd`` audit field. A model mapped to ``None`` (or
+# absent from the table) gets a BLANK estimated cost — never a guessed one;
+# token counts are still recorded so costs can be computed later.
+#
+# IMPORTANT: verify these prices against the provider pricing pages before any
+# production cost analysis — pricing changes over time:
+#   - Anthropic: https://www.anthropic.com/pricing
+#   - OpenAI:    https://openai.com/api/pricing/
+MODEL_PRICING_USD_PER_MTOK: dict[str, "tuple[float, float] | None"] = {
+    # Anthropic
+    "claude-haiku-4-5-20251001": (1.00, 5.00),
+    # OpenAI — pricing not yet confirmed for these models. Replace None with
+    # (input_usd_per_mtok, output_usd_per_mtok) once verified on the pricing
+    # page above; until then the estimated cost stays blank.
+    "gpt-5.4-nano": None,
+    "gpt-5.4-mini": None,
+}
+
+
+def estimate_ai_cost_usd(model, input_tokens, output_tokens):
+    """Estimated USD cost for one call, or None when pricing/tokens unknown."""
+    pricing = MODEL_PRICING_USD_PER_MTOK.get(str(model or ""))
+    if pricing is None or input_tokens is None or output_tokens is None:
+        return None
+    try:
+        in_price, out_price = pricing
+        return round(
+            (float(input_tokens) * in_price + float(output_tokens) * out_price)
+            / 1_000_000, 6)
+    except (TypeError, ValueError):
+        return None
 
 
 # ---------------------------------------------------------------------------
@@ -351,6 +399,73 @@ def evaluate_hq_positive_score_safety(
     }
 
 
+def _usage_field(usage_obj, *names):
+    """First present integer attribute from a provider usage object, or None."""
+    for name in names:
+        value = getattr(usage_obj, name, None)
+        if value is not None:
+            try:
+                return int(value)
+            except (TypeError, ValueError):
+                continue
+    return None
+
+
+def _call_anthropic_hq(api_key: str, model: str, user_msg: str) -> tuple[str, dict]:
+    """One Anthropic HQ call. Returns ``(raw_text, usage)``; raises on failure."""
+    if _anthropic_lib is None:
+        raise ImportError("anthropic package not installed")
+    client = _anthropic_lib.Anthropic(api_key=api_key)
+    response = client.messages.create(
+        model=model,
+        max_tokens=512,
+        system=_SYSTEM_PROMPT,
+        messages=[{"role": "user", "content": user_msg}],
+    )
+    raw_text = response.content[0].text if response.content else ""
+    usage_obj = getattr(response, "usage", None)
+    input_tokens = _usage_field(usage_obj, "input_tokens")
+    output_tokens = _usage_field(usage_obj, "output_tokens")
+    total = (input_tokens + output_tokens
+             if input_tokens is not None and output_tokens is not None else None)
+    return raw_text, {
+        "input_tokens": input_tokens,
+        "output_tokens": output_tokens,
+        "total_tokens": total,
+    }
+
+
+def _call_openai_hq(api_key: str, model: str, user_msg: str) -> tuple[str, dict]:
+    """One OpenAI HQ call — same system prompt and user message as the
+    Anthropic path. Returns ``(raw_text, usage)``; raises on failure."""
+    if _openai_lib is None:
+        raise ImportError("openai package not installed")
+    client = _openai_lib.OpenAI(api_key=api_key)
+    response = client.chat.completions.create(
+        model=model,
+        max_completion_tokens=512,
+        messages=[
+            {"role": "system", "content": _SYSTEM_PROMPT},
+            {"role": "user", "content": user_msg},
+        ],
+    )
+    raw_text = (
+        response.choices[0].message.content if getattr(response, "choices", None)
+        else ""
+    ) or ""
+    usage_obj = getattr(response, "usage", None)
+    input_tokens = _usage_field(usage_obj, "prompt_tokens", "input_tokens")
+    output_tokens = _usage_field(usage_obj, "completion_tokens", "output_tokens")
+    total = _usage_field(usage_obj, "total_tokens")
+    if total is None and input_tokens is not None and output_tokens is not None:
+        total = input_tokens + output_tokens
+    return raw_text, {
+        "input_tokens": input_tokens,
+        "output_tokens": output_tokens,
+        "total_tokens": total,
+    }
+
+
 def interpret_hq_with_ai(
     *,
     lead_input: "LeadInput",
@@ -359,57 +474,80 @@ def interpret_hq_with_ai(
     serper_payload: dict,
     anthropic_api_key: str,
     model: str = _DEFAULT_AI_MODEL,
+    ai_provider: str = "anthropic",
+    openai_api_key: str = "",
 ) -> "HQDetectionResult":
     """Interpret HQ from a Serper payload using Anthropic (Haiku by default).
+
+    ``ai_provider`` selects the experimental OpenAI path ("openai") — same
+    system prompt, user message, JSON parser, and post-AI scoring; only the
+    API call differs. The default ("anthropic") is byte-for-byte the existing
+    behavior. Usage/cost audit fields (``ai_hq_provider`` /
+    ``ai_hq_*_tokens`` / ``ai_hq_estimated_cost_usd``) are populated when the
+    provider reports usage; they stay blank rather than guessed.
 
     Returns an ``HQDetectionResult`` with AI audit fields populated.
     The only deterministic post-AI step is a normalised country comparison.
     """
     from lead_output_schema import HQDetectionResult
 
+    provider = (ai_provider or "anthropic").strip().lower()
+
     _base = dict(
         domain_root=domain_root,
         query_used=query,
         ai_hq_model=model,
+        ai_hq_provider=provider,
         ai_call_attempted="Yes",
     )
 
-    if not anthropic_api_key:
+    if provider not in SUPPORTED_AI_PROVIDERS:
         return HQDetectionResult(
-            **_base,
-            ai_call_attempted="No",
-            ai_hq_error="no_anthropic_api_key",
+            **{**_base, "ai_call_attempted": "No"},
+            ai_hq_error=f"unknown_ai_provider: {ai_provider}",
+            needs_manual_review=True,
+            hq_reason=f"ai_hq_not_eligible: unknown provider {ai_provider}",
+            sig_foreign_hq_score_for_next_scoring=None,
+        )
+
+    provider_api_key = openai_api_key if provider == "openai" else anthropic_api_key
+    if not provider_api_key:
+        return HQDetectionResult(
+            **{**_base, "ai_call_attempted": "No"},
+            ai_hq_error=f"no_{provider}_api_key",
             needs_manual_review=True,
             hq_reason="ai_hq_not_eligible: no API key",
             sig_foreign_hq_score_for_next_scoring=None,
         )
 
-    # ── Call Anthropic ────────────────────────────────────────────────────────
+    # ── Call the selected provider ───────────────────────────────────────────
     try:
-        if _anthropic_lib is None:
-            raise ImportError("anthropic package not installed")
-        client = _anthropic_lib.Anthropic(api_key=anthropic_api_key)
         user_msg = _build_user_message(
             domain_root=domain_root,
             input_country=lead_input.input_country or "",
             query=query,
             serper_payload=serper_payload,
         )
-        response = client.messages.create(
-            model=model,
-            max_tokens=512,
-            system=_SYSTEM_PROMPT,
-            messages=[{"role": "user", "content": user_msg}],
-        )
-        raw_text = response.content[0].text if response.content else ""
+        if provider == "openai":
+            raw_text, usage = _call_openai_hq(provider_api_key, model, user_msg)
+        else:
+            raw_text, usage = _call_anthropic_hq(provider_api_key, model, user_msg)
     except Exception as exc:
         return HQDetectionResult(
             **_base,
-            ai_hq_error=f"anthropic_call_failed: {exc}",
+            ai_hq_error=f"{provider}_call_failed: {exc}",
             needs_manual_review=True,
             hq_reason=f"ai_hq_error: {exc}",
             sig_foreign_hq_score_for_next_scoring=None,
         )
+
+    _base.update(
+        ai_hq_input_tokens=usage.get("input_tokens"),
+        ai_hq_output_tokens=usage.get("output_tokens"),
+        ai_hq_total_tokens=usage.get("total_tokens"),
+        ai_hq_estimated_cost_usd=estimate_ai_cost_usd(
+            model, usage.get("input_tokens"), usage.get("output_tokens")),
+    )
 
     ai_data = _parse_ai_response(raw_text)
 

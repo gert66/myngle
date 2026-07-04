@@ -31,6 +31,8 @@ def prioritize_single_lead(
     serper_api_key: str = "",
     anthropic_api_key: str = "",
     ai_model: str = _DEFAULT_AI_MODEL,
+    ai_provider: str = "anthropic",
+    openai_api_key: str = "",
     default_input_country: str = "Italy",
     collect_non_hq_evidence: bool = False,
     extract_non_hq_signals_flag: bool = False,
@@ -131,6 +133,8 @@ def prioritize_single_lead(
         serper_payload=serper_payload,
         anthropic_api_key=anthropic_api_key,
         model=ai_model,
+        ai_provider=ai_provider,
+        openai_api_key=openai_api_key,
     )
 
     # ── Step 2: non-HQ evidence collection (evidence only, no scores) ─────────
@@ -206,6 +210,12 @@ def prioritize_single_lead(
         ai_call_success=hq.ai_call_success,
         ai_hq_error=hq.ai_hq_error,
         ai_hq_raw_json=hq.ai_hq_raw_json,
+        # Provider/usage audit (in-memory only — not exported)
+        ai_hq_provider=hq.ai_hq_provider,
+        ai_hq_input_tokens=hq.ai_hq_input_tokens,
+        ai_hq_output_tokens=hq.ai_hq_output_tokens,
+        ai_hq_total_tokens=hq.ai_hq_total_tokens,
+        ai_hq_estimated_cost_usd=hq.ai_hq_estimated_cost_usd,
         # ── Non-HQ signal scores (Step 3 — intermediate, not final fit score) ──
         # Filled from deterministic extraction when the flag is on; otherwise the
         # summary is all-None, matching the previous placeholder behavior.

@@ -292,3 +292,222 @@ class TestUnclearResult:
                 anthropic_api_key="fake-anthropic",
             )
         assert result.ai_call_success == "No"
+
+
+# ---------------------------------------------------------------------------
+# Experimental OpenAI provider (opt-in; default Anthropic behavior unchanged)
+# ---------------------------------------------------------------------------
+
+from types import SimpleNamespace
+
+from lead_hq_ai_interpreter import estimate_ai_cost_usd, interpret_hq_with_ai
+
+
+def _mock_openai(ai_json_str: str, prompt_tokens=800, completion_tokens=120):
+    """Patch the module-level _openai_lib.OpenAI in lead_hq_ai_interpreter."""
+    mock_resp = MagicMock()
+    mock_resp.choices = [MagicMock(message=MagicMock(content=ai_json_str))]
+    mock_resp.usage = SimpleNamespace(
+        prompt_tokens=prompt_tokens,
+        completion_tokens=completion_tokens,
+        total_tokens=prompt_tokens + completion_tokens,
+    )
+    mock_client = MagicMock()
+    mock_client.chat.completions.create.return_value = mock_resp
+    mock_lib = MagicMock()
+    mock_lib.OpenAI.return_value = mock_client
+    return patch("lead_hq_ai_interpreter._openai_lib", mock_lib)
+
+
+class TestOpenAIProvider:
+    _lead = LeadInput(company_name="Thales Italia", domain="thalesgroup.com",
+                      input_country="Italy")
+
+    _ai = _ai_json(
+        classification="foreign_parent",
+        confidence="High",
+        parent_company="Thales Group",
+        parent_hq_country="France",
+        parent_hq_city="Paris",
+        evidence_url="https://www.thalesgroup.com/en/group/overview",
+        evidence_quote="Thales is a French multinational headquartered in Paris.",
+        reason="Ultimate parent HQ is in France.",
+    )
+
+    def _run_openai(self, **kwargs):
+        base = dict(
+            serper_api_key="fake-serper",
+            anthropic_api_key="",
+            openai_api_key="fake-openai",
+            ai_provider="openai",
+            ai_model="gpt-5.4-nano",
+        )
+        base.update(kwargs)
+        with _mock_serper(_EMPTY_SERPER), _mock_openai(self._ai):
+            return prioritize_single_lead(self._lead, **base)
+
+    def test_same_post_ai_scoring_as_anthropic_path(self):
+        result = self._run_openai()
+        assert result.sig_foreign_hq_score_for_next_scoring == 3.0
+        assert result.foreign_hq_simple is True
+        assert result.hq_structure_type == "foreign_parent"
+        assert result.ai_hq_classification == "foreign_parent"
+        assert result.ai_parent_hq_country == "France"
+        assert result.needs_manual_review is False
+
+    def test_provider_and_model_recorded(self):
+        result = self._run_openai()
+        assert result.ai_hq_provider == "openai"
+        assert result.ai_hq_model == "gpt-5.4-nano"
+
+    def test_usage_tokens_recorded(self):
+        result = self._run_openai()
+        assert result.ai_hq_input_tokens == 800
+        assert result.ai_hq_output_tokens == 120
+        assert result.ai_hq_total_tokens == 920
+
+    def test_cost_blank_for_unpriced_model(self):
+        # gpt-5.4-nano has no confirmed pricing entry → blank, not guessed.
+        result = self._run_openai()
+        assert result.ai_hq_estimated_cost_usd is None
+
+    def test_missing_openai_key_routes_to_manual_review(self):
+        with _mock_serper(_EMPTY_SERPER), _mock_openai(self._ai):
+            result = prioritize_single_lead(
+                self._lead,
+                serper_api_key="fake-serper",
+                anthropic_api_key="fake-anthropic",  # anthropic key must NOT be used
+                openai_api_key="",
+                ai_provider="openai",
+            )
+        assert result.ai_hq_error == "no_openai_api_key"
+        assert result.needs_manual_review is True
+        assert result.ai_call_attempted == "No"
+
+    def test_openai_call_failure_is_isolated(self):
+        mock_lib = MagicMock()
+        mock_lib.OpenAI.side_effect = RuntimeError("boom")
+        with _mock_serper(_EMPTY_SERPER), \
+             patch("lead_hq_ai_interpreter._openai_lib", mock_lib):
+            result = prioritize_single_lead(
+                self._lead,
+                serper_api_key="fake-serper",
+                openai_api_key="fake-openai",
+                ai_provider="openai",
+            )
+        assert result.ai_hq_error.startswith("openai_call_failed:")
+        assert result.needs_manual_review is True
+
+    def test_unknown_provider_is_rejected_safely(self):
+        with _mock_serper(_EMPTY_SERPER):
+            result = prioritize_single_lead(
+                self._lead,
+                serper_api_key="fake-serper",
+                anthropic_api_key="fake-anthropic",
+                ai_provider="gemini",
+            )
+        assert result.ai_hq_error.startswith("unknown_ai_provider:")
+        assert result.needs_manual_review is True
+
+    def test_default_provider_stays_anthropic(self):
+        # No ai_provider argument → the Anthropic path, unchanged.
+        with _mock_serper(_EMPTY_SERPER), _mock_anthropic(self._ai):
+            result = prioritize_single_lead(
+                self._lead,
+                serper_api_key="fake-serper",
+                anthropic_api_key="fake-anthropic",
+            )
+        assert result.ai_hq_provider == "anthropic"
+        assert result.sig_foreign_hq_score_for_next_scoring == 3.0
+
+    def test_openai_uses_same_system_prompt_and_user_message(self):
+        captured = {}
+
+        def _create(**kwargs):
+            captured.update(kwargs)
+            resp = MagicMock()
+            resp.choices = [MagicMock(message=MagicMock(content=self._ai))]
+            resp.usage = None
+            return resp
+
+        mock_client = MagicMock()
+        mock_client.chat.completions.create.side_effect = _create
+        mock_lib = MagicMock()
+        mock_lib.OpenAI.return_value = mock_client
+
+        from lead_hq_ai_interpreter import _SYSTEM_PROMPT
+
+        with _mock_serper(_EMPTY_SERPER), \
+             patch("lead_hq_ai_interpreter._openai_lib", mock_lib):
+            prioritize_single_lead(
+                self._lead, serper_api_key="fake-serper",
+                openai_api_key="fake-openai", ai_provider="openai",
+                ai_model="gpt-5.4-nano",
+            )
+        messages = captured["messages"]
+        assert messages[0] == {"role": "system", "content": _SYSTEM_PROMPT}
+        assert "thalesgroup" in messages[1]["content"]
+        assert captured["model"] == "gpt-5.4-nano"
+
+    def test_usage_absent_leaves_token_fields_blank(self):
+        def _create(**kwargs):
+            resp = MagicMock()
+            resp.choices = [MagicMock(message=MagicMock(content=self._ai))]
+            resp.usage = None
+            return resp
+
+        mock_client = MagicMock()
+        mock_client.chat.completions.create.side_effect = _create
+        mock_lib = MagicMock()
+        mock_lib.OpenAI.return_value = mock_client
+        with _mock_serper(_EMPTY_SERPER), \
+             patch("lead_hq_ai_interpreter._openai_lib", mock_lib):
+            result = prioritize_single_lead(
+                self._lead, serper_api_key="fake-serper",
+                openai_api_key="fake-openai", ai_provider="openai",
+            )
+        assert result.ai_hq_input_tokens is None
+        assert result.ai_hq_output_tokens is None
+        assert result.ai_hq_total_tokens is None
+        assert result.ai_hq_estimated_cost_usd is None
+
+
+class TestAnthropicUsageAndCost:
+    _lead = LeadInput(company_name="Thales Italia", domain="thalesgroup.com",
+                      input_country="Italy")
+
+    def test_anthropic_usage_and_cost_recorded(self):
+        ai = _ai_json(classification="domestic", confidence="High",
+                      parent_hq_country="Italy")
+        mock_msg = MagicMock()
+        mock_msg.content = [MagicMock(text=ai)]
+        mock_msg.usage = SimpleNamespace(input_tokens=1000, output_tokens=100)
+        mock_client = MagicMock()
+        mock_client.messages.create.return_value = mock_msg
+        mock_lib = MagicMock()
+        mock_lib.Anthropic.return_value = mock_client
+
+        with _mock_serper(_EMPTY_SERPER), \
+             patch("lead_hq_ai_interpreter._anthropic_lib", mock_lib):
+            result = prioritize_single_lead(
+                self._lead, serper_api_key="fake-serper",
+                anthropic_api_key="fake-anthropic",
+            )
+        assert result.ai_hq_provider == "anthropic"
+        assert result.ai_hq_input_tokens == 1000
+        assert result.ai_hq_output_tokens == 100
+        assert result.ai_hq_total_tokens == 1100
+        # claude-haiku-4-5 pricing is known: 1000/1M*1.00 + 100/1M*5.00
+        assert result.ai_hq_estimated_cost_usd == 0.0015
+
+
+class TestEstimateAiCost:
+    def test_known_model(self):
+        assert estimate_ai_cost_usd("claude-haiku-4-5-20251001", 1000, 100) == 0.0015
+
+    def test_unknown_model_returns_none(self):
+        assert estimate_ai_cost_usd("gpt-5.4-nano", 1000, 100) is None
+
+    def test_missing_tokens_return_none(self):
+        assert estimate_ai_cost_usd("claude-haiku-4-5-20251001", None, 100) is None
+        assert estimate_ai_cost_usd("claude-haiku-4-5-20251001", 1000, None) is None
