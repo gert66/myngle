@@ -44,7 +44,16 @@ from lead_hq_ai_interpreter import (
     DEFAULT_OPENAI_MODEL,
     SUPPORTED_OPENAI_MODELS,
 )
-from compare_ai_providers_lead_prioritizer import run_comparison
+from compare_ai_providers_lead_prioritizer import (
+    run_comparison,
+    run_triple_comparison,
+    build_provider_cost_rows,
+    build_cost_totals,
+    TWO_WAY_COST_PROVIDERS,
+    TRIPLE_COST_PROVIDERS,
+    DEFAULT_OPENAI_NANO_MODEL,
+    DEFAULT_OPENAI_MINI_MODEL,
+)
 
 from lead_hq_sonnet_adjudicator import (
     DEFAULT_SONNET_ADJUDICATION_MODEL,
@@ -136,16 +145,24 @@ AI_PROVIDER_LABELS: list[str] = [
     "Anthropic only (default)",
     "OpenAI only (experimental)",
     "Compare Anthropic vs OpenAI (experimental)",
+    "Compare Anthropic vs OpenAI nano vs OpenAI mini (experimental)",
 ]
 _AI_PROVIDER_LABEL_TO_MODE: dict[str, str] = {
     "Anthropic only (default)": "anthropic",
     "OpenAI only (experimental)": "openai",
     "Compare Anthropic vs OpenAI (experimental)": "compare",
+    "Compare Anthropic vs OpenAI nano vs OpenAI mini (experimental)": "compare_triple",
 }
 
 COMPARE_MODE_WARNING_TEXT = (
     "EXPERIMENTAL: compare mode runs every selected row TWICE — once with "
     "Anthropic and once with OpenAI — doubling AI calls and cost. "
+    "Recommended row limit: 5-10 rows."
+)
+
+COMPARE_TRIPLE_MODE_WARNING_TEXT = (
+    "EXPERIMENTAL: this mode runs every selected row THREE times — Anthropic, "
+    "OpenAI nano, and OpenAI mini — tripling AI calls and cost. "
     "Recommended row limit: 5-10 rows."
 )
 
@@ -187,7 +204,7 @@ def validate_ai_provider_run(
     """
     if provider_mode == "anthropic":
         return None
-    if provider_mode not in ("openai", "compare"):
+    if provider_mode not in ("openai", "compare", "compare_triple"):
         return f"Unknown AI provider mode: {provider_mode!r}"
     if run_mode in (FOREIGN_HQ_ONLY_MODE, NON_ENGLISH_FOREIGN_HQ_ONLY_MODE):
         return _EXPERIMENTAL_PROVIDER_MODE_BLOCK_TEXT
@@ -198,8 +215,12 @@ def validate_ai_provider_run(
     return None
 
 
-def build_provider_comparison_workbook_bytes(comparison_df) -> bytes:
-    """Write the provider-comparison DataFrame to xlsx bytes (one sheet)."""
+def build_provider_comparison_workbook_bytes(comparison_df, cost_summary_df=None) -> bytes:
+    """Write the provider-comparison DataFrame to xlsx bytes.
+
+    ``cost_summary_df`` is optional (backward compatible); when given, it is
+    written to an additional "Cost Summary" sheet.
+    """
     import io
 
     import pandas as _pd
@@ -207,8 +228,23 @@ def build_provider_comparison_workbook_bytes(comparison_df) -> bytes:
     buf = io.BytesIO()
     with _pd.ExcelWriter(buf, engine="openpyxl") as writer:
         comparison_df.to_excel(writer, sheet_name="Provider Comparison", index=False)
+        if cost_summary_df is not None:
+            cost_summary_df.to_excel(writer, sheet_name="Cost Summary", index=False)
     buf.seek(0)
     return buf.getvalue()
+
+
+def build_cost_summary_dataframe(comparison_df, providers) -> "pd.DataFrame":
+    """Per-provider/model cost rows as a DataFrame, for display and export.
+
+    ``providers`` is the same ``(label, column_prefix)`` list accepted by
+    ``build_provider_cost_rows`` (e.g. ``TWO_WAY_COST_PROVIDERS`` or
+    ``TRIPLE_COST_PROVIDERS``).
+    """
+    import pandas as _pd
+
+    cost_rows = build_provider_cost_rows(comparison_df, providers)
+    return _pd.DataFrame(cost_rows)
 
 
 def build_comparison_download_filename(timestamp) -> str:
@@ -838,8 +874,9 @@ def main() -> None:  # pragma: no cover - exercised only under `streamlit run`
     provider_label = st.selectbox(
         "AI provider for HQ interpretation", AI_PROVIDER_LABELS, index=0,
         help="Anthropic only is the production default. The OpenAI and "
-             "compare options are experimental and only available for the "
-             "standard batch modes without C5.")
+             "compare options (including the nano-vs-mini triple compare) "
+             "are experimental and only available for the standard batch "
+             "modes without C5.")
     ai_provider_mode = ai_provider_label_to_mode(provider_label)
     openai_model = DEFAULT_OPENAI_MODEL
     if ai_provider_mode in ("openai", "compare"):
@@ -848,6 +885,11 @@ def main() -> None:  # pragma: no cover - exercised only under `streamlit run`
             index=list(SUPPORTED_OPENAI_MODELS).index(DEFAULT_OPENAI_MODEL))
     if ai_provider_mode == "compare":
         st.warning(COMPARE_MODE_WARNING_TEXT)
+    if ai_provider_mode == "compare_triple":
+        st.caption(
+            f"Fixed models for this mode: OpenAI nano = **{DEFAULT_OPENAI_NANO_MODEL}**, "
+            f"OpenAI mini = **{DEFAULT_OPENAI_MINI_MODEL}**.")
+        st.warning(COMPARE_TRIPLE_MODE_WARNING_TEXT)
 
     # ── Row controls ──────────────────────────────────────────────────────────
     st.subheader("Rows")
@@ -971,41 +1013,86 @@ def main() -> None:  # pragma: no cover - exercised only under `streamlit run`
             row_limit=int(row_limit),
             continue_on_error=not stop_on_error,
             include_raw_ai_json=include_raw_ai_json,
-            # "compare" runs its own dedicated path below; the config itself
-            # stays anthropic unless OpenAI-only was explicitly selected.
+            # "compare" / "compare_triple" run their own dedicated path below;
+            # the config itself stays anthropic unless OpenAI-only was
+            # explicitly selected.
             ai_provider="openai" if ai_provider_mode == "openai" else "anthropic",
             ai_model=openai_model if ai_provider_mode == "openai" else "",
         )
         import time as _time
 
         # ── Experimental provider comparison (dedicated small-run path) ───────
-        if ai_provider_mode == "compare":
+        if ai_provider_mode in ("compare", "compare_triple"):
             selected_rows_df = select_batch_rows(df, config)
             run_timestamp = _dt.now()
+            is_triple = ai_provider_mode == "compare_triple"
+            run_times = 3 if is_triple else 2
+            cost_providers = TRIPLE_COST_PROVIDERS if is_triple else TWO_WAY_COST_PROVIDERS
             with st.spinner(
                 f"Comparing providers on {len(selected_rows_df)} row(s) — "
-                "each row runs twice..."
+                f"each row runs {run_times} times..."
             ):
-                comparison_df = run_comparison(
-                    selected_rows_df,
-                    company_column=company_col,
-                    domain_column=domain_col,
-                    country_column=input_country_column or "",
-                    default_input_country=default_country,
-                    openai_model=openai_model,
-                    serper_api_key=serper,
-                    anthropic_api_key=anthropic,
-                    openai_api_key=openai_key,
+                if is_triple:
+                    comparison_df = run_triple_comparison(
+                        selected_rows_df,
+                        company_column=company_col,
+                        domain_column=domain_col,
+                        country_column=input_country_column or "",
+                        default_input_country=default_country,
+                        openai_nano_model=DEFAULT_OPENAI_NANO_MODEL,
+                        openai_mini_model=DEFAULT_OPENAI_MINI_MODEL,
+                        serper_api_key=serper,
+                        anthropic_api_key=anthropic,
+                        openai_api_key=openai_key,
+                    )
+                else:
+                    comparison_df = run_comparison(
+                        selected_rows_df,
+                        company_column=company_col,
+                        domain_column=domain_col,
+                        country_column=input_country_column or "",
+                        default_input_country=default_country,
+                        openai_model=openai_model,
+                        serper_api_key=serper,
+                        anthropic_api_key=anthropic,
+                        openai_api_key=openai_key,
+                    )
+            if is_triple:
+                st.success(f"Compared {len(comparison_df)} row(s) across three providers/models.")
+            else:
+                matches = int(comparison_df["classification_match"].sum())
+                st.success(
+                    f"Compared {len(comparison_df)} row(s) across both providers. "
+                    f"Classification matches: {matches}/{len(comparison_df)}."
                 )
-            matches = int(comparison_df["classification_match"].sum())
-            st.success(
-                f"Compared {len(comparison_df)} row(s) across both providers. "
-                f"Classification matches: {matches}/{len(comparison_df)}."
-            )
             st.dataframe(comparison_df, use_container_width=True)
+
+            # ── Cost summary (audit only — never affects scoring) ─────────────
+            cost_summary_df = build_cost_summary_dataframe(comparison_df, cost_providers)
+            cost_totals = build_cost_totals(
+                build_provider_cost_rows(comparison_df, cost_providers), len(comparison_df))
+            st.subheader("Cost summary")
+            st.dataframe(cost_summary_df, use_container_width=True)
+            totals_cols = st.columns(len(cost_providers))
+            for col, (label, _prefix) in zip(totals_cols, cost_providers):
+                total = cost_totals.get(f"total_{label}_cost_usd")
+                col.metric(f"Total {label} cost",
+                          f"${total:.4f}" if total is not None else "n/a")
+            st.caption(
+                "Estimated cost per 100 / 1,000 / 10,000 companies (combined "
+                "across providers shown above, based on this run's average "
+                "cost per company): "
+                f"${cost_totals['estimated_cost_per_100_companies_usd']:.2f} / "
+                f"${cost_totals['estimated_cost_per_1000_companies_usd']:.2f} / "
+                f"${cost_totals['estimated_cost_per_10000_companies_usd']:.2f}"
+                if cost_totals.get("estimated_cost_per_100_companies_usd") is not None
+                else "Estimated cost per 100 / 1,000 / 10,000 companies: "
+                     "unavailable (no priced provider in this run)."
+            )
+
             st.download_button(
                 "Download provider comparison workbook",
-                data=build_provider_comparison_workbook_bytes(comparison_df),
+                data=build_provider_comparison_workbook_bytes(comparison_df, cost_summary_df),
                 file_name=build_comparison_download_filename(run_timestamp),
                 mime=("application/vnd.openxmlformats-officedocument"
                       ".spreadsheetml.sheet"),

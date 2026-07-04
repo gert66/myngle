@@ -12,10 +12,17 @@ import pytest
 from lead_output_schema import LeadPrioritizationResult
 from compare_ai_providers_lead_prioritizer import (
     COMPARISON_COLUMNS,
+    TRIPLE_COMPARISON_COLUMNS,
+    TWO_WAY_COST_PROVIDERS,
+    TRIPLE_COST_PROVIDERS,
     build_comparison_row,
+    build_cost_totals,
+    build_provider_cost_rows,
+    build_triple_comparison_row,
     main,
     read_input_rows,
     run_comparison,
+    run_triple_comparison,
     select_rows,
 )
 
@@ -198,3 +205,90 @@ class TestMainDryRun:
         rc = main(["--input", str(xlsx),
                    "--output-xlsx", str(tmp_path / "out.xlsx"), "--dry-run"])
         assert rc == 1
+
+
+class TestBuildTripleComparisonRow:
+    _input = {"company_name": "Acme", "domain": "acme.com", "input_country": "Brazil"}
+
+    def test_three_way_columns_and_values(self):
+        anthropic = _result("anthropic", ai_hq_model="claude-haiku-4-5-20251001")
+        nano = _result(
+            "openai", ai_hq_model="gpt-5.4-nano",
+            ai_hq_classification="domestic", ai_parent_hq_country="Brazil",
+            final_commercial_fit_score=4.0, commercial_tier="C")
+        mini = _result("openai", ai_hq_model="gpt-5.4-mini")
+        row = build_triple_comparison_row(self._input, anthropic, nano, mini)
+        assert set(row.keys()) == set(TRIPLE_COMPARISON_COLUMNS)
+        assert row["anthropic_model"] == "claude-haiku-4-5-20251001"
+        assert row["openai_nano_model"] == "gpt-5.4-nano"
+        assert row["openai_mini_model"] == "gpt-5.4-mini"
+        assert row["openai_nano_hq_classification"] == "domestic"
+        assert row["openai_nano_parent_hq_country"] == "Brazil"
+        assert row["openai_mini_hq_classification"] == "foreign_parent"
+
+
+class TestRunTripleComparison:
+    def test_three_calls_per_row(self):
+        df = pd.DataFrame({
+            "company_name": ["Alpha", "Beta"],
+            "domain": ["alpha.com", "beta.com"],
+        })
+        calls = []
+
+        def _fake(lead, **kwargs):
+            calls.append((lead.company_name, kwargs["ai_provider"], kwargs["ai_model"]))
+            return _result(kwargs["ai_provider"], ai_hq_model=kwargs["ai_model"],
+                           company_name=lead.company_name, domain=lead.domain,
+                           input_country=lead.input_country)
+
+        out = run_triple_comparison(
+            df, company_column="company_name", domain_column="domain",
+            anthropic_model="claude-haiku-4-5-20251001",
+            openai_nano_model="gpt-5.4-nano", openai_mini_model="gpt-5.4-mini",
+            prioritize_fn=_fake,
+        )
+        assert list(out.columns) == TRIPLE_COMPARISON_COLUMNS
+        assert len(out) == 2
+        assert calls.count(("Alpha", "anthropic", "claude-haiku-4-5-20251001")) == 1
+        assert calls.count(("Alpha", "openai", "gpt-5.4-nano")) == 1
+        assert calls.count(("Alpha", "openai", "gpt-5.4-mini")) == 1
+        assert len(calls) == 6
+
+
+class TestCostSummary:
+    def test_provider_cost_rows_and_totals(self):
+        df = pd.DataFrame([{
+            "anthropic_model": "claude-haiku-4-5-20251001",
+            "anthropic_input_tokens": 1000, "anthropic_output_tokens": 100,
+            "anthropic_total_tokens": 1100, "anthropic_estimated_cost_usd": 0.0015,
+            "openai_nano_model": "gpt-5.4-nano",
+            "openai_nano_input_tokens": 800, "openai_nano_output_tokens": 120,
+            "openai_nano_total_tokens": 920, "openai_nano_estimated_cost_usd": 0.00031,
+            "openai_mini_model": "gpt-5.4-mini",
+            "openai_mini_input_tokens": 800, "openai_mini_output_tokens": 120,
+            "openai_mini_total_tokens": 920, "openai_mini_estimated_cost_usd": 0.00114,
+        }])
+        rows = build_provider_cost_rows(df, TRIPLE_COST_PROVIDERS)
+        by_provider = {r["provider"]: r for r in rows}
+        assert by_provider["anthropic"]["estimated_cost_usd"] == 0.0015
+        assert by_provider["anthropic"]["cost_per_company_usd"] == 0.0015
+        assert by_provider["openai_nano"]["model"] == "gpt-5.4-nano"
+
+        totals = build_cost_totals(rows, len(df))
+        assert totals["total_anthropic_cost_usd"] == 0.0015
+        assert totals["total_openai_nano_cost_usd"] == 0.00031
+        assert totals["total_openai_mini_cost_usd"] == 0.00114
+        combined = 0.0015 + 0.00031 + 0.00114
+        assert totals["estimated_cost_per_100_companies_usd"] == round(combined * 100, 2)
+        assert totals["estimated_cost_per_1000_companies_usd"] == round(combined * 1000, 2)
+        assert totals["estimated_cost_per_10000_companies_usd"] == round(combined * 10000, 2)
+
+    def test_unpriced_or_missing_provider_never_crashes_and_stays_blank(self):
+        df = pd.DataFrame([{"anthropic_model": "claude-haiku-4-5-20251001"}])
+        rows = build_provider_cost_rows(df, TWO_WAY_COST_PROVIDERS)
+        by_provider = {r["provider"]: r for r in rows}
+        assert by_provider["openai"]["estimated_cost_usd"] is None
+        assert by_provider["openai"]["input_tokens"] == 0
+        totals = build_cost_totals(rows, len(df))
+        assert totals["total_openai_cost_usd"] is None
+        assert totals["estimated_cost_per_100_companies_usd"] is None

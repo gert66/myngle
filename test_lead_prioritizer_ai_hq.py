@@ -366,10 +366,10 @@ class TestOpenAIProvider:
         assert result.ai_hq_output_tokens == 120
         assert result.ai_hq_total_tokens == 920
 
-    def test_cost_blank_for_unpriced_model(self):
-        # gpt-5.4-nano has no confirmed pricing entry → blank, not guessed.
+    def test_cost_computed_for_priced_openai_model(self):
+        # gpt-5.4-nano pricing: 800/1M*0.20 + 120/1M*1.25 = 0.00031
         result = self._run_openai()
-        assert result.ai_hq_estimated_cost_usd is None
+        assert result.ai_hq_estimated_cost_usd == 0.00031
 
     def test_missing_openai_key_routes_to_manual_review(self):
         with _mock_serper(_EMPTY_SERPER), _mock_openai(self._ai):
@@ -506,7 +506,13 @@ class TestEstimateAiCost:
         assert estimate_ai_cost_usd("claude-haiku-4-5-20251001", 1000, 100) == 0.0015
 
     def test_unknown_model_returns_none(self):
-        assert estimate_ai_cost_usd("gpt-5.4-nano", 1000, 100) is None
+        assert estimate_ai_cost_usd("gpt-9-unreleased", 1000, 100) is None
+
+    def test_openai_nano_and_mini_pricing(self):
+        # gpt-5.4-nano: 1000/1M*0.20 + 100/1M*1.25 = 0.000325
+        assert estimate_ai_cost_usd("gpt-5.4-nano", 1000, 100) == 0.000325
+        # gpt-5.4-mini: 1000/1M*0.75 + 100/1M*4.50 = 0.00120
+        assert estimate_ai_cost_usd("gpt-5.4-mini", 1000, 100) == 0.0012
 
     def test_missing_tokens_return_none(self):
         assert estimate_ai_cost_usd("claude-haiku-4-5-20251001", None, 100) is None

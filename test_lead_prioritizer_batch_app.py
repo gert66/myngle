@@ -860,7 +860,7 @@ class TestAiProviderSelection:
 
     def test_all_labels_map(self):
         assert [ai_provider_label_to_mode(lbl) for lbl in AI_PROVIDER_LABELS] == \
-            ["anthropic", "openai", "compare"]
+            ["anthropic", "openai", "compare", "compare_triple"]
 
     def test_unknown_label_raises(self):
         with pytest.raises(ValueError):
@@ -889,6 +889,13 @@ class TestValidateAiProviderRun:
     def test_compare_blocked_with_c5(self):
         err = validate_ai_provider_run("compare", "full", True, "k")
         assert err is not None and "C5" in err
+
+    def test_compare_triple_allowed_and_blocked_like_compare(self):
+        assert validate_ai_provider_run("compare_triple", "hq_only", False, "k") is None
+        err = validate_ai_provider_run("compare_triple", "full", True, "k")
+        assert err is not None and "C5" in err
+        err2 = validate_ai_provider_run("compare_triple", "full", False, "")
+        assert err2 is not None and "OPENAI_API_KEY" in err2
 
     def test_blocked_for_foreign_hq_only_modes(self):
         err = validate_ai_provider_run("compare", FOREIGN_HQ_ONLY_MODE, False, "k")
@@ -925,3 +932,41 @@ class TestProviderComparisonWorkbook:
 
         name = build_comparison_download_filename(datetime(2026, 7, 4, 9, 30, 0))
         assert name == "lead_prioritizer_provider_comparison_20260704_093000.xlsx"
+
+    def test_workbook_with_cost_summary_sheet(self, tmp_path):
+        import io
+
+        import pandas as pd
+
+        from compare_ai_providers_lead_prioritizer import COMPARISON_COLUMNS
+
+        df = pd.DataFrame([{col: "" for col in COMPARISON_COLUMNS}])
+        df.loc[0, "company_name"] = "Acme"
+        cost_df = pd.DataFrame([{"provider": "anthropic", "estimated_cost_usd": 0.0015}])
+
+        data = build_provider_comparison_workbook_bytes(df, cost_df)
+        xls = pd.ExcelFile(io.BytesIO(data))
+        assert "Provider Comparison" in xls.sheet_names
+        assert "Cost Summary" in xls.sheet_names
+        loaded_cost = pd.read_excel(io.BytesIO(data), sheet_name="Cost Summary")
+        assert loaded_cost.loc[0, "provider"] == "anthropic"
+
+
+class TestCostSummaryDataframe:
+    def test_build_cost_summary_dataframe_for_triple(self):
+        from lead_prioritizer_batch_app import build_cost_summary_dataframe
+        from compare_ai_providers_lead_prioritizer import TRIPLE_COST_PROVIDERS
+
+        import pandas as pd
+
+        df = pd.DataFrame([{
+            "anthropic_model": "claude-haiku-4-5-20251001",
+            "anthropic_estimated_cost_usd": 0.0015,
+            "openai_nano_model": "gpt-5.4-nano",
+            "openai_nano_estimated_cost_usd": 0.0003,
+            "openai_mini_model": "gpt-5.4-mini",
+            "openai_mini_estimated_cost_usd": 0.0011,
+        }])
+        out = build_cost_summary_dataframe(df, TRIPLE_COST_PROVIDERS)
+        assert list(out["provider"]) == ["anthropic", "openai_nano", "openai_mini"]
+        assert out.loc[0, "estimated_cost_usd"] == 0.0015

@@ -41,6 +41,12 @@ from lead_prioritizer_core import prioritize_single_lead
 
 DEFAULT_ROW_LIMIT = 5
 
+# Fixed OpenAI models for the nano-vs-mini triple comparison (Anthropic vs
+# OpenAI nano vs OpenAI mini). Comparison-only — does not change which model
+# "OpenAI only" / two-way "compare" use.
+DEFAULT_OPENAI_NANO_MODEL = "gpt-5.4-nano"
+DEFAULT_OPENAI_MINI_MODEL = "gpt-5.4-mini"
+
 COMPARISON_COLUMNS = [
     "company_name", "domain", "input_country",
     "anthropic_hq_classification", "openai_hq_classification",
@@ -183,6 +189,234 @@ def run_comparison(
         ))
 
     return pd.DataFrame(records, columns=COMPARISON_COLUMNS)
+
+
+# ---------------------------------------------------------------------------
+# Triple comparison: Anthropic vs OpenAI nano vs OpenAI mini
+# ---------------------------------------------------------------------------
+# Same comparison-only contract as the two-way compare above: no scoring, C4,
+# C5, HQ, Serper, Excel, or Lovable export behavior changes; never runs unless
+# invoked explicitly. Each row costs one Serper call plus three AI calls
+# (Anthropic + OpenAI nano + OpenAI mini), so keep --row-limit small.
+
+TRIPLE_COMPARISON_COLUMNS = [
+    "company_name", "domain", "input_country",
+    "anthropic_hq_classification", "openai_nano_hq_classification",
+    "openai_mini_hq_classification",
+    "anthropic_parent_hq_country", "openai_nano_parent_hq_country",
+    "openai_mini_parent_hq_country",
+    "anthropic_foreign_hq_score", "openai_nano_foreign_hq_score",
+    "openai_mini_foreign_hq_score",
+    "anthropic_final_score", "openai_nano_final_score", "openai_mini_final_score",
+    "anthropic_tier", "openai_nano_tier", "openai_mini_tier",
+    "anthropic_model", "openai_nano_model", "openai_mini_model",
+    "anthropic_input_tokens", "anthropic_output_tokens",
+    "anthropic_total_tokens", "anthropic_estimated_cost_usd",
+    "openai_nano_input_tokens", "openai_nano_output_tokens",
+    "openai_nano_total_tokens", "openai_nano_estimated_cost_usd",
+    "openai_mini_input_tokens", "openai_mini_output_tokens",
+    "openai_mini_total_tokens", "openai_mini_estimated_cost_usd",
+    "anthropic_ai_error", "openai_nano_ai_error", "openai_mini_ai_error",
+]
+
+
+def build_triple_comparison_row(
+    row_input: dict, anthropic_result, nano_result, mini_result,
+) -> dict:
+    """Flatten three per-provider results into one triple-comparison record."""
+    a, n, m = anthropic_result, nano_result, mini_result
+
+    a_score = a.final_commercial_fit_score
+    n_score = n.final_commercial_fit_score
+    m_score = m.final_commercial_fit_score
+
+    a_tier = a.commercial_tier or ""
+    n_tier = n.commercial_tier or ""
+    m_tier = m.commercial_tier or ""
+
+    return {
+        "company_name": row_input.get("company_name", ""),
+        "domain": row_input.get("domain", ""),
+        "input_country": row_input.get("input_country", ""),
+        "anthropic_hq_classification": a.ai_hq_classification or "",
+        "openai_nano_hq_classification": n.ai_hq_classification or "",
+        "openai_mini_hq_classification": m.ai_hq_classification or "",
+        "anthropic_parent_hq_country": a.ai_parent_hq_country or "",
+        "openai_nano_parent_hq_country": n.ai_parent_hq_country or "",
+        "openai_mini_parent_hq_country": m.ai_parent_hq_country or "",
+        "anthropic_foreign_hq_score": a.sig_foreign_hq_score_for_next_scoring,
+        "openai_nano_foreign_hq_score": n.sig_foreign_hq_score_for_next_scoring,
+        "openai_mini_foreign_hq_score": m.sig_foreign_hq_score_for_next_scoring,
+        "anthropic_final_score": a_score,
+        "openai_nano_final_score": n_score,
+        "openai_mini_final_score": m_score,
+        "anthropic_tier": a_tier,
+        "openai_nano_tier": n_tier,
+        "openai_mini_tier": m_tier,
+        "anthropic_model": a.ai_hq_model or "",
+        "openai_nano_model": n.ai_hq_model or "",
+        "openai_mini_model": m.ai_hq_model or "",
+        "anthropic_input_tokens": a.ai_hq_input_tokens,
+        "anthropic_output_tokens": a.ai_hq_output_tokens,
+        "anthropic_total_tokens": a.ai_hq_total_tokens,
+        "anthropic_estimated_cost_usd": a.ai_hq_estimated_cost_usd,
+        "openai_nano_input_tokens": n.ai_hq_input_tokens,
+        "openai_nano_output_tokens": n.ai_hq_output_tokens,
+        "openai_nano_total_tokens": n.ai_hq_total_tokens,
+        "openai_nano_estimated_cost_usd": n.ai_hq_estimated_cost_usd,
+        "openai_mini_input_tokens": m.ai_hq_input_tokens,
+        "openai_mini_output_tokens": m.ai_hq_output_tokens,
+        "openai_mini_total_tokens": m.ai_hq_total_tokens,
+        "openai_mini_estimated_cost_usd": m.ai_hq_estimated_cost_usd,
+        "anthropic_ai_error": a.ai_hq_error or "",
+        "openai_nano_ai_error": n.ai_hq_error or "",
+        "openai_mini_ai_error": m.ai_hq_error or "",
+    }
+
+
+def run_triple_comparison(
+    df: pd.DataFrame,
+    *,
+    company_column: str,
+    domain_column: str,
+    country_column: str = "",
+    default_input_country: str = "Italy",
+    anthropic_model: str = DEFAULT_ANTHROPIC_MODEL,
+    openai_nano_model: str = DEFAULT_OPENAI_NANO_MODEL,
+    openai_mini_model: str = DEFAULT_OPENAI_MINI_MODEL,
+    serper_api_key: str = "",
+    anthropic_api_key: str = "",
+    openai_api_key: str = "",
+    prioritize_fn=prioritize_single_lead,
+) -> pd.DataFrame:
+    """Run each row once per provider/model (Anthropic, OpenAI nano, OpenAI
+    mini) and return the triple-comparison DataFrame.
+
+    ``prioritize_fn`` is injectable for tests; live runs use
+    ``prioritize_single_lead`` with ``calculate_commercial_score_flag=True``
+    (HQ + commercial score only — no non-HQ enrichment, no C5).
+    """
+    records = []
+    for _, raw in df.iterrows():
+        row = raw.to_dict()
+        company = _cell(row, company_column)
+        domain = _cell(row, domain_column) or None
+        country = _cell(row, country_column) or None
+        lead = LeadInput(company_name=company, domain=domain, input_country=country)
+
+        common = dict(
+            serper_api_key=serper_api_key,
+            anthropic_api_key=anthropic_api_key,
+            openai_api_key=openai_api_key,
+            default_input_country=default_input_country,
+            calculate_commercial_score_flag=True,
+        )
+        anthropic_result = prioritize_fn(
+            lead, ai_provider="anthropic", ai_model=anthropic_model, **common)
+        nano_result = prioritize_fn(
+            lead, ai_provider="openai", ai_model=openai_nano_model, **common)
+        mini_result = prioritize_fn(
+            lead, ai_provider="openai", ai_model=openai_mini_model, **common)
+
+        records.append(build_triple_comparison_row(
+            {"company_name": company, "domain": domain or "",
+             "input_country": country or default_input_country},
+            anthropic_result, nano_result, mini_result,
+        ))
+
+    return pd.DataFrame(records, columns=TRIPLE_COMPARISON_COLUMNS)
+
+
+# ---------------------------------------------------------------------------
+# Cost summary (audit only — never affects scoring, HQ, or export behavior)
+# ---------------------------------------------------------------------------
+# Company counts used for the "estimated cost per N companies" projection.
+COST_PROJECTION_COMPANY_COUNTS = (100, 1_000, 10_000)
+
+# (display_label, column_prefix) for the two-way and triple comparisons.
+# column_prefix must match the "<prefix>_model" / "<prefix>_input_tokens" /
+# "<prefix>_output_tokens" / "<prefix>_total_tokens" /
+# "<prefix>_estimated_cost_usd" columns on the comparison DataFrame.
+TWO_WAY_COST_PROVIDERS = [("anthropic", "anthropic"), ("openai", "openai")]
+TRIPLE_COST_PROVIDERS = [
+    ("anthropic", "anthropic"),
+    ("openai_nano", "openai_nano"),
+    ("openai_mini", "openai_mini"),
+]
+
+
+def build_provider_cost_rows(comparison_df: pd.DataFrame, providers) -> list:
+    """One cost row per provider/model actually present in ``comparison_df``.
+
+    ``providers`` is a list of ``(label, column_prefix)`` pairs. A provider
+    whose cost column is entirely blank (unpriced model, or no rows) still
+    gets a row with a blank ``estimated_cost_usd`` — never a guessed cost and
+    never a crash.
+    """
+    n_rows = len(comparison_df)
+    rows = []
+    for label, prefix in providers:
+        model_col = f"{prefix}_model"
+        in_col = f"{prefix}_input_tokens"
+        out_col = f"{prefix}_output_tokens"
+        total_col = f"{prefix}_total_tokens"
+        cost_col = f"{prefix}_estimated_cost_usd"
+
+        model_name = ""
+        if model_col in comparison_df.columns:
+            names = comparison_df[model_col].dropna()
+            names = names[names != ""]
+            if len(names):
+                model_name = str(names.iloc[0])
+
+        input_tokens = (int(comparison_df[in_col].dropna().sum())
+                        if in_col in comparison_df.columns else 0)
+        output_tokens = (int(comparison_df[out_col].dropna().sum())
+                          if out_col in comparison_df.columns else 0)
+        total_tokens = (int(comparison_df[total_col].dropna().sum())
+                        if total_col in comparison_df.columns
+                        else input_tokens + output_tokens)
+
+        cost_series = (comparison_df[cost_col].dropna()
+                       if cost_col in comparison_df.columns else pd.Series(dtype=float))
+        total_cost = round(float(cost_series.sum()), 6) if len(cost_series) else None
+        cost_per_company = (round(total_cost / n_rows, 6)
+                            if total_cost is not None and n_rows else None)
+
+        rows.append({
+            "provider": label,
+            "model": model_name,
+            "input_tokens": input_tokens,
+            "output_tokens": output_tokens,
+            "total_tokens": total_tokens,
+            "estimated_cost_usd": total_cost,
+            "cost_per_company_usd": cost_per_company,
+        })
+    return rows
+
+
+def build_cost_totals(cost_rows: list, n_rows: int) -> dict:
+    """Grand totals per provider plus projected cost at 100/1,000/10,000
+    companies.
+
+    The projection combines the per-company cost across every provider/model
+    row that has a known cost (unpriced models are simply excluded — never
+    guessed). Returns ``None`` for the projection when no provider has a
+    known cost yet.
+    """
+    totals = {"companies_compared": n_rows}
+    for row in cost_rows:
+        totals[f"total_{row['provider']}_cost_usd"] = row["estimated_cost_usd"]
+
+    known_per_company = [r["cost_per_company_usd"] for r in cost_rows
+                         if r["cost_per_company_usd"] is not None]
+    combined_per_company = round(sum(known_per_company), 6) if known_per_company else None
+    for count in COST_PROJECTION_COMPANY_COUNTS:
+        totals[f"estimated_cost_per_{count}_companies_usd"] = (
+            round(combined_per_company * count, 2)
+            if combined_per_company is not None else None
+        )
+    return totals
 
 
 def build_arg_parser() -> argparse.ArgumentParser:

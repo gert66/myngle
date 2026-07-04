@@ -47,18 +47,17 @@ SUPPORTED_OPENAI_MODELS = ("gpt-5.4-nano", "gpt-5.4-mini")
 # absent from the table) gets a BLANK estimated cost — never a guessed one;
 # token counts are still recorded so costs can be computed later.
 #
-# IMPORTANT: verify these prices against the provider pricing pages before any
-# production cost analysis — pricing changes over time:
+# IMPORTANT: these are provisional prices for cost-comparison purposes only —
+# verify against the provider pricing pages before any production cost
+# analysis, and update the values here (not elsewhere) when they change:
 #   - Anthropic: https://www.anthropic.com/pricing
 #   - OpenAI:    https://openai.com/api/pricing/
 MODEL_PRICING_USD_PER_MTOK: dict[str, "tuple[float, float] | None"] = {
-    # Anthropic
+    # Anthropic — Claude Haiku 4.5
     "claude-haiku-4-5-20251001": (1.00, 5.00),
-    # OpenAI — pricing not yet confirmed for these models. Replace None with
-    # (input_usd_per_mtok, output_usd_per_mtok) once verified on the pricing
-    # page above; until then the estimated cost stays blank.
-    "gpt-5.4-nano": None,
-    "gpt-5.4-mini": None,
+    # OpenAI (experimental, provisional pricing — verify before production use)
+    "gpt-5.4-nano": (0.20, 1.25),
+    "gpt-5.4-mini": (0.75, 4.50),
 }
 
 
