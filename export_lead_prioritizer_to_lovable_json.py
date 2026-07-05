@@ -476,6 +476,8 @@ def build_visible_icp_signal_scores(
             "label": FOREIGN_HQ_SIGNAL_LABEL,
             "score": 3,
             "evidence": build_foreign_hq_evidence_text(row),
+            "signal_name": "foreign_hq",
+            "evidence_url": None,
         })
 
     for sig in signal_rows:
@@ -494,6 +496,13 @@ def build_visible_icp_signal_scores(
             "label": label,
             "score": to_float(sig.get("signal_score")),
             "evidence": evidence,
+            # Internal-only extras (not part of the historical {label, score,
+            # evidence} contract) used by the ui_payload builders below to
+            # tell distinct underlying signals apart (e.g. "onboarding" also
+            # appears in company_size_complexity's display label) and to
+            # check evidence against its source domain.
+            "signal_name": name or None,
+            "evidence_url": clean_str(sig.get("evidence_url")),
         })
     return visible
 
@@ -596,6 +605,15 @@ _QUALITY_FLAG_CAUTION_TEXT: dict[str, str] = {
     "competitor_signal_suppressed": "A competitor-related signal was detected and excluded.",
 }
 
+# A caution_app sentence is only split into separate ui_payload.caution items
+# at a genuine item boundary — a period immediately followed by ";" (the
+# exact separator _join() in lead_caller_app_fields_builder.py inserts
+# between already-complete sentences). Some individual warnings (e.g. the
+# domain-mismatch one) use "; " as an internal clause connector with no
+# preceding period, so a naive text.split(";") would chop that one warning
+# into two bogus fragments; this lookbehind never matches there.
+_CAUTION_ITEM_SPLIT_RE = re.compile(r"(?<=\.)\s*;\s*")
+
 # Fragments that mark generic/templated filler text — never promoted into
 # ui_payload caller-facing bullets or driver evidence.
 _GENERIC_TEXT_RE = re.compile(
@@ -611,6 +629,27 @@ _GENERIC_TEXT_RE = re.compile(
 # Raw internal token fragments (sig_/ti_/c4_/c5_ field names, score math) that
 # must never leak into ui_payload text.
 _RAW_TOKEN_RE = re.compile(r"\bsig_|\bti_|\bc[45]_", re.IGNORECASE)
+
+# Raw scraper formatting artifacts (e.g. "___THE NETHERLANDS ___Austria")
+# left over from a poorly-cleaned location list dump.
+_RAW_ARTIFACT_RE = re.compile(r"_{2,}")
+
+# Marketing/event fragments picked up by mistake from an unrelated page
+# section (careers/events feed) rather than genuine company evidence.
+_EVENT_FRAGMENT_RE = re.compile(
+    r"back\s+by\s+popular\s+demand"
+    r"|coming\s+soon"
+    r"|register\s+now"
+    r"|sign\s+up\s+now"
+    r"|read\s+more"
+    r"|click\s+here"
+    r"|\.\.\.\s*$",
+    re.IGNORECASE,
+)
+
+# Above this length, a snippet is no longer "a concrete evidence sentence" —
+# it reads as a dumped block of scraped text rather than a clean summary.
+_MAX_VISIBLE_EVIDENCE_CHARS = 220
 
 _EMPLOYEE_COUNT_RE = re.compile(r"([\d,]{1,7})\s*\+?\s*employees", re.IGNORECASE)
 
@@ -628,12 +667,36 @@ def _employee_range_bounds(employee_range) -> "tuple[int, int | None] | None":
     return None
 
 
+def _looks_like_location_dump(text: str) -> bool:
+    """True for a multiline text, or a run of 3+ short capitalized
+    location-like tokens — a scraped "office locations" list rather than a
+    concrete evidence sentence."""
+    if "\n" in text or "\r" in text:
+        return True
+    segments = re.split(r"[|;]", text)
+    capitalized_segments = [
+        s for s in segments
+        if re.match(r"^[A-Z][A-Za-z .'-]{1,40}$", s.strip())
+    ]
+    return len(capitalized_segments) >= 3
+
+
 def is_generic_or_raw_text(text) -> bool:
-    """True for banned generic filler phrases or raw internal field tokens."""
+    """True for banned generic filler phrases, raw internal field tokens,
+    scraper formatting artifacts, event/marketing fragments, multiline
+    location dumps, or text too long to be a clean evidence sentence."""
     text = clean_str(text)
     if not text:
         return False
-    return bool(_GENERIC_TEXT_RE.search(text) or _RAW_TOKEN_RE.search(text))
+    if _GENERIC_TEXT_RE.search(text) or _RAW_TOKEN_RE.search(text):
+        return True
+    if _RAW_ARTIFACT_RE.search(text) or _EVENT_FRAGMENT_RE.search(text):
+        return True
+    if _looks_like_location_dump(text):
+        return True
+    if len(text) > _MAX_VISIBLE_EVIDENCE_CHARS:
+        return True
+    return False
 
 
 def is_suspicious_evidence(text, employee_range=None) -> bool:
@@ -656,13 +719,81 @@ def is_suspicious_evidence(text, employee_range=None) -> bool:
     return count < lo * 0.1
 
 
-def _clean_driver_evidence(text, employee_range) -> "str | None":
+# Simplified registrable-domain heuristic (last two dot-separated labels) —
+# no public-suffix-list handling, which is an accepted limitation for the
+# .com/.nl/.com.br-style domains this exporter deals with.
+def _registrable_domain(host: "str | None") -> str:
+    host = (host or "").lower().removeprefix("www.")
+    parts = [p for p in host.split(".") if p]
+    if len(parts) <= 2:
+        return host
+    return ".".join(parts[-2:])
+
+
+# Independent business-info sites worth keeping as "Third-party company
+# profile" even though they're never the lead's own domain.
+_KNOWN_THIRD_PARTY_DIRECTORY_DOMAINS = frozenset({
+    "linkedin.com", "crunchbase.com", "bloomberg.com", "glassdoor.com",
+    "zoominfo.com", "owler.com",
+})
+
+
+def _company_name_tokens(company_name: "str | None") -> list[str]:
+    """First couple of significant (3+ letter) words of a company name, used
+    as a light-touch check that a third-party page is actually about this
+    lead rather than an unrelated company picked up by the scraper."""
+    if not company_name:
+        return []
+    return re.findall(r"[A-Za-z]{3,}", company_name)[:2]
+
+
+def _mentions_company(text: "str | None", company_name: "str | None") -> bool:
+    if not text or not company_name:
+        return False
+    text_lower = text.lower()
+    return any(tok.lower() in text_lower for tok in _company_name_tokens(company_name))
+
+
+def is_domain_relevant_for_url(
+    url: "str | None",
+    own_domains: "set[str] | None",
+    company_name: "str | None" = None,
+    context_text: "str | None" = None,
+) -> bool:
+    """True when a URL's domain is the lead's own site, a known independent
+    business directory, or its accompanying text actually mentions the lead
+    — false for an unrelated domain such as a different company's careers
+    page picked up by a scraper (e.g. careers.accor.com for a DORC lead)."""
+    host = hostname_of(url)
+    if not host:
+        return False
+    domain = _registrable_domain(host)
+    if own_domains and domain in own_domains:
+        return True
+    if domain in _KNOWN_THIRD_PARTY_DIRECTORY_DOMAINS:
+        return True
+    if _mentions_company(context_text, company_name):
+        return True
+    # Nothing to compare against (no known own domain) — don't blanket-reject.
+    return not own_domains
+
+
+def _clean_driver_evidence(
+    signal: dict,
+    employee_range: "str | None",
+    own_domains: "set[str] | None" = None,
+    company_name: "str | None" = None,
+) -> "str | None":
     """Evidence text usable in ui_payload, or None when it's weak, generic,
-    a raw token, or suspicious — the label/strength is kept either way."""
-    text = clean_str(text)
+    a raw/formatting artifact, suspicious, or from an unrelated domain — the
+    label/strength is kept regardless."""
+    text = clean_str(signal.get("evidence"))
     if not text:
         return None
     if is_generic_or_raw_text(text) or is_suspicious_evidence(text, employee_range):
+        return None
+    url = signal.get("evidence_url")
+    if url and not is_domain_relevant_for_url(url, own_domains, company_name, text):
         return None
     return text
 
@@ -677,6 +808,26 @@ def resolve_parent_hq_country(row: dict) -> "str | None":
             or clean_str(row.get("foreign_hq_country_app")))
 
 
+# Natural caller-facing phrasing for known signal display labels — applied
+# only to ui_payload text (why_relevant / what_is_hot / commercial_fit_drivers),
+# never to the historical visible_icp_signal_scores.label used by the frozen
+# Italy/Dutch label translations in lovable_content_localization.py.
+_LABEL_NATURAL_OVERRIDES: dict[str, str] = {
+    "L&D or onboarding signal": "learning and development or onboarding needs",
+    "Explicit learning and development signal": "learning and development interest",
+    "Rapid growth signal": "rapid growth",
+    "Merger or acquisition signal": "merger or acquisition activity",
+}
+
+
+def _natural_label(label: "str | None") -> str:
+    if not label:
+        return ""
+    mapped = _LABEL_NATURAL_OVERRIDES.get(label, label)
+    mapped = re.sub(r"\bL&D\b", "learning and development", mapped, flags=re.IGNORECASE)
+    return mapped
+
+
 def build_ui_payload_why_relevant(
     company_name: "str | None",
     export_country: "str | None",
@@ -686,6 +837,7 @@ def build_ui_payload_why_relevant(
     parent_hq_country: "str | None",
     visible_signals: list[dict],
     employee_range: "str | None" = None,
+    own_domains: "set[str] | None" = None,
 ) -> str:
     """Company-specific, concrete relevance sentence built from safe fields
     only (company name, country, parent/HQ, industry, strongest signals)."""
@@ -708,10 +860,10 @@ def build_ui_payload_why_relevant(
         sentence += "."
 
     strongest_labels = [
-        s.get("label") for s in visible_signals
+        _natural_label(s.get("label")) for s in visible_signals
         if s.get("label") and s.get("label") != FOREIGN_HQ_SIGNAL_LABEL
         and (s.get("score") or 0) > 0
-        and _clean_driver_evidence(s.get("evidence"), employee_range) is not None
+        and _clean_driver_evidence(s, employee_range, own_domains, company_name) is not None
     ]
     if strongest_labels:
         signal_phrase = " and ".join(label.lower() for label in strongest_labels[:2])
@@ -720,38 +872,49 @@ def build_ui_payload_why_relevant(
     return sentence
 
 
+# Canonical signal_name groupings for the what_is_hot summary line — keyed by
+# the underlying Signals.signal_name, never by display-label substrings.
+# Using label text (e.g. "Possible onboarding need") would let an unrelated
+# signal (company_size_complexity) falsely trigger the L&D summary claim
+# just because its *label* happens to also contain the word "onboarding".
+_SUMMARY_SIGNAL_NAMES = {
+    "international": {"international_profile"},
+    "learning_development": {"onboarding_training_need", "icp_keyword_match"},
+    "size_complexity": {"company_size_complexity"},
+}
+
+
 def build_ui_payload_what_is_hot(
     foreign_hq_detected: bool,
     parent_hq_country: "str | None",
     employee_range: "str | None",
     visible_signals: list[dict],
+    own_domains: "set[str] | None" = None,
+    company_name: "str | None" = None,
     max_bullets: int = 5,
 ) -> list[str]:
     """Max-5-bullet Italy-style but controlled list: a compact summary line
     first, then concrete, evidence-backed bullets. Never raw tokens, score
-    math, or generic/suspicious snippets."""
+    math, or generic/suspicious/unrelated-domain snippets."""
     positive_signals = [
         s for s in visible_signals
         if s.get("label") and s.get("label") != FOREIGN_HQ_SIGNAL_LABEL
         and (s.get("score") or 0) > 0
     ]
 
-    def _has(*keywords) -> bool:
-        return any(
-            any(kw in (s.get("label") or "").lower() for kw in keywords)
-            for s in positive_signals
-        )
+    def _has_signal(names: set) -> bool:
+        return any(s.get("signal_name") in names for s in positive_signals)
 
     summary_parts = []
     if foreign_hq_detected:
         summary_parts.append(
             f"Foreign HQ: {parent_hq_country}" if parent_hq_country else "Foreign HQ confirmed"
         )
-    if _has("international"):
+    if _has_signal(_SUMMARY_SIGNAL_NAMES["international"]):
         summary_parts.append("International footprint")
-    if _has("learning", "onboarding", "l&d"):
-        summary_parts.append("L&D / onboarding signal")
-    if _has("size", "complexity", "onboarding need") or clean_str(employee_range):
+    if _has_signal(_SUMMARY_SIGNAL_NAMES["learning_development"]):
+        summary_parts.append("Learning and development")
+    if _has_signal(_SUMMARY_SIGNAL_NAMES["size_complexity"]) or clean_str(employee_range):
         summary_parts.append("Large-scale operation")
 
     bullets: list[str] = []
@@ -766,7 +929,7 @@ def build_ui_payload_what_is_hot(
 
     _PREFIXES = (
         (("international",), "International business context"),
-        (("learning", "onboarding", "l&d"), "Learning and development signal"),
+        (("learning", "onboarding", "l&d"), "Learning and development"),
         (("size", "complexity"), "Company complexity"),
     )
     for signal in positive_signals:
@@ -777,9 +940,9 @@ def build_ui_payload_what_is_hot(
         prefix = next(
             (text for keywords, text in _PREFIXES
              if any(kw in label_lower for kw in keywords)),
-            label,
+            _natural_label(label),
         )
-        evidence = _clean_driver_evidence(signal.get("evidence"), employee_range)
+        evidence = _clean_driver_evidence(signal, employee_range, own_domains, company_name)
         bullet = f"{prefix}: {evidence}" if evidence else f"{prefix}."
         if bullet not in bullets:
             bullets.append(bullet)
@@ -798,10 +961,13 @@ def _strength_for_score(score) -> str:
 
 
 def build_commercial_fit_drivers(
-    visible_signals: list[dict], employee_range: "str | None" = None,
+    visible_signals: list[dict],
+    employee_range: "str | None" = None,
+    own_domains: "set[str] | None" = None,
+    company_name: "str | None" = None,
 ) -> list[dict]:
     """Curated {label, strength, evidence} rows from the same signal source
-    as visible_icp_signal_scores; weak/generic/suspicious evidence is
+    as visible_icp_signal_scores; weak/generic/unrelated-domain evidence is
     omitted while the label and strength are always kept."""
     drivers = []
     for signal in visible_signals:
@@ -809,10 +975,10 @@ def build_commercial_fit_drivers(
         if not label:
             continue
         driver = {
-            "label": label,
+            "label": _natural_label(label),
             "strength": _strength_for_score(signal.get("score")),
         }
-        evidence = _clean_driver_evidence(signal.get("evidence"), employee_range)
+        evidence = _clean_driver_evidence(signal, employee_range, own_domains, company_name)
         if evidence:
             driver["evidence"] = evidence
         drivers.append(driver)
@@ -820,15 +986,16 @@ def build_commercial_fit_drivers(
 
 
 def build_ui_payload_caution(quality_flags: list[str], caution_app: "str | None") -> list[str]:
-    """Human-readable warnings only — raw quality-flag column names (e.g.
-    hq_evidence_domain_mismatch_warning, needs_manual_review) are always
-    mapped to plain text, never exposed verbatim."""
+    """Human-readable warnings only, one sentence per distinct warning —
+    raw quality-flag column names (e.g. hq_evidence_domain_mismatch_warning,
+    needs_manual_review) are always mapped to plain text, never exposed
+    verbatim, and never split mid-sentence into bogus extra fragments."""
     caution: list[str] = []
     for flag in quality_flags:
         text = _QUALITY_FLAG_CAUTION_TEXT.get(flag)
         if text and text not in caution:
             caution.append(text)
-    for part in (caution_app or "").split(";"):
+    for part in _CAUTION_ITEM_SPLIT_RE.split(caution_app or ""):
         part = part.strip()
         if part and not is_generic_or_raw_text(part) and part not in caution:
             caution.append(part)
@@ -840,27 +1007,59 @@ def build_ui_payload_source_urls(
     careers_url: "str | None",
     linkedin_url: "str | None",
     source_urls: list[str],
+    own_domains: "set[str] | None" = None,
+    company_name: "str | None" = None,
+    url_context: "dict[str, str] | None" = None,
 ) -> list[dict]:
-    """Deduplicated {label, url} rows with stable labels where known."""
-    seen: set[str] = set()
+    """Deduplicated (by normalized URL) {label, url} rows with stable
+    labels: the lead's own domain is "Official website" (or "Careers page"
+    for a careers URL/subdomain on that same domain), LinkedIn is
+    "LinkedIn", and only genuinely unrelated third-party domains are
+    excluded outright (e.g. careers.accor.com for a DORC lead) — everything
+    else third-party is kept, labeled "Third-party company profile"."""
+    url_context = url_context or {}
+    own_domains = own_domains or set()
+    seen_norm: set[str] = set()
     items: list[dict] = []
+
+    def _normalized(url: str) -> str:
+        u = re.sub(r"^https?://", "", url.strip(), flags=re.IGNORECASE).rstrip("/")
+        return u[4:].lower() if u.lower().startswith("www.") else u.lower()
 
     def _add(url, label) -> None:
         url = clean_str(url)
-        if not url or url in seen:
+        if not url:
             return
-        seen.add(url)
+        norm = _normalized(url)
+        if norm in seen_norm:
+            return
+        seen_norm.add(norm)
         items.append({"label": label, "url": url})
 
     _add(website_url, "Official website")
     _add(careers_url, "Careers page")
     _add(linkedin_url, "LinkedIn")
+
     for url in source_urls:
         url = clean_str(url)
-        if not url or url in seen:
+        if not url:
             continue
-        label = "LinkedIn" if "linkedin.com" in hostname_of(url) else "Third-party company profile"
-        _add(url, label)
+        norm = _normalized(url)
+        if norm in seen_norm:
+            continue
+        host = hostname_of(url)
+        if "linkedin.com" in host:
+            _add(url, "LinkedIn")
+            continue
+        domain = _registrable_domain(host)
+        if domain in own_domains:
+            label = "Careers page" if "career" in url.lower() else "Official website"
+            _add(url, label)
+            continue
+        if not is_domain_relevant_for_url(url, own_domains, company_name, url_context.get(url)):
+            continue  # unrelated domain (e.g. careers.accor.com) — excluded
+        _add(url, "Third-party company profile")
+
     return items
 
 
@@ -1015,6 +1214,42 @@ def _build_debug_row(row: dict, warnings: list[str]) -> dict:
     return debug_row
 
 
+def _own_domains_for_row(row: dict) -> "set[str]":
+    """Registrable domains that count as "the lead's own" for source/evidence
+    relevance checks: its domain/normalized_domain plus website/careers URLs."""
+    domains: set[str] = set()
+    for key in ("normalized_domain", "domain", "website_url", "careers_url"):
+        value = clean_str(row.get(key))
+        if not value:
+            continue
+        host = hostname_of(value) if ("://" in value or "/" in value) else value
+        host = (host or value).lower().removeprefix("www.")
+        if host:
+            domains.add(_registrable_domain(host))
+    return domains
+
+
+def _build_url_context(evidence_rows: list[dict], signal_rows: list[dict]) -> "dict[str, str]":
+    """url -> nearby title/snippet/quote text, used only to check whether a
+    third-party page actually mentions the lead's company name."""
+    context: dict[str, str] = {}
+
+    def _merge(url, *texts) -> None:
+        url = clean_str(url)
+        if not url:
+            return
+        text = " ".join(t for t in (clean_str(t) for t in texts) if t)
+        if text:
+            context[url] = (context.get(url, "") + " " + text).strip()
+
+    for ev in evidence_rows:
+        _merge(ev.get("source_url"), ev.get("source_title"), ev.get("source_snippet"))
+    for sig in signal_rows:
+        _merge(sig.get("evidence_url"), sig.get("evidence_title"),
+                sig.get("evidence_quote"), sig.get("signal_reason"))
+    return context
+
+
 def _build_detail_record(
     row: dict,
     list_item: dict,
@@ -1080,15 +1315,20 @@ def _build_detail_record(
     employee_range = list_item.get("employee_range")
     parent_company = resolve_parent_company(row)
     parent_hq_country = resolve_parent_hq_country(row)
+    company_name = detail["company_name"]
+    own_domains = _own_domains_for_row(row)
+    url_context = _build_url_context(evidence_rows, signal_rows)
 
     detail["ui_payload"] = {
         "why_relevant": build_ui_payload_why_relevant(
-            detail["company_name"], list_item.get("export_country"),
+            company_name, list_item.get("export_country"),
             list_item.get("industry"), foreign_hq_detected,
             parent_company, parent_hq_country, visible_signals, employee_range,
+            own_domains,
         ),
         "what_is_hot": build_ui_payload_what_is_hot(
             foreign_hq_detected, parent_hq_country, employee_range, visible_signals,
+            own_domains, company_name,
         ),
         "what_is_not": detail["what_is_not_app"],
         "caller_angle": detail["caller_angle_app"],
@@ -1096,11 +1336,12 @@ def _build_detail_record(
         "cold_caller_summary": detail["cold_caller_summary_app"],
         "parent_hq_summary": detail["parent_hq_summary_app"],
         "evidence_summary": detail["evidence_summary_app"],
-        "commercial_fit_drivers": build_commercial_fit_drivers(visible_signals, employee_range),
+        "commercial_fit_drivers": build_commercial_fit_drivers(
+            visible_signals, employee_range, own_domains, company_name),
         "caution": build_ui_payload_caution(detail["quality_flags"], detail["caution_app"]),
         "source_urls": build_ui_payload_source_urls(
             detail["website_url"], detail["careers_url"], detail["linkedin_url"],
-            detail["source_urls"],
+            detail["source_urls"], own_domains, company_name, url_context,
         ),
     }
     return detail

@@ -977,9 +977,10 @@ def test_ui_payload_and_array_fields(tmp_path):
          "evidence": "Foreign headquarters or group structure detected."},
     ]
     assert ui_payload["caution"] == []
-    assert ui_payload["source_urls"] == [
-        {"label": "Third-party company profile", "url": "https://e.com/1"},
-    ]
+    # "e.com" is unrelated to the lead's own domain (acme.com.br) and its
+    # snippet ("s") never mentions the company, so it's excluded rather than
+    # promoted as a visible source link.
+    assert ui_payload["source_urls"] == []
     # Lovable list-compatibility fallbacks.
     item = load_list(out_dir)[0]
     assert item["commercial_fit_score"] == 80  # copied from _app field
@@ -1017,7 +1018,7 @@ def test_brazil_style_record_has_clean_what_is_hot_max_five_bullets(tmp_path):
     what_is_hot = detail["ui_payload"]["what_is_hot"]
 
     assert len(what_is_hot) <= 5
-    assert what_is_hot[0] == "Foreign HQ: China | International footprint | L&D / onboarding signal | Large-scale operation"
+    assert what_is_hot[0] == "Foreign HQ: China | International footprint | Learning and development | Large-scale operation"
     assert what_is_hot[1] == "Foreign ownership or group structure: headquartered in China."
     joined = " ".join(what_is_hot)
     assert "distinct keyword match" not in joined
@@ -1088,7 +1089,7 @@ def test_ui_payload_source_urls_are_deduplicated_with_labels(tmp_path):
          "source_snippet": "dup of linkedin"},
         {"source_index": 1, "signal_name": "international_profile",
          "source_url": "https://otherdirectory.example.com/acme",
-         "source_snippet": "third-party profile"},
+         "source_snippet": "Acme Brasil company profile on a third-party directory"},
     ]
     _, out_dir = run_export(tmp_path, enriched, evidence)
 
@@ -1101,6 +1102,8 @@ def test_ui_payload_source_urls_are_deduplicated_with_labels(tmp_path):
     assert by_url["https://acme.com.br"] == "Official website"
     assert by_url["https://acme.com.br/careers"] == "Careers page"
     assert by_url["https://www.linkedin.com/company/acme-brasil"] == "LinkedIn"
+    # Genuinely third-party (its snippet actually mentions the company) —
+    # kept and labeled, unlike a truly unrelated domain (see below).
     assert by_url["https://otherdirectory.example.com/acme"] == "Third-party company profile"
 
 
@@ -1123,9 +1126,172 @@ def test_weak_generic_evidence_not_promoted_into_caller_facing_text(tmp_path):
 
     drivers_by_label = {d["label"]: d for d in ui["commercial_fit_drivers"]}
     assert "evidence" not in drivers_by_label["International business context"]
-    assert "evidence" not in drivers_by_label["L&D or onboarding signal"]
+    assert "evidence" not in drivers_by_label["learning and development or onboarding needs"]
     # Label and strength are still kept even when evidence is dropped.
     assert drivers_by_label["International business context"]["strength"] == "Strong"
+
+
+# ---------------------------------------------------------------------------
+# Netherlands / DORC-style content-quality regression tests — stricter
+# ui_payload filters: raw location dumps, unrelated-domain evidence, caution
+# fragmentation, source-url dedup/labeling, what_is_hot <-> commercial_fit_
+# drivers consistency, and "l&d"/raw-token wording.
+# ---------------------------------------------------------------------------
+
+def _dorc_row(**overrides) -> dict:
+    row = dict(
+        source_index=1,
+        company_name="DORC Dutch Ophthalmic Research Center (International)",
+        domain="dorcglobal.com",
+        website_url="https://www.dorcglobal.com",
+        careers_url="https://www.dorcglobal.com/careers",
+        input_country="Netherlands",
+        enrichment_skipped=False,
+        sig_foreign_hq_score_for_next_scoring=0,
+        commercial_fit_score_app=60,
+        commercial_tier_app="B",
+        industry="Medical devices",
+        employee_range="201-500",
+    )
+    row.update(overrides)
+    return row
+
+
+def test_raw_multiline_location_dump_not_promoted_to_what_is_hot(tmp_path):
+    signals = [
+        {"source_index": 1, "signal_name": "international_profile", "signal_score": 2,
+         "evidence_quote": (
+             "DORC locations\n___THE NETHERLANDS\n___Austria\n___China\n"
+             "___United States\n___Brazil"
+         )},
+    ]
+    _, out_dir = run_export(tmp_path, [_dorc_row()], signals=signals,
+                            export_country="Netherlands", foreign_hq_only=False)
+
+    detail = detail_for(out_dir, "DORC Dutch Ophthalmic Research Center (International)")
+    joined_hot = " ".join(detail["ui_payload"]["what_is_hot"])
+    assert "___" not in joined_hot
+    assert "DORC locations" not in joined_hot
+    drivers_by_label = {d["label"]: d for d in detail["ui_payload"]["commercial_fit_drivers"]}
+    assert "evidence" not in drivers_by_label["International business context"]
+
+
+def test_unrelated_domain_excluded_from_source_urls_and_evidence(tmp_path):
+    signals = [
+        {"source_index": 1, "signal_name": "onboarding_training_need", "signal_score": 2,
+         "evidence_quote": "Back by popular demand...",
+         "evidence_url": "https://careers.accor.com/jobs/123"},
+    ]
+    evidence = [
+        {"source_index": 1, "signal_name": "onboarding_training_need",
+         "source_url": "https://careers.accor.com/jobs/123",
+         "source_title": "Accor Careers", "source_snippet": "Back by popular demand..."},
+    ]
+    _, out_dir = run_export(tmp_path, [_dorc_row()], evidence, signals,
+                            export_country="Netherlands", foreign_hq_only=False)
+
+    detail = detail_for(out_dir, "DORC Dutch Ophthalmic Research Center (International)")
+    ui = detail["ui_payload"]
+
+    urls = [item["url"] for item in ui["source_urls"]]
+    assert not any("accor.com" in url for url in urls)
+    joined_hot = " ".join(ui["what_is_hot"])
+    assert "Back by popular demand" not in joined_hot
+    assert "accor" not in joined_hot.lower()
+    drivers_by_label = {d["label"]: d for d in ui["commercial_fit_drivers"]}
+    assert "evidence" not in drivers_by_label["learning and development or onboarding needs"]
+
+
+def test_caution_warning_deduplicated_into_one_sentence(tmp_path):
+    enriched = [_dorc_row(hq_evidence_domain_mismatch_warning="Yes")]
+    _, out_dir = run_export(tmp_path, enriched, export_country="Netherlands",
+                            foreign_hq_only=False)
+
+    detail = detail_for(out_dir, "DORC Dutch Ophthalmic Research Center (International)")
+    caution = detail["ui_payload"]["caution"]
+
+    domain_warnings = [c for c in caution if "domain" in c.lower()]
+    assert len(domain_warnings) == 1
+    assert domain_warnings[0] == (
+        "The HQ evidence source does not clearly match the lead's own "
+        "domain; verify the HQ signal before relying on it."
+    )
+
+
+def test_own_domain_labeled_official_website_no_duplicates(tmp_path):
+    # Same homepage as website_url ("https://www.dorcglobal.com"), just a
+    # different scheme/www form — must dedupe to a single entry, not a
+    # second "dorcglobal.com" row mislabeled as third-party.
+    evidence = [
+        {"source_index": 1, "signal_name": "international_profile",
+         "source_url": "http://dorcglobal.com", "source_snippet": "DORC home"},
+        {"source_index": 1, "signal_name": "international_profile",
+         "source_url": "https://dorcglobal.com/", "source_snippet": "DORC home"},
+    ]
+    _, out_dir = run_export(tmp_path, [_dorc_row()], evidence,
+                            export_country="Netherlands", foreign_hq_only=False)
+
+    detail = detail_for(out_dir, "DORC Dutch Ophthalmic Research Center (International)")
+    source_urls = detail["ui_payload"]["source_urls"]
+
+    dorc_home_entries = [
+        item for item in source_urls
+        if item["url"].rstrip("/").endswith("dorcglobal.com")
+    ]
+    assert len(dorc_home_entries) == 1
+    assert dorc_home_entries[0]["label"] == "Official website"
+
+
+def test_commercial_fit_drivers_not_inconsistent_with_what_is_hot(tmp_path):
+    signals = [
+        {"source_index": 1, "signal_name": "international_profile", "signal_score": 2,
+         "evidence_quote": "Runs subsidiaries in Germany, France, and Japan."},
+        {"source_index": 1, "signal_name": "company_size_complexity", "signal_score": 2,
+         "evidence_quote": "Possible onboarding need due to multi-site structure."},
+    ]
+    _, out_dir = run_export(tmp_path, [_dorc_row()], signals=signals,
+                            export_country="Netherlands", foreign_hq_only=False)
+
+    detail = detail_for(out_dir, "DORC Dutch Ophthalmic Research Center (International)")
+    ui = detail["ui_payload"]
+    summary_line = ui["what_is_hot"][0]
+
+    # onboarding_training_need itself is absent (no such signal row above);
+    # only company_size_complexity is positive, so the summary line must not
+    # falsely claim a learning-and-development signal off the shared
+    # "onboarding" word in company_size_complexity's own display label.
+    assert "Learning and development" not in summary_line
+    drivers_by_label = {d["label"]: d for d in ui["commercial_fit_drivers"]}
+    assert "learning and development or onboarding needs" not in drivers_by_label
+
+
+def test_no_visible_ui_payload_field_contains_shorthand_or_raw_tokens(tmp_path):
+    enriched = [_dorc_row(
+        c5_parent_company="Some Foreign Group", c5_parent_hq_country="Germany",
+        sig_foreign_hq_score_for_next_scoring=3,
+    )]
+    signals = [
+        {"source_index": 1, "signal_name": "onboarding_training_need", "signal_score": 2,
+         "evidence_quote": "Runs a structured onboarding and training program for new hires."},
+        {"source_index": 1, "signal_name": "icp_keyword_match", "signal_score": 2,
+         "signal_reason": "3 distinct keyword match(es) in evidence: training, learning, development"},
+    ]
+    _, out_dir = run_export(tmp_path, enriched, signals=signals,
+                            export_country="Netherlands")
+
+    detail = detail_for(out_dir, "DORC Dutch Ophthalmic Research Center (International)")
+    ui = detail["ui_payload"]
+
+    visible_text = " ".join([
+        ui["why_relevant"] or "",
+        " ".join(ui["what_is_hot"]),
+        " ".join(str(d) for d in ui["commercial_fit_drivers"]),
+        " ".join(ui["caution"]),
+    ])
+    assert "l&d" not in visible_text.lower()
+    assert "___" not in visible_text
+    for token in ("sig_", "ti_", "c4_", "c5_"):
+        assert token not in visible_text
 
 
 def test_parse_key_source_links_variants():
