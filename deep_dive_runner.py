@@ -116,10 +116,12 @@ def _collect_pages_via_firecrawl(
     """Returns ``{"pages": [...], "pages_crawled": [...], "used": bool}``.
 
     ``used=False`` means Firecrawl could not be used at all (no domain to
-    crawl, or a hard failure) — the caller must fall back for everything.
-    A hard failure discards any pages already collected in this call, since
-    a bad/exhausted key fails consistently and partial results would be
-    misleading about what Firecrawl actually delivered.
+    crawl, or a hard failure) — the caller must ignore ``pages`` entirely
+    (whatever it contains) and fall back for everything, since a bad/
+    exhausted key fails consistently and partial results would be
+    misleading about what Firecrawl actually delivered. ``pages`` may still
+    hold whatever was collected before a hard failure was hit — callers
+    must gate on ``used``, never on whether ``pages`` is non-empty.
     """
     targets = []
     if domain:

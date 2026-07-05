@@ -20,10 +20,13 @@ from lead_prioritizer_batch_core import (
     flatten_result_for_excel,
     flatten_evidence_for_excel,
     flatten_signals_for_excel,
+    flatten_deep_dive_for_excel,
     build_run_summary_dataframe,
     build_excel_workbook_bytes,
     run_batch_dataframe,
+    should_run_deep_dive,
 )
+from deep_dive_schema import DeepDiveClaim, DeepDiveResult
 
 
 def _sample_result(**kw) -> LeadPrioritizationResult:
@@ -438,6 +441,352 @@ class TestRunBatch:
         # Acme (ok) + Beta (error) then stop → 2 rows, Gamma never processed.
         assert out["enriched_leads"].shape[0] == 2
         assert out["run_summary"].iloc[0]["processed_rows"] == 2
+
+
+# ---------------------------------------------------------------------------
+# Deep Dive (Step B, opt-in) — trigger gate, per-row wiring, Excel output,
+# and score-invariance (never fed back into scoring).
+# ---------------------------------------------------------------------------
+
+class TestShouldRunDeepDive:
+    def _cfg(self, **kw):
+        base = dict(company_name_column="company", domain_column="domain",
+                    deep_dive=True, deep_dive_min_score=8.0, deep_dive_on_foreign_hq=True)
+        base.update(kw)
+        return BatchRunConfig(**base)
+
+    def test_off_by_default_regardless_of_score(self):
+        cfg = self._cfg(deep_dive=False)
+        result = _sample_result(final_commercial_fit_score=10.0,
+                                sig_foreign_hq_score_for_next_scoring=3.0)
+        assert should_run_deep_dive(result, cfg) == (False, "")
+
+    def test_score_threshold_triggers(self):
+        cfg = self._cfg()
+        result = _sample_result(final_commercial_fit_score=8.5,
+                                sig_foreign_hq_score_for_next_scoring=0.0)
+        assert should_run_deep_dive(result, cfg) == (True, "score_threshold")
+
+    def test_below_threshold_and_no_foreign_hq_does_not_trigger(self):
+        cfg = self._cfg()
+        result = _sample_result(final_commercial_fit_score=5.0,
+                                sig_foreign_hq_score_for_next_scoring=0.0)
+        assert should_run_deep_dive(result, cfg) == (False, "")
+
+    def test_foreign_hq_triggers_when_enabled(self):
+        cfg = self._cfg()
+        result = _sample_result(final_commercial_fit_score=5.0,
+                                sig_foreign_hq_score_for_next_scoring=3.0)
+        assert should_run_deep_dive(result, cfg) == (True, "foreign_hq")
+
+    def test_foreign_hq_ignored_when_disabled(self):
+        cfg = self._cfg(deep_dive_on_foreign_hq=False)
+        result = _sample_result(final_commercial_fit_score=5.0,
+                                sig_foreign_hq_score_for_next_scoring=3.0)
+        assert should_run_deep_dive(result, cfg) == (False, "")
+
+    def test_both_conditions_true_prefers_score_threshold(self):
+        cfg = self._cfg()
+        result = _sample_result(final_commercial_fit_score=9.0,
+                                sig_foreign_hq_score_for_next_scoring=3.0)
+        assert should_run_deep_dive(result, cfg) == (True, "score_threshold")
+
+    def test_score_none_does_not_crash(self):
+        cfg = self._cfg()
+        result = _sample_result(final_commercial_fit_score=None,
+                                sig_foreign_hq_score_for_next_scoring=0.0)
+        assert should_run_deep_dive(result, cfg) == (False, "")
+
+
+class TestFlattenDeepDiveForExcel:
+    def test_one_row_per_claim(self):
+        dd = DeepDiveResult(
+            company_name="Acme", trigger_reason="score_threshold",
+            claims=[
+                DeepDiveClaim(claim_id="hq_structure:1", category="hq_structure",
+                              statement="s1", quote="q1", source_url="https://acme.com/about",
+                              source_kind="own_domain", domain_verified=True,
+                              retrieval_method="firecrawl"),
+                DeepDiveClaim(claim_id="workforce:1", category="workforce",
+                              statement="s2", quote="q2", source_url="https://acme.com/careers",
+                              source_kind="own_domain", domain_verified=True,
+                              retrieval_method="firecrawl"),
+            ],
+        )
+        rows = flatten_deep_dive_for_excel(dd, source_index=3)
+        assert len(rows) == 2
+        assert rows[0]["source_index"] == 3
+        assert rows[0]["company_name"] == "Acme"
+        assert rows[0]["trigger_reason"] == "score_threshold"
+        assert rows[0]["category"] == "hq_structure"
+        assert rows[1]["category"] == "workforce"
+
+    def test_no_claims_yields_no_rows(self):
+        dd = DeepDiveResult(company_name="Acme", error="no_anthropic_api_key")
+        assert flatten_deep_dive_for_excel(dd, source_index=0) == []
+
+
+class TestRunBatchDeepDiveWiring:
+    _df = pd.DataFrame({
+        "company": ["Acme", "Beta"],
+        "domain": ["acme.com", "beta.com"],
+    })
+
+    def _fake_result(self, company_name, **kw):
+        return _sample_result(company_name=company_name, **kw)
+
+    def test_deep_dive_runs_only_for_triggered_rows(self):
+        def _fake_pipeline(lead_input, **kwargs):
+            score = 9.0 if lead_input.company_name == "Acme" else 3.0
+            return self._fake_result(lead_input.company_name,
+                                     final_commercial_fit_score=score,
+                                     sig_foreign_hq_score_for_next_scoring=0.0)
+
+        dd_result = DeepDiveResult(company_name="Acme", trigger_reason="score_threshold",
+                                   claims=[DeepDiveClaim(claim_id="hq_structure:1",
+                                                         category="hq_structure", statement="s",
+                                                         quote="q", source_url="https://acme.com")])
+        cfg = BatchRunConfig(company_name_column="company", domain_column="domain",
+                             run_mode="full", deep_dive=True, deep_dive_min_score=8.0,
+                             deep_dive_on_foreign_hq=False)
+        with patch("lead_prioritizer_batch_core.prioritize_single_lead", side_effect=_fake_pipeline), \
+             patch("lead_prioritizer_batch_core.run_deep_dive", return_value=dd_result) as m_dd:
+            out = run_batch_dataframe(self._df, cfg, "S", "A")
+        m_dd.assert_called_once()  # only Acme cleared the gate
+        assert len(out["deep_dive"]) == 1
+        assert out["deep_dive"].iloc[0]["company_name"] == "Acme"
+
+    def test_deep_dive_disabled_by_default_never_called(self):
+        def _fake_pipeline(lead_input, **kwargs):
+            return self._fake_result(lead_input.company_name,
+                                     final_commercial_fit_score=10.0,
+                                     sig_foreign_hq_score_for_next_scoring=3.0)
+
+        cfg = BatchRunConfig(company_name_column="company", domain_column="domain", run_mode="full")
+        with patch("lead_prioritizer_batch_core.prioritize_single_lead", side_effect=_fake_pipeline), \
+             patch("lead_prioritizer_batch_core.run_deep_dive") as m_dd:
+            out = run_batch_dataframe(self._df, cfg, "S", "A")
+        m_dd.assert_not_called()
+        assert out["deep_dive"].empty
+
+    def test_deep_dive_receives_firecrawl_key_and_max_pages(self):
+        def _fake_pipeline(lead_input, **kwargs):
+            return self._fake_result(lead_input.company_name,
+                                     final_commercial_fit_score=9.0,
+                                     sig_foreign_hq_score_for_next_scoring=0.0)
+
+        cfg = BatchRunConfig(company_name_column="company", domain_column="domain",
+                             run_mode="full", row_limit=1, deep_dive=True,
+                             deep_dive_min_score=8.0, deep_dive_max_pages=3)
+        with patch("lead_prioritizer_batch_core.prioritize_single_lead", side_effect=_fake_pipeline), \
+             patch("lead_prioritizer_batch_core.run_deep_dive",
+                   return_value=DeepDiveResult(company_name="Acme")) as m_dd:
+            run_batch_dataframe(self._df, cfg, "S", "A", firecrawl_api_key="FC")
+        assert m_dd.call_args.kwargs["firecrawl_api_key"] == "FC"
+        assert m_dd.call_args.kwargs["max_pages"] == 3
+        assert m_dd.call_args.kwargs["parent_domain"] is None
+
+    def test_deep_dive_error_never_breaks_the_batch(self):
+        def _fake_pipeline(lead_input, **kwargs):
+            return self._fake_result(lead_input.company_name,
+                                     final_commercial_fit_score=9.0,
+                                     sig_foreign_hq_score_for_next_scoring=0.0)
+
+        cfg = BatchRunConfig(company_name_column="company", domain_column="domain",
+                             run_mode="full", deep_dive=True, deep_dive_min_score=8.0)
+        with patch("lead_prioritizer_batch_core.prioritize_single_lead", side_effect=_fake_pipeline), \
+             patch("lead_prioritizer_batch_core.run_deep_dive",
+                   return_value=DeepDiveResult(company_name="Acme", error="deep_dive_failed: boom")):
+            out = run_batch_dataframe(self._df, cfg, "S", "A")
+        assert out["run_summary"].iloc[0]["error_count"] == 0
+        assert len(out["enriched_leads"]) == 2
+
+
+class TestDeepDiveExcelSheetConditional:
+    def test_sheet_present_when_deep_dive_rows_exist(self):
+        tables = {
+            "enriched_leads": pd.DataFrame([{"company_name": "Acme"}]),
+            "evidence": pd.DataFrame(),
+            "signals": pd.DataFrame(),
+            "deep_dive": pd.DataFrame([{"company_name": "Acme", "category": "hq_structure"}]),
+            "run_summary": pd.DataFrame([{"processed_rows": 1}]),
+        }
+        data = build_excel_workbook_bytes(tables)
+        import io
+        xls = pd.ExcelFile(io.BytesIO(data))
+        assert "Deep Dive" in xls.sheet_names
+
+    def test_sheet_absent_when_no_deep_dive_rows(self):
+        tables = {
+            "enriched_leads": pd.DataFrame([{"company_name": "Acme"}]),
+            "evidence": pd.DataFrame(),
+            "signals": pd.DataFrame(),
+            "deep_dive": pd.DataFrame(),
+            "run_summary": pd.DataFrame([{"processed_rows": 1}]),
+        }
+        data = build_excel_workbook_bytes(tables)
+        import io
+        xls = pd.ExcelFile(io.BytesIO(data))
+        assert "Deep Dive" not in xls.sheet_names
+
+    def test_sheet_absent_when_deep_dive_key_missing_entirely(self):
+        # Backward compatibility: callers (e.g. run_batch_foreign_hq_only)
+        # that don't produce a "deep_dive" key at all must not break.
+        tables = {
+            "enriched_leads": pd.DataFrame([{"company_name": "Acme"}]),
+            "evidence": pd.DataFrame(),
+            "signals": pd.DataFrame(),
+            "run_summary": pd.DataFrame([{"processed_rows": 1}]),
+        }
+        data = build_excel_workbook_bytes(tables)
+        import io
+        xls = pd.ExcelFile(io.BytesIO(data))
+        assert "Deep Dive" not in xls.sheet_names
+
+
+class TestDeepDiveScoreInvariance:
+    """Hard Requirement #1, Part B: Deep Dive must never affect scoring."""
+
+    _SCORE_FIELDS = (
+        "final_commercial_fit_score", "commercial_tier",
+        "sig_foreign_hq_score_for_next_scoring",
+        "sig_international_profile_score",
+    )
+
+    def test_identical_enriched_leads_scoring_with_and_without_deep_dive(self):
+        def _fake_pipeline(lead_input, **kwargs):
+            return _sample_result(company_name=lead_input.company_name,
+                                  final_commercial_fit_score=9.0,
+                                  sig_foreign_hq_score_for_next_scoring=3.0)
+
+        df = pd.DataFrame({"company": ["Acme"], "domain": ["acme.com"]})
+        cfg_without = BatchRunConfig(company_name_column="company", domain_column="domain",
+                                     run_mode="full", deep_dive=False)
+        cfg_with = BatchRunConfig(company_name_column="company", domain_column="domain",
+                                  run_mode="full", deep_dive=True, deep_dive_min_score=8.0)
+
+        with patch("lead_prioritizer_batch_core.prioritize_single_lead", side_effect=_fake_pipeline):
+            out_without = run_batch_dataframe(df, cfg_without, "S", "A")
+
+        dd_result = DeepDiveResult(
+            company_name="Acme", trigger_reason="score_threshold",
+            claims=[DeepDiveClaim(claim_id="hq_structure:1", category="hq_structure",
+                                  statement="s", quote="q", source_url="https://acme.com")])
+        with patch("lead_prioritizer_batch_core.prioritize_single_lead", side_effect=_fake_pipeline), \
+             patch("lead_prioritizer_batch_core.run_deep_dive", return_value=dd_result):
+            out_with = run_batch_dataframe(df, cfg_with, "S", "A")
+
+        for field in self._SCORE_FIELDS:
+            assert (out_without["enriched_leads"].iloc[0][field] ==
+                   out_with["enriched_leads"].iloc[0][field])
+        # Deep Dive itself did run and produced its own separate table.
+        assert len(out_with["deep_dive"]) == 1
+        assert out_without["deep_dive"].empty
+
+    def test_deep_dive_failure_also_leaves_scoring_untouched(self):
+        def _fake_pipeline(lead_input, **kwargs):
+            return _sample_result(company_name=lead_input.company_name,
+                                  final_commercial_fit_score=9.0,
+                                  sig_foreign_hq_score_for_next_scoring=3.0)
+
+        df = pd.DataFrame({"company": ["Acme"], "domain": ["acme.com"]})
+        cfg_without = BatchRunConfig(company_name_column="company", domain_column="domain",
+                                     run_mode="full", deep_dive=False)
+        cfg_with = BatchRunConfig(company_name_column="company", domain_column="domain",
+                                  run_mode="full", deep_dive=True, deep_dive_min_score=8.0)
+
+        with patch("lead_prioritizer_batch_core.prioritize_single_lead", side_effect=_fake_pipeline):
+            out_without = run_batch_dataframe(df, cfg_without, "S", "A")
+        with patch("lead_prioritizer_batch_core.prioritize_single_lead", side_effect=_fake_pipeline), \
+             patch("lead_prioritizer_batch_core.run_deep_dive",
+                   return_value=DeepDiveResult(company_name="Acme", error="deep_dive_failed: boom")):
+            out_with = run_batch_dataframe(df, cfg_with, "S", "A")
+
+        for field in self._SCORE_FIELDS:
+            assert (out_without["enriched_leads"].iloc[0][field] ==
+                   out_with["enriched_leads"].iloc[0][field])
+
+
+# ---------------------------------------------------------------------------
+# Onafhankelijkheidstest A×B: rich_icp_context (Onderdeel A) and deep_dive
+# (Onderdeel B) run through the real run_batch_dataframe() with all four
+# on/off combinations. prioritize_single_lead is mocked but reflects
+# whether compose_icp_context was actually passed through (proving Onderdeel
+# A reaches the pipeline); run_deep_dive is mocked directly (it is called by
+# batch-core itself, not by prioritize_single_lead). Neither feature must
+# ever require or block the other.
+# ---------------------------------------------------------------------------
+
+class TestRichIcpContextAndDeepDiveIndependence:
+    _df = pd.DataFrame({"company": ["Acme"], "domain": ["acme.com"]})
+
+    def _fake_pipeline(self, lead_input, **kwargs):
+        result = _sample_result(
+            company_name=lead_input.company_name,
+            final_commercial_fit_score=9.0,
+            sig_foreign_hq_score_for_next_scoring=0.0,
+        )
+        if kwargs.get("compose_icp_context"):
+            result.icp_buying_signals = "AI-composed buying signals."
+            result.icp_context_by_ai = True
+        return result
+
+    @pytest.mark.parametrize("rich_icp_context,deep_dive", [
+        (False, False), (True, False), (False, True), (True, True),
+    ])
+    def test_all_four_combinations_run_without_conflict(self, rich_icp_context, deep_dive):
+        dd_result = DeepDiveResult(
+            company_name="Acme", trigger_reason="score_threshold",
+            claims=[DeepDiveClaim(claim_id="hq_structure:1", category="hq_structure",
+                                  statement="s", quote="q", source_url="https://acme.com")])
+        cfg = BatchRunConfig(company_name_column="company", domain_column="domain",
+                             run_mode="full", rich_icp_context=rich_icp_context,
+                             deep_dive=deep_dive, deep_dive_min_score=8.0)
+
+        with patch("lead_prioritizer_batch_core.prioritize_single_lead",
+                   side_effect=self._fake_pipeline), \
+             patch("lead_prioritizer_batch_core.run_deep_dive",
+                   return_value=dd_result) as m_dd:
+            out = run_batch_dataframe(self._df, cfg, "S", "A")
+
+        assert out["run_summary"].iloc[0]["error_count"] == 0
+        enriched = out["enriched_leads"].iloc[0]
+
+        # Onderdeel A ran (or not) exactly per its own flag.
+        if rich_icp_context:
+            assert enriched["icp_buying_signals"] == "AI-composed buying signals."
+        else:
+            assert pd.isna(enriched.get("icp_buying_signals"))
+
+        # Onderdeel B ran (or not) exactly per its own flag -- never gated
+        # on rich_icp_context, and never itself gating rich_icp_context.
+        if deep_dive:
+            m_dd.assert_called_once()
+            assert len(out["deep_dive"]) == 1
+        else:
+            m_dd.assert_not_called()
+            assert out["deep_dive"].empty
+
+    def test_deep_dive_never_requires_rich_icp_context(self):
+        cfg = BatchRunConfig(company_name_column="company", domain_column="domain",
+                             run_mode="full", rich_icp_context=False,
+                             deep_dive=True, deep_dive_min_score=8.0)
+        dd_result = DeepDiveResult(company_name="Acme")
+        with patch("lead_prioritizer_batch_core.prioritize_single_lead",
+                   side_effect=self._fake_pipeline), \
+             patch("lead_prioritizer_batch_core.run_deep_dive", return_value=dd_result) as m_dd:
+            run_batch_dataframe(self._df, cfg, "S", "A")
+        m_dd.assert_called_once()
+
+    def test_rich_icp_context_never_requires_deep_dive(self):
+        cfg = BatchRunConfig(company_name_column="company", domain_column="domain",
+                             run_mode="full", rich_icp_context=True, deep_dive=False)
+        with patch("lead_prioritizer_batch_core.prioritize_single_lead",
+                   side_effect=self._fake_pipeline), \
+             patch("lead_prioritizer_batch_core.run_deep_dive") as m_dd:
+            out = run_batch_dataframe(self._df, cfg, "S", "A")
+        m_dd.assert_not_called()
+        assert out["enriched_leads"].iloc[0]["icp_buying_signals"] == "AI-composed buying signals."
 
 
 # ---------------------------------------------------------------------------

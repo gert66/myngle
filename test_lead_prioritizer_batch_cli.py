@@ -20,6 +20,7 @@ from lead_prioritizer_batch_cli import (
     resolve_sheet,
     check_required_columns,
     config_from_args,
+    load_firecrawl_key,
     SheetResolutionError,
     main,
 )
@@ -73,6 +74,9 @@ class TestArgParsing:
         assert args.yes is False
         assert args.compose_caller_content is False
         assert args.rich_icp_context is False
+        assert args.deep_dive is False
+        assert args.deep_dive_min_score == 8.0
+        assert args.deep_dive_max_pages == 6
 
     def test_compose_caller_content_flag_parses(self):
         args = build_arg_parser().parse_args(
@@ -106,6 +110,37 @@ class TestArgParsing:
         cfg = config_from_args(args)
         assert cfg.compose_caller_content is expect_caller
         assert cfg.rich_icp_context is expect_icp
+
+    def test_deep_dive_flags_parse(self):
+        args = build_arg_parser().parse_args(
+            ["--input", "x.xlsx", "--company-column", "c", "--domain-column", "d",
+             "--deep-dive", "--deep-dive-min-score", "6.5", "--deep-dive-max-pages", "4"])
+        assert args.deep_dive is True
+        assert args.deep_dive_min_score == 6.5
+        assert args.deep_dive_max_pages == 4
+        cfg = config_from_args(args)
+        assert cfg.deep_dive is True
+        assert cfg.deep_dive_min_score == 6.5
+        assert cfg.deep_dive_max_pages == 4
+
+    @pytest.mark.parametrize("cli_flags,expect_icp,expect_deep_dive", [
+        ([], False, False),
+        (["--rich-icp-context"], True, False),
+        (["--deep-dive"], False, True),
+        (["--rich-icp-context", "--deep-dive"], True, True),
+    ])
+    def test_rich_icp_context_and_deep_dive_are_independent(
+        self, cli_flags, expect_icp, expect_deep_dive,
+    ):
+        # Onderdeel A (--rich-icp-context) x Onderdeel B (--deep-dive):
+        # every one of the four on/off combinations must parse and combine
+        # with no cross-dependency between the two opt-ins.
+        args = build_arg_parser().parse_args(
+            ["--input", "x.xlsx", "--company-column", "c", "--domain-column", "d",
+             *cli_flags])
+        cfg = config_from_args(args)
+        assert cfg.rich_icp_context is expect_icp
+        assert cfg.deep_dive is expect_deep_dive
 
     def test_config_from_args_maps_stop_on_error(self):
         args = build_arg_parser().parse_args(
@@ -155,6 +190,32 @@ class TestHelpers:
     def test_check_columns_missing_raises(self):
         with pytest.raises(ValueError):
             check_required_columns(["company_name"], "company_name", "domain")
+
+
+class TestLoadFirecrawlKey:
+    def test_env_var_used(self, monkeypatch):
+        monkeypatch.setenv("FIRECRAWL_API_KEY", "fc-from-env")
+        assert load_firecrawl_key(None) == "fc-from-env"
+
+    def test_missing_is_not_an_error(self, monkeypatch):
+        monkeypatch.delenv("FIRECRAWL_API_KEY", raising=False)
+        assert load_firecrawl_key(None) == ""
+
+    def test_secrets_file_fallback(self, tmp_path, monkeypatch):
+        monkeypatch.delenv("FIRECRAWL_API_KEY", raising=False)
+        secrets = tmp_path / "secrets.toml"
+        secrets.write_text('FIRECRAWL_API_KEY = "fc-from-file"\n')
+        assert load_firecrawl_key(str(secrets)) == "fc-from-file"
+
+    def test_env_takes_precedence_over_secrets_file(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("FIRECRAWL_API_KEY", "fc-from-env")
+        secrets = tmp_path / "secrets.toml"
+        secrets.write_text('FIRECRAWL_API_KEY = "fc-from-file"\n')
+        assert load_firecrawl_key(str(secrets)) == "fc-from-env"
+
+    def test_missing_secrets_file_is_safe(self, monkeypatch):
+        monkeypatch.delenv("FIRECRAWL_API_KEY", raising=False)
+        assert load_firecrawl_key("/no/such/file.toml") == ""
 
 
 # ---------------------------------------------------------------------------
@@ -280,6 +341,54 @@ class TestMain:
         assert cfg.rich_icp_context is True
         # --compose-caller-content was never passed: stays independently off.
         assert cfg.compose_caller_content is False
+
+    def test_deep_dive_flags_and_firecrawl_key_passthrough(self, tmp_path, monkeypatch, capsys):
+        monkeypatch.setenv("FIRECRAWL_API_KEY", "FC")
+        p = tmp_path / "in.xlsx"
+        _write_xlsx(p, {"Sheet1": _LEADS})
+        out_path = tmp_path / "result.xlsx"
+        captured = {}
+
+        def _fake_run(df, config, serper, anthropic, **kwargs):
+            captured["config"] = config
+            captured["firecrawl_api_key"] = kwargs.get("firecrawl_api_key")
+            return _fake_tables()
+
+        with patch("lead_prioritizer_batch_cli.load_api_keys", return_value=_KEYS_OK), \
+             patch("lead_prioritizer_batch_cli.run_batch_dataframe", side_effect=_fake_run), \
+             patch("lead_prioritizer_batch_cli.build_excel_workbook_bytes", return_value=b"BYTES"):
+            argv = self._base_argv(p, **{"--output": str(out_path),
+                                         "--deep-dive-min-score": "6.0",
+                                         "--deep-dive-max-pages": "3"})
+            argv.append("--deep-dive")
+            rc = main(argv)
+
+        assert rc == 0
+        cfg = captured["config"]
+        assert cfg.deep_dive is True
+        assert cfg.deep_dive_min_score == 6.0
+        assert cfg.deep_dive_max_pages == 3
+        assert captured["firecrawl_api_key"] == "FC"
+        assert "FIRECRAWL_API_KEY: set" in capsys.readouterr().out
+
+    def test_missing_firecrawl_key_is_not_fatal(self, tmp_path, monkeypatch, capsys):
+        monkeypatch.delenv("FIRECRAWL_API_KEY", raising=False)
+        p = tmp_path / "in.xlsx"
+        _write_xlsx(p, {"Sheet1": _LEADS})
+        out_path = tmp_path / "result.xlsx"
+
+        with patch("lead_prioritizer_batch_cli.load_api_keys", return_value=_KEYS_OK), \
+             patch("lead_prioritizer_batch_cli.run_batch_dataframe",
+                   return_value=_fake_tables()) as m_run, \
+             patch("lead_prioritizer_batch_cli.build_excel_workbook_bytes", return_value=b"BYTES"):
+            argv = self._base_argv(p, **{"--output": str(out_path)})
+            argv.append("--deep-dive")
+            rc = main(argv)
+
+        assert rc == 0  # missing Firecrawl key never blocks the run
+        m_run.assert_called_once()
+        assert m_run.call_args.kwargs["firecrawl_api_key"] == ""
+        assert "not set (Deep Dive fallback mode)" in capsys.readouterr().out
 
     def test_output_bytes_contain_no_keys(self, tmp_path):
         # Guard: the CLI writes exactly the core's bytes, which never embed keys.

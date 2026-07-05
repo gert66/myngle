@@ -74,7 +74,7 @@ def enriched_row(**overrides) -> dict:
 
 
 def write_workbook(path, enriched, evidence=None, signals=None,
-                   run_summary=None, skip_enriched=False):
+                   run_summary=None, skip_enriched=False, deep_dive=None):
     with pd.ExcelWriter(path, engine="openpyxl") as writer:
         if not skip_enriched:
             pd.DataFrame(enriched).to_excel(
@@ -88,12 +88,15 @@ def write_workbook(path, enriched, evidence=None, signals=None,
         if run_summary is not None:
             pd.DataFrame(run_summary).to_excel(
                 writer, sheet_name="Run Summary", index=False)
+        if deep_dive is not None:
+            pd.DataFrame(deep_dive).to_excel(
+                writer, sheet_name="Deep Dive", index=False)
 
 
 def run_export(tmp_path, enriched, evidence=None, signals=None,
-               run_summary=None, **kwargs):
+               run_summary=None, deep_dive=None, **kwargs):
     xlsx = tmp_path / "workbook.xlsx"
-    write_workbook(xlsx, enriched, evidence, signals, run_summary)
+    write_workbook(xlsx, enriched, evidence, signals, run_summary, deep_dive=deep_dive)
     out_dir = tmp_path / "lovable_export"
     options = dict(
         export_country="Brazil",
@@ -1983,6 +1986,162 @@ def test_icp_context_ignored_for_italian_content_language(tmp_path):
     assert detail["icp_context"] == {
         "buying_signals": "Should still be exposed as icp_context for Italy too.",
     }
+    assert detail["ui_payload"]["cold_caller_summary"] == "Legacy Italian cold caller summary text."
+
+
+# ---------------------------------------------------------------------------
+# Deep Dive (Step B, opt-in, independent of AI-composed caller content and
+# rich ICP context) — a nested deep_dive object built from the optional
+# "Deep Dive" sheet, present only when it has at least one claim row for the
+# company, never touching ui_payload/icp_context/scoring.
+# ---------------------------------------------------------------------------
+
+def test_deep_dive_present_when_sheet_has_claims(tmp_path):
+    row = dict(
+        source_index=1,
+        company_name="Nordic Gear AB",
+        domain="nordicgear.se",
+        input_country="Netherlands",
+        enrichment_skipped=False,
+        sig_foreign_hq_score_for_next_scoring=0,
+        commercial_fit_score_app=90,
+        commercial_tier_app="A",
+        industry="Manufacturing",
+        employee_range="1001-5000",
+    )
+    deep_dive_rows = [
+        {"source_index": 1, "company_name": "Nordic Gear AB",
+         "trigger_reason": "score_threshold", "category": "hq_structure",
+         "statement": "Nordic Gear AB is headquartered in Stockholm.",
+         "quote": "headquartered in Stockholm", "source_url": "https://nordicgear.se/about",
+         "source_kind": "own_domain", "domain_verified": True,
+         "retrieval_method": "firecrawl", "error": ""},
+        {"source_index": 1, "company_name": "Nordic Gear AB",
+         "trigger_reason": "score_threshold", "category": "workforce",
+         "statement": "Nordic Gear AB employs over 1000 people.",
+         "quote": "over 1000 employees", "source_url": "https://nordicgear.se/careers",
+         "source_kind": "own_domain", "domain_verified": True,
+         "retrieval_method": "firecrawl", "error": ""},
+    ]
+    _, out_dir = run_export(tmp_path, [row], deep_dive=deep_dive_rows,
+                            export_country="Netherlands", foreign_hq_only=False)
+
+    detail = detail_for(out_dir, "Nordic Gear AB")
+    assert detail["deep_dive"]["trigger_reason"] == "score_threshold"
+    assert len(detail["deep_dive"]["claims"]) == 2
+    categories = {c["category"] for c in detail["deep_dive"]["claims"]}
+    assert categories == {"hq_structure", "workforce"}
+    for claim in detail["deep_dive"]["claims"]:
+        assert claim["domain_verified"] is True
+        assert claim["source_kind"] == "own_domain"
+
+    # Never leaks into the caller-facing ui_payload or icp_context.
+    ui = detail["ui_payload"]
+    visible_text = " ".join([ui["why_relevant"] or "", " ".join(ui["what_is_hot"]),
+                             ui["cold_caller_summary"] or ""])
+    assert "Stockholm" not in visible_text
+    assert "icp_context" not in detail
+
+
+def test_deep_dive_absent_when_sheet_missing(tmp_path):
+    row = dict(
+        source_index=1,
+        company_name="Nordic Gear AB",
+        domain="nordicgear.se",
+        input_country="Netherlands",
+        enrichment_skipped=False,
+        sig_foreign_hq_score_for_next_scoring=0,
+        commercial_fit_score_app=90,
+        commercial_tier_app="A",
+        industry="Manufacturing",
+        employee_range="1001-5000",
+    )
+    _, out_dir = run_export(tmp_path, [row],
+                            export_country="Netherlands", foreign_hq_only=False)
+    detail = detail_for(out_dir, "Nordic Gear AB")
+    assert "deep_dive" not in detail
+
+
+def test_deep_dive_absent_when_sheet_present_but_empty_or_unrelated_row(tmp_path):
+    row = dict(
+        source_index=1,
+        company_name="Nordic Gear AB",
+        domain="nordicgear.se",
+        input_country="Netherlands",
+        enrichment_skipped=False,
+        sig_foreign_hq_score_for_next_scoring=0,
+        commercial_fit_score_app=90,
+        commercial_tier_app="A",
+        industry="Manufacturing",
+        employee_range="1001-5000",
+    )
+    # A claim row for a DIFFERENT source_index must never attach to this company.
+    deep_dive_rows = [
+        {"source_index": 99, "company_name": "Someone Else",
+         "trigger_reason": "score_threshold", "category": "hq_structure",
+         "statement": "s", "quote": "q", "source_url": "https://else.com",
+         "source_kind": "own_domain", "domain_verified": True,
+         "retrieval_method": "firecrawl", "error": ""},
+    ]
+    _, out_dir = run_export(tmp_path, [row], deep_dive=deep_dive_rows,
+                            export_country="Netherlands", foreign_hq_only=False)
+    detail = detail_for(out_dir, "Nordic Gear AB")
+    assert "deep_dive" not in detail
+
+
+def test_deep_dive_error_only_row_produces_no_claims_and_no_field(tmp_path):
+    # A row with error set but no actual claim columns filled (company-level
+    # failure with zero claims) must not fabricate a deep_dive object.
+    row = dict(
+        source_index=1,
+        company_name="Nordic Gear AB",
+        domain="nordicgear.se",
+        input_country="Netherlands",
+        enrichment_skipped=False,
+        sig_foreign_hq_score_for_next_scoring=0,
+        commercial_fit_score_app=90,
+        commercial_tier_app="A",
+        industry="Manufacturing",
+        employee_range="1001-5000",
+    )
+    _, out_dir = run_export(tmp_path, [row], deep_dive=[],
+                            export_country="Netherlands", foreign_hq_only=False)
+    detail = detail_for(out_dir, "Nordic Gear AB")
+    assert "deep_dive" not in detail
+
+
+def test_deep_dive_ignored_for_italian_content_language_but_still_present(tmp_path):
+    row = dict(
+        source_index=1,
+        company_name="ALDI S.R.L.",
+        domain="aldi-sued.com",
+        input_country="Italy",
+        enrichment_skipped=False,
+        sig_foreign_hq_score_for_next_scoring=3,
+        c5_parent_company="ALDI SUD",
+        c5_parent_hq_country="Germany",
+        commercial_fit_score_app=85,
+        commercial_tier_app="A",
+        industry="Retail",
+        employee_range="10001+",
+        cold_caller_summary_app="Legacy Italian cold caller summary text.",
+    )
+    deep_dive_rows = [
+        {"source_index": 1, "company_name": "ALDI S.R.L.",
+         "trigger_reason": "foreign_hq", "category": "hq_structure",
+         "statement": "s", "quote": "q", "source_url": "https://aldi-sued.com/about",
+         "source_kind": "own_domain", "domain_verified": True,
+         "retrieval_method": "firecrawl", "error": ""},
+    ]
+    _, out_dir = run_export(tmp_path, [row], deep_dive=deep_dive_rows,
+                            export_country="Italy", foreign_hq_only=False,
+                            content_language="Italian")
+    detail = detail_for(out_dir, "ALDI S.R.L.")
+    # deep_dive is built independently of the Italy/non-Italy ui_payload
+    # branch, so it is present regardless of content_language — but the
+    # frozen Italy ui_payload fields stay untouched.
+    assert detail["deep_dive"]["trigger_reason"] == "foreign_hq"
+    assert len(detail["deep_dive"]["claims"]) == 1
     assert detail["ui_payload"]["cold_caller_summary"] == "Legacy Italian cold caller summary text."
 
 
