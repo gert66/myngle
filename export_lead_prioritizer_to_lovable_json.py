@@ -577,6 +577,10 @@ def build_evidence_audit(
         "signal_evidence": signal_evidence,
         "c5_audit": c5_audit,
         "hq_audit": hq_audit,
+        # Onderdeel 3 / Onderdeel 2 provenance -- so old/new (keyword-set or
+        # deterministic/AI-scored) datasets are never silently mixed.
+        "signal_extractor_version": clean_str(row.get("signal_extractor_version")),
+        "signal_scoring_mode": clean_str(row.get("signal_scoring_mode")) or "deterministic",
     }
     if run_metadata:
         audit["run_metadata"] = run_metadata

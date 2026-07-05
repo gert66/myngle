@@ -353,3 +353,89 @@ class TestComposeIcpContextScoreInvariance:
             r_with = _run(run_full_v2_pipeline=True, calculate_commercial_score_flag=True,
                           compose_icp_context=True)
         assert self._snapshot(r_without) == self._snapshot(r_with)
+
+
+# ---------------------------------------------------------------------------
+# Onderdeel 2: opt-in AI signal scoring. Unlike every other v2 opt-in flag,
+# this ONE is explicitly allowed to change final_commercial_fit_score -- but
+# ONLY when actually enabled and successful; off (the default) must stay
+# byte-identical, and a failed AI call must fall back to the deterministic
+# extractor rather than ever shipping a row with no signals.
+# ---------------------------------------------------------------------------
+
+class TestAiSignalScoringFlag:
+    def test_off_by_default(self):
+        r = _run(extract_non_hq_signals_flag=True)
+        assert r.signal_scoring_mode == "deterministic"
+
+    def test_full_preset_does_not_enable_it(self):
+        r = _run(run_full_v2_pipeline=True)
+        assert r.signal_scoring_mode == "deterministic"
+
+    def test_flag_off_is_byte_identical_to_current_behavior(self):
+        r_default = _run(extract_non_hq_signals_flag=True, calculate_commercial_score_flag=True)
+        r_explicit_off = _run(extract_non_hq_signals_flag=True,
+                              calculate_commercial_score_flag=True, ai_signal_scoring=False)
+        assert r_default.signals == r_explicit_off.signals
+        assert r_default.final_commercial_fit_score == r_explicit_off.final_commercial_fit_score
+        assert r_explicit_off.signal_scoring_mode == "deterministic"
+
+    def test_flag_alone_without_extract_flag_does_nothing(self):
+        r = _run(ai_signal_scoring=True)
+        assert r.signals == []
+        assert r.signal_scoring_mode == "deterministic"
+
+    def test_ai_success_replaces_signals_and_marks_mode(self):
+        from lead_ai_signal_scorer import AiSignalScoringResult
+        from lead_output_schema import LeadSignal
+
+        ai_signal = LeadSignal(
+            signal_name="international_profile", signal_value="positive_evidence",
+            signal_score=2.0, signal_confidence="High",
+            evidence_url="https://acme.com/intl", evidence_urls=["https://acme.com/intl"],
+        )
+        ai_result = AiSignalScoringResult(
+            signals=[ai_signal], call_attempted=True, call_success=True)
+        with patch("lead_prioritizer_core.score_signals_with_ai", return_value=ai_result):
+            r = _run(extract_non_hq_signals_flag=True, ai_signal_scoring=True)
+
+        assert r.signal_scoring_mode == "ai"
+        assert r.signals == [ai_signal]
+        assert r.sig_international_profile_score == 2.0
+        assert r.international_profile_evidence_url == "https://acme.com/intl"
+        assert r.international_profile_evidence_urls == "https://acme.com/intl"
+
+    def test_ai_failure_falls_back_to_deterministic(self):
+        from lead_ai_signal_scorer import AiSignalScoringResult
+
+        ai_result = AiSignalScoringResult(
+            call_attempted=True, call_success=False,
+            error="ai_signal_scoring_call_failed: connection reset",
+        )
+        r_deterministic = _run(extract_non_hq_signals_flag=True)
+        with patch("lead_prioritizer_core.score_signals_with_ai", return_value=ai_result):
+            r_ai_failed = _run(extract_non_hq_signals_flag=True, ai_signal_scoring=True)
+
+        assert r_ai_failed.signal_scoring_mode == "deterministic"
+        assert [s.signal_name for s in r_ai_failed.signals] == \
+            [s.signal_name for s in r_deterministic.signals]
+        assert [s.signal_score for s in r_ai_failed.signals] == \
+            [s.signal_score for s in r_deterministic.signals]
+
+    def test_same_signal_input_produces_same_score_as_deterministic(self):
+        """Same scoring formula/weights either way -- proven by feeding the
+        deterministic run's own signals back in as the "AI" result and
+        checking the final score matches exactly."""
+        r_deterministic = _run(extract_non_hq_signals_flag=True,
+                               calculate_commercial_score_flag=True)
+
+        from lead_ai_signal_scorer import AiSignalScoringResult
+        ai_result = AiSignalScoringResult(
+            signals=list(r_deterministic.signals), call_attempted=True, call_success=True)
+        with patch("lead_prioritizer_core.score_signals_with_ai", return_value=ai_result):
+            r_ai = _run(extract_non_hq_signals_flag=True,
+                       calculate_commercial_score_flag=True, ai_signal_scoring=True)
+
+        assert r_ai.final_commercial_fit_score == r_deterministic.final_commercial_fit_score
+        assert r_ai.signal_scoring_mode == "ai"
+        assert r_deterministic.signal_scoring_mode == "deterministic"

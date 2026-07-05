@@ -117,6 +117,15 @@ def build_arg_parser() -> argparse.ArgumentParser:
                         "Independent of --compose-caller-content (either may be "
                         "used without the other); never affects scoring "
                         "(default: off).")
+    p.add_argument("--ai-signal-scoring", action="store_true",
+                   help="Opt-in Onderdeel 2: replace deterministic keyword-count "
+                        "signal verdicts with one Anthropic call judging the same "
+                        "guard-filtered evidence semantically. WARNING: unlike "
+                        "--compose-caller-content/--rich-icp-context/--deep-dive, "
+                        "this DOES change final_commercial_fit_score versus the "
+                        "default (same scoring formula, AI-judged signal input). "
+                        "Falls back to deterministic scoring on any AI failure. "
+                        "Recorded per row via signal_scoring_mode (default: off).")
     p.add_argument("--deep-dive", action="store_true",
                    help="Opt-in Step B: run a deeper, source-backed evidence "
                         "collection (Firecrawl if FIRECRAWL_API_KEY is set, "
@@ -201,6 +210,7 @@ def config_from_args(args: argparse.Namespace) -> BatchRunConfig:
         include_raw_ai_json=args.include_raw_ai_json,
         compose_caller_content=args.compose_caller_content,
         rich_icp_context=args.rich_icp_context,
+        ai_signal_scoring=args.ai_signal_scoring,
         deep_dive=args.deep_dive,
         deep_dive_min_score=args.deep_dive_min_score,
         deep_dive_max_pages=args.deep_dive_max_pages,

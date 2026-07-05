@@ -210,6 +210,10 @@ class LeadPrioritizationResult:
     # (e.g. "v2-multilingual" once localized keywords/gl/hl are in use), so
     # old and new datasets are never silently mixed.
     signal_extractor_version: Optional[str] = None
+    # "deterministic" (default) or "ai" (Onderdeel 2 opt-in) -- which path
+    # actually produced `signals`, so AI- and keyword-scored datasets are
+    # never silently mixed.
+    signal_scoring_mode: Optional[str] = "deterministic"
     # ── Sector / industry detection (audit & app metadata — NEVER scoring) ─────
     detected_industry: Optional[str] = None
     detected_sub_industry: Optional[str] = None

@@ -342,6 +342,30 @@ class TestRunBatch:
         assert seen.get("compose_caller_content_flag") is compose_caller_content
         assert seen.get("compose_icp_context") is rich_icp_context
 
+    @pytest.mark.parametrize("ai_signal_scoring", [False, True])
+    def test_ai_signal_scoring_passthrough_independent_of_other_flags(self, ai_signal_scoring):
+        # Onderdeel 2 must reach prioritize_single_lead as an independent
+        # kwarg, off by default, with no cross-dependency on the compose
+        # flags above.
+        seen = {}
+
+        def _fake(lead_input, **kwargs):
+            seen.update(kwargs)
+            return _sample_result(company_name=lead_input.company_name)
+
+        cfg = BatchRunConfig(company_name_column="company", domain_column="domain",
+                             run_mode="full", row_limit=1,
+                             ai_signal_scoring=ai_signal_scoring)
+        with patch("lead_prioritizer_batch_core.prioritize_single_lead", side_effect=_fake):
+            run_batch_dataframe(self._df, cfg, "SERP", "ANTH")
+        assert seen.get("ai_signal_scoring") is ai_signal_scoring
+        assert seen.get("compose_caller_content_flag") is False
+        assert seen.get("compose_icp_context") is False
+
+    def test_ai_signal_scoring_default_is_false(self):
+        cfg = BatchRunConfig(company_name_column="company", domain_column="domain")
+        assert cfg.ai_signal_scoring is False
+
     def test_continue_on_error(self):
         calls = {"n": 0}
 

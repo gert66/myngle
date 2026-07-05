@@ -20,6 +20,7 @@ from lead_non_hq_signal_extractor import (
     extract_sector_industry,
     summarize_non_hq_signals_for_result,
 )
+from lead_ai_signal_scorer import score_signals_with_ai
 from lead_app_summary_builder import build_app_summary_fields
 from lead_v2_scoring_adapter import score_lead_v2_result
 from lead_caller_app_fields_builder import build_caller_app_fields
@@ -63,6 +64,7 @@ def prioritize_single_lead(
     default_input_country: str = "Italy",
     collect_non_hq_evidence: bool = False,
     extract_non_hq_signals_flag: bool = False,
+    ai_signal_scoring: bool = False,
     build_app_summary_fields_flag: bool = False,
     calculate_commercial_score_flag: bool = False,
     build_caller_app_fields_flag: bool = False,
@@ -89,6 +91,16 @@ def prioritize_single_lead(
     triggers a Serper call itself: if evidence was not collected, extraction runs
     over an empty list and yields empty signals.  Intermediate signal scores are
     filled; the final commercial score and ranking are NOT touched here.
+
+    ``ai_signal_scoring`` (default ``False``) is a separate, explicit opt-in
+    that, when combined with ``extract_non_hq_signals_flag=True``, replaces the
+    deterministic Step-3 verdicts with one Anthropic call judging the same
+    (guard-filtered) evidence semantically instead of by keyword count. This is
+    the ONE part of Onderdeel 2 that can change ``final_commercial_fit_score``
+    versus the default — the score mapping itself is unchanged, only its
+    signal input is. Any AI call/parse failure falls back to the deterministic
+    extractor. ``result.signal_scoring_mode`` records which path actually ran
+    (``"deterministic"`` or ``"ai"``) so datasets are never silently mixed.
 
     ``build_app_summary_fields_flag`` (default ``False``) enables Step-4
     deterministic app/evidence summary building from the signals and evidence
@@ -216,11 +228,31 @@ def prioritize_single_lead(
             country=effective_country,
         )
 
-    # ── Step 3: deterministic non-HQ signal extraction (no live calls) ────────
-    # Extracts only from evidence already present — never triggers Serper here.
+    # ── Step 3: non-HQ signal extraction (no live Serper calls) ───────────────
+    # Deterministic by default. ``ai_signal_scoring`` is a separate, explicit
+    # opt-in that replaces the deterministic verdicts with one Anthropic call
+    # judging the same (already guard-filtered) evidence -- the score mapping
+    # further downstream (lead_v2_scoring_adapter.py / commercial_fit_scoring.py)
+    # is completely unchanged either way. Any AI failure falls back to the
+    # deterministic extractor so a row is never left without signals.
     signals = []
+    signal_scoring_mode = "deterministic"
     if extract_non_hq_signals_flag:
-        signals = extract_non_hq_signals(evidence_items)
+        if ai_signal_scoring:
+            ai_scoring_result = score_signals_with_ai(
+                company_name=input_row.company_name,
+                country=effective_country,
+                evidence_items=evidence_items,
+                anthropic_api_key=anthropic_api_key,
+                ai_model=ai_model,
+            )
+            if ai_scoring_result.call_success:
+                signals = ai_scoring_result.signals
+                signal_scoring_mode = "ai"
+            else:
+                signals = extract_non_hq_signals(evidence_items)
+        else:
+            signals = extract_non_hq_signals(evidence_items)
     non_hq_summary = summarize_non_hq_signals_for_result(signals)
 
     # Sector/industry metadata from sector_industry evidence (deterministic,
@@ -316,6 +348,7 @@ def prioritize_single_lead(
         icp_keyword_match_evidence_quote=non_hq_summary["icp_keyword_match_evidence_quote"],
         employer_branding_evidence_quote=non_hq_summary["employer_branding_evidence_quote"],
         signal_extractor_version=non_hq_summary["signal_extractor_version"],
+        signal_scoring_mode=signal_scoring_mode,
         # Sector / industry metadata (audit & app only — never scoring)
         detected_industry=sector_summary["detected_industry"],
         detected_sub_industry=sector_summary["detected_sub_industry"],

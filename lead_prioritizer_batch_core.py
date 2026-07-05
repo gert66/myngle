@@ -109,6 +109,11 @@ class BatchRunConfig:
     # lead_icp_context_composer.py; never affects evidence_items, signals, or
     # scoring.
     rich_icp_context: bool = False
+    # Onderdeel 2 — opt-in AI signal scoring. Off by default and INDEPENDENT
+    # of every flag above; unlike them, this ONE flag changes
+    # final_commercial_fit_score (same formula/weights, AI-judged signal
+    # input instead of keyword-counted). See lead_ai_signal_scorer.py.
+    ai_signal_scoring: bool = False
     # Deep Dive (Step B) — explicit opt-in, off by default, and INDEPENDENT
     # of both flags above. Runs AFTER scoring, only for rows that clear the
     # trigger gate (score threshold and/or confirmed foreign HQ); the result
@@ -222,7 +227,7 @@ _RESULT_FLAT_FIELDS = [
     "international_profile_evidence_quote", "onboarding_training_need_evidence_quote",
     "company_size_complexity_evidence_quote", "icp_keyword_match_evidence_quote",
     "employer_branding_evidence_quote",
-    "signal_extractor_version",
+    "signal_extractor_version", "signal_scoring_mode",
     # sector / industry detection (audit & app metadata — never scoring)
     "detected_industry", "detected_sub_industry", "detected_company_type",
     "sector_confidence", "sector_reason", "sector_evidence_url",
@@ -469,6 +474,9 @@ def run_batch_dataframe(
     # Rich ICP context is independent of run_mode AND of compose_caller_content
     # above — an explicit opt-in on top of whatever else is enabled.
     flags["compose_icp_context"] = config.rich_icp_context
+    # Onderdeel 2: opt-in AI signal scoring, independent of every flag above.
+    # Off by default; changes scores only when explicitly enabled.
+    flags["ai_signal_scoring"] = config.ai_signal_scoring
     # Provider selection: only override the pipeline's own ai_model default
     # when the config explicitly sets one.
     ai_kwargs: dict = {

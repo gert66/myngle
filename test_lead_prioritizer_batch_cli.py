@@ -74,6 +74,7 @@ class TestArgParsing:
         assert args.yes is False
         assert args.compose_caller_content is False
         assert args.rich_icp_context is False
+        assert args.ai_signal_scoring is False
         assert args.deep_dive is False
         assert args.deep_dive_min_score == 8.0
         assert args.deep_dive_max_pages == 6
@@ -82,6 +83,7 @@ class TestArgParsing:
         cfg = config_from_args(args)
         assert cfg.verify_quotes is True
         assert cfg.auto_correct_quotes is True
+        assert cfg.ai_signal_scoring is False
 
     def test_compose_caller_content_flag_parses(self):
         args = build_arg_parser().parse_args(
@@ -99,6 +101,14 @@ class TestArgParsing:
         cfg = config_from_args(args)
         assert cfg.rich_icp_context is True
 
+    def test_ai_signal_scoring_flag_parses(self):
+        args = build_arg_parser().parse_args(
+            ["--input", "x.xlsx", "--company-column", "c", "--domain-column", "d",
+             "--ai-signal-scoring"])
+        assert args.ai_signal_scoring is True
+        cfg = config_from_args(args)
+        assert cfg.ai_signal_scoring is True
+
     @pytest.mark.parametrize("cli_flags,expect_caller,expect_icp", [
         ([], False, False),
         (["--compose-caller-content"], True, False),
@@ -115,6 +125,17 @@ class TestArgParsing:
         cfg = config_from_args(args)
         assert cfg.compose_caller_content is expect_caller
         assert cfg.rich_icp_context is expect_icp
+
+    def test_ai_signal_scoring_independent_of_other_ai_flags(self):
+        # Onderdeel 2 (--ai-signal-scoring) must parse and combine with no
+        # cross-dependency on --compose-caller-content / --rich-icp-context.
+        args = build_arg_parser().parse_args(
+            ["--input", "x.xlsx", "--company-column", "c", "--domain-column", "d",
+             "--ai-signal-scoring"])
+        cfg = config_from_args(args)
+        assert cfg.ai_signal_scoring is True
+        assert cfg.compose_caller_content is False
+        assert cfg.rich_icp_context is False
 
     def test_deep_dive_flags_parse(self):
         args = build_arg_parser().parse_args(
