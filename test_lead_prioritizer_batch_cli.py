@@ -77,6 +77,11 @@ class TestArgParsing:
         assert args.deep_dive is False
         assert args.deep_dive_min_score == 8.0
         assert args.deep_dive_max_pages == 6
+        assert args.no_verify_quotes is False
+        assert args.no_auto_correct_quotes is False
+        cfg = config_from_args(args)
+        assert cfg.verify_quotes is True
+        assert cfg.auto_correct_quotes is True
 
     def test_compose_caller_content_flag_parses(self):
         args = build_arg_parser().parse_args(
@@ -122,6 +127,34 @@ class TestArgParsing:
         assert cfg.deep_dive is True
         assert cfg.deep_dive_min_score == 6.5
         assert cfg.deep_dive_max_pages == 4
+
+    def test_no_verify_quotes_flag_parses(self):
+        args = build_arg_parser().parse_args(
+            ["--input", "x.xlsx", "--company-column", "c", "--domain-column", "d",
+             "--deep-dive", "--no-verify-quotes"])
+        assert args.no_verify_quotes is True
+        cfg = config_from_args(args)
+        assert cfg.verify_quotes is False
+        # auto_correct_quotes stays True at the config level -- run_deep_dive
+        # itself only applies auto-correction when verify_quotes is on.
+        assert cfg.auto_correct_quotes is True
+
+    def test_no_auto_correct_quotes_flag_parses(self):
+        args = build_arg_parser().parse_args(
+            ["--input", "x.xlsx", "--company-column", "c", "--domain-column", "d",
+             "--deep-dive", "--no-auto-correct-quotes"])
+        assert args.no_auto_correct_quotes is True
+        cfg = config_from_args(args)
+        assert cfg.auto_correct_quotes is False
+        assert cfg.verify_quotes is True
+
+    def test_both_no_verify_and_no_auto_correct_together(self):
+        args = build_arg_parser().parse_args(
+            ["--input", "x.xlsx", "--company-column", "c", "--domain-column", "d",
+             "--deep-dive", "--no-verify-quotes", "--no-auto-correct-quotes"])
+        cfg = config_from_args(args)
+        assert cfg.verify_quotes is False
+        assert cfg.auto_correct_quotes is False
 
     @pytest.mark.parametrize("cli_flags,expect_icp,expect_deep_dive", [
         ([], False, False),
@@ -370,6 +403,28 @@ class TestMain:
         assert cfg.deep_dive_max_pages == 3
         assert captured["firecrawl_api_key"] == "FC"
         assert "FIRECRAWL_API_KEY: set" in capsys.readouterr().out
+
+    def test_no_verify_and_no_auto_correct_quotes_passthrough(self, tmp_path):
+        p = tmp_path / "in.xlsx"
+        _write_xlsx(p, {"Sheet1": _LEADS})
+        out_path = tmp_path / "result.xlsx"
+        captured = {}
+
+        def _fake_run(df, config, serper, anthropic, **kwargs):
+            captured["config"] = config
+            return _fake_tables()
+
+        with patch("lead_prioritizer_batch_cli.load_api_keys", return_value=_KEYS_OK), \
+             patch("lead_prioritizer_batch_cli.run_batch_dataframe", side_effect=_fake_run), \
+             patch("lead_prioritizer_batch_cli.build_excel_workbook_bytes", return_value=b"BYTES"):
+            argv = self._base_argv(p, **{"--output": str(out_path)})
+            argv += ["--deep-dive", "--no-verify-quotes", "--no-auto-correct-quotes"]
+            rc = main(argv)
+
+        assert rc == 0
+        cfg = captured["config"]
+        assert cfg.verify_quotes is False
+        assert cfg.auto_correct_quotes is False
 
     def test_missing_firecrawl_key_is_not_fatal(self, tmp_path, monkeypatch, capsys):
         monkeypatch.delenv("FIRECRAWL_API_KEY", raising=False)

@@ -2043,6 +2043,90 @@ def test_deep_dive_present_when_sheet_has_claims(tmp_path):
     assert "icp_context" not in detail
 
 
+def test_deep_dive_claim_quote_verification_fields_and_badge(tmp_path):
+    row = dict(
+        source_index=1,
+        company_name="Nordic Gear AB",
+        domain="nordicgear.se",
+        input_country="Netherlands",
+        enrichment_skipped=False,
+        sig_foreign_hq_score_for_next_scoring=0,
+        commercial_fit_score_app=90,
+        commercial_tier_app="A",
+        industry="Manufacturing",
+        employee_range="1001-5000",
+    )
+    deep_dive_rows = [
+        {"source_index": 1, "company_name": "Nordic Gear AB",
+         "trigger_reason": "score_threshold", "category": "hq_structure",
+         "statement": "s1", "quote": "the real page text",
+         "source_url": "https://nordicgear.se/about", "source_kind": "own_domain",
+         "domain_verified": True, "retrieval_method": "firecrawl", "error": "",
+         "quote_verified": True, "quote_verification_status": "verified_corrected",
+         "quote_match_score": 0.91, "original_quote": "the AI's paraphrase"},
+        {"source_index": 1, "company_name": "Nordic Gear AB",
+         "trigger_reason": "score_threshold", "category": "workforce",
+         "statement": "s2", "quote": "not actually on the page",
+         "source_url": "https://nordicgear.se/careers", "source_kind": "own_domain",
+         "domain_verified": True, "retrieval_method": "firecrawl", "error": "",
+         "quote_verified": False, "quote_verification_status": "not_found",
+         "quote_match_score": 0.31, "original_quote": ""},
+    ]
+    _, out_dir = run_export(tmp_path, [row], deep_dive=deep_dive_rows,
+                            export_country="Netherlands", foreign_hq_only=False)
+
+    detail = detail_for(out_dir, "Nordic Gear AB")
+    claims_by_category = {c["category"]: c for c in detail["deep_dive"]["claims"]}
+
+    corrected = claims_by_category["hq_structure"]
+    assert corrected["quote_verified"] is True
+    assert corrected["quote_verification_status"] == "verified_corrected"
+    assert corrected["quote_match_score"] == pytest.approx(0.91)
+    assert corrected["original_quote"] == "the AI's paraphrase"
+    assert corrected["badge"] == "confirmed"
+
+    not_found = claims_by_category["workforce"]
+    assert not_found["quote_verified"] is False
+    assert not_found["quote_verification_status"] == "not_found"
+    assert not_found["original_quote"] is None
+    assert not_found["badge"] == "unconfirmed"
+    # not_found claims are shown, never dropped -- a trust signal, not a filter.
+    assert len(detail["deep_dive"]["claims"]) == 2
+
+
+def test_deep_dive_claim_missing_quote_verification_fields_default_safely(tmp_path):
+    # A claim row written before these fields existed (or with verify_quotes
+    # off, leaving them at schema defaults) must still export safely.
+    row = dict(
+        source_index=1,
+        company_name="Nordic Gear AB",
+        domain="nordicgear.se",
+        input_country="Netherlands",
+        enrichment_skipped=False,
+        sig_foreign_hq_score_for_next_scoring=0,
+        commercial_fit_score_app=90,
+        commercial_tier_app="A",
+        industry="Manufacturing",
+        employee_range="1001-5000",
+    )
+    deep_dive_rows = [
+        {"source_index": 1, "company_name": "Nordic Gear AB",
+         "trigger_reason": "score_threshold", "category": "hq_structure",
+         "statement": "s1", "quote": "some quote", "source_url": "https://nordicgear.se/about",
+         "source_kind": "own_domain", "domain_verified": True,
+         "retrieval_method": "firecrawl", "error": ""},
+    ]
+    _, out_dir = run_export(tmp_path, [row], deep_dive=deep_dive_rows,
+                            export_country="Netherlands", foreign_hq_only=False)
+    detail = detail_for(out_dir, "Nordic Gear AB")
+    claim = detail["deep_dive"]["claims"][0]
+    assert claim["quote_verified"] is False
+    assert claim["quote_verification_status"] == "not_checked"
+    assert claim["quote_match_score"] == 0.0
+    assert claim["original_quote"] is None
+    assert claim["badge"] == "unconfirmed"
+
+
 def test_deep_dive_absent_when_sheet_missing(tmp_path):
     row = dict(
         source_index=1,

@@ -586,6 +586,28 @@ class TestRunBatchDeepDiveWiring:
         assert m_dd.call_args.kwargs["max_pages"] == 3
         assert m_dd.call_args.kwargs["parent_domain"] is None
 
+    @pytest.mark.parametrize("verify_quotes,auto_correct_quotes", [
+        (True, True), (True, False), (False, True), (False, False),
+    ])
+    def test_deep_dive_receives_verify_and_auto_correct_flags(
+        self, verify_quotes, auto_correct_quotes,
+    ):
+        def _fake_pipeline(lead_input, **kwargs):
+            return self._fake_result(lead_input.company_name,
+                                     final_commercial_fit_score=9.0,
+                                     sig_foreign_hq_score_for_next_scoring=0.0)
+
+        cfg = BatchRunConfig(company_name_column="company", domain_column="domain",
+                             run_mode="full", row_limit=1, deep_dive=True,
+                             deep_dive_min_score=8.0, verify_quotes=verify_quotes,
+                             auto_correct_quotes=auto_correct_quotes)
+        with patch("lead_prioritizer_batch_core.prioritize_single_lead", side_effect=_fake_pipeline), \
+             patch("lead_prioritizer_batch_core.run_deep_dive",
+                   return_value=DeepDiveResult(company_name="Acme")) as m_dd:
+            run_batch_dataframe(self._df, cfg, "S", "A")
+        assert m_dd.call_args.kwargs["verify_quotes"] is verify_quotes
+        assert m_dd.call_args.kwargs["auto_correct_quotes"] is auto_correct_quotes
+
     def test_deep_dive_error_never_breaks_the_batch(self):
         def _fake_pipeline(lead_input, **kwargs):
             return self._fake_result(lead_input.company_name,
@@ -705,6 +727,50 @@ class TestDeepDiveScoreInvariance:
         for field in self._SCORE_FIELDS:
             assert (out_without["enriched_leads"].iloc[0][field] ==
                    out_with["enriched_leads"].iloc[0][field])
+
+    @pytest.mark.parametrize("verify_quotes,auto_correct_quotes", [
+        (True, True), (True, False), (False, True), (False, False),
+    ])
+    def test_identical_scoring_regardless_of_quote_verification_settings(
+        self, verify_quotes, auto_correct_quotes,
+    ):
+        # Runs the REAL run_deep_dive() (not mocked) so the quote-verifier
+        # actually executes -- only its own network-boundary collection
+        # functions are mocked -- and proves that no combination of
+        # verify_quotes/auto_correct_quotes ever touches a score field.
+        def _fake_pipeline(lead_input, **kwargs):
+            return _sample_result(company_name=lead_input.company_name,
+                                  final_commercial_fit_score=9.0,
+                                  sig_foreign_hq_score_for_next_scoring=3.0)
+
+        df = pd.DataFrame({"company": ["Acme"], "domain": ["acme.com"]})
+        cfg_without = BatchRunConfig(company_name_column="company", domain_column="domain",
+                                     run_mode="full", deep_dive=False)
+        cfg_with = BatchRunConfig(company_name_column="company", domain_column="domain",
+                                  run_mode="full", deep_dive=True, deep_dive_min_score=8.0,
+                                  verify_quotes=verify_quotes,
+                                  auto_correct_quotes=auto_correct_quotes)
+
+        with patch("lead_prioritizer_batch_core.prioritize_single_lead", side_effect=_fake_pipeline):
+            out_without = run_batch_dataframe(df, cfg_without, "S", "A")
+
+        pages = [{"pages": [{"url": "https://acme.com/about", "title": None,
+                            "text": "Acme was founded in 1990 in Munich.",
+                            "source_kind": "own_domain", "retrieval_method": "firecrawl"}],
+                 "pages_crawled": [], "used": True}][0]
+        with patch("lead_prioritizer_batch_core.prioritize_single_lead", side_effect=_fake_pipeline), \
+             patch("deep_dive_runner._collect_pages_via_firecrawl", return_value=pages), \
+             patch("deep_dive_runner._distill_claims", return_value=(
+                 [DeepDiveClaim(claim_id="hq_structure:1", category="hq_structure",
+                               statement="s", quote="Acme founded in 1990 in Munich",
+                               source_url="https://acme.com/about")], "")):
+            out_with = run_batch_dataframe(df, cfg_with, "S", "A", firecrawl_api_key="fc")
+
+        for field in self._SCORE_FIELDS:
+            assert (out_without["enriched_leads"].iloc[0][field] ==
+                   out_with["enriched_leads"].iloc[0][field])
+        # Deep Dive still ran and populated its own separate table.
+        assert len(out_with["deep_dive"]) == 1
 
 
 # ---------------------------------------------------------------------------
