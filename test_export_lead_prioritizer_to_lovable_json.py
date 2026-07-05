@@ -953,21 +953,179 @@ def test_ui_payload_and_array_fields(tmp_path):
     assert detail["cold_caller_summary_app"] == "Concrete reason to explore cross-border alignment."
     assert detail["parent_hq_summary_app"] == \
         "The enrichment data identifies Acme Group as the parent company."
-    assert detail["ui_payload"] == {
-        "why_relevant": "Strong foreign parent and L&D hiring.",
-        "what_is_hot": ["Foreign parent confirmed", "Hiring L&D manager"],
-        "what_is_not": ["No competitor signal"],
-        "caller_angle": "Lead with onboarding angle.",
-        "call_starter": "I saw you are part of a Japanese group...",
-        "cold_caller_summary": "Concrete reason to explore cross-border alignment.",
-        "parent_hq_summary": "The enrichment data identifies Acme Group as the parent company.",
-        "evidence_summary": "Two strong sources.",
-        "source_urls": ["https://e.com/1"],
-    }
+    ui_payload = detail["ui_payload"]
+    # These mirror the *_app fields verbatim — unchanged, Italy-compatible behavior.
+    assert ui_payload["what_is_not"] == ["No competitor signal"]
+    assert ui_payload["caller_angle"] == "Lead with onboarding angle."
+    assert ui_payload["call_starter"] == "I saw you are part of a Japanese group..."
+    assert ui_payload["cold_caller_summary"] == "Concrete reason to explore cross-border alignment."
+    assert ui_payload["parent_hq_summary"] == \
+        "The enrichment data identifies Acme Group as the parent company."
+    assert ui_payload["evidence_summary"] == "Two strong sources."
+    # These are independently built, richer, company-specific content —
+    # not a mirror of why_relevant_app / what_is_hot_app.
+    assert ui_payload["why_relevant"] == (
+        "Acme Brasil is a Brazil-based manufacturing company with a "
+        "confirmed foreign parent or HQ context.")
+    assert ui_payload["what_is_hot"] == [
+        "Foreign HQ confirmed | Large-scale operation",
+        "Foreign ownership or group structure confirmed.",
+    ]
+    assert len(ui_payload["what_is_hot"]) <= 5
+    assert ui_payload["commercial_fit_drivers"] == [
+        {"label": FOREIGN_HQ_SIGNAL_LABEL, "strength": "Strong",
+         "evidence": "Foreign headquarters or group structure detected."},
+    ]
+    assert ui_payload["caution"] == []
+    assert ui_payload["source_urls"] == [
+        {"label": "Third-party company profile", "url": "https://e.com/1"},
+    ]
     # Lovable list-compatibility fallbacks.
     item = load_list(out_dir)[0]
     assert item["commercial_fit_score"] == 80  # copied from _app field
     assert item["commercial_tier"] == "A"
+
+
+# ---------------------------------------------------------------------------
+# ui_payload richer content builders (Brazil-style, controlled) — item 7 of
+# the Lovable JSON export content upgrade: what_is_hot capped at 5 clean
+# bullets, no technical tokens, human-readable caution, deduplicated labeled
+# source URLs, and weak/generic/suspicious evidence never promoted.
+# ---------------------------------------------------------------------------
+
+def test_brazil_style_record_has_clean_what_is_hot_max_five_bullets(tmp_path):
+    enriched = [enriched_row(
+        c5_parent_company="Shandong Heavy Industry Group",
+        c5_parent_hq_country="China",
+        needs_manual_review=True,
+    )]
+    signals = [
+        {"source_index": 1, "signal_name": "international_profile", "signal_score": 2,
+         "evidence_quote": "Operates offices across five countries in Latin America."},
+        {"source_index": 1, "signal_name": "onboarding_training_need", "signal_score": 2,
+         "evidence_quote": "Actively hiring an L&D manager for new-hire onboarding."},
+        {"source_index": 1, "signal_name": "company_size_complexity", "signal_score": 1,
+         "evidence_quote": "Runs a multi-site manufacturing operation."},
+        {"source_index": 1, "signal_name": "icp_keyword_match", "signal_score": 2,
+         "signal_reason": "3 distinct keyword match(es) in evidence: training, learning, development"},
+        {"source_index": 1, "signal_name": "employer_branding", "signal_score": 1,
+         "evidence_quote": "Recognized as a great place to work."},
+    ]
+    _, out_dir = run_export(tmp_path, enriched, signals=signals)
+
+    detail = detail_for(out_dir, "Acme Brasil")
+    what_is_hot = detail["ui_payload"]["what_is_hot"]
+
+    assert len(what_is_hot) <= 5
+    assert what_is_hot[0] == "Foreign HQ: China | International footprint | L&D / onboarding signal | Large-scale operation"
+    assert what_is_hot[1] == "Foreign ownership or group structure: headquartered in China."
+    joined = " ".join(what_is_hot)
+    assert "distinct keyword match" not in joined
+    assert "Industry: Unknown" not in joined
+
+
+def test_ui_payload_visible_text_has_no_technical_tokens(tmp_path):
+    enriched = [enriched_row(
+        c5_adjudication="foreign_parent_confirmed",
+        c5_parent_company="Foreign Group",
+        c5_parent_hq_country="Germany",
+    )]
+    signals = [
+        {"source_index": 1, "signal_name": "icp_keyword_match", "signal_score": 2,
+         "signal_reason": "3 distinct keyword match(es) in evidence: training, learning, development"},
+    ]
+    _, out_dir = run_export(tmp_path, enriched, signals=signals)
+
+    detail = detail_for(out_dir, "Acme Brasil")
+    ui = detail["ui_payload"]
+    visible_text = " ".join([
+        ui["why_relevant"] or "",
+        " ".join(ui["what_is_hot"]),
+        " ".join(str(d) for d in ui["commercial_fit_drivers"]),
+    ])
+    for token in ("sig_", "ti_", "c4_", "c5_", "foreign_parent_confirmed"):
+        assert token not in visible_text
+    assert "Positive signals:" not in visible_text
+    assert "Buying signals:" not in visible_text
+
+
+def test_caution_never_exposes_raw_quality_flag_names(tmp_path):
+    enriched = [enriched_row(
+        needs_manual_review=True,
+        hq_evidence_domain_mismatch_warning="Yes",
+        hq_positive_score_suppressed_for_review="Yes",
+    )]
+    _, out_dir = run_export(tmp_path, enriched)
+
+    detail = detail_for(out_dir, "Acme Brasil")
+    caution = detail["ui_payload"]["caution"]
+
+    assert caution, "expected human-readable caution entries"
+    joined = " ".join(caution)
+    for raw_flag in (
+        "hq_evidence_domain_mismatch_warning",
+        "needs_manual_review",
+        "hq_positive_score_suppressed_for_review",
+        "parser_source",
+        "raw_",
+    ):
+        assert raw_flag not in joined
+    assert "Manual review recommended before outreach." in caution
+    assert any("domain" in c.lower() for c in caution)
+
+
+def test_ui_payload_source_urls_are_deduplicated_with_labels(tmp_path):
+    enriched = [enriched_row(
+        website_url="https://acme.com.br",
+        careers_url="https://acme.com.br/careers",
+        linkedin_url="https://www.linkedin.com/company/acme-brasil",
+    )]
+    evidence = [
+        {"source_index": 1, "signal_name": "international_profile",
+         "source_url": "https://acme.com.br", "source_snippet": "dup of website"},
+        {"source_index": 1, "signal_name": "international_profile",
+         "source_url": "https://www.linkedin.com/company/acme-brasil",
+         "source_snippet": "dup of linkedin"},
+        {"source_index": 1, "signal_name": "international_profile",
+         "source_url": "https://otherdirectory.example.com/acme",
+         "source_snippet": "third-party profile"},
+    ]
+    _, out_dir = run_export(tmp_path, enriched, evidence)
+
+    detail = detail_for(out_dir, "Acme Brasil")
+    source_urls = detail["ui_payload"]["source_urls"]
+
+    urls = [item["url"] for item in source_urls]
+    assert len(urls) == len(set(urls))  # deduplicated
+    by_url = {item["url"]: item["label"] for item in source_urls}
+    assert by_url["https://acme.com.br"] == "Official website"
+    assert by_url["https://acme.com.br/careers"] == "Careers page"
+    assert by_url["https://www.linkedin.com/company/acme-brasil"] == "LinkedIn"
+    assert by_url["https://otherdirectory.example.com/acme"] == "Third-party company profile"
+
+
+def test_weak_generic_evidence_not_promoted_into_caller_facing_text(tmp_path):
+    enriched = [enriched_row(employee_range="10001+")]
+    signals = [
+        {"source_index": 1, "signal_name": "international_profile", "signal_score": 2,
+         "evidence_quote": "Signals point to international alignment."},
+        {"source_index": 1, "signal_name": "onboarding_training_need", "signal_score": 1,
+         "evidence_quote": "The company has 5 employees according to this snippet."},
+    ]
+    _, out_dir = run_export(tmp_path, enriched, signals=signals)
+
+    detail = detail_for(out_dir, "Acme Brasil")
+    ui = detail["ui_payload"]
+
+    joined_hot = " ".join(ui["what_is_hot"])
+    assert "Signals point to" not in joined_hot
+    assert "5 employees" not in joined_hot
+
+    drivers_by_label = {d["label"]: d for d in ui["commercial_fit_drivers"]}
+    assert "evidence" not in drivers_by_label["International business context"]
+    assert "evidence" not in drivers_by_label["L&D or onboarding signal"]
+    # Label and strength are still kept even when evidence is dropped.
+    assert drivers_by_label["International business context"]["strength"] == "Strong"
 
 
 def test_parse_key_source_links_variants():
@@ -1872,8 +2030,15 @@ class TestContentLanguageDutch:
         _, out_dir = run_export(tmp_path, enriched, content_language="Dutch")
 
         detail = detail_for(out_dir, "Acme Brasil")
+        # The legacy Italy-compatible *_app field is still fully localized.
         assert detail["why_relevant_app"] == _FOREIGN_HQ_WHY_RELEVANT_NL
-        assert detail["ui_payload"]["why_relevant"] == _FOREIGN_HQ_WHY_RELEVANT_NL
+        # ui_payload.why_relevant is now built independently (richer,
+        # company-specific) and has no matching Dutch template to rebuild
+        # from, so it stays in the English it was generated in — it is no
+        # longer a mirror of why_relevant_app.
+        assert detail["ui_payload"]["why_relevant"] == (
+            "Acme Brasil is a Brazil-based manufacturing company operating "
+            "as part of Foreign Group, headquartered in Germany.")
         assert "is relevant because" not in detail["why_relevant_app"]
 
     def test_ids_domain_scores_tiers_and_debug_unchanged(self, tmp_path):
@@ -1969,10 +2134,17 @@ class TestContentLanguageItalian:
         _, out_dir = run_export(tmp_path, enriched, content_language="Italian")
 
         detail = detail_for(out_dir, "Acme Brasil")
+        # The legacy Italy-compatible *_app field is still fully localized.
         assert detail["why_relevant_app"] == _FOREIGN_HQ_WHY_RELEVANT_IT
-        assert detail["ui_payload"]["why_relevant"] == _FOREIGN_HQ_WHY_RELEVANT_IT
         assert "is relevant because" not in detail["why_relevant_app"]
         assert "hoofdkantoor" not in detail["why_relevant_app"]
+        # ui_payload.why_relevant is now built independently (richer,
+        # company-specific) and has no matching Italian template to rebuild
+        # from, so it stays in the English it was generated in — it is no
+        # longer a mirror of why_relevant_app.
+        assert detail["ui_payload"]["why_relevant"] == (
+            "Acme Brasil is a Brazil-based manufacturing company operating "
+            "as part of Foreign Group, headquartered in Germany.")
 
     def test_ids_domain_scores_tiers_and_debug_unchanged(self, tmp_path):
         enriched = [_foreign_hq_row()]

@@ -567,6 +567,304 @@ def build_quality_flags(row: dict) -> list[str]:
 
 
 # ---------------------------------------------------------------------------
+# ui_payload content builders — richer, curated, company-specific text built
+# straight from already-computed row/visible-signal data. Independent from
+# the frozen why_relevant_app/what_is_hot_app/... Italy-compatible templates
+# in lead_caller_app_fields_builder.py (never touched here): this only adds
+# to and refines the separate ui_payload copy so Lovable can render it
+# literally, without needing to enrich or interpret anything itself.
+# ---------------------------------------------------------------------------
+
+# Raw quality_flags column name -> human-readable caution sentence. Keeps
+# internal flag tokens (needs_manual_review, parser_source, ...) out of any
+# caller-facing text.
+_QUALITY_FLAG_CAUTION_TEXT: dict[str, str] = {
+    "needs_manual_review": "Manual review recommended before outreach.",
+    "hq_query_risk_flag": "The HQ search query carries some ambiguity; verify the HQ signal before relying on it.",
+    "hq_evidence_domain_mismatch_warning": (
+        "The HQ evidence source does not clearly match the lead's own "
+        "domain; verify the HQ signal before relying on it."
+    ),
+    "hq_positive_score_suppressed_for_review": (
+        "The foreign-HQ signal was flagged for manual review before being "
+        "treated as confirmed."
+    ),
+    "c5_recommended_manual_review": "A manual review of the foreign-HQ signal is recommended.",
+    "c5_possible_foreign_parent_for_review": (
+        "A possible foreign parent was found but still needs manual confirmation."
+    ),
+    "competitor_signal_suppressed": "A competitor-related signal was detected and excluded.",
+}
+
+# Fragments that mark generic/templated filler text — never promoted into
+# ui_payload caller-facing bullets or driver evidence.
+_GENERIC_TEXT_RE = re.compile(
+    r"signals?\s+point\s+to"
+    r"|combines\s+a\s+signal\s+with\s+evidence"
+    r"|keyword\s+evidence\s+signals\s+alignment"
+    r"|positive\s+signals\s*:"
+    r"|buying\s+signals\s*:"
+    r"|industry\s*:\s*unknown",
+    re.IGNORECASE,
+)
+
+# Raw internal token fragments (sig_/ti_/c4_/c5_ field names, score math) that
+# must never leak into ui_payload text.
+_RAW_TOKEN_RE = re.compile(r"\bsig_|\bti_|\bc[45]_", re.IGNORECASE)
+
+_EMPLOYEE_COUNT_RE = re.compile(r"([\d,]{1,7})\s*\+?\s*employees", re.IGNORECASE)
+
+
+def _employee_range_bounds(employee_range) -> "tuple[int, int | None] | None":
+    employee_range = clean_str(employee_range)
+    if not employee_range:
+        return None
+    m = re.match(r"\s*([\d,]+)\s*-\s*([\d,]+)", employee_range)
+    if m:
+        return int(m.group(1).replace(",", "")), int(m.group(2).replace(",", ""))
+    m = re.match(r"\s*([\d,]+)\s*\+", employee_range)
+    if m:
+        return int(m.group(1).replace(",", "")), None
+    return None
+
+
+def is_generic_or_raw_text(text) -> bool:
+    """True for banned generic filler phrases or raw internal field tokens."""
+    text = clean_str(text)
+    if not text:
+        return False
+    return bool(_GENERIC_TEXT_RE.search(text) or _RAW_TOKEN_RE.search(text))
+
+
+def is_suspicious_evidence(text, employee_range=None) -> bool:
+    """True when evidence quotes an employee count wildly inconsistent with
+    the lead's own employee_range (e.g. "5 employees" vs. a "10,001+" lead) —
+    a strong sign the snippet is about a different company."""
+    text = clean_str(text)
+    if not text:
+        return False
+    match = _EMPLOYEE_COUNT_RE.search(text)
+    if not match:
+        return False
+    bounds = _employee_range_bounds(employee_range)
+    if not bounds:
+        return False
+    lo, hi = bounds
+    count = int(match.group(1).replace(",", ""))
+    if hi is not None:
+        return count < lo * 0.1 or count > hi * 10
+    return count < lo * 0.1
+
+
+def _clean_driver_evidence(text, employee_range) -> "str | None":
+    """Evidence text usable in ui_payload, or None when it's weak, generic,
+    a raw token, or suspicious — the label/strength is kept either way."""
+    text = clean_str(text)
+    if not text:
+        return None
+    if is_generic_or_raw_text(text) or is_suspicious_evidence(text, employee_range):
+        return None
+    return text
+
+
+def resolve_parent_company(row: dict) -> "str | None":
+    return clean_str(row.get("c5_parent_company")) or clean_str(row.get("ai_parent_company"))
+
+
+def resolve_parent_hq_country(row: dict) -> "str | None":
+    return (clean_str(row.get("c5_parent_hq_country"))
+            or clean_str(row.get("ai_parent_hq_country"))
+            or clean_str(row.get("foreign_hq_country_app")))
+
+
+def build_ui_payload_why_relevant(
+    company_name: "str | None",
+    export_country: "str | None",
+    industry: "str | None",
+    foreign_hq_detected: bool,
+    parent_company: "str | None",
+    parent_hq_country: "str | None",
+    visible_signals: list[dict],
+    employee_range: "str | None" = None,
+) -> str:
+    """Company-specific, concrete relevance sentence built from safe fields
+    only (company name, country, parent/HQ, industry, strongest signals)."""
+    company = company_name or "This company"
+    country = export_country or "the region"
+    industry_word = (f" {industry.lower()}" if industry and industry != "Unknown" else "")
+
+    sentence = f"{company} is a {country}-based{industry_word} company"
+
+    if foreign_hq_detected and parent_company and parent_hq_country:
+        sentence += (
+            f" operating as part of {parent_company}, headquartered in "
+            f"{parent_hq_country}."
+        )
+    elif foreign_hq_detected and parent_hq_country:
+        sentence += f" with a confirmed foreign parent headquartered in {parent_hq_country}."
+    elif foreign_hq_detected:
+        sentence += " with a confirmed foreign parent or HQ context."
+    else:
+        sentence += "."
+
+    strongest_labels = [
+        s.get("label") for s in visible_signals
+        if s.get("label") and s.get("label") != FOREIGN_HQ_SIGNAL_LABEL
+        and (s.get("score") or 0) > 0
+        and _clean_driver_evidence(s.get("evidence"), employee_range) is not None
+    ]
+    if strongest_labels:
+        signal_phrase = " and ".join(label.lower() for label in strongest_labels[:2])
+        sentence += f" It also shows {signal_phrase}, relevant to language and training support."
+
+    return sentence
+
+
+def build_ui_payload_what_is_hot(
+    foreign_hq_detected: bool,
+    parent_hq_country: "str | None",
+    employee_range: "str | None",
+    visible_signals: list[dict],
+    max_bullets: int = 5,
+) -> list[str]:
+    """Max-5-bullet Italy-style but controlled list: a compact summary line
+    first, then concrete, evidence-backed bullets. Never raw tokens, score
+    math, or generic/suspicious snippets."""
+    positive_signals = [
+        s for s in visible_signals
+        if s.get("label") and s.get("label") != FOREIGN_HQ_SIGNAL_LABEL
+        and (s.get("score") or 0) > 0
+    ]
+
+    def _has(*keywords) -> bool:
+        return any(
+            any(kw in (s.get("label") or "").lower() for kw in keywords)
+            for s in positive_signals
+        )
+
+    summary_parts = []
+    if foreign_hq_detected:
+        summary_parts.append(
+            f"Foreign HQ: {parent_hq_country}" if parent_hq_country else "Foreign HQ confirmed"
+        )
+    if _has("international"):
+        summary_parts.append("International footprint")
+    if _has("learning", "onboarding", "l&d"):
+        summary_parts.append("L&D / onboarding signal")
+    if _has("size", "complexity", "onboarding need") or clean_str(employee_range):
+        summary_parts.append("Large-scale operation")
+
+    bullets: list[str] = []
+    if summary_parts:
+        bullets.append(" | ".join(summary_parts))
+
+    if foreign_hq_detected:
+        bullets.append(
+            f"Foreign ownership or group structure: headquartered in {parent_hq_country}."
+            if parent_hq_country else "Foreign ownership or group structure confirmed."
+        )
+
+    _PREFIXES = (
+        (("international",), "International business context"),
+        (("learning", "onboarding", "l&d"), "Learning and development signal"),
+        (("size", "complexity"), "Company complexity"),
+    )
+    for signal in positive_signals:
+        if len(bullets) >= max_bullets:
+            break
+        label = signal.get("label") or ""
+        label_lower = label.lower()
+        prefix = next(
+            (text for keywords, text in _PREFIXES
+             if any(kw in label_lower for kw in keywords)),
+            label,
+        )
+        evidence = _clean_driver_evidence(signal.get("evidence"), employee_range)
+        bullet = f"{prefix}: {evidence}" if evidence else f"{prefix}."
+        if bullet not in bullets:
+            bullets.append(bullet)
+
+    return bullets[:max_bullets]
+
+
+def _strength_for_score(score) -> str:
+    if score is None:
+        return "Unknown"
+    if score >= 2:
+        return "Strong"
+    if score >= 1:
+        return "Moderate"
+    return "Weak"
+
+
+def build_commercial_fit_drivers(
+    visible_signals: list[dict], employee_range: "str | None" = None,
+) -> list[dict]:
+    """Curated {label, strength, evidence} rows from the same signal source
+    as visible_icp_signal_scores; weak/generic/suspicious evidence is
+    omitted while the label and strength are always kept."""
+    drivers = []
+    for signal in visible_signals:
+        label = signal.get("label")
+        if not label:
+            continue
+        driver = {
+            "label": label,
+            "strength": _strength_for_score(signal.get("score")),
+        }
+        evidence = _clean_driver_evidence(signal.get("evidence"), employee_range)
+        if evidence:
+            driver["evidence"] = evidence
+        drivers.append(driver)
+    return drivers
+
+
+def build_ui_payload_caution(quality_flags: list[str], caution_app: "str | None") -> list[str]:
+    """Human-readable warnings only — raw quality-flag column names (e.g.
+    hq_evidence_domain_mismatch_warning, needs_manual_review) are always
+    mapped to plain text, never exposed verbatim."""
+    caution: list[str] = []
+    for flag in quality_flags:
+        text = _QUALITY_FLAG_CAUTION_TEXT.get(flag)
+        if text and text not in caution:
+            caution.append(text)
+    for part in (caution_app or "").split(";"):
+        part = part.strip()
+        if part and not is_generic_or_raw_text(part) and part not in caution:
+            caution.append(part)
+    return caution
+
+
+def build_ui_payload_source_urls(
+    website_url: "str | None",
+    careers_url: "str | None",
+    linkedin_url: "str | None",
+    source_urls: list[str],
+) -> list[dict]:
+    """Deduplicated {label, url} rows with stable labels where known."""
+    seen: set[str] = set()
+    items: list[dict] = []
+
+    def _add(url, label) -> None:
+        url = clean_str(url)
+        if not url or url in seen:
+            return
+        seen.add(url)
+        items.append({"label": label, "url": url})
+
+    _add(website_url, "Official website")
+    _add(careers_url, "Careers page")
+    _add(linkedin_url, "LinkedIn")
+    for url in source_urls:
+        url = clean_str(url)
+        if not url or url in seen:
+            continue
+        label = "LinkedIn" if "linkedin.com" in hostname_of(url) else "Third-party company profile"
+        _add(url, label)
+    return items
+
+
+# ---------------------------------------------------------------------------
 # Record builders
 # ---------------------------------------------------------------------------
 
@@ -777,16 +1075,33 @@ def _build_detail_record(
             "signals_rows_count": len(signal_rows),
         },
     })
+    foreign_hq_detected = list_item["foreign_hq_detected_for_export"]
+    visible_signals = detail["visible_icp_signal_scores"]
+    employee_range = list_item.get("employee_range")
+    parent_company = resolve_parent_company(row)
+    parent_hq_country = resolve_parent_hq_country(row)
+
     detail["ui_payload"] = {
-        "why_relevant": detail["why_relevant_app"],
-        "what_is_hot": detail["what_is_hot_app"],
+        "why_relevant": build_ui_payload_why_relevant(
+            detail["company_name"], list_item.get("export_country"),
+            list_item.get("industry"), foreign_hq_detected,
+            parent_company, parent_hq_country, visible_signals, employee_range,
+        ),
+        "what_is_hot": build_ui_payload_what_is_hot(
+            foreign_hq_detected, parent_hq_country, employee_range, visible_signals,
+        ),
         "what_is_not": detail["what_is_not_app"],
         "caller_angle": detail["caller_angle_app"],
         "call_starter": detail["call_starter_app"],
         "cold_caller_summary": detail["cold_caller_summary_app"],
         "parent_hq_summary": detail["parent_hq_summary_app"],
         "evidence_summary": detail["evidence_summary_app"],
-        "source_urls": detail["source_urls"],
+        "commercial_fit_drivers": build_commercial_fit_drivers(visible_signals, employee_range),
+        "caution": build_ui_payload_caution(detail["quality_flags"], detail["caution_app"]),
+        "source_urls": build_ui_payload_source_urls(
+            detail["website_url"], detail["careers_url"], detail["linkedin_url"],
+            detail["source_urls"],
+        ),
     }
     return detail
 
