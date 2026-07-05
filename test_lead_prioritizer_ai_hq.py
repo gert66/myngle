@@ -739,3 +739,109 @@ class TestEstimateAiCost:
     def test_missing_tokens_return_none(self):
         assert estimate_ai_cost_usd("claude-haiku-4-5-20251001", None, 100) is None
         assert estimate_ai_cost_usd("claude-haiku-4-5-20251001", 1000, None) is None
+
+
+# ---------------------------------------------------------------------------
+# hq_evidence_urls — ALL usable HQ evidence URLs, mechanically validated
+# against the Serper payload actually shown to the model (never an
+# AI-invented URL); the existing hq_evidence_url is unchanged.
+# ---------------------------------------------------------------------------
+
+class TestHqEvidenceUrls:
+    _lead = LeadInput(company_name="Acme Italia", domain="acme.com", input_country="Italy")
+
+    _payload = {
+        "organic": [
+            {"title": "Acme HQ", "snippet": "Acme is headquartered in Munich.",
+             "link": "https://acme.com/about"},
+            {"title": "Acme on Wikipedia", "snippet": "Acme GmbH is a German company.",
+             "link": "https://en.wikipedia.org/wiki/Acme"},
+        ],
+    }
+
+    def _interpret(self, ai_json_str):
+        from lead_hq_ai_interpreter import interpret_hq_with_ai
+        with _mock_anthropic(ai_json_str):
+            return interpret_hq_with_ai(
+                lead_input=self._lead, domain_root="acme", query="acme headquarters",
+                serper_payload=self._payload, anthropic_api_key="fake-anthropic",
+            )
+
+    def test_valid_urls_from_payload_are_kept_ordered(self):
+        ai = _ai_json(
+            classification="foreign_parent", confidence="High",
+            parent_company="Acme GmbH", parent_hq_country="Germany",
+            evidence_url="https://acme.com/about",
+        )
+        # evidence_urls is not part of _ai_json's defaults -- inject it directly.
+        data = json.loads(ai)
+        data["evidence_urls"] = ["https://acme.com/about", "https://en.wikipedia.org/wiki/Acme"]
+        result = self._interpret(json.dumps(data))
+        assert result.hq_evidence_urls == [
+            "https://acme.com/about", "https://en.wikipedia.org/wiki/Acme",
+        ]
+
+    def test_first_element_equals_existing_singular_field(self):
+        data = json.loads(_ai_json(
+            classification="foreign_parent", confidence="High",
+            parent_company="Acme GmbH", parent_hq_country="Germany",
+            evidence_url="https://acme.com/about",
+        ))
+        data["evidence_urls"] = ["https://en.wikipedia.org/wiki/Acme", "https://acme.com/about"]
+        result = self._interpret(json.dumps(data))
+        assert result.hq_evidence_url == "https://acme.com/about"
+        assert result.hq_evidence_urls[0] == result.hq_evidence_url
+
+    def test_invented_url_not_in_payload_is_dropped(self):
+        data = json.loads(_ai_json(
+            classification="foreign_parent", confidence="High",
+            parent_company="Acme GmbH", parent_hq_country="Germany",
+            evidence_url="https://acme.com/about",
+        ))
+        data["evidence_urls"] = [
+            "https://acme.com/about", "https://invented-by-model.com/fake",
+        ]
+        result = self._interpret(json.dumps(data))
+        assert result.hq_evidence_urls == ["https://acme.com/about"]
+        assert "invented-by-model" not in " ".join(result.hq_evidence_urls)
+
+    def test_duplicate_urls_deduplicated(self):
+        data = json.loads(_ai_json(
+            classification="foreign_parent", confidence="High",
+            parent_company="Acme GmbH", parent_hq_country="Germany",
+            evidence_url="https://acme.com/about",
+        ))
+        data["evidence_urls"] = ["https://acme.com/about", "https://acme.com/about"]
+        result = self._interpret(json.dumps(data))
+        assert result.hq_evidence_urls == ["https://acme.com/about"]
+
+    def test_missing_evidence_urls_key_falls_back_to_singular(self):
+        # No "evidence_urls" key at all in the AI JSON (older-shape response).
+        ai = _ai_json(
+            classification="foreign_parent", confidence="High",
+            parent_company="Acme GmbH", parent_hq_country="Germany",
+            evidence_url="https://acme.com/about",
+        )
+        result = self._interpret(ai)
+        assert result.hq_evidence_urls == ["https://acme.com/about"]
+
+    def test_no_evidence_url_at_all_yields_empty_list(self):
+        ai = _ai_json(classification="unclear", confidence="Low")
+        result = self._interpret(ai)
+        assert result.hq_evidence_urls == []
+
+    def test_hq_evidence_urls_never_affects_classification_or_score(self):
+        data_without = json.loads(_ai_json(
+            classification="foreign_parent", confidence="High",
+            parent_company="Acme GmbH", parent_hq_country="Germany",
+            evidence_url="https://acme.com/about",
+        ))
+        data_with = dict(data_without)
+        data_with["evidence_urls"] = [
+            "https://acme.com/about", "https://en.wikipedia.org/wiki/Acme",
+        ]
+        r_without = self._interpret(json.dumps(data_without))
+        r_with = self._interpret(json.dumps(data_with))
+        assert r_without.sig_foreign_hq_score_for_next_scoring == r_with.sig_foreign_hq_score_for_next_scoring
+        assert r_without.hq_structure_type == r_with.hq_structure_type
+        assert r_without.needs_manual_review == r_with.needs_manual_review

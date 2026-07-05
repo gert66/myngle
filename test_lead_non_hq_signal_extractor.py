@@ -114,6 +114,108 @@ class TestExtractor:
 
 
 # ---------------------------------------------------------------------------
+# evidence_urls — ALL usable evidence URLs per signal (multiple clickable
+# references), never a score/confidence/value change.
+# ---------------------------------------------------------------------------
+
+class TestEvidenceUrls:
+    def test_multiple_usable_items_yield_all_urls_ordered(self):
+        ev = [
+            _ev("international_profile", url="https://acme.com/intl",
+               snippet="Global company with offices in many countries."),
+            _ev("international_profile", url="https://linkedin.com/company/acme",
+               snippet="Acme operates globally across many countries."),
+            _ev("international_profile", url="https://acme.com/about",
+               snippet="More international footprint context here."),
+        ]
+        s = extract_non_hq_signals(ev)[0]
+        assert s.evidence_urls == [
+            "https://acme.com/intl", "https://linkedin.com/company/acme",
+            "https://acme.com/about",
+        ]
+
+    def test_first_element_equals_existing_singular_field(self):
+        ev = [
+            _ev("international_profile", url="https://acme.com/intl",
+               snippet="Global company with offices in many countries."),
+            _ev("international_profile", url="https://linkedin.com/company/acme",
+               snippet="operates globally across many countries"),
+        ]
+        s = extract_non_hq_signals(ev)[0]
+        assert s.evidence_urls[0] == s.evidence_url
+
+    def test_duplicate_urls_are_deduplicated(self):
+        ev = [
+            _ev("international_profile", url="https://acme.com/intl",
+               snippet="Global company with offices in many countries."),
+            _ev("international_profile", url="https://acme.com/intl",
+               snippet="Duplicate URL, different snippet text entirely."),
+        ]
+        s = extract_non_hq_signals(ev)[0]
+        assert s.evidence_urls == ["https://acme.com/intl"]
+
+    def test_blank_urls_never_included(self):
+        ev = [
+            _ev("international_profile", url="",
+               snippet="Global company with offices in many countries."),
+            _ev("international_profile", url="https://acme.com/intl",
+               snippet="operates globally across many countries"),
+        ]
+        s = extract_non_hq_signals(ev)[0]
+        assert s.evidence_urls == ["https://acme.com/intl"]
+
+    def test_hosted_platform_url_never_in_evidence_urls(self):
+        ev = [
+            _ev("international_profile", url="https://acme.com/intl",
+               snippet="Global company with offices in many countries."),
+            _ev("international_profile", url="https://acme.wd3.myworkdayjobs.com/careers",
+               snippet="International careers listing page content."),
+        ]
+        s = extract_non_hq_signals(ev)[0]
+        assert s.evidence_urls == ["https://acme.com/intl"]
+        assert "myworkdayjobs" not in " ".join(s.evidence_urls)
+
+    def test_external_training_evidence_url_never_in_evidence_urls(self):
+        ev = [
+            _ev("onboarding_training_need", url="https://acme.com/careers",
+               snippet="Employee onboarding and internal training academy for new hires."),
+            _ev("onboarding_training_need", url="https://acme.com/installer-training",
+               snippet="Become a certified installer through our channel partner training."),
+        ]
+        s = extract_non_hq_signals(ev)[0]
+        assert s.evidence_urls == ["https://acme.com/careers"]
+
+    def test_no_usable_evidence_yields_empty_evidence_urls(self):
+        # All evidence excluded (hosted platform) -> evidence_url may still
+        # carry an audit-only fallback, but evidence_urls must stay empty.
+        ev = [_ev("international_profile", url="https://acme.wd3.myworkdayjobs.com/careers",
+                 snippet="International careers listing.")]
+        s = extract_non_hq_signals(ev)[0]
+        assert s.evidence_urls == []
+
+    def test_single_usable_item_yields_single_element_list(self):
+        ev = [_ev("employer_branding",
+                 snippet="Great place to work with strong employee satisfaction.")]
+        s = extract_non_hq_signals(ev)[0]
+        assert s.evidence_urls == [s.evidence_url]
+
+    def test_evidence_urls_never_affects_score_or_confidence(self):
+        # Same evidence, only the number of usable URLs differs -- score,
+        # value, and confidence must be identical either way.
+        ev_one = [_ev("international_profile", url="https://acme.com/intl",
+                     snippet="Global company with offices in many countries.")]
+        ev_many = ev_one + [
+            _ev("international_profile", url="https://linkedin.com/company/acme",
+               snippet="Duplicate scoring text, offices in many countries."),
+        ]
+        s_one = extract_non_hq_signals(ev_one)[0]
+        s_many = extract_non_hq_signals(ev_many)[0]
+        assert s_one.signal_score == s_many.signal_score
+        assert s_one.signal_value == s_many.signal_value
+        assert s_one.signal_confidence == s_many.signal_confidence
+
+
+# ---------------------------------------------------------------------------
 # Step 2 — external-training and hosted-platform guards moved into the
 # extraction layer, so the signal score and the exporter's displayed
 # rationale can never disagree (previously: a high score with every driver
