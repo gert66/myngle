@@ -206,6 +206,10 @@ class LeadPrioritizationResult:
     company_size_complexity_evidence_quote: Optional[str] = None
     icp_keyword_match_evidence_quote: Optional[str] = None
     employer_branding_evidence_quote: Optional[str] = None
+    # Which deterministic signal-extractor keyword set produced these signals
+    # (e.g. "v2-multilingual" once localized keywords/gl/hl are in use), so
+    # old and new datasets are never silently mixed.
+    signal_extractor_version: Optional[str] = None
     # ── Sector / industry detection (audit & app metadata — NEVER scoring) ─────
     detected_industry: Optional[str] = None
     detected_sub_industry: Optional[str] = None

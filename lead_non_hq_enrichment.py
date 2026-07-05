@@ -86,18 +86,53 @@ def build_non_hq_enrichment_queries(
 # Serper caller (defensive — mirrors the HQ helper)
 # ---------------------------------------------------------------------------
 
-def call_serper_for_enrichment(query: str, serper_api_key: str) -> dict:
+# Country -> (gl, hl) for localized Serper results. Only countries with an
+# unambiguous single primary language are mapped; unknown countries fall
+# back to Serper's default (no gl/hl sent at all — current behavior).
+_COUNTRY_TO_GL_HL: dict[str, tuple[str, str]] = {
+    "netherlands": ("nl", "nl"),
+    "italy": ("it", "it"),
+    "germany": ("de", "de"),
+    "france": ("fr", "fr"),
+    "spain": ("es", "es"),
+    "belgium": ("be", "nl"),
+}
+
+
+def gl_hl_for_country(country: Optional[str]) -> tuple[Optional[str], Optional[str]]:
+    """Map a lead's input country to Serper's ``gl``/``hl`` params.
+
+    Returns ``(None, None)`` for unmapped/unknown countries so callers can
+    omit both params and keep exactly today's (unlocalized) behavior."""
+    key = (country or "").strip().lower()
+    return _COUNTRY_TO_GL_HL.get(key, (None, None))
+
+
+def call_serper_for_enrichment(
+    query: str,
+    serper_api_key: str,
+    gl: Optional[str] = None,
+    hl: Optional[str] = None,
+) -> dict:
     """Fire a single Serper search and return the raw JSON payload.
 
-    Returns ``{}`` on any error so callers can treat it defensively; never
-    raises on API / network failure.
+    ``gl``/``hl`` (Serper's country/language params) are only included in the
+    request when explicitly given, so callers that don't pass them keep the
+    exact request shape used today. Returns ``{}`` on any error so callers can
+    treat it defensively; never raises on API / network failure.
     """
     import urllib.request
 
     if not serper_api_key or not query:
         return {}
 
-    payload_bytes = json.dumps({"q": query, "num": 10}).encode()
+    request_payload: dict = {"q": query, "num": 10}
+    if gl:
+        request_payload["gl"] = gl
+    if hl:
+        request_payload["hl"] = hl
+
+    payload_bytes = json.dumps(request_payload).encode()
     req = urllib.request.Request(
         "https://google.serper.dev/search",
         data=payload_bytes,
@@ -208,17 +243,22 @@ def collect_non_hq_enrichment_evidence(
     domain: Optional[str],
     serper_api_key: str,
     max_evidence_per_signal: int = 3,
+    country: Optional[str] = None,
 ) -> list[LeadEvidence]:
     """Build query specs, call Serper per query, extract evidence.
 
     Returns one flat list of ``LeadEvidence`` across all non-HQ signals.  No
     scores are produced.  At most 6 Serper queries are made (one per signal).
+    ``country`` (the lead's effective input country) is mapped to Serper's
+    ``gl``/``hl`` params for localized results; unmapped/unknown countries
+    keep today's unlocalized behavior.
     """
+    gl, hl = gl_hl_for_country(country)
     specs = build_non_hq_enrichment_queries(company_name, domain)
     evidence: list[LeadEvidence] = []
     for spec in specs:
         query = spec["query"]
-        payload = call_serper_for_enrichment(query, serper_api_key)
+        payload = call_serper_for_enrichment(query, serper_api_key, gl=gl, hl=hl)
         evidence.extend(
             extract_evidence_from_serper_payload(
                 payload,

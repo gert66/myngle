@@ -17,23 +17,47 @@ from lead_output_schema import LeadEvidence, LeadSignal
 
 # Exactly the five supported non-HQ signals and their positive keyword groups.
 # (No competitor / alternative-provider / rapid-growth keywords anywhere.)
+#
+# Each list also carries a short, unambiguous set of NL/IT/DE/FR/ES
+# equivalents for the core concept the signal is looking for (employees,
+# training, international, locations/sites, ...). Kept deliberately short —
+# only words that cannot reasonably appear as a false positive in unrelated
+# evidence text. English-only synonyms that are spelled identically in
+# another language (e.g. "international" in DE/FR) are not duplicated.
 _SIGNAL_KEYWORDS: dict[str, list[str]] = {
     "international_profile": [
         "international", "global", "worldwide", "countries", "offices",
         "subsidiaries", "locations", "export", "markets", "presence", "group",
+        # NL, IT, ES equivalents of "international"; DE/FR share the EN spelling.
+        "internationaal", "internazionale", "internacional",
+        # NL, IT, DE, ES equivalents of "locations/offices/sites".
+        "vestigingen", "sedi", "standorte", "sedes",
     ],
     "onboarding_training_need": [
         "careers", "training", "onboarding", "academy", "learning",
         "development", "employees", "talent", "people", "team", "hiring",
+        # NL, IT, DE, FR, ES equivalents of "employees".
+        "medewerkers", "dipendenti", "mitarbeiter", "employés", "empleados",
+        # NL, IT, DE, FR, ES equivalents of "training".
+        "opleiding", "formazione", "schulung", "formation", "formación",
     ],
     "company_size_complexity": [
         "employees", "revenue", "locations", "offices", "subsidiaries", "group",
         "company profile", "annual report", "global", "production sites", "plants",
+        # NL, IT, DE, FR, ES equivalents of "employees".
+        "medewerkers", "dipendenti", "mitarbeiter", "employés", "empleados",
+        # NL, IT, DE, ES equivalents of "locations/offices/sites".
+        "vestigingen", "sedi", "standorte", "sedes",
     ],
     "icp_keyword_match": [
         "corporate training", "sales", "customer service", "support",
         "global teams", "multilingual", "language", "learning", "academy",
         "employees", "international teams",
+        # NL, IT, DE, FR, ES equivalents of "customer service".
+        "klantenservice", "servizio clienti", "kundenservice",
+        "service client", "servicio al cliente",
+        # NL, IT, DE, FR, ES equivalents of "multilingual".
+        "meertalig", "multilingue", "mehrsprachig", "multilingüe",
     ],
     "employer_branding": [
         "employer brand", "employer branding", "employee satisfaction",
@@ -41,10 +65,19 @@ _SIGNAL_KEYWORDS: dict[str, list[str]] = {
         "great place to work", "best places to work", "employee engagement",
         "employee wellbeing", "people culture", "career development",
         "learning culture",
+        # NL, IT, DE, FR, ES equivalents of "employer brand(ing)".
+        "werkgeversmerk", "marchio del datore di lavoro", "arbeitgebermarke",
+        "marque employeur", "marca empleadora",
     ],
 }
 
 SUPPORTED_SIGNALS: tuple[str, ...] = tuple(_SIGNAL_KEYWORDS.keys())
+
+# Bumped whenever _SIGNAL_KEYWORDS or the matching rules change in a way that
+# can alter signal_score/signal_value output, so old and new datasets (e.g.
+# pre- and post-multilingual-keywords Excel/Lovable exports) can be told
+# apart. v1 = English-only keywords; v2 = adds NL/IT/DE/FR/ES equivalents.
+SIGNAL_EXTRACTOR_VERSION = "v2-multilingual"
 
 
 def _evidence_text(ev: LeadEvidence) -> str:
@@ -264,7 +297,7 @@ def summarize_non_hq_signals_for_result(signals: list[LeadSignal]) -> dict:
 
     Missing signals map to ``None`` for every field.
     """
-    out: dict = {}
+    out: dict = {"signal_extractor_version": SIGNAL_EXTRACTOR_VERSION}
     for fields in _RESULT_FIELD_MAP.values():
         for key in fields.values():
             out[key] = None

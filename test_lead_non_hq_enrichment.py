@@ -7,12 +7,16 @@ gating (default must NOT call non-HQ enrichment).
 
 from __future__ import annotations
 
+import json
 from unittest.mock import patch
 
 from lead_output_schema import LeadEvidence, LeadInput
 from lead_non_hq_enrichment import (
     build_non_hq_enrichment_queries,
     extract_evidence_from_serper_payload,
+    call_serper_for_enrichment,
+    collect_non_hq_enrichment_evidence,
+    gl_hl_for_country,
 )
 from lead_prioritizer_core import prioritize_single_lead
 
@@ -165,6 +169,103 @@ class TestEvidenceExtractor:
 
 
 # ---------------------------------------------------------------------------
+# Onderdeel 3: gl/hl localization
+# ---------------------------------------------------------------------------
+
+class TestGlHlLocalization:
+    def test_gl_hl_for_country_known_countries(self):
+        assert gl_hl_for_country("Netherlands") == ("nl", "nl")
+        assert gl_hl_for_country("Italy") == ("it", "it")
+        assert gl_hl_for_country("Germany") == ("de", "de")
+        assert gl_hl_for_country("France") == ("fr", "fr")
+        assert gl_hl_for_country("Spain") == ("es", "es")
+        assert gl_hl_for_country("Belgium") == ("be", "nl")
+
+    def test_gl_hl_for_country_is_case_insensitive(self):
+        assert gl_hl_for_country("italy") == ("it", "it")
+        assert gl_hl_for_country("ITALY") == ("it", "it")
+
+    def test_gl_hl_for_country_unknown_returns_none_none(self):
+        assert gl_hl_for_country("Brazil") == (None, None)
+        assert gl_hl_for_country(None) == (None, None)
+        assert gl_hl_for_country("") == (None, None)
+
+    def test_call_serper_for_enrichment_includes_gl_hl_when_given(self):
+        captured = {}
+
+        class _FakeResponse:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *a):
+                return False
+
+            def read(self):
+                return b"{}"
+
+        def _fake_urlopen(req, timeout=15):
+            captured["body"] = json.loads(req.data.decode())
+            return _FakeResponse()
+
+        with patch("urllib.request.urlopen", side_effect=_fake_urlopen):
+            call_serper_for_enrichment("acme international", "fake-key", gl="it", hl="it")
+
+        assert captured["body"] == {"q": "acme international", "num": 10, "gl": "it", "hl": "it"}
+
+    def test_call_serper_for_enrichment_omits_gl_hl_when_not_given(self):
+        captured = {}
+
+        class _FakeResponse:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *a):
+                return False
+
+            def read(self):
+                return b"{}"
+
+        def _fake_urlopen(req, timeout=15):
+            captured["body"] = json.loads(req.data.decode())
+            return _FakeResponse()
+
+        with patch("urllib.request.urlopen", side_effect=_fake_urlopen):
+            call_serper_for_enrichment("acme international", "fake-key")
+
+        assert captured["body"] == {"q": "acme international", "num": 10}
+
+    def test_collect_non_hq_enrichment_evidence_passes_gl_hl_for_known_country(self):
+        calls = []
+
+        def _fake_call(query, serper_api_key, gl=None, hl=None):
+            calls.append((gl, hl))
+            return {}
+
+        with patch("lead_non_hq_enrichment.call_serper_for_enrichment", side_effect=_fake_call):
+            collect_non_hq_enrichment_evidence(
+                "Acme", "acme.com", "fake-key", country="Italy",
+            )
+
+        assert calls
+        assert all(c == ("it", "it") for c in calls)
+
+    def test_collect_non_hq_enrichment_evidence_unknown_country_passes_none(self):
+        calls = []
+
+        def _fake_call(query, serper_api_key, gl=None, hl=None):
+            calls.append((gl, hl))
+            return {}
+
+        with patch("lead_non_hq_enrichment.call_serper_for_enrichment", side_effect=_fake_call):
+            collect_non_hq_enrichment_evidence(
+                "Acme", "acme.com", "fake-key", country="Brazil",
+            )
+
+        assert calls
+        assert all(c == (None, None) for c in calls)
+
+
+# ---------------------------------------------------------------------------
 # Core flag gating
 # ---------------------------------------------------------------------------
 
@@ -218,3 +319,18 @@ class TestCoreFlagGating:
         # No scores produced by Step 2.
         assert result.sig_international_profile_score is None
         assert result.signals == []
+
+    def test_effective_country_passed_to_collector(self):
+        captured = {}
+
+        def _collector(*a, **k):
+            captured.update(k)
+            return []
+
+        p1, p2, p3 = self._patches(_collector)
+        with p1, p2, p3:
+            prioritize_single_lead(
+                self._lead, serper_api_key="fake", anthropic_api_key="fake",
+                collect_non_hq_evidence=True,
+            )
+        assert captured.get("country") == "Italy"

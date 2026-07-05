@@ -213,6 +213,7 @@ def prioritize_single_lead(
             company_name=input_row.company_name,
             domain=input_row.domain,
             serper_api_key=serper_api_key,
+            country=effective_country,
         )
 
     # ── Step 3: deterministic non-HQ signal extraction (no live calls) ────────
@@ -314,6 +315,7 @@ def prioritize_single_lead(
         company_size_complexity_evidence_quote=non_hq_summary["company_size_complexity_evidence_quote"],
         icp_keyword_match_evidence_quote=non_hq_summary["icp_keyword_match_evidence_quote"],
         employer_branding_evidence_quote=non_hq_summary["employer_branding_evidence_quote"],
+        signal_extractor_version=non_hq_summary["signal_extractor_version"],
         # Sector / industry metadata (audit & app only — never scoring)
         detected_industry=sector_summary["detected_industry"],
         detected_sub_industry=sector_summary["detected_sub_industry"],

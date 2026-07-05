@@ -222,6 +222,7 @@ _RESULT_FLAT_FIELDS = [
     "international_profile_evidence_quote", "onboarding_training_need_evidence_quote",
     "company_size_complexity_evidence_quote", "icp_keyword_match_evidence_quote",
     "employer_branding_evidence_quote",
+    "signal_extractor_version",
     # sector / industry detection (audit & app metadata — never scoring)
     "detected_industry", "detected_sub_industry", "detected_company_type",
     "sector_confidence", "sector_reason", "sector_evidence_url",

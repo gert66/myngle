@@ -14,6 +14,7 @@ from lead_non_hq_signal_extractor import (
     extract_sector_industry,
     summarize_non_hq_signals_for_result,
     SUPPORTED_SIGNALS,
+    SIGNAL_EXTRACTOR_VERSION,
 )
 from lead_prioritizer_core import prioritize_single_lead
 
@@ -344,6 +345,72 @@ class TestSummary:
         assert summary["employer_branding_evidence_quote"] == \
             "Employee satisfaction and workplace culture are strong."
         assert "keyword match" in summary["employer_branding_reason"]
+
+    def test_signal_extractor_version_present_even_with_no_signals(self):
+        summary = summarize_non_hq_signals_for_result([])
+        assert summary["signal_extractor_version"] == SIGNAL_EXTRACTOR_VERSION
+
+    def test_signal_extractor_version_present_with_signals(self):
+        ev = [_ev("international_profile", snippet="Global company with offices worldwide.")]
+        sigs = extract_non_hq_signals(ev)
+        summary = summarize_non_hq_signals_for_result(sigs)
+        assert summary["signal_extractor_version"] == SIGNAL_EXTRACTOR_VERSION
+
+
+# ---------------------------------------------------------------------------
+# Onderdeel 3: multilingual keyword equivalents (NL/IT/DE/FR/ES). English
+# snippets must keep matching exactly as before; localized snippets now also
+# score positively on the same signals.
+# ---------------------------------------------------------------------------
+
+class TestMultilingualKeywords:
+    def test_dutch_snippet_matches_international_profile(self):
+        ev = [_ev("international_profile",
+                  snippet="Een internationaal bedrijf met vestigingen in 11 landen.")]
+        sigs = extract_non_hq_signals(ev)
+        s = sigs[0]
+        assert s.signal_score == 2.0
+        assert s.signal_value == "positive_evidence"
+
+    def test_italian_snippet_matches_onboarding_training_need(self):
+        ev = [_ev("onboarding_training_need",
+                  snippet="Offriamo formazione e sviluppo per tutti i dipendenti.")]
+        sigs = extract_non_hq_signals(ev)
+        s = sigs[0]
+        assert s.signal_score == 2.0
+        assert s.signal_value == "positive_evidence"
+
+    def test_german_snippet_matches_company_size_complexity(self):
+        ev = [_ev("company_size_complexity",
+                  snippet="Das Unternehmen beschäftigt Mitarbeiter an mehreren Standorten.")]
+        sigs = extract_non_hq_signals(ev)
+        s = sigs[0]
+        assert s.signal_score == 2.0
+        assert s.signal_value == "positive_evidence"
+
+    def test_french_snippet_matches_icp_keyword_match(self):
+        ev = [_ev("icp_keyword_match",
+                  snippet="Notre service client multilingue soutient des équipes mondiales.")]
+        sigs = extract_non_hq_signals(ev)
+        s = sigs[0]
+        assert s.signal_score == 2.0
+        assert s.signal_value == "positive_evidence"
+
+    def test_spanish_snippet_matches_employer_branding(self):
+        ev = [_ev("employer_branding",
+                  snippet="Nuestra marca empleadora refleja la satisfaccion de los "
+                          "empleados y una fuerte cultura corporativa.")]
+        sigs = extract_non_hq_signals(ev)
+        s = sigs[0]
+        assert s.signal_score >= 1.0
+
+    def test_english_snippet_still_matches_after_localization(self):
+        ev = [_ev("international_profile",
+                  snippet="Global company with offices in many countries.")]
+        sigs = extract_non_hq_signals(ev)
+        s = sigs[0]
+        assert s.signal_score == 2.0
+        assert s.signal_value == "positive_evidence"
 
 
 # ---------------------------------------------------------------------------
