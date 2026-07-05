@@ -72,6 +72,7 @@ class TestArgParsing:
         assert args.stop_on_error is False
         assert args.yes is False
         assert args.compose_caller_content is False
+        assert args.rich_icp_context is False
 
     def test_compose_caller_content_flag_parses(self):
         args = build_arg_parser().parse_args(
@@ -80,6 +81,31 @@ class TestArgParsing:
         assert args.compose_caller_content is True
         cfg = config_from_args(args)
         assert cfg.compose_caller_content is True
+
+    def test_rich_icp_context_flag_parses(self):
+        args = build_arg_parser().parse_args(
+            ["--input", "x.xlsx", "--company-column", "c", "--domain-column", "d",
+             "--rich-icp-context"])
+        assert args.rich_icp_context is True
+        cfg = config_from_args(args)
+        assert cfg.rich_icp_context is True
+
+    @pytest.mark.parametrize("cli_flags,expect_caller,expect_icp", [
+        ([], False, False),
+        (["--compose-caller-content"], True, False),
+        (["--rich-icp-context"], False, True),
+        (["--compose-caller-content", "--rich-icp-context"], True, True),
+    ])
+    def test_flag_combinations_are_independent(self, cli_flags, expect_caller, expect_icp):
+        # Onderdeel A (--rich-icp-context) and Step 3 (--compose-caller-content)
+        # must parse and combine into BatchRunConfig with no cross-dependency:
+        # every one of the four on/off combinations must work standalone.
+        args = build_arg_parser().parse_args(
+            ["--input", "x.xlsx", "--company-column", "c", "--domain-column", "d",
+             *cli_flags])
+        cfg = config_from_args(args)
+        assert cfg.compose_caller_content is expect_caller
+        assert cfg.rich_icp_context is expect_icp
 
     def test_config_from_args_maps_stop_on_error(self):
         args = build_arg_parser().parse_args(
@@ -231,6 +257,29 @@ class TestMain:
         # keys passed through to core but never written to disk output
         assert captured["serper"] == "SK" and captured["anthropic"] == "AK"
         assert out_path.read_bytes() == b"BYTES"
+
+    def test_rich_icp_context_passthrough_independent_of_compose_caller_content(self, tmp_path):
+        p = tmp_path / "in.xlsx"
+        _write_xlsx(p, {"Sheet1": _LEADS})
+        out_path = tmp_path / "result.xlsx"
+        captured = {}
+
+        def _fake_run(df, config, serper, anthropic):
+            captured["config"] = config
+            return _fake_tables()
+
+        with patch("lead_prioritizer_batch_cli.load_api_keys", return_value=_KEYS_OK), \
+             patch("lead_prioritizer_batch_cli.run_batch_dataframe", side_effect=_fake_run), \
+             patch("lead_prioritizer_batch_cli.build_excel_workbook_bytes", return_value=b"BYTES"):
+            argv = self._base_argv(p, **{"--output": str(out_path)})
+            argv.append("--rich-icp-context")
+            rc = main(argv)
+
+        assert rc == 0
+        cfg = captured["config"]
+        assert cfg.rich_icp_context is True
+        # --compose-caller-content was never passed: stays independently off.
+        assert cfg.compose_caller_content is False
 
     def test_output_bytes_contain_no_keys(self, tmp_path):
         # Guard: the CLI writes exactly the core's bytes, which never embed keys.

@@ -1877,6 +1877,116 @@ def test_composed_caller_content_ignored_for_italian_content_language(tmp_path):
 
 
 # ---------------------------------------------------------------------------
+# Rich ICP context (opt-in, independent of AI-composed caller content) —
+# added as a nested icp_context object only when actually present on the
+# row, never touching ui_payload or scoring.
+# ---------------------------------------------------------------------------
+
+def test_icp_context_present_when_fields_are_on_the_row(tmp_path):
+    row = dict(
+        source_index=1,
+        company_name="Nordic Gear AB",
+        domain="nordicgear.se",
+        input_country="Netherlands",
+        enrichment_skipped=False,
+        sig_foreign_hq_score_for_next_scoring=0,
+        commercial_fit_score_app=50,
+        commercial_tier_app="B",
+        industry="Manufacturing",
+        employee_range="501-1000",
+        icp_buying_signals="Active onboarding academy suggests near-term L&D investment.",
+        icp_likely_training_interest="Onboarding and new-hire ramp-up.",
+        icp_potential_buyer_function="HR / Talent Development",
+    )
+    _, out_dir = run_export(tmp_path, [row],
+                            export_country="Netherlands", foreign_hq_only=False)
+
+    detail = detail_for(out_dir, "Nordic Gear AB")
+    assert detail["icp_context"] == {
+        "buying_signals": "Active onboarding academy suggests near-term L&D investment.",
+        "likely_training_interest": "Onboarding and new-hire ramp-up.",
+        "potential_buyer_function": "HR / Talent Development",
+    }
+    # Never leaks into the caller-facing ui_payload.
+    ui = detail["ui_payload"]
+    visible_text = " ".join([ui["why_relevant"] or "", " ".join(ui["what_is_hot"]),
+                             ui["cold_caller_summary"] or ""])
+    assert "onboarding academy" not in visible_text.lower()
+
+
+def test_icp_context_absent_when_no_fields_on_the_row(tmp_path):
+    row = dict(
+        source_index=1,
+        company_name="Nordic Gear AB",
+        domain="nordicgear.se",
+        input_country="Netherlands",
+        enrichment_skipped=False,
+        sig_foreign_hq_score_for_next_scoring=0,
+        commercial_fit_score_app=50,
+        commercial_tier_app="B",
+        industry="Manufacturing",
+        employee_range="501-1000",
+    )
+    _, out_dir = run_export(tmp_path, [row],
+                            export_country="Netherlands", foreign_hq_only=False)
+
+    detail = detail_for(out_dir, "Nordic Gear AB")
+    assert "icp_context" not in detail
+
+
+def test_icp_context_partial_fields_only_include_present_ones(tmp_path):
+    row = dict(
+        source_index=1,
+        company_name="Nordic Gear AB",
+        domain="nordicgear.se",
+        input_country="Netherlands",
+        enrichment_skipped=False,
+        sig_foreign_hq_score_for_next_scoring=0,
+        commercial_fit_score_app=50,
+        commercial_tier_app="B",
+        industry="Manufacturing",
+        employee_range="501-1000",
+        icp_potential_buyer_function="HR / Talent Development",
+    )
+    _, out_dir = run_export(tmp_path, [row],
+                            export_country="Netherlands", foreign_hq_only=False)
+
+    detail = detail_for(out_dir, "Nordic Gear AB")
+    assert detail["icp_context"] == {"potential_buyer_function": "HR / Talent Development"}
+
+
+def test_icp_context_ignored_for_italian_content_language(tmp_path):
+    row = dict(
+        source_index=1,
+        company_name="ALDI S.R.L.",
+        domain="aldi-sued.com",
+        input_country="Italy",
+        enrichment_skipped=False,
+        sig_foreign_hq_score_for_next_scoring=3,
+        c5_parent_company="ALDI SUD",
+        c5_parent_hq_country="Germany",
+        commercial_fit_score_app=85,
+        commercial_tier_app="A",
+        industry="Retail",
+        employee_range="10001+",
+        cold_caller_summary_app="Legacy Italian cold caller summary text.",
+        icp_buying_signals="Should still be exposed as icp_context for Italy too.",
+    )
+    _, out_dir = run_export(tmp_path, [row],
+                            export_country="Italy", foreign_hq_only=False,
+                            content_language="Italian")
+
+    detail = detail_for(out_dir, "ALDI S.R.L.")
+    # icp_context is built independently of the Italy/non-Italy ui_payload
+    # branch, so it is present regardless of content_language — but it never
+    # touches the frozen Italy ui_payload fields themselves.
+    assert detail["icp_context"] == {
+        "buying_signals": "Should still be exposed as icp_context for Italy too.",
+    }
+    assert detail["ui_payload"]["cold_caller_summary"] == "Legacy Italian cold caller summary text."
+
+
+# ---------------------------------------------------------------------------
 # Six fixed commercial_fit_drivers dimensions (non-Italy) — always present,
 # in this exact order, never silently omitted.
 # ---------------------------------------------------------------------------

@@ -141,6 +141,21 @@ class TestFlatten:
         assert row["commercial_tier"] == "🥇 Hot"
         assert row["what_is_hot_app"] == "Foreign HQ signal: Germany"
         assert row["v2_pipeline_mode"] == "full_v2_single_lead"
+
+    def test_flattens_rich_icp_context_fields(self):
+        row = flatten_result_for_excel(
+            _sample_result(
+                icp_buying_signals="Active onboarding academy.",
+                icp_likely_training_interest="Onboarding ramp-up.",
+                icp_potential_buyer_function="HR / Talent",
+                icp_context_by_ai=True,
+                icp_context_content_note="AI-composed ICP context used.",
+            ), {"c": "Acme", "d": "acme.com"}, source_index=1, run_success=True, run_error="")
+        assert row["icp_buying_signals"] == "Active onboarding academy."
+        assert row["icp_likely_training_interest"] == "Onboarding ramp-up."
+        assert row["icp_potential_buyer_function"] == "HR / Talent"
+        assert row["icp_context_by_ai"] is True
+        assert row["icp_context_content_note"] == "AI-composed ICP context used."
         assert row["evidence_count"] == 1 and row["signal_count"] == 1
 
     def test_raw_ai_json_excluded_by_default(self):
@@ -301,6 +316,28 @@ class TestRunBatch:
         assert out["enriched_leads"].shape[0] == 1
         blob = out["enriched_leads"].to_csv(index=False)
         assert "SERP" not in blob and "ANTH" not in blob
+
+    @pytest.mark.parametrize("compose_caller_content,rich_icp_context", [
+        (False, False), (True, False), (False, True), (True, True),
+    ])
+    def test_compose_flags_independent_passthrough(self, compose_caller_content, rich_icp_context):
+        # Onderdeel A (rich_icp_context) and Step 3 (compose_caller_content)
+        # must reach prioritize_single_lead as independent kwargs — every
+        # combination must pass through with no cross-dependency.
+        seen = {}
+
+        def _fake(lead_input, **kwargs):
+            seen.update(kwargs)
+            return _sample_result(company_name=lead_input.company_name)
+
+        cfg = BatchRunConfig(company_name_column="company", domain_column="domain",
+                             run_mode="full", row_limit=1,
+                             compose_caller_content=compose_caller_content,
+                             rich_icp_context=rich_icp_context)
+        with patch("lead_prioritizer_batch_core.prioritize_single_lead", side_effect=_fake):
+            run_batch_dataframe(self._df, cfg, "SERP", "ANTH")
+        assert seen.get("compose_caller_content_flag") is compose_caller_content
+        assert seen.get("compose_icp_context") is rich_icp_context
 
     def test_continue_on_error(self):
         calls = {"n": 0}

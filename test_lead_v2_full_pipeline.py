@@ -10,6 +10,7 @@ import json
 from unittest.mock import patch
 
 from lead_caller_content_composer import ComposedCallerContent
+from lead_icp_context_composer import IcpContextResult
 from lead_output_schema import LeadInput, HQDetectionResult, LeadEvidence
 from lead_prioritizer_core import prioritize_single_lead
 
@@ -44,7 +45,12 @@ def _run(**flags):
     p_ai = patch("lead_prioritizer_core.interpret_hq_with_ai", return_value=_HQ)
     p_collect = patch("lead_prioritizer_core.collect_non_hq_enrichment_evidence",
                       return_value=list(_NON_HQ_EVIDENCE))
-    with p_serper, p_ai, p_collect:
+    # Rich ICP context's own broader-query evidence collection is independent
+    # of Step 2 above and would otherwise make a live Serper call; default to
+    # no extra evidence unless a test overrides it.
+    p_icp_evidence = patch("lead_prioritizer_core.collect_icp_context_evidence",
+                          return_value=[])
+    with p_serper, p_ai, p_collect, p_icp_evidence:
         return prioritize_single_lead(
             _LEAD, serper_api_key="fake", anthropic_api_key="fake", **flags)
 
@@ -205,3 +211,145 @@ class TestComposeCallerContentFlag:
         with patch("lead_prioritizer_core.compose_caller_content", return_value=composed):
             r = _run(compose_caller_content_flag=True)
         assert r.v2_pipeline_mode == "partial_v2"
+
+
+# ---------------------------------------------------------------------------
+# Rich ICP context (explicit opt-in only, INDEPENDENT of compose_caller_content)
+# ---------------------------------------------------------------------------
+
+class TestComposeIcpContextFlag:
+    def test_not_run_by_default(self):
+        r = _run()
+        assert r.icp_context_by_ai is None
+        assert r.icp_buying_signals is None
+
+    def test_full_preset_does_not_enable_it(self):
+        r = _run(run_full_v2_pipeline=True)
+        assert r.icp_context_by_ai is None
+        assert r.icp_buying_signals is None
+
+    def test_success_populates_icp_fields(self):
+        icp = IcpContextResult(
+            buying_signals="Active onboarding academy suggests near-term L&D investment.",
+            likely_training_interest="Onboarding and new-hire ramp-up.",
+            potential_buyer_function="HR / Talent Development",
+            call_attempted=True, call_success=True,
+        )
+        with patch("lead_prioritizer_core.run_icp_context_composition", return_value=icp):
+            r = _run(run_full_v2_pipeline=True, compose_icp_context=True)
+        assert r.icp_context_by_ai is True
+        assert r.icp_buying_signals == icp.buying_signals
+        assert r.icp_likely_training_interest == icp.likely_training_interest
+        assert r.icp_potential_buyer_function == icp.potential_buyer_function
+        assert r.v2_pipeline_mode == "full_v2_single_lead"
+
+    def test_failure_falls_back_silently_with_audit_note(self):
+        icp = IcpContextResult(call_attempted=True, call_success=False, error="no_anthropic_api_key")
+        with patch("lead_prioritizer_core.run_icp_context_composition", return_value=icp):
+            r = _run(run_full_v2_pipeline=True, compose_icp_context=True)
+        assert r.icp_context_by_ai is False
+        assert r.icp_buying_signals is None
+        assert r.icp_likely_training_interest is None
+        assert r.icp_potential_buyer_function is None
+        assert r.icp_context_content_note is not None
+        assert "no_anthropic_api_key" in r.icp_context_content_note
+
+    def test_flag_alone_marks_partial_v2(self):
+        icp = IcpContextResult(call_attempted=True, call_success=False, error="no_anthropic_api_key")
+        with patch("lead_prioritizer_core.run_icp_context_composition", return_value=icp):
+            r = _run(compose_icp_context=True)
+        assert r.v2_pipeline_mode == "partial_v2"
+
+
+# ---------------------------------------------------------------------------
+# Independence of the two opt-in composition flags — either may run without
+# the other, and enabling one must never implicitly enable/require the other.
+# ---------------------------------------------------------------------------
+
+class TestComposeFlagsAreIndependent:
+    def test_icp_context_alone_does_not_touch_caller_content_fields(self):
+        icp = IcpContextResult(
+            buying_signals="signals", likely_training_interest="interest",
+            potential_buyer_function="function", call_attempted=True, call_success=True,
+        )
+        with patch("lead_prioritizer_core.run_icp_context_composition", return_value=icp):
+            r = _run(run_full_v2_pipeline=True, compose_icp_context=True)
+        assert r.icp_context_by_ai is True
+        assert r.composed_by_ai is None
+        assert r.composed_why_relevant is None
+
+    def test_caller_content_alone_does_not_touch_icp_context_fields(self):
+        composed = ComposedCallerContent(
+            why_relevant="why", call_attempted=True, call_success=True,
+        )
+        with patch("lead_prioritizer_core.compose_caller_content", return_value=composed):
+            r = _run(run_full_v2_pipeline=True, compose_caller_content_flag=True)
+        assert r.composed_by_ai is True
+        assert r.icp_context_by_ai is None
+        assert r.icp_buying_signals is None
+
+    def test_both_flags_together_populate_both_families(self):
+        composed = ComposedCallerContent(
+            why_relevant="why", call_attempted=True, call_success=True,
+        )
+        icp = IcpContextResult(
+            buying_signals="signals", call_attempted=True, call_success=True,
+        )
+        with patch("lead_prioritizer_core.compose_caller_content", return_value=composed), \
+             patch("lead_prioritizer_core.run_icp_context_composition", return_value=icp):
+            r = _run(run_full_v2_pipeline=True,
+                     compose_caller_content_flag=True, compose_icp_context=True)
+        assert r.composed_by_ai is True
+        assert r.icp_context_by_ai is True
+
+
+# ---------------------------------------------------------------------------
+# Score-invariance: rich ICP context must never affect evidence_items,
+# signals, or final_commercial_fit_score (Hard Requirement #1, Part A).
+# ---------------------------------------------------------------------------
+
+class TestComposeIcpContextScoreInvariance:
+    _SCORE_FIELDS = (
+        "final_commercial_fit_score", "commercial_tier", "icp_similarity_score",
+        "lean_model_prob", "lr_z_score", "scoring_profile",
+        "sig_foreign_hq_score_for_next_scoring",
+        "sig_international_profile_score", "sig_onboarding_training_need_score",
+        "sig_company_size_complexity_score", "sig_icp_keyword_match_score",
+    )
+
+    def _snapshot(self, r):
+        snap = {f: getattr(r, f) for f in self._SCORE_FIELDS}
+        snap["evidence_items"] = list(r.evidence_items or [])
+        snap["signals"] = list(r.signals or [])
+        return snap
+
+    def test_identical_scoring_with_and_without_icp_context(self):
+        icp = IcpContextResult(
+            buying_signals="signals", likely_training_interest="interest",
+            potential_buyer_function="function", call_attempted=True, call_success=True,
+        )
+        # Non-empty extra evidence, to prove it never leaks into scoring even
+        # when actually collected.
+        extra_evidence = [{"label": "general_company_context",
+                          "evidence": "Some broader context.", "source_url": "https://acme.com"}]
+
+        r_without = _run(run_full_v2_pipeline=True, calculate_commercial_score_flag=True)
+
+        with patch("lead_prioritizer_core.collect_icp_context_evidence",
+                   return_value=extra_evidence), \
+             patch("lead_prioritizer_core.run_icp_context_composition", return_value=icp):
+            r_with = _run(run_full_v2_pipeline=True, calculate_commercial_score_flag=True,
+                          compose_icp_context=True)
+
+        assert self._snapshot(r_without) == self._snapshot(r_with)
+        # The composition itself did run and populated its own fields.
+        assert r_with.icp_context_by_ai is True
+        assert r_without.icp_context_by_ai is None
+
+    def test_icp_context_failure_also_leaves_scoring_untouched(self):
+        icp = IcpContextResult(call_attempted=True, call_success=False, error="icp_context_parse_failed")
+        r_without = _run(run_full_v2_pipeline=True, calculate_commercial_score_flag=True)
+        with patch("lead_prioritizer_core.run_icp_context_composition", return_value=icp):
+            r_with = _run(run_full_v2_pipeline=True, calculate_commercial_score_flag=True,
+                          compose_icp_context=True)
+        assert self._snapshot(r_without) == self._snapshot(r_with)
