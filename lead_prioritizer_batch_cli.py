@@ -131,6 +131,20 @@ def build_arg_parser() -> argparse.ArgumentParser:
                         "Deep Dive (default: 8.0).")
     p.add_argument("--deep-dive-max-pages", type=int, default=6,
                    help="Max pages collected per Deep Dive (default: 6).")
+    p.add_argument("--no-verify-quotes", action="store_true",
+                   help="Skip mechanical quote verification for Deep Dive "
+                        "claims (on by default). Verification catches an AI "
+                        "hallucinated/paraphrased quote by re-checking it "
+                        "against the actual page text; leaves every claim "
+                        "as quote_verification_status='not_checked' when "
+                        "skipped.")
+    p.add_argument("--no-auto-correct-quotes", action="store_true",
+                   help="Disable automatic quote self-healing (on by "
+                        "default, only meaningful when quote verification "
+                        "is on): a fuzzy-matched quote stays as the AI's "
+                        "original text instead of being corrected to the "
+                        "real page text, and 'not_found' quotes never get "
+                        "a re-extraction attempt.")
     return p
 
 
@@ -190,6 +204,8 @@ def config_from_args(args: argparse.Namespace) -> BatchRunConfig:
         deep_dive=args.deep_dive,
         deep_dive_min_score=args.deep_dive_min_score,
         deep_dive_max_pages=args.deep_dive_max_pages,
+        verify_quotes=not args.no_verify_quotes,
+        auto_correct_quotes=not args.no_auto_correct_quotes,
     )
 
 

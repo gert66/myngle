@@ -2037,6 +2037,19 @@ def _build_detail_record(
         source_url = clean_str(dd_row.get("source_url"))
         if not (category and statement and quote and source_url):
             continue
+        # "confirmed" for verified/verified_corrected, or a fuzzy_match at or
+        # above the matcher's own confirm threshold; "unconfirmed" for
+        # everything else (not_found/fetch_failed/not_checked/low-confidence
+        # fuzzy) — mirrors DeepDiveClaim.badge so the frontend never has to
+        # re-derive this threshold logic itself.
+        quote_status = clean_str(dd_row.get("quote_verification_status")) or "not_checked"
+        quote_score = to_float(dd_row.get("quote_match_score")) or 0.0
+        badge = (
+            "confirmed"
+            if quote_status in ("verified", "verified_corrected")
+            or (quote_status == "fuzzy_match" and quote_score >= 0.85)
+            else "unconfirmed"
+        )
         deep_dive_claims.append({
             "category": category,
             "statement": statement,
@@ -2045,6 +2058,11 @@ def _build_detail_record(
             "source_kind": clean_str(dd_row.get("source_kind")) or None,
             "domain_verified": to_bool(dd_row.get("domain_verified")),
             "retrieval_method": clean_str(dd_row.get("retrieval_method")) or None,
+            "quote_verified": to_bool(dd_row.get("quote_verified")),
+            "quote_verification_status": quote_status,
+            "quote_match_score": quote_score,
+            "original_quote": clean_str(dd_row.get("original_quote")) or None,
+            "badge": badge,
         })
     if deep_dive_claims:
         detail["deep_dive"] = {

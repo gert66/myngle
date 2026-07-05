@@ -1067,6 +1067,8 @@ def main() -> None:  # pragma: no cover - exercised only under `streamlit run`
              "a 'Deep Dive' sheet; never affects scoring. Independent of "
              "the two options above (default: off).")
     deep_dive_min_score = 8.0
+    verify_quotes = True
+    auto_correct_quotes = True
     if deep_dive:
         dd1, dd2 = st.columns(2)
         deep_dive_min_score = dd1.number_input(
@@ -1076,6 +1078,21 @@ def main() -> None:  # pragma: no cover - exercised only under `streamlit run`
                  "value trigger a deep dive.")
         deep_dive_on_foreign_hq = dd2.checkbox(
             "Also trigger on confirmed foreign HQ", value=True)
+        verify_quotes = st.checkbox(
+            "Verify Deep Dive quotes against the source page", value=True,
+            help="Mechanically re-checks every claim's quote against the "
+                 "actual page text, catching an AI hallucinated/paraphrased "
+                 "quote (on by default).")
+        if verify_quotes:
+            auto_correct_quotes = st.checkbox(
+                "Auto-correct fuzzy/not-found quotes", value=True,
+                help="A fuzzy-matched quote is replaced by the real page "
+                     "text; a not-found quote gets one bundled re-extraction "
+                     "attempt per company, mechanically re-verified before "
+                     "being accepted (on by default, only used when "
+                     "verification above is on).")
+        else:
+            auto_correct_quotes = False
     else:
         deep_dive_on_foreign_hq = True
 
@@ -1306,6 +1323,8 @@ def main() -> None:  # pragma: no cover - exercised only under `streamlit run`
             deep_dive=deep_dive,
             deep_dive_min_score=deep_dive_min_score,
             deep_dive_on_foreign_hq=deep_dive_on_foreign_hq,
+            verify_quotes=verify_quotes,
+            auto_correct_quotes=auto_correct_quotes,
             # "compare" / "compare_triple" run their own dedicated path below;
             # the config itself stays anthropic unless OpenAI-only was
             # explicitly selected.

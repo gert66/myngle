@@ -118,6 +118,12 @@ class BatchRunConfig:
     deep_dive_min_score: float = 8.0
     deep_dive_on_foreign_hq: bool = True
     deep_dive_max_pages: int = 6
+    # Mechanical quote verification is the core of Deep Dive's value (it is
+    # what catches an AI hallucinated/paraphrased quote), so it defaults to
+    # on; auto_correct_quotes only takes effect when verify_quotes is also
+    # on. Both are independent of deep_dive_on_foreign_hq / min_score.
+    verify_quotes: bool = True
+    auto_correct_quotes: bool = True
 
 
 # ---------------------------------------------------------------------------
@@ -341,6 +347,10 @@ def flatten_deep_dive_for_excel(result, source_index) -> list[dict]:
             "source_kind": claim.source_kind,
             "domain_verified": claim.domain_verified,
             "retrieval_method": claim.retrieval_method,
+            "quote_verified": claim.quote_verified,
+            "quote_verification_status": claim.quote_verification_status,
+            "quote_match_score": claim.quote_match_score,
+            "original_quote": claim.original_quote,
             "error": result.error,
         })
     return rows
@@ -519,6 +529,8 @@ def run_batch_dataframe(
                         anthropic_api_key=anthropic_api_key,
                         firecrawl_api_key=firecrawl_api_key,
                         max_pages=config.deep_dive_max_pages,
+                        verify_quotes=config.verify_quotes,
+                        auto_correct_quotes=config.auto_correct_quotes,
                     )
                     deep_dive_rows.extend(flatten_deep_dive_for_excel(dd_result, idx))
 
