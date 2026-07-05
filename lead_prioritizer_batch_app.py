@@ -975,12 +975,17 @@ def main() -> None:  # pragma: no cover - exercised only under `streamlit run`
         index=(country_options.index(country_default) if country_default in country_options else 0))
     input_country_column = None if country_choice == "(None)" else country_choice
 
+    _default_country_options = [DEFAULT_COUNTRY_PLACEHOLDER] + SUPPORTED_DEFAULT_INPUT_COUNTRIES
+    _suggested_default_country = suggest_country_from_filename(
+        getattr(uploaded, "name", "") or "", SUPPORTED_DEFAULT_INPUT_COUNTRIES)
     default_country_choice = st.selectbox(
         "Default input country",
-        [DEFAULT_COUNTRY_PLACEHOLDER] + SUPPORTED_DEFAULT_INPUT_COUNTRIES,
-        index=0,
+        _default_country_options,
+        index=(_default_country_options.index(_suggested_default_country)
+               if _suggested_default_country in _default_country_options else 0),
         help="Used as the fallback input_country when the row's own "
-             "input_country column is blank. Must be chosen explicitly.")
+             "input_country column is blank. Defaults to a guess from the "
+             "uploaded filename when recognized; always overridable.")
     default_country, default_country_error = resolve_default_input_country(default_country_choice)
     if default_country_error:
         st.error(default_country_error)
@@ -1141,7 +1146,7 @@ def main() -> None:  # pragma: no cover - exercised only under `streamlit run`
     )
     auto_lovable_export_enabled = st.checkbox(
         "After batch completes, automatically export Lovable JSON",
-        value=False, key="auto_lovable_export_enabled")
+        value=True, key="auto_lovable_export_enabled")
 
     auto_export_country = ""
     auto_lovable_callers_raw = DEFAULT_COLD_CALLERS_TEXT
@@ -1196,7 +1201,7 @@ def main() -> None:  # pragma: no cover - exercised only under `streamlit run`
 
         auto_gcs_upload_enabled = st.checkbox(
             "After Lovable JSON export, upload to Google Cloud Storage",
-            value=False, key="auto_lovable_gcs_upload_enabled")
+            value=True, key="auto_lovable_gcs_upload_enabled")
 
         if auto_gcs_upload_enabled:
             _auto_default_bucket = get_secret_or_env(_GCS_BUCKET_NAME_KEY) or DEFAULT_GCS_BUCKET
