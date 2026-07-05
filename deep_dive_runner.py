@@ -53,6 +53,7 @@ from deep_dive_schema import DeepDiveClaim, DeepDiveResult, DEEP_DIVE_CATEGORIES
 from hq_simple_detector import is_hosted_careers_platform_domain
 from lead_hq_ai_interpreter import _host_from, _hosts_match
 from lead_non_hq_enrichment import extract_evidence_from_serper_payload
+from quote_verifier import verify_claims, verify_quote_on_page
 
 DEFAULT_DEEP_DIVE_MODEL = "claude-haiku-4-5-20251001"
 
@@ -537,8 +538,187 @@ def _distill_claims(
 
 
 # ---------------------------------------------------------------------------
+# Quote verification + self-healing (mechanical matcher: quote_verifier.py)
+# ---------------------------------------------------------------------------
+#
+# The AI distillation step above is trusted to pick a URL from the supplied
+# material (enforced by _validate_and_build_claims), but NOT trusted to have
+# copied the quote itself correctly -- it could have paraphrased, truncated,
+# or (rarely) hallucinated one. Every claim's quote is re-checked against
+# the actual page text with quote_verifier.verify_claims(); a "fuzzy_match"
+# is automatically corrected to the real page text, and a "not_found" gets
+# exactly one bundled re-extraction attempt per company (never per claim),
+# whose result is itself mechanically re-verified before ever being trusted
+# -- the AI never gets the final word, the matcher does.
+
+_REEXTRACT_SYSTEM_PROMPT = (
+    "You are verifying company research claims against their cited source "
+    "pages. For each claim below, find a short literal quote on that "
+    "claim's page that supports the statement. Use ONLY text that actually "
+    "appears in the supplied page material -- never invent or paraphrase. "
+    "If the page material does not support the claim, answer null for that "
+    "claim id. "
+    "Reply ONLY with a valid JSON object -- no prose, no markdown fences."
+)
+
+_REEXTRACT_USER_TEMPLATE = """\
+Company: {company_name}
+
+For each claim below, find a literal quote on the listed page that
+supports the statement, or answer null if the page material does not
+support it.
+
+Claims:
+{claims_text}
+
+Source material for each URL (use verbatim -- do not invent text):
+{pages_text}
+
+Return JSON with exactly this shape:
+{{
+  "corrections": {{"<claim_id>": "literal quote from that claim's source page, or null"}}
+}}
+"""
+
+
+def _format_claims_for_reextraction(claims: list) -> str:
+    return "\n".join(
+        f"  - {c.claim_id} ({c.source_url}): {c.statement}" for c in claims
+    ) or "  (none)"
+
+
+def _reextract_not_found_quotes(
+    *,
+    company_name: str,
+    not_found_claims: list,
+    page_text_by_url: dict,
+    anthropic_api_key: str,
+    ai_model: str,
+) -> dict:
+    """One bundled Anthropic call for ALL of a company's not_found claims.
+
+    Returns ``{claim_id: candidate_quote}`` (only entries with a non-null,
+    non-blank candidate). Never raises; returns ``{}`` on any failure or
+    when there is nothing to re-extract. The returned candidates are NOT
+    trusted here -- the caller must re-verify each one mechanically before
+    accepting it.
+    """
+    if not anthropic_api_key or not not_found_claims:
+        return {}
+    urls = sorted({c.source_url for c in not_found_claims if c.source_url in page_text_by_url})
+    if not urls:
+        return {}
+
+    pages = [{"url": u, "title": None, "text": page_text_by_url[u]} for u in urls]
+    prompt = _REEXTRACT_USER_TEMPLATE.format(
+        company_name=company_name or "(unknown)",
+        claims_text=_format_claims_for_reextraction(not_found_claims),
+        pages_text=_format_pages(pages),
+    )
+
+    try:
+        if _anthropic_lib is None:
+            raise ImportError("anthropic package not installed")
+        client = _anthropic_lib.Anthropic(api_key=anthropic_api_key)
+        response = client.messages.create(
+            model=ai_model,
+            max_tokens=1024,
+            system=_REEXTRACT_SYSTEM_PROMPT,
+            messages=[{"role": "user", "content": prompt}],
+        )
+        raw_text = extract_anthropic_text(response)
+    except Exception:
+        return {}
+
+    data = _parse_response(raw_text)
+    corrections = data.get("corrections") if isinstance(data, dict) else None
+    if not isinstance(corrections, dict):
+        return {}
+
+    out: dict[str, str] = {}
+    for claim_id, candidate in corrections.items():
+        if isinstance(candidate, str) and candidate.strip():
+            out[str(claim_id)] = candidate.strip()
+    return out
+
+
+def _apply_quote_correction(claim, verification) -> None:
+    """Replace a claim's quote with the mechanically-matched page text,
+    preserving the AI's prior text in ``original_quote`` for audit."""
+    claim.original_quote = claim.quote
+    claim.quote = verification.matched_snippet
+    claim.quote_verification_status = "verified_corrected"
+    claim.quote_verified = True
+    claim.quote_match_score = verification.match_score
+    claim.quote_matched_snippet = verification.matched_snippet
+
+
+def _self_heal_claims(
+    *,
+    claims: list,
+    page_text_by_url: dict,
+    company_name: str,
+    anthropic_api_key: str,
+    ai_model: str,
+    auto_correct_quotes: bool,
+) -> None:
+    """Mutate ``claims`` in place per the self-healing rules. Never raises.
+
+    - "fuzzy_match" -> automatically corrected to the matched page text.
+    - "not_found" -> one bundled re-extraction attempt for the whole
+      company (never per claim); each candidate is re-verified mechanically
+      and only accepted on a fresh verified/fuzzy_match.
+    - "fetch_failed" / "not_checked" -> never touched (no page text to
+      correct against).
+    """
+    if not auto_correct_quotes:
+        return
+
+    for claim in claims:
+        if claim.quote_verification_status == "fuzzy_match":
+            claim.original_quote = claim.quote
+            claim.quote = claim.quote_matched_snippet
+            claim.quote_verification_status = "verified_corrected"
+            claim.quote_verified = True
+
+    not_found_claims = [c for c in claims if c.quote_verification_status == "not_found"]
+    if not not_found_claims:
+        return
+
+    corrections = _reextract_not_found_quotes(
+        company_name=company_name, not_found_claims=not_found_claims,
+        page_text_by_url=page_text_by_url, anthropic_api_key=anthropic_api_key,
+        ai_model=ai_model,
+    )
+    for claim in not_found_claims:
+        candidate = corrections.get(claim.claim_id)
+        if not candidate:
+            continue
+        page_text = page_text_by_url.get(claim.source_url, "")
+        verification = verify_quote_on_page(candidate, page_text)
+        if verification.status in ("verified", "fuzzy_match"):
+            _apply_quote_correction(claim, verification)
+        # else: mechanical re-check rejected the AI's candidate -> stays
+        # "not_found", quote left untouched.
+
+
+# ---------------------------------------------------------------------------
 # Entry point
 # ---------------------------------------------------------------------------
+
+def _fetch_page_for_verification(url: str, firecrawl_api_key: str) -> Optional[str]:
+    """Fetch one specific URL's full text for quote verification.
+
+    Same fallback order as collection (Firecrawl if a key is set, else a
+    bare fetch) but for exactly one already-known URL rather than a set of
+    candidate paths. Returns ``None`` on any failure so the caller can
+    record ``"fetch_failed"`` — never raises.
+    """
+    if firecrawl_api_key:
+        result = _firecrawl_scrape_page(url, firecrawl_api_key)
+        return result["text"] if result["ok"] else None
+    return _plain_fetch(url) or None
+
 
 def run_deep_dive(
     *,
@@ -553,6 +733,9 @@ def run_deep_dive(
     firecrawl_api_key: str = "",
     max_pages: int = 6,
     ai_model: str = DEFAULT_DEEP_DIVE_MODEL,
+    verify_quotes: bool = True,
+    auto_correct_quotes: bool = True,
+    max_verify_fetches: int = 5,
 ) -> DeepDiveResult:
     """Run one deep dive for a single company. Never raises.
 
@@ -563,6 +746,21 @@ def run_deep_dive(
     collected. Any failure — collection error, missing key, AI call error,
     unparseable response — yields ``error`` set on the result rather than
     an exception, so a batch run can never break on one company's deep dive.
+
+    ``verify_quotes`` (default ``True``) mechanically re-checks every
+    claim's quote against the actual page text via
+    ``quote_verifier.verify_claims`` — reusing already-fetched
+    Firecrawl/plain-fetch pages where possible, and fetching only the URLs
+    still missing full text (capped at ``max_verify_fetches``, e.g. a
+    Serper-snippet URL whose full page was never retrieved). This never
+    touches ``evidence_items``, ``signals``, or scoring — it only enriches
+    the ``DeepDiveClaim`` objects already produced. ``auto_correct_quotes``
+    (default ``True``, only meaningful when ``verify_quotes`` is on)
+    additionally self-heals: a "fuzzy_match" quote is replaced by the real
+    matched page text, and a "not_found" quote gets exactly one bundled
+    Anthropic re-extraction attempt per company (never per claim), whose
+    candidate is itself mechanically re-verified before ever being
+    accepted — the AI never gets the final word on its own correction.
     """
     generated_at = datetime.now(timezone.utc).isoformat(timespec="seconds")
     result = DeepDiveResult(
@@ -609,6 +807,29 @@ def run_deep_dive(
         result.claims = claims
         if distill_error:
             result.error = distill_error
+
+        if verify_quotes and claims:
+            # Only pages actually fully fetched (Firecrawl/plain-fetch) are
+            # trustworthy as a verification cache -- a "serper_localized"
+            # page's cached "text" is just a short Serper snippet, not the
+            # real page, so it is deliberately excluded here and its claims
+            # trigger a fresh, targeted fetch instead (see verify_claims).
+            page_cache = {
+                p["url"]: p["text"] for p in pages
+                if p.get("retrieval_method") in ("firecrawl", "plain_fetch")
+            }
+
+            def _fetch_fn(url: str) -> Optional[str]:
+                return _fetch_page_for_verification(url, firecrawl_api_key)
+
+            verify_claims(claims, page_cache, _fetch_fn, max_verify_fetches=max_verify_fetches)
+
+            _self_heal_claims(
+                claims=claims, page_text_by_url=page_cache, company_name=company_name,
+                anthropic_api_key=anthropic_api_key, ai_model=ai_model,
+                auto_correct_quotes=auto_correct_quotes,
+            )
+
         return result
     except Exception as exc:
         result.error = f"deep_dive_failed: {str(exc)[:200]}"
