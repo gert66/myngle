@@ -158,6 +158,98 @@ Implemented in `lead_caller_app_fields_builder.py` and wired into
   failures.
 - **This prepares the payload but does not change batch ranking yet.**
 
+## Quality fixes: hosted-platform neutralization, guard centralization, AI caller content
+
+Three follow-up fixes address cases where a hosted careers/job platform
+(Workday, Greenhouse, Lever, …) or external installer/partner training could
+contaminate HQ detection, non-HQ signal scoring, or the caller-facing text
+built from them.
+
+### Fix 1: hosted careers-platform domains neutralized at the source
+
+Implemented in `hq_simple_detector.py`.
+
+- `_HOSTED_CAREERS_PLATFORM_DOMAINS` is the single centralized list of known
+  hosted careers/job platforms (`myworkdayjobs.com`, `workdayjobs.com`,
+  `greenhouse.io`, `lever.co`, `smartrecruiters.com`, `bamboohr.com`,
+  `workable.com`, `taleo.net`, `icims.com`, `successfactors.com`). HQ query
+  building, non-HQ query building, non-HQ signal extraction, and the Lovable
+  exporter's display guards all import this one list — no duplication.
+- `is_hosted_careers_platform_domain(value)` is the shared predicate.
+  `derive_domain_root()` uses it so a hosted-platform domain never becomes the
+  HQ/non-HQ query root: the tenant label is used when reliably determined
+  (e.g. `shimano.wd3.myworkdayjobs.com` → `"shimano"`), otherwise an empty
+  root is returned so the caller falls back to the company-name root — a
+  hosted-platform domain never leaks the platform vendor name into a query.
+- `LeadPrioritizationResult.domain_is_hosted_platform` records whether the
+  lead's own `domain` column resolves to a hosted platform, for audit/caution
+  use downstream (see `_quality_flags_for_result` in `lead_prioritizer_core.py`).
+
+### Fix 2: external-training / hosted-platform guards moved into signal extraction
+
+Implemented in `lead_non_hq_signal_extractor.py` (imported from here by
+`export_lead_prioritizer_to_lovable_json.py`, not duplicated).
+
+- Previously, the *scoring* guard (in the signal extractor) and the
+  exporter's independent *display* guard could disagree — a Samsung-style
+  "become an installer" snippet could score a full positive
+  `onboarding_training_need` signal while the export layer separately
+  rejected the same evidence for display, producing a high commercial score
+  with every driver shown as "Rejected".
+- `is_external_training_evidence(text)` and `_usable_evidence_for_signal()`
+  now live in the extractor and gate the *score itself*: hosted
+  careers-platform evidence never counts toward a positive score for any
+  signal, and for the L&D-family signals (`onboarding_training_need`,
+  `icp_keyword_match`) evidence that reads as external
+  installer/product/partner/reseller training (and lacks internal-L&D
+  markers like "employee", "onboarding", "academy") never counts as a
+  positive keyword hit either.
+- Excluded evidence stays in `evidence_items` for audit purposes but can no
+  longer be the sole basis for a positive score — so the score and the
+  displayed rationale can no longer diverge.
+
+### Fix 3: opt-in AI-composed caller content
+
+Implemented in `lead_caller_content_composer.py`, wired into
+`prioritize_single_lead(..., compose_caller_content_flag=True)` (CLI:
+`lead_prioritizer_batch_cli.py`; batch core: `lead_prioritizer_batch_core.py`).
+
+- **Explicit opt-in, off by default.** `compose_caller_content_flag` is a
+  separate flag from `run_full_v2_pipeline` and is never turned on by it.
+- **Uses only already-curated evidence.** `compose_caller_content()` is given
+  the HQ/parent conclusion already on the result, plus
+  `build_curated_signals_from_result()` — positively-scored non-HQ signals
+  with non-blank evidence, which (per Fix 2) can no longer be a hosted-platform
+  or external-training false positive. The Anthropic prompt instructs the
+  model to use only the supplied evidence, never present external training as
+  internal L&D, never present rapid growth as a positive driver, and fall
+  back to a light-discovery angle when evidence is thin.
+- **Never raises.** Any failure — no API key, a call error, or an unparseable
+  response — yields `call_success=False` with a short `error` string
+  (`no_anthropic_api_key`, `caller_content_call_failed: …`, or
+  `caller_content_parse_failed`) and the pipeline silently falls back to the
+  existing deterministic `*_app` templates built by Step 6. On success, the
+  result gets `composed_why_relevant`, `composed_what_is_hot`,
+  `composed_cold_caller_summary`, `composed_caller_angle`,
+  `composed_call_starter`, and `composed_driver_evidence_json` (a JSON
+  `signal_name -> sentence` map keyed by the six fixed driver dimensions).
+  `composed_by_ai` and `composed_content_note` always record what happened,
+  for audit purposes, whether composition succeeded or fell back.
+- **Exporter preference, non-Italy only.** In
+  `export_lead_prioritizer_to_lovable_json.py`, for every export except
+  Italian, each composed field is used in place of the curated-layer value
+  wherever it is present on the row (`apply_composed_driver_evidence` only
+  ever refines the wording of a driver that is *already* positively
+  evidenced — it never upgrades a "Not evidenced" or "Rejected" row). Any
+  field the composer did not fill keeps exactly the curated-layer value it
+  would have had without composition.
+- **Italy path is completely unaffected.** The Italian `content_language`
+  branch never reads any `composed_*` column — its `why_relevant`,
+  `what_is_hot`, `commercial_fit_drivers`, `cold_caller_summary`,
+  `caller_angle`, and `call_starter` stay byte-for-byte identical to the
+  frozen legacy behavior, even if `composed_*` columns happen to be present
+  on the row (e.g. from a batch run that mixed Italy and non-Italy leads).
+
 ## Full v2 single-lead pipeline preset
 
 Wired into `prioritize_single_lead(..., run_full_v2_pipeline=True)`.

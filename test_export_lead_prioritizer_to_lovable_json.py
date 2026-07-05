@@ -1719,6 +1719,164 @@ def test_italy_legacy_ui_payload_behavior_untouched(tmp_path):
 
 
 # ---------------------------------------------------------------------------
+# AI-composed caller content (Step 3, opt-in — non-Italy only). When
+# prioritize_single_lead(..., compose_caller_content_flag=True) succeeded for
+# a row, the Enriched Leads sheet carries composed_* fields alongside the
+# deterministic *_app templates; the exporter must prefer them wherever
+# present and leave the curated-layer value otherwise. Italy stays untouched
+# even when composed_* columns happen to be present on the row.
+# ---------------------------------------------------------------------------
+
+def test_composed_caller_content_preferred_over_curated_layer_non_italy(tmp_path):
+    row = dict(
+        source_index=1,
+        company_name="Nordic Gear AB",
+        domain="nordicgear.se",
+        website_url="https://www.nordicgear.se",
+        input_country="Netherlands",
+        enrichment_skipped=False,
+        sig_foreign_hq_score_for_next_scoring=3,
+        c5_parent_company="Nordic Gear Group",
+        c5_parent_hq_country="Sweden",
+        commercial_fit_score_app=70,
+        commercial_tier_app="B",
+        industry="Manufacturing",
+        employee_range="501-1000",
+        composed_why_relevant="AI-composed why-relevant text mentioning Nordic Gear AB.",
+        composed_what_is_hot="AI bullet one\nAI bullet two",
+        composed_cold_caller_summary="AI-composed cold caller summary.",
+        composed_caller_angle="AI-composed caller angle.",
+        composed_call_starter="Hi, this is an AI-composed call starter.",
+        composed_driver_evidence_json=json.dumps(
+            {"foreign_hq": "AI evidence sentence for foreign HQ."}),
+        composed_by_ai=True,
+        composed_content_note="AI-composed caller content used.",
+    )
+    _, out_dir = run_export(tmp_path, [row],
+                            export_country="Netherlands", foreign_hq_only=False)
+
+    detail = detail_for(out_dir, "Nordic Gear AB")
+    ui = detail["ui_payload"]
+
+    assert ui["why_relevant"] == "AI-composed why-relevant text mentioning Nordic Gear AB."
+    assert ui["what_is_hot"] == ["AI bullet one", "AI bullet two"]
+    assert ui["cold_caller_summary"] == "AI-composed cold caller summary."
+    assert ui["caller_angle"] == "AI-composed caller angle."
+    assert ui["call_starter"] == "Hi, this is an AI-composed call starter."
+
+    hq_driver = next(
+        d for d in ui["commercial_fit_drivers"]
+        if d["id"] == "foreign_ownership_or_group_structure")
+    assert hq_driver["strength"] == "Strong"
+    assert hq_driver["evidence"] == "AI evidence sentence for foreign HQ."
+
+    assert detail["composed_by_ai"] is True
+    assert detail["composed_content_note"] == "AI-composed caller content used."
+
+
+def test_composed_caller_content_partial_fields_keep_curated_layer_for_rest(tmp_path):
+    # Only composed_why_relevant is present -> every other field must keep
+    # exactly the curated-layer value it would have had without composition.
+    base_row = dict(
+        source_index=1,
+        company_name="Nordic Gear AB",
+        domain="nordicgear.se",
+        website_url="https://www.nordicgear.se",
+        input_country="Netherlands",
+        enrichment_skipped=False,
+        sig_foreign_hq_score_for_next_scoring=3,
+        c5_parent_company="Nordic Gear Group",
+        c5_parent_hq_country="Sweden",
+        commercial_fit_score_app=70,
+        commercial_tier_app="B",
+        industry="Manufacturing",
+        employee_range="501-1000",
+    )
+    baseline_dir = tmp_path / "baseline"
+    composed_dir = tmp_path / "composed"
+    baseline_dir.mkdir()
+    composed_dir.mkdir()
+
+    _, baseline_out_dir = run_export(baseline_dir, [base_row],
+                                     export_country="Netherlands", foreign_hq_only=False)
+    baseline_ui = detail_for(baseline_out_dir, "Nordic Gear AB")["ui_payload"]
+
+    composed_row = dict(base_row, composed_why_relevant="Only this field is AI-composed.")
+    _, out_dir = run_export(composed_dir, [composed_row],
+                            export_country="Netherlands", foreign_hq_only=False)
+    ui = detail_for(out_dir, "Nordic Gear AB")["ui_payload"]
+
+    assert ui["why_relevant"] == "Only this field is AI-composed."
+    assert ui["what_is_hot"] == baseline_ui["what_is_hot"]
+    assert ui["cold_caller_summary"] == baseline_ui["cold_caller_summary"]
+    assert ui["caller_angle"] == baseline_ui["caller_angle"]
+    assert ui["call_starter"] == baseline_ui["call_starter"]
+    assert ui["commercial_fit_drivers"] == baseline_ui["commercial_fit_drivers"]
+
+
+def test_composed_caller_content_ignored_for_italian_content_language(tmp_path):
+    row = dict(
+        source_index=1,
+        company_name="ALDI S.R.L.",
+        domain="aldi-sued.com",
+        website_url="https://www.aldi-sued.com",
+        input_country="Italy",
+        enrichment_skipped=False,
+        sig_foreign_hq_score_for_next_scoring=3,
+        c5_parent_company="ALDI SUD",
+        c5_parent_hq_country="Germany",
+        commercial_fit_score_app=85,
+        commercial_tier_app="A",
+        industry="Retail",
+        employee_range="10001+",
+        cold_caller_summary_app="Legacy Italian cold caller summary text.",
+        parent_hq_summary_app="Legacy Italian parent HQ summary text.",
+        caller_angle_app="Legacy Italian caller angle.",
+        call_starter_app="Legacy Italian call starter.",
+        # Composed fields present but must never leak into the frozen Italy path.
+        composed_why_relevant="Should never appear for Italy.",
+        composed_what_is_hot="Should not appear\nEither",
+        composed_cold_caller_summary="Should not appear for Italy.",
+        composed_caller_angle="Should not appear for Italy.",
+        composed_call_starter="Should not appear for Italy.",
+        composed_driver_evidence_json=json.dumps(
+            {"foreign_hq": "Should not appear for Italy."}),
+        composed_by_ai=True,
+        composed_content_note="AI-composed caller content used.",
+    )
+    signals = [
+        {"source_index": 1, "signal_name": "international_profile", "signal_score": 2,
+         "evidence_quote": "Signals point to international alignment."},
+    ]
+    _, out_dir = run_export(tmp_path, [row], signals=signals,
+                            export_country="Italy", foreign_hq_only=False,
+                            content_language="Italian")
+
+    detail = detail_for(out_dir, "ALDI S.R.L.")
+    ui = detail["ui_payload"]
+
+    # Byte-for-byte the same as the pre-existing Italy legacy behavior.
+    assert ui["cold_caller_summary"] == "Legacy Italian cold caller summary text."
+    assert ui["parent_hq_summary"] == "Legacy Italian parent HQ summary text."
+    assert ui["caller_angle"] == "Legacy Italian caller angle."
+    assert ui["call_starter"] == "Legacy Italian call starter."
+
+    visible_text = " ".join([
+        ui["why_relevant"] or "", " ".join(ui["what_is_hot"]),
+        ui["cold_caller_summary"] or "", ui["caller_angle"] or "",
+        ui["call_starter"] or "",
+    ])
+    assert "Should not appear" not in visible_text
+    assert not any("Should not appear" in (d.get("evidence") or "")
+                   for d in ui["commercial_fit_drivers"])
+
+    # composed_by_ai / composed_content_note are still copied through as
+    # audit metadata even though the Italy ui_payload ignores them.
+    assert detail["composed_by_ai"] is True
+    assert detail["composed_content_note"] == "AI-composed caller content used."
+
+
+# ---------------------------------------------------------------------------
 # Six fixed commercial_fit_drivers dimensions (non-Italy) — always present,
 # in this exact order, never silently omitted.
 # ---------------------------------------------------------------------------
