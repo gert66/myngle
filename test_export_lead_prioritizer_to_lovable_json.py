@@ -2534,6 +2534,221 @@ def test_stable_company_ids_avoid_collisions(tmp_path):
 
 
 # ---------------------------------------------------------------------------
+# Onderdeel 1: multiple clickable evidence_urls -> evidence_sources[] on
+# commercial_fit_drivers and what_is_hot_items, and score/backward-compat
+# invariance. evidence_urls arrives on the Signals sheet as the same
+# semicolon-joined string format used everywhere else in this exporter
+# (mirroring flatten_signals_for_excel's "evidence_urls" column).
+# ---------------------------------------------------------------------------
+
+_ACME_INTL_QUOTE = "Acme Global operates across 11 countries with 40+ offices worldwide."
+
+
+def _acme_row(**overrides) -> dict:
+    row = dict(
+        source_index=1,
+        company_name="Acme Global BV",
+        domain="acmeglobal.com",
+        website_url="https://www.acmeglobal.com",
+        input_country="Netherlands",
+        enrichment_skipped=False,
+        sig_foreign_hq_score_for_next_scoring=0,
+        commercial_fit_score_app=50,
+        commercial_tier_app="C",
+        industry="Manufacturing",
+        employee_range="201-500",
+    )
+    row.update(overrides)
+    return row
+
+
+def test_commercial_fit_driver_evidence_sources_ordered_deduped_and_own_domain_first(tmp_path):
+    signals = [
+        {"source_index": 1, "signal_name": "international_profile", "signal_score": 2,
+         "evidence_quote": _ACME_INTL_QUOTE,
+         "evidence_url": "https://www.acmeglobal.com/about",
+         "evidence_urls": (
+             "https://www.acmeglobal.com/about; "
+             "https://en.wikipedia.org/wiki/Acme_Global; "
+             "https://www.acmeglobal.com/about"
+         )},
+    ]
+    _, out_dir = run_export(tmp_path, [_acme_row()], signals=signals,
+                            export_country="Netherlands", foreign_hq_only=False)
+
+    detail = detail_for(out_dir, "Acme Global BV")
+    drivers = {d["id"]: d for d in detail["ui_payload"]["commercial_fit_drivers"]}
+    driver = drivers["international_business_context"]
+
+    sources = driver["evidence_sources"]
+    urls = [s["url"] for s in sources]
+    assert urls == [
+        "https://www.acmeglobal.com/about",
+        "https://en.wikipedia.org/wiki/Acme_Global",
+    ]
+    assert sources[0]["domain"] == "acmeglobal.com"
+    assert sources[1]["domain"] == "wikipedia.org"
+
+
+def test_commercial_fit_driver_evidence_source_singular_equals_first_of_array(tmp_path):
+    signals = [
+        {"source_index": 1, "signal_name": "international_profile", "signal_score": 2,
+         "evidence_quote": _ACME_INTL_QUOTE,
+         "evidence_url": "https://www.acmeglobal.com/about",
+         "evidence_urls": (
+             "https://www.acmeglobal.com/about; https://en.wikipedia.org/wiki/Acme_Global"
+         )},
+    ]
+    _, out_dir = run_export(tmp_path, [_acme_row()], signals=signals,
+                            export_country="Netherlands", foreign_hq_only=False)
+
+    detail = detail_for(out_dir, "Acme Global BV")
+    drivers = {d["id"]: d for d in detail["ui_payload"]["commercial_fit_drivers"]}
+    driver = drivers["international_business_context"]
+
+    assert driver["evidence_source_url"] == driver["evidence_sources"][0]["url"]
+    assert driver["evidence_source_domain"] == driver["evidence_sources"][0]["domain"]
+
+
+def test_commercial_fit_driver_evidence_sources_excludes_hosted_platform_and_caps_at_five(tmp_path):
+    other_domains = "; ".join(
+        f"https://example{i}.com/page" for i in range(1, 6)
+    )
+    signals = [
+        {"source_index": 1, "signal_name": "international_profile", "signal_score": 2,
+         "evidence_quote": _ACME_INTL_QUOTE,
+         "evidence_url": "https://www.acmeglobal.com/about",
+         "evidence_urls": (
+             "https://www.acmeglobal.com/about; "
+             "https://acmeglobal.wd3.myworkdayjobs.com/en-US/jobs; "
+             f"{other_domains}"
+         )},
+    ]
+    _, out_dir = run_export(tmp_path, [_acme_row()], signals=signals,
+                            export_country="Netherlands", foreign_hq_only=False)
+
+    detail = detail_for(out_dir, "Acme Global BV")
+    drivers = {d["id"]: d for d in detail["ui_payload"]["commercial_fit_drivers"]}
+    sources = drivers["international_business_context"]["evidence_sources"]
+
+    assert not any("myworkdayjobs.com" in s["url"] for s in sources)
+    assert len(sources) == 5
+
+
+def test_commercial_fit_driver_no_evidence_sources_key_when_all_urls_filtered_out(tmp_path):
+    signals = [
+        {"source_index": 1, "signal_name": "international_profile", "signal_score": 2,
+         "evidence_quote": _ACME_INTL_QUOTE,
+         "evidence_url": "",
+         "evidence_urls": "https://acmeglobal.wd3.myworkdayjobs.com/en-US/jobs"},
+    ]
+    _, out_dir = run_export(tmp_path, [_acme_row()], signals=signals,
+                            export_country="Netherlands", foreign_hq_only=False)
+
+    detail = detail_for(out_dir, "Acme Global BV")
+    drivers = {d["id"]: d for d in detail["ui_payload"]["commercial_fit_drivers"]}
+    driver = drivers["international_business_context"]
+
+    assert "evidence_sources" not in driver
+    assert "evidence_source_url" not in driver
+    # The driver itself is untouched: still Strong with its evidence text.
+    assert driver["strength"] == "Strong"
+    assert "11 countries" in driver["evidence"]
+
+
+def test_what_is_hot_items_parallel_to_what_is_hot_with_evidence_sources(tmp_path):
+    signals = [
+        {"source_index": 1, "signal_name": "international_profile", "signal_score": 2,
+         "evidence_quote": _ACME_INTL_QUOTE,
+         "evidence_url": "https://www.acmeglobal.com/about",
+         "evidence_urls": (
+             "https://www.acmeglobal.com/about; https://en.wikipedia.org/wiki/Acme_Global"
+         )},
+    ]
+    _, out_dir = run_export(tmp_path, [_acme_row()], signals=signals,
+                            export_country="Netherlands", foreign_hq_only=False)
+
+    detail = detail_for(out_dir, "Acme Global BV")
+    ui = detail["ui_payload"]
+
+    assert [item["text"] for item in ui["what_is_hot_items"]] == ui["what_is_hot"]
+    matching = [item for item in ui["what_is_hot_items"]
+                if item["text"].startswith("International business context:")]
+    assert len(matching) == 1
+    sources = matching[0]["evidence_sources"]
+    assert [s["url"] for s in sources] == [
+        "https://www.acmeglobal.com/about",
+        "https://en.wikipedia.org/wiki/Acme_Global",
+    ]
+
+
+def test_what_is_hot_items_absent_for_italy(tmp_path):
+    aldi_row = dict(
+        source_index=1,
+        company_name="ALDI S.R.L.",
+        domain="aldi-sued.com",
+        website_url="https://www.aldi-sued.com",
+        input_country="Italy",
+        enrichment_skipped=False,
+        sig_foreign_hq_score_for_next_scoring=3,
+        c5_parent_company="ALDI SUD",
+        c5_parent_hq_country="Germany",
+        commercial_fit_score_app=85,
+        commercial_tier_app="A",
+        industry="Retail",
+        employee_range="10001+",
+    )
+    signals = [
+        {"source_index": 1, "signal_name": "international_profile", "signal_score": 2,
+         "evidence_quote": "ALDI SUD group operates across 11 countries with 7,300+ stores."},
+    ]
+    _, out_dir = run_export(tmp_path, [aldi_row], signals=signals,
+                            export_country="Italy", foreign_hq_only=False,
+                            content_language="Italian")
+
+    detail = detail_for(out_dir, "ALDI S.R.L.")
+    assert "what_is_hot_items" not in detail["ui_payload"]
+
+
+def test_evidence_urls_field_does_not_change_score_or_existing_fields(tmp_path):
+    row = _acme_row()
+    signal_base = {"source_index": 1, "signal_name": "international_profile",
+                   "signal_score": 2, "evidence_quote": _ACME_INTL_QUOTE,
+                   "evidence_url": "https://www.acmeglobal.com/about"}
+
+    without_dir = tmp_path / "without"
+    with_dir = tmp_path / "with"
+    without_dir.mkdir()
+    with_dir.mkdir()
+
+    _, out_dir_without = run_export(without_dir, [row], signals=[dict(signal_base)],
+                                    export_country="Netherlands", foreign_hq_only=False)
+    signal_with_urls = dict(signal_base)
+    signal_with_urls["evidence_urls"] = (
+        "https://www.acmeglobal.com/about; https://en.wikipedia.org/wiki/Acme_Global"
+    )
+    _, out_dir_with = run_export(with_dir, [row], signals=[signal_with_urls],
+                                 export_country="Netherlands", foreign_hq_only=False)
+
+    list_without = load_list(out_dir_without)[0]
+    list_with = load_list(out_dir_with)[0]
+    assert list_without["commercial_fit_score_app"] == list_with["commercial_fit_score_app"]
+    assert list_without["commercial_tier_app"] == list_with["commercial_tier_app"]
+
+    detail_without = detail_for(out_dir_without, "Acme Global BV")
+    detail_with = detail_for(out_dir_with, "Acme Global BV")
+    drivers_without = {d["id"]: d for d in detail_without["ui_payload"]["commercial_fit_drivers"]}
+    drivers_with = {d["id"]: d for d in detail_with["ui_payload"]["commercial_fit_drivers"]}
+    for driver_id in drivers_without:
+        d_without = drivers_without[driver_id]
+        d_with = drivers_with[driver_id]
+        assert d_without["strength"] == d_with["strength"]
+        assert d_without["evidence"] == d_with["evidence"]
+        assert d_without["note"] == d_with["note"]
+    assert detail_without["ui_payload"]["what_is_hot"] == detail_with["ui_payload"]["what_is_hot"]
+
+
+# ---------------------------------------------------------------------------
 # export_batch_output_tables_to_lovable_json — in-memory DataFrames -> JSON
 # (integrates the Streamlit batch app's output_tables without a manual
 # save-Excel-then-reupload step; delegates straight to
