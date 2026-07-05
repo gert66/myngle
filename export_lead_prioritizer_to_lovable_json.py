@@ -74,6 +74,7 @@ ENRICHED_SHEET = "Enriched Leads"
 EVIDENCE_SHEET = "Evidence"
 SIGNALS_SHEET = "Signals"
 RUN_SUMMARY_SHEET = "Run Summary"
+DEEP_DIVE_SHEET = "Deep Dive"
 
 FOREIGN_HQ_RUN_MODE = "full_foreign_hq_only"
 FOREIGN_HQ_SIGNAL_LABEL = "Foreign ownership or group structure"
@@ -1950,6 +1951,7 @@ def _build_detail_record(
     run_metadata: dict | None,
     warnings: list[str],
     content_language: str = "English",
+    deep_dive_rows: list[dict] | None = None,
 ) -> dict:
     key_source_links = parse_key_source_links(row.get("key_source_links_app"))
     evidence_snippets = build_evidence_snippets(evidence_rows)
@@ -2022,6 +2024,33 @@ def _build_detail_record(
             row.get("icp_potential_buyer_function"))
     if icp_context:
         detail["icp_context"] = icp_context
+
+    # Deep Dive (Step B, opt-in, independent of the two AI-composition
+    # families above) — added only when the "Deep Dive" sheet actually has
+    # at least one claim row for this company. Never affects ui_payload,
+    # scoring, or any other field.
+    deep_dive_claims = []
+    for dd_row in (deep_dive_rows or []):
+        category = clean_str(dd_row.get("category"))
+        statement = clean_str(dd_row.get("statement"))
+        quote = clean_str(dd_row.get("quote"))
+        source_url = clean_str(dd_row.get("source_url"))
+        if not (category and statement and quote and source_url):
+            continue
+        deep_dive_claims.append({
+            "category": category,
+            "statement": statement,
+            "quote": quote,
+            "source_url": source_url,
+            "source_kind": clean_str(dd_row.get("source_kind")) or None,
+            "domain_verified": to_bool(dd_row.get("domain_verified")),
+            "retrieval_method": clean_str(dd_row.get("retrieval_method")) or None,
+        })
+    if deep_dive_claims:
+        detail["deep_dive"] = {
+            "trigger_reason": clean_str((deep_dive_rows or [{}])[0].get("trigger_reason")) or None,
+            "claims": deep_dive_claims,
+        }
 
     foreign_hq_detected = list_item["foreign_hq_detected_for_export"]
     visible_signals = detail["visible_icp_signal_scores"]
@@ -2403,7 +2432,11 @@ def _read_workbook(input_xlsx: Path, warnings: list[str]):
         evidence = _optional(EVIDENCE_SHEET)
         signals = _optional(SIGNALS_SHEET)
         run_summary = _optional(RUN_SUMMARY_SHEET)
-    return enriched, evidence, signals, run_summary, sheets_found
+        # Deep Dive is a brand-new opt-in sheet absent from almost every
+        # workbook (any run without --deep-dive) -- its absence is normal,
+        # not worth a warning like the other optional sheets above.
+        deep_dive = xls.parse(DEEP_DIVE_SHEET) if DEEP_DIVE_SHEET in xls.sheet_names else pd.DataFrame()
+    return enriched, evidence, signals, run_summary, deep_dive, sheets_found
 
 
 def _rows_by_source_index(df: pd.DataFrame) -> dict:
@@ -2566,11 +2599,12 @@ def export_workbook_to_lovable_json(
     content_language = normalize_content_language(content_language)
 
     warnings: list[str] = []
-    enriched, evidence, signals, run_summary, sheets_found = _read_workbook(
+    enriched, evidence, signals, run_summary, deep_dive, sheets_found = _read_workbook(
         input_xlsx, warnings)
 
     evidence_by_index = _rows_by_source_index(evidence)
     signals_by_index = _rows_by_source_index(signals)
+    deep_dive_by_index = _rows_by_source_index(deep_dive)
     run_metadata = _run_metadata_from_summary(run_summary)
     run_mode = clean_str(run_metadata.get("run_mode"))
     now_iso = datetime.now().isoformat(timespec="seconds")
@@ -2635,6 +2669,7 @@ def export_workbook_to_lovable_json(
             run_metadata or None,
             warnings,
             content_language,
+            deep_dive_by_index.get(idx, []),
         )
         list_items.append(item)
         detail_records.append(detail)

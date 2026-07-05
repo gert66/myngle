@@ -145,6 +145,9 @@ _OPENAI_KEY_NAME = "OPENAI_API_KEY"
 _DEEPSEEK_KEY_NAME = "DEEPSEEK_API_KEY"
 _GCS_BUCKET_NAME_KEY = "GCS_BUCKET_NAME"
 _GCS_BASE_PREFIX_KEY = "GCS_BASE_PREFIX"
+# Optional: missing is not an error, Deep Dive just uses its Serper/urllib
+# fallback path instead of Firecrawl.
+_FIRECRAWL_KEY_NAME = "FIRECRAWL_API_KEY"
 
 # Experimental AI-provider selection for HQ interpretation. The first label is
 # the default and preserves the existing Anthropic-only behavior exactly.
@@ -904,6 +907,7 @@ def main() -> None:  # pragma: no cover - exercised only under `streamlit run`
     anthropic = get_secret_or_env(_ANTHROPIC_KEY_NAME)
     openai_key = get_secret_or_env(_OPENAI_KEY_NAME)
     deepseek_key = get_secret_or_env(_DEEPSEEK_KEY_NAME)
+    firecrawl_key = get_secret_or_env(_FIRECRAWL_KEY_NAME)
     with st.sidebar:
         st.header("API keys (secrets or environment)")
         st.write(f"{_SERPER_KEY_NAME}:", "✅ set" if serper else "❌ missing")
@@ -914,6 +918,9 @@ def main() -> None:  # pragma: no cover - exercised only under `streamlit run`
         st.write(f"{_DEEPSEEK_KEY_NAME}:",
                  "✅ set" if deepseek_key else "➖ not set (only needed for the "
                  "\"Compare Anthropic vs OpenAI mini vs DeepSeek\" option)")
+        st.write(f"{_FIRECRAWL_KEY_NAME}:",
+                 "✅ set" if firecrawl_key else "➖ not set (Deep Dive falls back "
+                 "to localized Serper + plain fetches)")
         st.caption(
             "Local secrets in `.streamlit/secrets.toml`, or environment "
             "variables. Key values are never shown or written to output."
@@ -1051,6 +1058,26 @@ def main() -> None:  # pragma: no cover - exercised only under `streamlit run`
              "icp_potential_buyer_function via the Anthropic API using "
              "broader context evidence. Independent of 'Compose caller "
              "content via AI' above; never affects scoring (default: off).")
+    deep_dive = st.checkbox(
+        "Deep dive voor top-leads (opt-in)", value=False,
+        help="Runs a deeper, source-backed evidence collection AFTER "
+             "scoring (Firecrawl if the key above is set, else localized "
+             "Serper + plain fetches) for rows that clear the score "
+             "threshold below and/or a confirmed foreign-HQ signal. Writes "
+             "a 'Deep Dive' sheet; never affects scoring. Independent of "
+             "the two options above (default: off).")
+    deep_dive_min_score = 8.0
+    if deep_dive:
+        dd1, dd2 = st.columns(2)
+        deep_dive_min_score = dd1.number_input(
+            "Deep dive score threshold", min_value=0.0, max_value=10.0,
+            value=8.0, step=0.5,
+            help="Rows with final_commercial_fit_score at or above this "
+                 "value trigger a deep dive.")
+        deep_dive_on_foreign_hq = dd2.checkbox(
+            "Also trigger on confirmed foreign HQ", value=True)
+    else:
+        deep_dive_on_foreign_hq = True
 
     # ── Autosave (output workbook to disk when the run completes) ─────────────
     autosave_enabled = st.checkbox(
@@ -1276,6 +1303,9 @@ def main() -> None:  # pragma: no cover - exercised only under `streamlit run`
             include_raw_ai_json=include_raw_ai_json,
             compose_caller_content=compose_caller_content,
             rich_icp_context=rich_icp_context,
+            deep_dive=deep_dive,
+            deep_dive_min_score=deep_dive_min_score,
+            deep_dive_on_foreign_hq=deep_dive_on_foreign_hq,
             # "compare" / "compare_triple" run their own dedicated path below;
             # the config itself stays anthropic unless OpenAI-only was
             # explicitly selected.
@@ -1444,6 +1474,7 @@ def main() -> None:  # pragma: no cover - exercised only under `streamlit run`
                     c5_model_used=c5_model_used,
                     c5_model_tier=c5_model_tier,
                     openai_api_key=openai_key,
+                    firecrawl_api_key=firecrawl_key,
                     progress_callback=_on_chunk_progress,
                     chunk_result_callback=_save_chunk if run_dir is not None else None,
                 )
@@ -1495,7 +1526,8 @@ def main() -> None:  # pragma: no cover - exercised only under `streamlit run`
                 tables = run_batch_dataframe(
                     df, config, serper, anthropic,
                     progress_callback=_on_progress,
-                    openai_api_key=openai_key)
+                    openai_api_key=openai_key,
+                    firecrawl_api_key=firecrawl_key)
 
             progress_bar.progress(1.0)
 

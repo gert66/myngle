@@ -13,6 +13,7 @@ written to output.
 from __future__ import annotations
 
 import argparse
+import os
 import sys
 from datetime import datetime
 from pathlib import Path
@@ -35,6 +36,36 @@ from run_v2_single_lead_validation import (
 )
 
 _CONFIRM_THRESHOLD = 50
+
+# Optional key: missing is not an error, Deep Dive just uses its Serper/
+# urllib fallback path instead of Firecrawl. Resolved locally (env, then an
+# optional --secrets-file TOML fallback) rather than folded into the shared
+# load_api_keys() above, which is reused by other CLI tools that know
+# nothing about Firecrawl.
+FIRECRAWL_KEY_NAME = "FIRECRAWL_API_KEY"
+
+
+def load_firecrawl_key(secrets_file: Optional[str] = None) -> str:
+    """Resolve the optional Firecrawl key: env first, then --secrets-file."""
+    key = (os.environ.get(FIRECRAWL_KEY_NAME) or "").strip()
+    if key:
+        return key
+    if not secrets_file:
+        return ""
+    try:
+        import tomllib
+    except ImportError:  # pragma: no cover - py<3.11 fallback
+        try:
+            import tomli as tomllib  # type: ignore[no-redef]
+        except ImportError:
+            return ""
+    try:
+        with open(secrets_file, "rb") as f:
+            data = tomllib.load(f)
+    except Exception:
+        return ""
+    val = data.get(FIRECRAWL_KEY_NAME)
+    return val.strip() if isinstance(val, str) and val.strip() else ""
 
 
 class SheetResolutionError(ValueError):
@@ -86,6 +117,20 @@ def build_arg_parser() -> argparse.ArgumentParser:
                         "Independent of --compose-caller-content (either may be "
                         "used without the other); never affects scoring "
                         "(default: off).")
+    p.add_argument("--deep-dive", action="store_true",
+                   help="Opt-in Step B: run a deeper, source-backed evidence "
+                        "collection (Firecrawl if FIRECRAWL_API_KEY is set, "
+                        "else localized Serper + plain fetches) for rows that "
+                        "clear --deep-dive-min-score and/or a confirmed "
+                        "foreign-HQ signal, AFTER scoring. Writes a 'Deep "
+                        "Dive' sheet; never affects scoring. Independent of "
+                        "--compose-caller-content and --rich-icp-context "
+                        "(default: off).")
+    p.add_argument("--deep-dive-min-score", type=float, default=8.0,
+                   help="Minimum final_commercial_fit_score that triggers a "
+                        "Deep Dive (default: 8.0).")
+    p.add_argument("--deep-dive-max-pages", type=int, default=6,
+                   help="Max pages collected per Deep Dive (default: 6).")
     return p
 
 
@@ -142,6 +187,9 @@ def config_from_args(args: argparse.Namespace) -> BatchRunConfig:
         include_raw_ai_json=args.include_raw_ai_json,
         compose_caller_content=args.compose_caller_content,
         rich_icp_context=args.rich_icp_context,
+        deep_dive=args.deep_dive,
+        deep_dive_min_score=args.deep_dive_min_score,
+        deep_dive_max_pages=args.deep_dive_max_pages,
     )
 
 
@@ -162,6 +210,10 @@ def main(argv: Optional[list[str]] = None) -> int:
         print("ERROR: missing API key(s). Set env vars or pass --secrets-file.",
               file=sys.stderr)
         return 2
+
+    # Optional: missing is not an error, only a Deep Dive fallback mode.
+    firecrawl = load_firecrawl_key(args.secrets_file)
+    print(f"{FIRECRAWL_KEY_NAME}: {'set' if firecrawl else 'not set (Deep Dive fallback mode)'}")
 
     # ── Load workbook ─────────────────────────────────────────────────────────
     input_path = Path(args.input)
@@ -214,7 +266,7 @@ def main(argv: Optional[list[str]] = None) -> int:
         return 3
 
     # ── Run batch via shared core ─────────────────────────────────────────────
-    tables = run_batch_dataframe(df, config, serper, anthropic)
+    tables = run_batch_dataframe(df, config, serper, anthropic, firecrawl_api_key=firecrawl)
     data = build_excel_workbook_bytes(tables)
     output_path.write_bytes(data)
 

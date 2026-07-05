@@ -231,7 +231,7 @@ class TestMain:
         out_path = tmp_path / "result.xlsx"
         captured = {}
 
-        def _fake_run(df, config, serper, anthropic):
+        def _fake_run(df, config, serper, anthropic, **kwargs):
             captured["config"] = config
             captured["serper"] = serper
             captured["anthropic"] = anthropic
@@ -264,7 +264,7 @@ class TestMain:
         out_path = tmp_path / "result.xlsx"
         captured = {}
 
-        def _fake_run(df, config, serper, anthropic):
+        def _fake_run(df, config, serper, anthropic, **kwargs):
             captured["config"] = config
             return _fake_tables()
 
