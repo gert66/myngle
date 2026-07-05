@@ -954,28 +954,38 @@ def test_ui_payload_and_array_fields(tmp_path):
     assert detail["parent_hq_summary_app"] == \
         "The enrichment data identifies Acme Group as the parent company."
     ui_payload = detail["ui_payload"]
-    # These mirror the *_app fields verbatim — unchanged, Italy-compatible behavior.
+    # These still mirror the *_app fields verbatim — unchanged, Italy-compatible
+    # behavior kept for every export, not just Italian ones.
     assert ui_payload["what_is_not"] == ["No competitor signal"]
     assert ui_payload["caller_angle"] == "Lead with onboarding angle."
     assert ui_payload["call_starter"] == "I saw you are part of a Japanese group..."
-    assert ui_payload["cold_caller_summary"] == "Concrete reason to explore cross-border alignment."
     assert ui_payload["parent_hq_summary"] == \
         "The enrichment data identifies Acme Group as the parent company."
     assert ui_payload["evidence_summary"] == "Two strong sources."
-    # These are independently built, richer, company-specific content —
-    # not a mirror of why_relevant_app / what_is_hot_app.
+    # These are independently built (non-Italy curated layer), richer,
+    # company-specific content — not a mirror of why_relevant_app /
+    # what_is_hot_app / cold_caller_summary_app.
     assert ui_payload["why_relevant"] == (
-        "Acme Brasil is a Brazil-based manufacturing company with a "
-        "confirmed foreign parent or HQ context.")
+        "Acme Brasil is a Brazil-based company in Manufacturing. It has a "
+        "confirmed foreign parent or HQ context. The current evidence is "
+        "not strong enough to confirm a specific training trigger, so "
+        "treat this as a light discovery lead and first validate whether "
+        "international communication, onboarding, or team-development "
+        "needs exist.")
     assert ui_payload["what_is_hot"] == [
-        "Foreign HQ confirmed | Large-scale operation",
         "Foreign ownership or group structure confirmed.",
+        "Industry: Manufacturing.",
+        "Company size: 201-500 employees.",
     ]
     assert len(ui_payload["what_is_hot"]) <= 5
     assert ui_payload["commercial_fit_drivers"] == [
         {"label": FOREIGN_HQ_SIGNAL_LABEL, "strength": "Strong",
          "evidence": "Foreign headquarters or group structure detected."},
     ]
+    assert ui_payload["cold_caller_summary"] == (
+        "This company has a confirmed foreign parent or HQ context, which "
+        "is a concrete reason to explore cross-border communication and "
+        "team alignment.")
     assert ui_payload["caution"] == []
     # "e.com" is unrelated to the lead's own domain (acme.com.br) and its
     # snippet ("s") never mentions the company, so it's excluded rather than
@@ -1018,8 +1028,10 @@ def test_brazil_style_record_has_clean_what_is_hot_max_five_bullets(tmp_path):
     what_is_hot = detail["ui_payload"]["what_is_hot"]
 
     assert len(what_is_hot) <= 5
-    assert what_is_hot[0] == "Foreign HQ: China | International footprint | Learning and development | Large-scale operation"
-    assert what_is_hot[1] == "Foreign ownership or group structure: headquartered in China."
+    assert what_is_hot[0] == "Foreign ownership or group structure: headquartered in China."
+    assert what_is_hot[1] == (
+        "International business context: Operates offices across five "
+        "countries in Latin America.")
     joined = " ".join(what_is_hot)
     assert "distinct keyword match" not in joined
     assert "Industry: Unknown" not in joined
@@ -1460,13 +1472,12 @@ def test_aldi_style_rich_evidence_is_still_promoted(tmp_path):
     detail = detail_for(out_dir, "ALDI S.R.L.")
     ui = detail["ui_payload"]
 
-    summary_line = ui["what_is_hot"][0]
-    assert "International footprint" in summary_line
-    assert "Learning and development" in summary_line
-
     joined_hot = " ".join(ui["what_is_hot"])
     assert "11 countries" in joined_hot
     assert "Learning Management System" in joined_hot
+    assert any(b.startswith("International business context:") for b in ui["what_is_hot"])
+    assert any(b.startswith("learning and development or onboarding needs:")
+               for b in ui["what_is_hot"])
 
     drivers_by_label = {d["label"]: d for d in ui["commercial_fit_drivers"]}
     assert drivers_by_label["International business context"]["strength"] == "Strong"
@@ -1474,6 +1485,184 @@ def test_aldi_style_rich_evidence_is_still_promoted(tmp_path):
     assert drivers_by_label["learning and development or onboarding needs"]["strength"] == "Strong"
     assert "Learning Management System" in \
         drivers_by_label["learning and development or onboarding needs"]["evidence"]
+
+
+# ---------------------------------------------------------------------------
+# IGM Resins-style regression tests — the non-Italy curated display-signal
+# layer (why_relevant, what_is_hot, commercial_fit_drivers, and
+# cold_caller_summary all built from the same curated signals, per item B
+# of the ui_payload content-quality fix).
+# ---------------------------------------------------------------------------
+
+_IGM_HOMEPAGE_COPY = (
+    "IGM Resins delivers high-performance UV-curable resins and coatings "
+    "solutions to customers around the world."
+)
+
+
+def _igm_row(**overrides) -> dict:
+    row = dict(
+        source_index=1,
+        company_name="IGM Resins",
+        domain="igmresins.com",
+        website_url="https://www.igmresins.com",
+        input_country="Netherlands",
+        enrichment_skipped=False,
+        sig_foreign_hq_score_for_next_scoring=0,
+        commercial_fit_score_app=40,
+        commercial_tier_app="C",
+        industry="Chemicals",
+        employee_range="1001-5000",
+    )
+    row.update(overrides)
+    return row
+
+
+def test_weak_employer_branding_not_shown_as_strong_driver(tmp_path):
+    signals = [
+        {"source_index": 1, "signal_name": "employer_branding", "signal_score": 2,
+         "evidence_quote": _IGM_HOMEPAGE_COPY},
+    ]
+    _, out_dir = run_export(tmp_path, [_igm_row()], signals=signals,
+                            export_country="Netherlands", foreign_hq_only=False)
+
+    detail = detail_for(out_dir, "IGM Resins")
+    ui = detail["ui_payload"]
+
+    driver_labels = {d["label"] for d in ui["commercial_fit_drivers"]}
+    assert "Employer branding or employee satisfaction" not in driver_labels
+    assert "IGM Resins delivers high-performance" not in " ".join(ui["what_is_hot"])
+
+
+def test_sparse_record_gets_cautious_why_relevant_and_cold_caller_summary(tmp_path):
+    _, out_dir = run_export(tmp_path, [_igm_row()],
+                            export_country="Netherlands", foreign_hq_only=False)
+
+    detail = detail_for(out_dir, "IGM Resins")
+    ui = detail["ui_payload"]
+
+    assert ui["why_relevant"] != "IGM Resins is a Netherlands-based company."
+    assert "light discovery" in ui["why_relevant"].lower()
+    assert "Chemicals" in ui["why_relevant"]
+
+    # No curated signals, no foreign HQ -> only safe factual bullets (or none).
+    for bullet in ui["what_is_hot"]:
+        assert bullet.startswith("Industry:") or bullet.startswith("Company size:")
+
+    assert ui["cold_caller_summary"] == (
+        "Use this as a light discovery lead. The current evidence does not "
+        "yet show a clear training trigger, so start by validating whether "
+        "international communication, onboarding, or team-development "
+        "needs exist.")
+    assert ui["cold_caller_summary"] != detail["cold_caller_summary_app"]
+
+
+def test_legacy_generic_phrases_never_appear_in_ui_payload(tmp_path):
+    row = _igm_row(
+        cold_caller_summary_app=(
+            "Signals point to international operations and onboarding or "
+            "training needs. Company size or complexity suggests structured "
+            "training coordination may be relevant. Keyword evidence signals "
+            "alignment with the target profile for language or training "
+            "support."
+        ),
+    )
+    _, out_dir = run_export(tmp_path, [row], export_country="Netherlands",
+                            foreign_hq_only=False)
+
+    detail = detail_for(out_dir, "IGM Resins")
+    ui = detail["ui_payload"]
+
+    visible_text = " ".join([
+        ui["why_relevant"] or "",
+        " ".join(ui["what_is_hot"]),
+        ui["cold_caller_summary"] or "",
+        " ".join(str(d) for d in ui["commercial_fit_drivers"]),
+    ])
+    assert "Signals point to" not in visible_text
+    assert "Keyword evidence signals" not in visible_text
+    assert "Company size or complexity suggests" not in visible_text
+
+
+def test_generic_homepage_copy_rejected_for_all_signal_types(tmp_path):
+    signals = [
+        {"source_index": 1, "signal_name": "international_profile", "signal_score": 2,
+         "evidence_quote": _IGM_HOMEPAGE_COPY},
+        {"source_index": 1, "signal_name": "onboarding_training_need", "signal_score": 2,
+         "evidence_quote": _IGM_HOMEPAGE_COPY},
+        {"source_index": 1, "signal_name": "employer_branding", "signal_score": 2,
+         "evidence_quote": _IGM_HOMEPAGE_COPY},
+    ]
+    _, out_dir = run_export(tmp_path, [_igm_row()], signals=signals,
+                            export_country="Netherlands", foreign_hq_only=False)
+
+    detail = detail_for(out_dir, "IGM Resins")
+    ui = detail["ui_payload"]
+
+    assert ui["commercial_fit_drivers"] == []
+    joined_hot = " ".join(ui["what_is_hot"])
+    assert "IGM Resins delivers high-performance" not in joined_hot
+    assert "UV-curable" not in joined_hot
+
+
+def test_duplicate_official_website_urls_removed(tmp_path):
+    evidence = [
+        {"source_index": 1, "signal_name": "international_profile",
+         "source_url": "https://www.igmresins.com/about-us",
+         "source_snippet": "About IGM Resins"},
+        {"source_index": 1, "signal_name": "international_profile",
+         "source_url": "https://igmresins.com/products",
+         "source_snippet": "IGM Resins products"},
+    ]
+    _, out_dir = run_export(tmp_path, [_igm_row()], evidence,
+                            export_country="Netherlands", foreign_hq_only=False)
+
+    detail = detail_for(out_dir, "IGM Resins")
+    source_urls = detail["ui_payload"]["source_urls"]
+
+    official = [item for item in source_urls if item["label"] == "Official website"]
+    assert len(official) == 1
+    assert official[0]["url"] == "https://www.igmresins.com"  # explicit field wins
+
+
+def test_italy_legacy_ui_payload_behavior_untouched(tmp_path):
+    aldi_row = dict(
+        source_index=1,
+        company_name="ALDI S.R.L.",
+        domain="aldi-sued.com",
+        website_url="https://www.aldi-sued.com",
+        input_country="Italy",
+        enrichment_skipped=False,
+        sig_foreign_hq_score_for_next_scoring=3,
+        c5_parent_company="ALDI SUD",
+        c5_parent_hq_country="Germany",
+        commercial_fit_score_app=85,
+        commercial_tier_app="A",
+        industry="Retail",
+        employee_range="10001+",
+        cold_caller_summary_app="Legacy Italian cold caller summary text.",
+    )
+    signals = [
+        {"source_index": 1, "signal_name": "international_profile", "signal_score": 2,
+         "evidence_quote": "Signals point to international alignment."},
+    ]
+    _, out_dir = run_export(tmp_path, [aldi_row], signals=signals,
+                            export_country="Italy", foreign_hq_only=False,
+                            content_language="Italian")
+
+    detail = detail_for(out_dir, "ALDI S.R.L.")
+    ui = detail["ui_payload"]
+
+    # Italy keeps mirroring cold_caller_summary_app verbatim — never rebuilt
+    # by the new non-Italy curated layer.
+    assert ui["cold_caller_summary"] == "Legacy Italian cold caller summary text."
+    # Italy keeps the original (pre-curated-layer) commercial_fit_drivers
+    # behavior: a positively-scored non-bucketed... here the bucketed
+    # international_profile signal has weak evidence ("Signals point to")
+    # and is correctly still filtered by the original, unmodified
+    # build_commercial_fit_drivers logic (unchanged from before this task).
+    driver_labels = {d["label"] for d in ui["commercial_fit_drivers"]}
+    assert "International business context" not in driver_labels
 
 
 def test_parse_key_source_links_variants():
@@ -2380,13 +2569,16 @@ class TestContentLanguageDutch:
         detail = detail_for(out_dir, "Acme Brasil")
         # The legacy Italy-compatible *_app field is still fully localized.
         assert detail["why_relevant_app"] == _FOREIGN_HQ_WHY_RELEVANT_NL
-        # ui_payload.why_relevant is now built independently (richer,
-        # company-specific) and has no matching Dutch template to rebuild
-        # from, so it stays in the English it was generated in — it is no
-        # longer a mirror of why_relevant_app.
+        # ui_payload.why_relevant is now built independently by the non-Italy
+        # curated layer (richer, company-specific, English-only for now) —
+        # it is no longer a mirror of why_relevant_app.
         assert detail["ui_payload"]["why_relevant"] == (
-            "Acme Brasil is a Brazil-based manufacturing company operating "
-            "as part of Foreign Group, headquartered in Germany.")
+            "Acme Brasil is a Brazil-based company in Manufacturing. It "
+            "operates as part of Foreign Group, headquartered in Germany. "
+            "The current evidence is not strong enough to confirm a "
+            "specific training trigger, so treat this as a light discovery "
+            "lead and first validate whether international communication, "
+            "onboarding, or team-development needs exist.")
         assert "is relevant because" not in detail["why_relevant_app"]
 
     def test_ids_domain_scores_tiers_and_debug_unchanged(self, tmp_path):

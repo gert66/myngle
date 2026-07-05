@@ -798,27 +798,31 @@ _SIGNAL_TOPIC_PATTERNS: "dict[str, re.Pattern]" = {
     )),
     "onboarding_training_need": _topic_pattern((
         "training", "academy", "lms", "learning management system",
-        "onboarding", "employee development", "leadership development",
-        "talent development", "mandatory training", "upskilling",
-        "career development", "learning program", "learning programs",
+        "learning", "onboarding", "employee development",
+        "leadership development", "talent development",
+        "mandatory training", "upskilling", "career development",
+        "learning program", "learning programs",
     )),
     "icp_keyword_match": _topic_pattern((
         "training", "academy", "lms", "learning management system",
-        "onboarding", "employee development", "leadership development",
-        "talent development", "mandatory training", "upskilling",
-        "career development", "learning program", "learning programs",
+        "learning", "onboarding", "employee development",
+        "leadership development", "talent development",
+        "mandatory training", "upskilling", "career development",
+        "learning program", "learning programs",
     )),
     "company_size_complexity": _topic_pattern((
-        "employees", "employee count", "workforce", "multi-site",
-        "multi site", "branches", "stores", "locations",
-        "distributed team", "distributed teams", "operational scale",
-        "large-scale", "large scale",
+        "employees", "employee count", "company size", "workforce",
+        "multi-site", "multi site", "branches", "stores", "offices",
+        "locations", "distributed team", "distributed teams",
+        "production sites", "operational scale", "large-scale",
+        "large scale",
     )),
     "employer_branding": _topic_pattern((
-        "careers page", "employer branding", "employee value proposition",
-        "evp", "team culture", "workplace", "employee testimonial",
-        "employee testimonials", "great place to work", "workplace award",
-        "workplace awards", "company culture",
+        "careers page", "employer brand", "employer branding",
+        "employee value proposition", "evp", "team culture", "workplace",
+        "people culture", "employee experience", "employee testimonial",
+        "employee testimonials", "great place to work", "glassdoor",
+        "workplace award", "workplace awards", "company culture",
     )),
 }
 
@@ -1070,6 +1074,239 @@ def build_commercial_fit_drivers(
     return drivers
 
 
+# ---------------------------------------------------------------------------
+# Curated display-signal layer (non-Italy ui_payload only)
+# ---------------------------------------------------------------------------
+# lead_caller_app_fields_builder.py / build_ui_payload_why_relevant /
+# build_ui_payload_what_is_hot / build_commercial_fit_drivers above are
+# frozen and kept verbatim for Italy (content_language == "Italian"), which
+# still renders well from that legacy behavior. Everything below is a single
+# shared "curated display signal" source used ONLY for non-Italy exports, so
+# why_relevant, what_is_hot, commercial_fit_drivers, and cold_caller_summary
+# can never disagree with each other (see _build_detail_record).
+
+_LIGHT_DISCOVERY_WHY_RELEVANT_TAIL = (
+    " The current evidence is not strong enough to confirm a specific "
+    "training trigger, so treat this as a light discovery lead and first "
+    "validate whether international communication, onboarding, or "
+    "team-development needs exist."
+)
+
+_LIGHT_DISCOVERY_COLD_CALLER_SUMMARY = (
+    "Use this as a light discovery lead. The current evidence does not yet "
+    "show a clear training trigger, so start by validating whether "
+    "international communication, onboarding, or team-development needs "
+    "exist."
+)
+
+
+def build_curated_display_signals(
+    visible_signals: list[dict],
+    employee_range: "str | None" = None,
+    own_domains: "set[str] | None" = None,
+    company_name: "str | None" = None,
+) -> list[dict]:
+    """The single curated source of "genuinely displayable" non-HQ signals:
+    positively scored AND backed by clean, domain-relevant, signal-specific
+    evidence (see _clean_driver_evidence). Foreign HQ is excluded here — it
+    is displayed separately from confirmed HQ/parent fields, which are
+    already handled by build_foreign_hq_evidence_text."""
+    curated = []
+    for signal in visible_signals:
+        label = signal.get("label")
+        if not label or label == FOREIGN_HQ_SIGNAL_LABEL:
+            continue
+        score = signal.get("score")
+        if not (score and score > 0):
+            continue
+        evidence = _clean_driver_evidence(signal, employee_range, own_domains, company_name)
+        if evidence is None:
+            continue
+        curated.append({
+            "signal_name": signal.get("signal_name"),
+            "label": _natural_label(label),
+            "strength": _strength_for_score(score),
+            "evidence": evidence,
+        })
+    return curated
+
+
+def _foreign_hq_driver(
+    visible_signals: list[dict], foreign_hq_detected: bool,
+) -> "dict | None":
+    """Reuses the already-computed foreign-HQ row from visible_icp_signal_scores
+    (built by build_foreign_hq_evidence_text) rather than re-deriving it."""
+    if not foreign_hq_detected:
+        return None
+    for signal in visible_signals:
+        if signal.get("label") == FOREIGN_HQ_SIGNAL_LABEL:
+            return {
+                "label": _natural_label(signal.get("label")),
+                "strength": "Strong",
+                "evidence": signal.get("evidence"),
+            }
+    return None
+
+
+def _format_company_size_fact(
+    employee_range: "str | None", display_size_category_app: "str | None",
+) -> "str | None":
+    if display_size_category_app:
+        return display_size_category_app
+    if employee_range:
+        return f"{employee_range} employees"
+    return None
+
+
+def _a_or_an(word: "str | None") -> str:
+    return "an" if word and word[0].lower() in "aeiou" else "a"
+
+
+def build_curated_why_relevant(
+    company_name: "str | None",
+    export_country: "str | None",
+    industry: "str | None",
+    foreign_hq_detected: bool,
+    parent_company: "str | None",
+    parent_hq_country: "str | None",
+    curated_signals: list[dict],
+) -> str:
+    """Company-specific relevance sentence for non-Italy exports, built only
+    from safe facts (company, country, industry, confirmed HQ) plus the
+    shared curated display signals. Never claims a training/international
+    trigger with nothing behind it — sparse records get a cautious,
+    still-useful light-discovery sentence instead of a bare one-liner."""
+    company = company_name or "This company"
+    country = export_country or "the region"
+    industry_clause = f" in {industry}" if industry and industry != "Unknown" else ""
+
+    sentence = f"{company} is {_a_or_an(country)} {country}-based company{industry_clause}."
+
+    if foreign_hq_detected and parent_company and parent_hq_country:
+        sentence += (
+            f" It operates as part of {parent_company}, headquartered in "
+            f"{parent_hq_country}."
+        )
+    elif foreign_hq_detected and parent_hq_country:
+        sentence += f" It has a confirmed foreign parent headquartered in {parent_hq_country}."
+    elif foreign_hq_detected:
+        sentence += " It has a confirmed foreign parent or HQ context."
+
+    if curated_signals:
+        labels = [s["label"].lower() for s in curated_signals[:2]]
+        sentence += f" It also shows {' and '.join(labels)}, relevant to language and training support."
+    else:
+        sentence += _LIGHT_DISCOVERY_WHY_RELEVANT_TAIL
+
+    return sentence
+
+
+def build_curated_what_is_hot(
+    foreign_hq_detected: bool,
+    parent_hq_country: "str | None",
+    industry: "str | None",
+    employee_range: "str | None",
+    display_size_category_app: "str | None",
+    curated_signals: list[dict],
+    max_bullets: int = 5,
+) -> list[str]:
+    """Non-Italy what_is_hot: Foreign HQ (if confirmed) and curated signal
+    bullets first, then safe factual bullets (industry, company size).
+    Returns an empty list when nothing safe is available, so Lovable can
+    hide the section rather than show a bare/unsupported claim."""
+    bullets: list[str] = []
+
+    if foreign_hq_detected:
+        bullets.append(
+            f"Foreign ownership or group structure: headquartered in {parent_hq_country}."
+            if parent_hq_country else "Foreign ownership or group structure confirmed."
+        )
+
+    for signal in curated_signals:
+        if len(bullets) >= max_bullets:
+            break
+        bullet = f"{signal['label']}: {signal['evidence']}"
+        if bullet not in bullets:
+            bullets.append(bullet)
+
+    if len(bullets) < max_bullets and industry and industry != "Unknown":
+        bullets.append(f"Industry: {industry}.")
+
+    if len(bullets) < max_bullets:
+        size_fact = _format_company_size_fact(employee_range, display_size_category_app)
+        if size_fact:
+            bullets.append(f"Company size: {size_fact}.")
+
+    return bullets[:max_bullets]
+
+
+def build_curated_commercial_fit_drivers(
+    visible_signals: list[dict],
+    foreign_hq_detected: bool,
+    curated_signals: list[dict],
+) -> list[dict]:
+    """Non-Italy commercial_fit_drivers: only the confirmed-HQ driver (from
+    the same evidence already shown elsewhere) plus the shared curated
+    display signals — never a Strong/Moderate/Weak row without usable
+    evidence behind it."""
+    drivers = []
+    hq_driver = _foreign_hq_driver(visible_signals, foreign_hq_detected)
+    if hq_driver:
+        drivers.append(hq_driver)
+    for signal in curated_signals:
+        drivers.append({
+            "label": signal["label"],
+            "strength": signal["strength"],
+            "evidence": signal["evidence"],
+        })
+    return drivers
+
+
+def build_curated_cold_caller_summary(
+    foreign_hq_detected: bool,
+    parent_company: "str | None",
+    parent_hq_country: "str | None",
+    curated_signals: list[dict],
+) -> str:
+    """Non-Italy cold_caller_summary: never a straight copy of
+    cold_caller_summary_app. Built from confirmed HQ, then curated display
+    signals, falling back to cautious light-discovery wording when neither
+    is available."""
+    parts: list[str] = []
+
+    if foreign_hq_detected and parent_company and parent_hq_country:
+        parts.append(
+            f"This company operates as part of {parent_company}, "
+            f"headquartered in {parent_hq_country}, which is a concrete "
+            "reason to explore cross-border communication and team "
+            "alignment."
+        )
+    elif foreign_hq_detected and parent_hq_country:
+        parts.append(
+            f"This company has a confirmed foreign parent headquartered in "
+            f"{parent_hq_country}, which is a concrete reason to explore "
+            "cross-border communication and team alignment."
+        )
+    elif foreign_hq_detected:
+        parts.append(
+            "This company has a confirmed foreign parent or HQ context, "
+            "which is a concrete reason to explore cross-border "
+            "communication and team alignment."
+        )
+
+    if curated_signals:
+        labels = [s["label"].lower() for s in curated_signals[:2]]
+        parts.append(
+            "The available evidence also shows " + " and ".join(labels) +
+            ", worth exploring in a first conversation."
+        )
+
+    if not parts:
+        return _LIGHT_DISCOVERY_COLD_CALLER_SUMMARY
+
+    return " ".join(parts)
+
+
 def build_ui_payload_caution(quality_flags: list[str], caution_app: "str | None") -> list[str]:
     """Human-readable warnings only, one sentence per distinct warning —
     raw quality-flag column names (e.g. hq_evidence_domain_mismatch_warning,
@@ -1101,29 +1338,41 @@ def build_ui_payload_source_urls(
     for a careers URL/subdomain on that same domain), LinkedIn is
     "LinkedIn", and only genuinely unrelated third-party domains are
     excluded outright (e.g. careers.accor.com for a DORC lead) — everything
-    else third-party is kept, labeled "Third-party company profile"."""
+    else third-party is kept, labeled "Third-party company profile".
+
+    "Official website", "Careers page", and "LinkedIn" are each capped at
+    one entry: once one is found (preferring the explicit website_url/
+    careers_url/linkedin_url fields), any further own-domain/LinkedIn pages
+    turned up in evidence are the same site and are dropped rather than
+    shown as extra "duplicate" entries under the same label. Third-party
+    profiles are not capped — distinct outside sources are legitimate."""
     url_context = url_context or {}
     own_domains = own_domains or set()
     seen_norm: set[str] = set()
+    seen_roles: set[str] = set()
     items: list[dict] = []
 
     def _normalized(url: str) -> str:
         u = re.sub(r"^https?://", "", url.strip(), flags=re.IGNORECASE).rstrip("/")
         return u[4:].lower() if u.lower().startswith("www.") else u.lower()
 
-    def _add(url, label) -> None:
+    def _add(url, label, role=None) -> None:
         url = clean_str(url)
         if not url:
             return
         norm = _normalized(url)
         if norm in seen_norm:
             return
+        if role and role in seen_roles:
+            return
         seen_norm.add(norm)
+        if role:
+            seen_roles.add(role)
         items.append({"label": label, "url": url})
 
-    _add(website_url, "Official website")
-    _add(careers_url, "Careers page")
-    _add(linkedin_url, "LinkedIn")
+    _add(website_url, "Official website", role="official")
+    _add(careers_url, "Careers page", role="careers")
+    _add(linkedin_url, "LinkedIn", role="linkedin")
 
     for url in source_urls:
         url = clean_str(url)
@@ -1134,12 +1383,14 @@ def build_ui_payload_source_urls(
             continue
         host = hostname_of(url)
         if "linkedin.com" in host:
-            _add(url, "LinkedIn")
+            _add(url, "LinkedIn", role="linkedin")
             continue
         domain = _registrable_domain(host)
         if domain in own_domains:
-            label = "Careers page" if "career" in url.lower() else "Official website"
-            _add(url, label)
+            is_careers = "career" in url.lower()
+            role = "careers" if is_careers else "official"
+            label = "Careers page" if is_careers else "Official website"
+            _add(url, label, role=role)
             continue
         if not is_domain_relevant_for_url(url, own_domains, company_name, url_context.get(url)):
             continue  # unrelated domain (e.g. careers.accor.com) — excluded
@@ -1342,6 +1593,7 @@ def _build_detail_record(
     signal_rows: list[dict],
     run_metadata: dict | None,
     warnings: list[str],
+    content_language: str = "English",
 ) -> dict:
     key_source_links = parse_key_source_links(row.get("key_source_links_app"))
     evidence_snippets = build_evidence_snippets(evidence_rows)
@@ -1404,25 +1656,55 @@ def _build_detail_record(
     own_domains = _own_domains_for_row(row)
     url_context = _build_url_context(evidence_rows, signal_rows)
 
-    detail["ui_payload"] = {
-        "why_relevant": build_ui_payload_why_relevant(
+    # Italy (content_language == "Italian") keeps today's exact ui_payload
+    # behavior byte-for-byte — why_relevant/what_is_hot/commercial_fit_drivers
+    # via the original build_ui_payload_* functions, cold_caller_summary
+    # mirroring cold_caller_summary_app. It already renders well from that
+    # legacy behavior and must not change. Every other export (English,
+    # Dutch, and any future country) uses the newer curated display-signal
+    # layer described above.
+    if content_language == "Italian":
+        why_relevant = build_ui_payload_why_relevant(
             company_name, list_item.get("export_country"),
             list_item.get("industry"), foreign_hq_detected,
             parent_company, parent_hq_country, visible_signals, employee_range,
             own_domains,
-        ),
-        "what_is_hot": build_ui_payload_what_is_hot(
+        )
+        what_is_hot = build_ui_payload_what_is_hot(
             foreign_hq_detected, parent_hq_country, employee_range, visible_signals,
             own_domains, company_name,
-        ),
+        )
+        commercial_fit_drivers = build_commercial_fit_drivers(
+            visible_signals, employee_range, own_domains, company_name)
+        cold_caller_summary = detail["cold_caller_summary_app"]
+    else:
+        curated_signals = build_curated_display_signals(
+            visible_signals, employee_range, own_domains, company_name)
+        why_relevant = build_curated_why_relevant(
+            company_name, list_item.get("export_country"),
+            list_item.get("industry"), foreign_hq_detected,
+            parent_company, parent_hq_country, curated_signals,
+        )
+        what_is_hot = build_curated_what_is_hot(
+            foreign_hq_detected, parent_hq_country, list_item.get("industry"),
+            employee_range, list_item.get("display_size_category_app"),
+            curated_signals,
+        )
+        commercial_fit_drivers = build_curated_commercial_fit_drivers(
+            visible_signals, foreign_hq_detected, curated_signals)
+        cold_caller_summary = build_curated_cold_caller_summary(
+            foreign_hq_detected, parent_company, parent_hq_country, curated_signals)
+
+    detail["ui_payload"] = {
+        "why_relevant": why_relevant,
+        "what_is_hot": what_is_hot,
         "what_is_not": detail["what_is_not_app"],
         "caller_angle": detail["caller_angle_app"],
         "call_starter": detail["call_starter_app"],
-        "cold_caller_summary": detail["cold_caller_summary_app"],
+        "cold_caller_summary": cold_caller_summary,
         "parent_hq_summary": detail["parent_hq_summary_app"],
         "evidence_summary": detail["evidence_summary_app"],
-        "commercial_fit_drivers": build_commercial_fit_drivers(
-            visible_signals, employee_range, own_domains, company_name),
+        "commercial_fit_drivers": commercial_fit_drivers,
         "caution": build_ui_payload_caution(detail["quality_flags"], detail["caution_app"]),
         "source_urls": build_ui_payload_source_urls(
             detail["website_url"], detail["careers_url"], detail["linkedin_url"],
@@ -1922,6 +2204,7 @@ def export_workbook_to_lovable_json(
             signals_by_index.get(idx, []),
             run_metadata or None,
             warnings,
+            content_language,
         )
         list_items.append(item)
         detail_records.append(detail)
