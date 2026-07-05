@@ -28,6 +28,10 @@ from lead_caller_content_composer import (
     build_curated_signals_from_result,
     compose_caller_content,
 )
+from lead_icp_context_composer import (
+    collect_icp_context_evidence,
+    compose_icp_context as run_icp_context_composition,
+)
 
 _DEFAULT_AI_MODEL = "claude-haiku-4-5-20251001"
 
@@ -63,6 +67,7 @@ def prioritize_single_lead(
     calculate_commercial_score_flag: bool = False,
     build_caller_app_fields_flag: bool = False,
     compose_caller_content_flag: bool = False,
+    compose_icp_context: bool = False,
     run_full_v2_pipeline: bool = False,
 ) -> LeadPrioritizationResult:
     """Orchestrate HQ detection and scoring for a single lead.
@@ -121,17 +126,35 @@ def prioritize_single_lead(
     Deliberately **not** part of the ``run_full_v2_pipeline`` preset: it must
     be turned on explicitly.
 
+    ``compose_icp_context`` (default ``False``) enables an explicit opt-in AI
+    ICP-context composition step, fully **independent** of
+    ``compose_caller_content_flag`` — either can be on without the other. It
+    runs its own broader thematic Serper queries
+    (``lead_icp_context_composer.collect_icp_context_evidence``) plus the
+    curated non-HQ signals already on the result, and — on success — fills
+    ``icp_buying_signals``, ``icp_likely_training_interest``,
+    ``icp_potential_buyer_function``. That evidence is collected into a
+    throwaway list, never written to ``evidence_items`` and never read by
+    signal extraction or scoring — this step can never affect
+    ``final_commercial_fit_score`` or any ``sig_*``/``signals`` field. On any
+    failure (no Anthropic key, call error, unparseable response) it leaves
+    the ``icp_*`` fields blank and records why in
+    ``icp_context_content_note``. Deliberately **not** part of the
+    ``run_full_v2_pipeline`` preset: it must be turned on explicitly.
+
     ``run_full_v2_pipeline`` (default ``False``) is an explicit opt-in preset
     that turns on all optional v2 steps (2–6) for a single-lead end-to-end run.
     It does not add batch processing, change legacy ranking, or alter the
     canonical HQ-first order.  It deliberately does NOT enable
-    ``compose_caller_content_flag`` — that stays an explicit, separate opt-in.
+    ``compose_caller_content_flag`` or ``compose_icp_context`` — those stay
+    explicit, separate opt-ins.
     ``v2_pipeline_mode`` on the result records which mode ran: ``"hq_only"``,
     ``"partial_v2"``, or ``"full_v2_single_lead"``.
     """
     # Full-pipeline preset: enable every optional v2 step explicitly (order of
     # operations below is unchanged — HQ first, then 2→6). Deliberately does
-    # NOT include compose_caller_content_flag — that stays a separate opt-in.
+    # NOT include compose_caller_content_flag / compose_icp_context — those
+    # stay separate opt-ins.
     if run_full_v2_pipeline:
         collect_non_hq_evidence = True
         extract_non_hq_signals_flag = True
@@ -145,6 +168,7 @@ def prioritize_single_lead(
         collect_non_hq_evidence, extract_non_hq_signals_flag,
         build_app_summary_fields_flag, calculate_commercial_score_flag,
         build_caller_app_fields_flag, compose_caller_content_flag,
+        compose_icp_context,
     )):
         v2_pipeline_mode = "partial_v2"
     else:
@@ -385,6 +409,38 @@ def prioritize_single_lead(
             result.composed_content_note = (
                 f"AI composition unavailable ({composed.error}); "
                 "fell back to deterministic templates."
+            )
+
+    # ── Rich ICP context (opt-in): AI-composed ICP buying-context fields ──────
+    # Explicit opt-in only, INDEPENDENT of compose_caller_content_flag — never
+    # enabled by run_full_v2_pipeline. Its own broader Serper queries
+    # (collect_icp_context_evidence) are collected into a throwaway list, never
+    # written to evidence_items, and never read by signal extraction or
+    # scoring; icp_context_content_note records why for audit purposes.
+    if compose_icp_context:
+        icp_extra_evidence = collect_icp_context_evidence(
+            company_name=input_row.company_name,
+            domain=input_row.domain,
+            serper_api_key=serper_api_key,
+        )
+        icp_composed = run_icp_context_composition(
+            company_name=result.company_name,
+            country=result.input_country,
+            curated_signals=build_curated_signals_from_result(result),
+            extra_evidence=icp_extra_evidence,
+            anthropic_api_key=anthropic_api_key,
+            ai_model=ai_model,
+        )
+        if icp_composed.call_success:
+            result.icp_buying_signals = icp_composed.buying_signals
+            result.icp_likely_training_interest = icp_composed.likely_training_interest
+            result.icp_potential_buyer_function = icp_composed.potential_buyer_function
+            result.icp_context_by_ai = True
+            result.icp_context_content_note = "AI-composed ICP context used."
+        else:
+            result.icp_context_by_ai = False
+            result.icp_context_content_note = (
+                f"AI ICP context unavailable ({icp_composed.error})."
             )
 
     return result

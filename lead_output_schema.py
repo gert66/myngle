@@ -254,6 +254,17 @@ class LeadPrioritizationResult:
     composed_by_ai: Optional[bool] = None
     composed_content_note: Optional[str] = None
 
+    # ── AI-composed rich ICP context (opt-in, off by default; independent of
+    # compose_caller_content_flag above — see lead_icp_context_composer.py).
+    # Never read by scoring, signal extraction, or the *_app templates;
+    # icp_context_content_note records why (missing key, call/parse failure,
+    # or success) for audit purposes. ───────────────────────────────────────
+    icp_buying_signals: Optional[str] = None
+    icp_likely_training_interest: Optional[str] = None
+    icp_potential_buyer_function: Optional[str] = None
+    icp_context_by_ai: Optional[bool] = None
+    icp_context_content_note: Optional[str] = None
+
     # ── Run metadata ──────────────────────────────────────────────────────────
     # "hq_only" | "partial_v2" | "full_v2_single_lead"
     v2_pipeline_mode: Optional[str] = None
