@@ -12,13 +12,18 @@ from unittest.mock import MagicMock, Mock, patch
 
 import pytest
 
+from deep_dive_schema import DeepDiveClaim
 from deep_dive_runner import (
     DEFAULT_DEEP_DIVE_MODEL,
+    _apply_quote_correction,
     _classify_source_kind,
     _collect_pages_via_fallback,
     _collect_pages_via_firecrawl,
     _distill_claims,
+    _fetch_page_for_verification,
     _firecrawl_scrape_page,
+    _reextract_not_found_quotes,
+    _self_heal_claims,
     _validate_and_build_claims,
     build_deep_dive_prompt,
     gl_hl_for_country,
@@ -34,6 +39,21 @@ def _mock_anthropic(text: str):
     lib = MagicMock()
     lib.Anthropic.return_value = client
     return patch("deep_dive_runner._anthropic_lib", lib)
+
+
+def _mock_anthropic_sequence(*texts: str):
+    """Mock the Anthropic client to return a different response per call,
+    in order — used for tests exercising distillation THEN re-extraction."""
+    messages = []
+    for text in texts:
+        msg = MagicMock()
+        msg.content = [MagicMock(text=text)]
+        messages.append(msg)
+    client = MagicMock()
+    client.messages.create.side_effect = messages
+    lib = MagicMock()
+    lib.Anthropic.return_value = client
+    return patch("deep_dive_runner._anthropic_lib", lib), client
 
 
 # ---------------------------------------------------------------------------
@@ -542,3 +562,386 @@ class TestRunDeepDive:
                    side_effect=Exception("anything")):
             result = run_deep_dive(company_name="Acme", firecrawl_api_key="fc")
         assert isinstance(result, DeepDiveResult)
+
+
+# ---------------------------------------------------------------------------
+# Quote verification wired into run_deep_dive — page-cache construction
+# (serper_localized "pages" are snippets, not full text) and verify_quotes
+# on/off.
+# ---------------------------------------------------------------------------
+
+_FULL_PAGE_TEXT = (
+    "Acme GmbH was founded in 1990 and has grown into a leading "
+    "manufacturer of industrial equipment across Europe."
+)
+
+
+class TestRunDeepDiveQuoteVerificationWiring:
+    def test_verify_quotes_true_by_default_populates_status(self):
+        pages = [{"url": "https://acme.com/about", "title": None, "text": _FULL_PAGE_TEXT,
+                 "source_kind": "own_domain", "retrieval_method": "firecrawl"}]
+        with patch("deep_dive_runner._collect_pages_via_firecrawl",
+                   return_value={"pages": pages, "pages_crawled": [], "used": True}), \
+             _mock_anthropic(json.dumps({"claims": [
+                 {"category": "hq_structure", "statement": "s",
+                  "quote": "Acme GmbH was founded in 1990",
+                  "source_url": "https://acme.com/about"},
+             ]})):
+            result = run_deep_dive(
+                company_name="Acme", domain="acme.com", anthropic_api_key="fake",
+                firecrawl_api_key="fc-key")
+        assert result.claims[0].quote_verification_status == "verified"
+        assert result.claims[0].quote_verified is True
+
+    def test_verify_quotes_false_leaves_not_checked(self):
+        pages = [{"url": "https://acme.com/about", "title": None, "text": _FULL_PAGE_TEXT,
+                 "source_kind": "own_domain", "retrieval_method": "firecrawl"}]
+        with patch("deep_dive_runner._collect_pages_via_firecrawl",
+                   return_value={"pages": pages, "pages_crawled": [], "used": True}), \
+             _mock_anthropic(json.dumps({"claims": [
+                 {"category": "hq_structure", "statement": "s",
+                  "quote": "Acme GmbH was founded in 1990",
+                  "source_url": "https://acme.com/about"},
+             ]})):
+            result = run_deep_dive(
+                company_name="Acme", domain="acme.com", anthropic_api_key="fake",
+                firecrawl_api_key="fc-key", verify_quotes=False)
+        assert result.claims[0].quote_verification_status == "not_checked"
+        assert result.claims[0].quote_verified is False
+
+    def test_serper_localized_page_snippet_not_used_as_full_text_cache(self):
+        # A serper_localized "page" only ever holds a short Serper snippet
+        # (not the full page) -- verification must trigger a fresh fetch
+        # for it rather than trusting the snippet as ground truth.
+        snippet_pages = [{"url": "https://acme.com/careers", "title": "Careers",
+                          "text": "Join our growing team today.",
+                          "source_kind": "own_domain", "retrieval_method": "serper_localized"}]
+        with patch("deep_dive_runner._collect_pages_via_fallback",
+                   return_value={"pages": snippet_pages, "localized_queries_used": []}), \
+             patch("deep_dive_runner._fetch_page_for_verification",
+                   return_value=_FULL_PAGE_TEXT) as m_fetch, \
+             _mock_anthropic(json.dumps({"claims": [
+                 {"category": "hq_structure", "statement": "s",
+                  "quote": "Acme GmbH was founded in 1990",
+                  "source_url": "https://acme.com/careers"},
+             ]})):
+            result = run_deep_dive(
+                company_name="Acme", domain="acme.com", anthropic_api_key="fake",
+                firecrawl_api_key="")
+        m_fetch.assert_called_once()
+        assert result.claims[0].quote_verification_status == "verified"
+
+
+# ---------------------------------------------------------------------------
+# Self-healing: fuzzy auto-correction, bundled not_found re-extraction,
+# mechanical re-verification of the AI's own correction candidate.
+# ---------------------------------------------------------------------------
+
+def _healed_claim(**kw) -> DeepDiveClaim:
+    base = dict(claim_id="hq_structure:1", category="hq_structure",
+               statement="s", quote="q", source_url="https://acme.com/about")
+    base.update(kw)
+    return DeepDiveClaim(**base)
+
+
+class TestApplyQuoteCorrection:
+    def test_replaces_quote_and_preserves_original(self):
+        from quote_verifier import QuoteVerification
+        claim = _healed_claim(quote="AI paraphrase", quote_verification_status="fuzzy_match")
+        verification = QuoteVerification(status="fuzzy_match", match_score=0.9,
+                                         matched_snippet="the real page text")
+        _apply_quote_correction(claim, verification)
+        assert claim.quote == "the real page text"
+        assert claim.original_quote == "AI paraphrase"
+        assert claim.quote_verification_status == "verified_corrected"
+        assert claim.quote_verified is True
+        assert claim.quote_match_score == 0.9
+
+
+class TestReextractNotFoundQuotes:
+    def test_no_api_key_returns_empty(self):
+        claim = _healed_claim(quote_verification_status="not_found")
+        out = _reextract_not_found_quotes(
+            company_name="Acme", not_found_claims=[claim],
+            page_text_by_url={"https://acme.com/about": _FULL_PAGE_TEXT},
+            anthropic_api_key="", ai_model=DEFAULT_DEEP_DIVE_MODEL)
+        assert out == {}
+
+    def test_no_not_found_claims_returns_empty(self):
+        out = _reextract_not_found_quotes(
+            company_name="Acme", not_found_claims=[],
+            page_text_by_url={}, anthropic_api_key="fake",
+            ai_model=DEFAULT_DEEP_DIVE_MODEL)
+        assert out == {}
+
+    def test_successful_reextraction_returns_candidate(self):
+        claim = _healed_claim(quote_verification_status="not_found")
+        with _mock_anthropic(json.dumps({
+            "corrections": {"hq_structure:1": "Acme GmbH was founded in 1990"},
+        })):
+            out = _reextract_not_found_quotes(
+                company_name="Acme", not_found_claims=[claim],
+                page_text_by_url={"https://acme.com/about": _FULL_PAGE_TEXT},
+                anthropic_api_key="fake", ai_model=DEFAULT_DEEP_DIVE_MODEL)
+        assert out == {"hq_structure:1": "Acme GmbH was founded in 1990"}
+
+    def test_null_correction_is_omitted(self):
+        claim = _healed_claim(quote_verification_status="not_found")
+        with _mock_anthropic(json.dumps({"corrections": {"hq_structure:1": None}})):
+            out = _reextract_not_found_quotes(
+                company_name="Acme", not_found_claims=[claim],
+                page_text_by_url={"https://acme.com/about": _FULL_PAGE_TEXT},
+                anthropic_api_key="fake", ai_model=DEFAULT_DEEP_DIVE_MODEL)
+        assert out == {}
+
+    def test_api_exception_returns_empty(self):
+        claim = _healed_claim(quote_verification_status="not_found")
+        client = MagicMock()
+        client.messages.create.side_effect = RuntimeError("boom")
+        lib = MagicMock()
+        lib.Anthropic.return_value = client
+        with patch("deep_dive_runner._anthropic_lib", lib):
+            out = _reextract_not_found_quotes(
+                company_name="Acme", not_found_claims=[claim],
+                page_text_by_url={"https://acme.com/about": _FULL_PAGE_TEXT},
+                anthropic_api_key="fake", ai_model=DEFAULT_DEEP_DIVE_MODEL)
+        assert out == {}
+
+    def test_bundles_multiple_claims_into_one_call(self):
+        claim1 = _healed_claim(claim_id="hq_structure:1", quote_verification_status="not_found")
+        claim2 = _healed_claim(claim_id="workforce:1", category="workforce",
+                               quote_verification_status="not_found",
+                               source_url="https://acme.com/careers")
+        page_text_by_url = {
+            "https://acme.com/about": _FULL_PAGE_TEXT,
+            "https://acme.com/careers": "We employ over 500 people across Europe.",
+        }
+        with _mock_anthropic(json.dumps({"corrections": {
+            "hq_structure:1": "founded in 1990",
+            "workforce:1": "employ over 500 people",
+        }})):
+            out = _reextract_not_found_quotes(
+                company_name="Acme", not_found_claims=[claim1, claim2],
+                page_text_by_url=page_text_by_url,
+                anthropic_api_key="fake", ai_model=DEFAULT_DEEP_DIVE_MODEL)
+        assert out == {"hq_structure:1": "founded in 1990", "workforce:1": "employ over 500 people"}
+
+
+class TestSelfHealClaims:
+    def test_fuzzy_match_auto_corrected(self):
+        claim = _healed_claim(
+            quote="Acme GmbH founded in 1990, grown into a leading manufacturer",
+            quote_verification_status="fuzzy_match", quote_match_score=0.9,
+            quote_matched_snippet="acme gmbh was founded in 1990 and has grown into a leading",
+        )
+        _self_heal_claims(
+            claims=[claim], page_text_by_url={}, company_name="Acme",
+            anthropic_api_key="", ai_model=DEFAULT_DEEP_DIVE_MODEL,
+            auto_correct_quotes=True,
+        )
+        assert claim.quote == "acme gmbh was founded in 1990 and has grown into a leading"
+        assert claim.original_quote == "Acme GmbH founded in 1990, grown into a leading manufacturer"
+        assert claim.quote_verification_status == "verified_corrected"
+        assert claim.quote_verified is True
+
+    def test_auto_correct_disabled_leaves_fuzzy_match_untouched(self):
+        claim = _healed_claim(
+            quote="AI paraphrase of the page",
+            quote_verification_status="fuzzy_match", quote_match_score=0.9,
+            quote_matched_snippet="the real page text",
+        )
+        _self_heal_claims(
+            claims=[claim], page_text_by_url={}, company_name="Acme",
+            anthropic_api_key="fake", ai_model=DEFAULT_DEEP_DIVE_MODEL,
+            auto_correct_quotes=False,
+        )
+        assert claim.quote == "AI paraphrase of the page"
+        assert claim.quote_verification_status == "fuzzy_match"
+        assert claim.original_quote == ""
+
+    def test_not_found_successful_reextraction_is_corrected(self):
+        claim = _healed_claim(quote="hallucinated text", quote_verification_status="not_found")
+        with _mock_anthropic(json.dumps({
+            "corrections": {"hq_structure:1": "Acme GmbH was founded in 1990"},
+        })):
+            _self_heal_claims(
+                claims=[claim], page_text_by_url={"https://acme.com/about": _FULL_PAGE_TEXT},
+                company_name="Acme", anthropic_api_key="fake",
+                ai_model=DEFAULT_DEEP_DIVE_MODEL, auto_correct_quotes=True,
+            )
+        assert claim.quote_verification_status == "verified_corrected"
+        assert claim.quote_verified is True
+        assert claim.original_quote == "hallucinated text"
+
+    def test_not_found_reextraction_that_fails_mechanical_check_stays_not_found(self):
+        claim = _healed_claim(quote="hallucinated text", quote_verification_status="not_found")
+        with _mock_anthropic(json.dumps({
+            "corrections": {"hq_structure:1": "this text is not on the page either"},
+        })):
+            _self_heal_claims(
+                claims=[claim], page_text_by_url={"https://acme.com/about": _FULL_PAGE_TEXT},
+                company_name="Acme", anthropic_api_key="fake",
+                ai_model=DEFAULT_DEEP_DIVE_MODEL, auto_correct_quotes=True,
+            )
+        assert claim.quote_verification_status == "not_found"
+        assert claim.quote == "hallucinated text"  # untouched
+        assert claim.original_quote == ""
+
+    def test_not_found_no_candidate_stays_not_found(self):
+        claim = _healed_claim(quote="hallucinated text", quote_verification_status="not_found")
+        with _mock_anthropic(json.dumps({"corrections": {"hq_structure:1": None}})):
+            _self_heal_claims(
+                claims=[claim], page_text_by_url={"https://acme.com/about": _FULL_PAGE_TEXT},
+                company_name="Acme", anthropic_api_key="fake",
+                ai_model=DEFAULT_DEEP_DIVE_MODEL, auto_correct_quotes=True,
+            )
+        assert claim.quote_verification_status == "not_found"
+        assert claim.quote == "hallucinated text"
+
+    def test_at_most_one_reextraction_call_for_multiple_not_found_claims(self):
+        claim1 = _healed_claim(claim_id="hq_structure:1", quote_verification_status="not_found")
+        claim2 = _healed_claim(claim_id="workforce:1", category="workforce",
+                               quote_verification_status="not_found",
+                               source_url="https://acme.com/careers")
+        page_text_by_url = {
+            "https://acme.com/about": _FULL_PAGE_TEXT,
+            "https://acme.com/careers": "We employ over 500 people across Europe.",
+        }
+        with patch("deep_dive_runner._anthropic_lib") as lib:
+            msg = MagicMock()
+            msg.content = [MagicMock(text=json.dumps({"corrections": {
+                "hq_structure:1": "founded in 1990",
+                "workforce:1": "employ over 500 people",
+            }}))]
+            client = MagicMock()
+            client.messages.create.return_value = msg
+            lib.Anthropic.return_value = client
+            _self_heal_claims(
+                claims=[claim1, claim2], page_text_by_url=page_text_by_url,
+                company_name="Acme", anthropic_api_key="fake",
+                ai_model=DEFAULT_DEEP_DIVE_MODEL, auto_correct_quotes=True,
+            )
+            assert client.messages.create.call_count == 1
+        assert claim1.quote_verification_status == "verified_corrected"
+        assert claim2.quote_verification_status == "verified_corrected"
+
+    def test_fetch_failed_never_corrected(self):
+        claim = _healed_claim(quote="whatever", quote_verification_status="fetch_failed")
+        _self_heal_claims(
+            claims=[claim], page_text_by_url={}, company_name="Acme",
+            anthropic_api_key="fake", ai_model=DEFAULT_DEEP_DIVE_MODEL,
+            auto_correct_quotes=True,
+        )
+        assert claim.quote_verification_status == "fetch_failed"
+        assert claim.quote == "whatever"
+
+    def test_not_checked_never_corrected(self):
+        claim = _healed_claim(quote="whatever", quote_verification_status="not_checked")
+        _self_heal_claims(
+            claims=[claim], page_text_by_url={}, company_name="Acme",
+            anthropic_api_key="fake", ai_model=DEFAULT_DEEP_DIVE_MODEL,
+            auto_correct_quotes=True,
+        )
+        assert claim.quote_verification_status == "not_checked"
+        assert claim.quote == "whatever"
+
+    def test_verified_never_touched(self):
+        claim = _healed_claim(quote="already good", quote_verification_status="verified",
+                              quote_verified=True, quote_match_score=1.0)
+        _self_heal_claims(
+            claims=[claim], page_text_by_url={}, company_name="Acme",
+            anthropic_api_key="fake", ai_model=DEFAULT_DEEP_DIVE_MODEL,
+            auto_correct_quotes=True,
+        )
+        assert claim.quote_verification_status == "verified"
+        assert claim.quote == "already good"
+        assert claim.original_quote == ""
+
+
+class TestRunDeepDiveSelfHealingEndToEnd:
+    def test_fuzzy_match_from_distillation_is_corrected_end_to_end(self):
+        pages = [{"url": "https://acme.com/about", "title": None, "text": _FULL_PAGE_TEXT,
+                 "source_kind": "own_domain", "retrieval_method": "firecrawl"}]
+        with patch("deep_dive_runner._collect_pages_via_firecrawl",
+                   return_value={"pages": pages, "pages_crawled": [], "used": True}), \
+             _mock_anthropic(json.dumps({"claims": [
+                 {"category": "hq_structure", "statement": "s",
+                  "quote": "Acme GmbH founded in 1990, grown into a leading manufacturer of industrial equipment",
+                  "source_url": "https://acme.com/about"},
+             ]})):
+            result = run_deep_dive(
+                company_name="Acme", domain="acme.com", anthropic_api_key="fake",
+                firecrawl_api_key="fc-key")
+        claim = result.claims[0]
+        assert claim.quote_verification_status == "verified_corrected"
+        assert claim.quote_verified is True
+        assert claim.original_quote
+
+    def test_auto_correct_quotes_false_leaves_fuzzy_match_as_is(self):
+        pages = [{"url": "https://acme.com/about", "title": None, "text": _FULL_PAGE_TEXT,
+                 "source_kind": "own_domain", "retrieval_method": "firecrawl"}]
+        original_quote = ("Acme GmbH founded in 1990, grown into a leading "
+                          "manufacturer of industrial equipment")
+        with patch("deep_dive_runner._collect_pages_via_firecrawl",
+                   return_value={"pages": pages, "pages_crawled": [], "used": True}), \
+             _mock_anthropic(json.dumps({"claims": [
+                 {"category": "hq_structure", "statement": "s", "quote": original_quote,
+                  "source_url": "https://acme.com/about"},
+             ]})):
+            result = run_deep_dive(
+                company_name="Acme", domain="acme.com", anthropic_api_key="fake",
+                firecrawl_api_key="fc-key", auto_correct_quotes=False)
+        claim = result.claims[0]
+        assert claim.quote_verification_status == "fuzzy_match"
+        assert claim.quote == original_quote
+        assert claim.original_quote == ""
+
+    def test_not_found_end_to_end_reextraction_success(self):
+        pages = [{"url": "https://acme.com/about", "title": None, "text": _FULL_PAGE_TEXT,
+                 "source_kind": "own_domain", "retrieval_method": "firecrawl"}]
+        distill_response = json.dumps({"claims": [
+            {"category": "hq_structure", "statement": "s",
+             "quote": "this text does not appear on the page at all",
+             "source_url": "https://acme.com/about"},
+        ]})
+        reextract_response = json.dumps({"corrections": {
+            "hq_structure:1": "founded in 1990",
+        }})
+        patched, client = _mock_anthropic_sequence(distill_response, reextract_response)
+        with patch("deep_dive_runner._collect_pages_via_firecrawl",
+                   return_value={"pages": pages, "pages_crawled": [], "used": True}), \
+             patched:
+            result = run_deep_dive(
+                company_name="Acme", domain="acme.com", anthropic_api_key="fake",
+                firecrawl_api_key="fc-key")
+        assert client.messages.create.call_count == 2
+        claim = result.claims[0]
+        assert claim.quote_verification_status == "verified_corrected"
+        assert claim.quote_verified is True
+        assert claim.original_quote == "this text does not appear on the page at all"
+
+
+class TestFetchPageForVerification:
+    def test_uses_firecrawl_when_key_present(self):
+        with patch("deep_dive_runner._firecrawl_scrape_page",
+                   return_value={"ok": True, "text": "page text", "status": "ok",
+                                "hard_failure": False}) as m_fc:
+            text = _fetch_page_for_verification("https://acme.com/about", "fc-key")
+        m_fc.assert_called_once_with("https://acme.com/about", "fc-key")
+        assert text == "page text"
+
+    def test_firecrawl_failure_yields_none(self):
+        with patch("deep_dive_runner._firecrawl_scrape_page",
+                   return_value={"ok": False, "text": "", "status": "404",
+                                "hard_failure": False}):
+            assert _fetch_page_for_verification("https://acme.com/about", "fc-key") is None
+
+    def test_uses_plain_fetch_without_key(self):
+        with patch("deep_dive_runner._plain_fetch", return_value="page text") as m_pf:
+            text = _fetch_page_for_verification("https://acme.com/about", "")
+        m_pf.assert_called_once_with("https://acme.com/about")
+        assert text == "page text"
+
+    def test_plain_fetch_failure_yields_none(self):
+        with patch("deep_dive_runner._plain_fetch", return_value=""):
+            assert _fetch_page_for_verification("https://acme.com/about", "") is None
