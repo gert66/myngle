@@ -201,6 +201,14 @@ def hostname_of(url) -> str:
     return host.lower().removeprefix("www.")
 
 
+def _split_semicolon_urls(value) -> list:
+    """Parse the semicolon-joined *_evidence_urls columns back into a list."""
+    text = clean_str(value)
+    if not text:
+        return []
+    return [u.strip() for u in text.split(";") if u.strip()]
+
+
 def slugify(text: str) -> str:
     slug = re.sub(r"[^a-z0-9]+", "-", str(text).lower()).strip("-")
     return slug or "company"
@@ -478,12 +486,17 @@ def build_visible_icp_signal_scores(
         or foreign_hq_detected
     )
     if add_foreign_hq_row:
+        hq_url = clean_str(row.get("hq_evidence_url"))
         visible.append({
             "label": FOREIGN_HQ_SIGNAL_LABEL,
             "score": 3,
             "evidence": build_foreign_hq_evidence_text(row),
             "signal_name": "foreign_hq",
-            "evidence_url": None,
+            "evidence_url": hq_url,
+            "evidence_urls": _split_semicolon_urls(row.get("hq_evidence_urls")) or (
+                [hq_url] if hq_url else []
+            ),
+            "evidence_title": None,
         })
 
     for sig in signal_rows:
@@ -498,6 +511,7 @@ def build_visible_icp_signal_scores(
         evidence = (clean_str(sig.get("evidence_quote"))
                     or (reason if not is_technical_reason(reason) else None)
                     or clean_str(sig.get("evidence_title")))
+        sig_url = clean_str(sig.get("evidence_url"))
         visible.append({
             "label": label,
             "score": to_float(sig.get("signal_score")),
@@ -508,7 +522,11 @@ def build_visible_icp_signal_scores(
             # appears in company_size_complexity's display label) and to
             # check evidence against its source domain.
             "signal_name": name or None,
-            "evidence_url": clean_str(sig.get("evidence_url")),
+            "evidence_url": sig_url,
+            "evidence_urls": _split_semicolon_urls(sig.get("evidence_urls")) or (
+                [sig_url] if sig_url else []
+            ),
+            "evidence_title": clean_str(sig.get("evidence_title")),
         })
     return visible
 
@@ -734,6 +752,40 @@ def _registrable_domain(host: "str | None") -> str:
     if len(parts) <= 2:
         return host
     return ".".join(parts[-2:])
+
+
+def build_evidence_sources(
+    urls: list,
+    own_domains: "set[str] | None" = None,
+    primary_title: "str | None" = None,
+    max_sources: int = 5,
+) -> list:
+    """Ordered, deduplicated ``[{"url", "domain", "title"}, ...]`` for a
+    driver/bullet's clickable references.
+
+    Hosted careers/job-platform URLs are never included (same guard used
+    everywhere else). The lead's own domain(s) sort first; relative order is
+    otherwise preserved within each group (stable sort). Capped at
+    ``max_sources``. ``primary_title`` (when known) is attached only to the
+    first URL in the input order -- titles are not reliably known for the
+    rest, so they are left ``None`` rather than guessed or duplicated.
+    Returns ``[]`` when nothing usable is left."""
+    own_domains = own_domains or set()
+    seen: set = set()
+    own_group: list = []
+    other_group: list = []
+    for i, url in enumerate(urls or []):
+        url = clean_str(url)
+        if not url or url in seen:
+            continue
+        if is_hosted_careers_platform_domain(url):
+            continue
+        seen.add(url)
+        host = hostname_of(url)
+        domain = _registrable_domain(host)
+        entry = {"url": url, "domain": domain, "title": primary_title if i == 0 else None}
+        (own_group if (domain in own_domains or host in own_domains) else other_group).append(entry)
+    return (own_group + other_group)[:max_sources]
 
 
 # Independent business-info sites worth keeping as "Third-party company
@@ -1291,6 +1343,10 @@ def build_curated_display_signals(
             "label": _CURATED_SIGNAL_LABELS.get(signal_name, _natural_label(label)),
             "strength": _strength_for_score(score),
             "evidence": result["evidence"],
+            "evidence_urls": signal.get("evidence_urls") or (
+                [signal["evidence_url"]] if signal.get("evidence_url") else []
+            ),
+            "evidence_title": signal.get("evidence_title"),
         })
     return curated
 
@@ -1308,6 +1364,7 @@ def _foreign_hq_driver(
                 "label": _natural_label(signal.get("label")),
                 "strength": "Strong",
                 "evidence": signal.get("evidence"),
+                "evidence_urls": signal.get("evidence_urls") or [],
             }
     return None
 
@@ -1404,6 +1461,65 @@ def build_curated_what_is_hot(
     return bullets[:max_bullets]
 
 
+def build_curated_what_is_hot_items(
+    foreign_hq_detected: bool,
+    parent_hq_country: "str | None",
+    industry: "str | None",
+    employee_range: "str | None",
+    display_size_category_app: "str | None",
+    curated_signals: list[dict],
+    own_domains: "set[str] | None" = None,
+    hq_evidence_urls: "list | None" = None,
+    max_bullets: int = 5,
+) -> list[dict]:
+    """``[{"text", "evidence_sources"}, ...]`` parallel to
+    ``build_curated_what_is_hot`` -- every ``text`` value is byte-identical
+    to the corresponding ``build_curated_what_is_hot`` bullet (same
+    construction order, same truncation), so the two never disagree.
+    Deliberately a parallel implementation rather than a shared refactor:
+    ``build_curated_what_is_hot`` is left untouched to keep this addition
+    zero-risk for its existing (well-tested) bullet text. ``evidence_sources``
+    is omitted on a bullet with nothing to link (the industry/company-size
+    facts have no source URL by construction)."""
+    items: list[dict] = []
+
+    if foreign_hq_detected:
+        text = (
+            f"Foreign ownership or group structure: headquartered in {parent_hq_country}."
+            if parent_hq_country else "Foreign ownership or group structure confirmed."
+        )
+        item = {"text": text}
+        sources = build_evidence_sources(hq_evidence_urls or [], own_domains=own_domains)
+        if sources:
+            item["evidence_sources"] = sources
+        items.append(item)
+
+    for signal in curated_signals:
+        if len(items) >= max_bullets:
+            break
+        text = f"{signal['label']}: {signal['evidence']}"
+        if any(existing["text"] == text for existing in items):
+            continue
+        item = {"text": text}
+        sources = build_evidence_sources(
+            signal.get("evidence_urls") or [], own_domains=own_domains,
+            primary_title=signal.get("evidence_title"),
+        )
+        if sources:
+            item["evidence_sources"] = sources
+        items.append(item)
+
+    if len(items) < max_bullets and industry and industry != "Unknown":
+        items.append({"text": f"Industry: {industry}."})
+
+    if len(items) < max_bullets:
+        size_fact = _format_company_size_fact(employee_range, display_size_category_app)
+        if size_fact:
+            items.append({"text": f"Company size: {size_fact}."})
+
+    return items[:max_bullets]
+
+
 def build_fixed_commercial_fit_drivers(
     visible_signals: list[dict],
     foreign_hq_detected: bool,
@@ -1425,14 +1541,23 @@ def build_fixed_commercial_fit_drivers(
     }
     hq_driver = _foreign_hq_driver(visible_signals, foreign_hq_detected)
 
+    def _attach_evidence_sources(driver: dict, urls: list, title: "str | None") -> None:
+        sources = build_evidence_sources(urls, own_domains=own_domains, primary_title=title)
+        if sources:
+            driver["evidence_source_url"] = sources[0]["url"]
+            driver["evidence_source_domain"] = sources[0]["domain"]
+            driver["evidence_sources"] = sources
+
     drivers = []
     for signal_name, driver_id, label in _FIXED_DRIVER_SIGNAL_ORDER:
         if signal_name == "foreign_hq":
             if hq_driver:
-                drivers.append({
+                driver = {
                     "id": driver_id, "label": label, "strength": "Strong",
                     "evidence": hq_driver["evidence"] or "", "note": "",
-                })
+                }
+                _attach_evidence_sources(driver, hq_driver.get("evidence_urls") or [], None)
+                drivers.append(driver)
             else:
                 drivers.append({
                     "id": driver_id, "label": label, "strength": "Not evidenced",
@@ -1451,11 +1576,16 @@ def build_fixed_commercial_fit_drivers(
 
         result = classify_curated_evidence(signal, employee_range, own_domains, company_name)
         if result["evidence"]:
-            drivers.append({
+            driver = {
                 "id": driver_id, "label": label,
                 "strength": _strength_for_score(score),
                 "evidence": result["evidence"], "note": "",
-            })
+            }
+            evidence_urls = signal.get("evidence_urls") or (
+                [signal["evidence_url"]] if signal.get("evidence_url") else []
+            )
+            _attach_evidence_sources(driver, evidence_urls, signal.get("evidence_title"))
+            drivers.append(driver)
         elif result["rejected_reason"]:
             drivers.append({
                 "id": driver_id, "label": label, "strength": "Rejected",
@@ -2098,6 +2228,10 @@ def _build_detail_record(
             foreign_hq_detected, parent_hq_country, employee_range, visible_signals,
             own_domains, company_name,
         )
+        # Italy path is frozen -- what_is_hot_items (the new per-bullet
+        # evidence_sources array) is a non-Italy addition only; omitted from
+        # the Italy ui_payload entirely rather than approximated.
+        what_is_hot_items = None
         commercial_fit_drivers = build_commercial_fit_drivers(
             visible_signals, employee_range, own_domains, company_name)
         cold_caller_summary = detail["cold_caller_summary_app"]
@@ -2137,6 +2271,13 @@ def _build_detail_record(
             foreign_hq_detected, parent_hq_country, industry_display,
             employee_range, list_item.get("display_size_category_app"),
             curated_signals,
+        )
+        _hq_driver_for_items = _foreign_hq_driver(visible_signals, foreign_hq_detected)
+        what_is_hot_items = build_curated_what_is_hot_items(
+            foreign_hq_detected, parent_hq_country, industry_display,
+            employee_range, list_item.get("display_size_category_app"),
+            curated_signals, own_domains_display,
+            hq_evidence_urls=(_hq_driver_for_items or {}).get("evidence_urls"),
         )
         commercial_fit_drivers = build_fixed_commercial_fit_drivers(
             visible_signals, foreign_hq_detected, parent_company, parent_hq_country,
@@ -2188,6 +2329,8 @@ def _build_detail_record(
         "caution": build_ui_payload_caution(detail["quality_flags"], detail["caution_app"]),
         "source_urls": source_urls_ui_payload,
     }
+    if what_is_hot_items is not None:
+        detail["ui_payload"]["what_is_hot_items"] = what_is_hot_items
     return detail
 
 
