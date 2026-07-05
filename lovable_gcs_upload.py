@@ -31,6 +31,10 @@ _COUNTRY_FOLDER_SLUGS = {
     "uruguay": "uruguay",
     "new zealand": "new-zealand",
     "netherlands": "netherlands",
+    "japan": "japan",
+    "south korea": "south-korea",
+    "switzerland": "switzerland",
+    "test": "test",
 }
 
 
@@ -152,6 +156,19 @@ def gcs_archive_path(bucket: str, country_folder: str, run_folder: str, filename
 def public_url(bucket: str, country_folder: str, filename: str) -> str:
     """Public HTTPS URL for a file in the "current" folder."""
     return f"https://storage.googleapis.com/{bucket}/{country_folder}/current/{filename}"
+
+
+COUNTRIES_INDEX_FILENAME = "countries.index.json"
+
+
+def gcs_manifest_path(bucket: str, filename: str = COUNTRIES_INDEX_FILENAME) -> str:
+    """``gs://`` destination for the root-level countries manifest."""
+    return f"gs://{bucket}/{filename}"
+
+
+def public_manifest_url(bucket: str, filename: str = COUNTRIES_INDEX_FILENAME) -> str:
+    """Public HTTPS URL for the root-level countries manifest."""
+    return f"https://storage.googleapis.com/{bucket}/{filename}"
 
 
 def resolve_gcs_upload_tool() -> Optional[list[str]]:

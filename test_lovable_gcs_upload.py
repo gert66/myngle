@@ -9,6 +9,7 @@ from datetime import datetime
 import pytest
 
 from lovable_gcs_upload import (
+    COUNTRIES_INDEX_FILENAME,
     DEFAULT_GCS_BUCKET,
     build_flat_upload_plan,
     check_gcloud_available,
@@ -18,7 +19,9 @@ from lovable_gcs_upload import (
     gcs_current_path,
     gcs_archive_path,
     gcs_flat_path,
+    gcs_manifest_path,
     normalize_gcs_prefix,
+    public_manifest_url,
     public_url,
     public_url_flat,
     resolve_gcs_upload_tool,
@@ -39,6 +42,12 @@ class TestCountryFolderSlug:
         assert country_folder_slug("Uruguay") == "uruguay"
         assert country_folder_slug("New Zealand") == "new-zealand"
         assert country_folder_slug("Netherlands") == "netherlands"
+
+    def test_new_manifest_countries(self):
+        assert country_folder_slug("Japan") == "japan"
+        assert country_folder_slug("South Korea") == "south-korea"
+        assert country_folder_slug("Switzerland") == "switzerland"
+        assert country_folder_slug("Test") == "test"
 
     def test_case_and_whitespace_insensitive(self):
         assert country_folder_slug("  new   zealand  ") == "new-zealand"
@@ -79,6 +88,21 @@ class TestDestinationPathBuilders:
         assert public_url(DEFAULT_GCS_BUCKET, "italy", "export_manifest.json") == (
             f"https://storage.googleapis.com/{DEFAULT_GCS_BUCKET}/italy/"
             "current/export_manifest.json")
+
+
+class TestManifestPathBuilders:
+    def test_gcs_manifest_path_defaults_to_countries_index_filename(self):
+        assert gcs_manifest_path("bucket-a") == "gs://bucket-a/countries.index.json"
+        assert gcs_manifest_path("bucket-a") == f"gs://bucket-a/{COUNTRIES_INDEX_FILENAME}"
+
+    def test_public_manifest_url_defaults_to_countries_index_filename(self):
+        assert public_manifest_url("bucket-a") == \
+            "https://storage.googleapis.com/bucket-a/countries.index.json"
+
+    def test_manifest_helpers_accept_explicit_filename(self):
+        assert gcs_manifest_path("bucket-a", "other.json") == "gs://bucket-a/other.json"
+        assert public_manifest_url("bucket-a", "other.json") == \
+            "https://storage.googleapis.com/bucket-a/other.json"
 
 
 class TestUploadCommandBuilder:

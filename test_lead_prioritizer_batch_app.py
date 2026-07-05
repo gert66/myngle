@@ -483,8 +483,10 @@ class TestCountryListAlphabeticalAndComplete:
             assert country in SUPPORTED_DEFAULT_INPUT_COUNTRIES
 
     def test_exact_list(self):
-        assert SUPPORTED_DEFAULT_INPUT_COUNTRIES == \
-            ["Australia", "Brazil", "Italy", "Netherlands", "New Zealand", "Uruguay"]
+        assert SUPPORTED_DEFAULT_INPUT_COUNTRIES == [
+            "Australia", "Brazil", "Italy", "Japan", "Netherlands", "New Zealand",
+            "South Korea", "Switzerland", "Test", "Uruguay",
+        ]
 
     def test_placeholder_is_first_in_dropdown_options(self):
         options = [DEFAULT_COUNTRY_PLACEHOLDER] + SUPPORTED_DEFAULT_INPUT_COUNTRIES
