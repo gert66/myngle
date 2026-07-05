@@ -196,7 +196,7 @@ _RESULT_FLAT_FIELDS = [
     # HQ
     "hq_detected_country", "hq_detected_city", "hq_confidence",
     "foreign_hq_simple", "needs_manual_review", "hq_reason",
-    "hq_evidence_url", "hq_evidence_quote", "hq_structure_type",
+    "hq_evidence_url", "hq_evidence_urls", "hq_evidence_quote", "hq_structure_type",
     "sig_foreign_hq_score_for_next_scoring",
     "domain_root", "query_used", "parser_source", "domain_is_hosted_platform",
     # C4 positive-score safety audit
@@ -216,6 +216,9 @@ _RESULT_FLAT_FIELDS = [
     "international_profile_evidence_url", "onboarding_training_need_evidence_url",
     "company_size_complexity_evidence_url", "icp_keyword_match_evidence_url",
     "employer_branding_evidence_url",
+    "international_profile_evidence_urls", "onboarding_training_need_evidence_urls",
+    "company_size_complexity_evidence_urls", "icp_keyword_match_evidence_urls",
+    "employer_branding_evidence_urls",
     "international_profile_evidence_quote", "onboarding_training_need_evidence_quote",
     "company_size_complexity_evidence_quote", "icp_keyword_match_evidence_quote",
     "employer_branding_evidence_quote",
@@ -275,6 +278,13 @@ def flatten_result_for_excel(
 
     for field in _RESULT_FLAT_FIELDS:
         out[field] = getattr(result, field, None)
+    # hq_evidence_urls is the one _RESULT_FLAT_FIELDS entry holding a raw
+    # list (mirrors LeadSignal.evidence_urls) -- join it for a clean Excel
+    # cell, same semicolon-joined convention as the per-signal *_evidence_urls
+    # columns above.
+    out["hq_evidence_urls"] = (
+        "; ".join(out["hq_evidence_urls"]) if out.get("hq_evidence_urls") else None
+    )
 
     out["evidence_count"] = len(result.evidence_items or [])
     out["signal_count"] = len(result.signals or [])
@@ -368,6 +378,7 @@ def flatten_signals_for_excel(result, source_index) -> list[dict]:
             "signal_confidence": sig.signal_confidence,
             "signal_reason": sig.signal_reason,
             "evidence_url": sig.evidence_url,
+            "evidence_urls": "; ".join(sig.evidence_urls) if sig.evidence_urls else None,
             "evidence_quote": sig.evidence_quote,
             "evidence_title": sig.evidence_title,
             "query_used": sig.query_used,

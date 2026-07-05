@@ -225,30 +225,35 @@ _RESULT_FIELD_MAP: dict[str, dict[str, str]] = {
         "score": "sig_international_profile_score",
         "reason": "international_profile_reason",
         "evidence_url": "international_profile_evidence_url",
+        "evidence_urls": "international_profile_evidence_urls",
         "evidence_quote": "international_profile_evidence_quote",
     },
     "onboarding_training_need": {
         "score": "sig_onboarding_training_need_score",
         "reason": "onboarding_training_need_reason",
         "evidence_url": "onboarding_training_need_evidence_url",
+        "evidence_urls": "onboarding_training_need_evidence_urls",
         "evidence_quote": "onboarding_training_need_evidence_quote",
     },
     "company_size_complexity": {
         "score": "sig_company_size_complexity_score",
         "reason": "company_size_complexity_reason",
         "evidence_url": "company_size_complexity_evidence_url",
+        "evidence_urls": "company_size_complexity_evidence_urls",
         "evidence_quote": "company_size_complexity_evidence_quote",
     },
     "icp_keyword_match": {
         "score": "sig_icp_keyword_match_score",
         "reason": "icp_keyword_match_reason",
         "evidence_url": "icp_keyword_match_evidence_url",
+        "evidence_urls": "icp_keyword_match_evidence_urls",
         "evidence_quote": "icp_keyword_match_evidence_quote",
     },
     "employer_branding": {
         "score": "sig_employer_branding_score",
         "reason": "employer_branding_reason",
         "evidence_url": "employer_branding_evidence_url",
+        "evidence_urls": "employer_branding_evidence_urls",
         "evidence_quote": "employer_branding_evidence_quote",
     },
 }
@@ -272,6 +277,7 @@ def summarize_non_hq_signals_for_result(signals: list[LeadSignal]) -> dict:
         out[fields["score"]] = sig.signal_score
         out[fields["reason"]] = sig.signal_reason
         out[fields["evidence_url"]] = sig.evidence_url
+        out[fields["evidence_urls"]] = "; ".join(sig.evidence_urls) if sig.evidence_urls else None
         out[fields["evidence_quote"]] = sig.evidence_quote
 
     return out

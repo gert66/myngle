@@ -192,6 +192,14 @@ class LeadPrioritizationResult:
     company_size_complexity_evidence_url: Optional[str] = None
     icp_keyword_match_evidence_url: Optional[str] = None
     employer_branding_evidence_url: Optional[str] = None
+    # ALL usable evidence URLs per signal, semicolon-joined (same guards as
+    # the single evidence_url above; that field is unchanged and always
+    # equals the first entry here).
+    international_profile_evidence_urls: Optional[str] = None
+    onboarding_training_need_evidence_urls: Optional[str] = None
+    company_size_complexity_evidence_urls: Optional[str] = None
+    icp_keyword_match_evidence_urls: Optional[str] = None
+    employer_branding_evidence_urls: Optional[str] = None
     # Evidence quotes
     international_profile_evidence_quote: Optional[str] = None
     onboarding_training_need_evidence_quote: Optional[str] = None
