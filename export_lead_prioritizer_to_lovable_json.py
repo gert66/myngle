@@ -36,6 +36,10 @@ from urllib.parse import urlparse
 
 import pandas as pd
 
+from hq_simple_detector import (
+    _HOSTED_CAREERS_PLATFORM_DOMAINS,
+    is_hosted_careers_platform_domain,
+)
 from lovable_content_localization import (
     localize_caller_angle_app,
     localize_caller_angle_app_it,
@@ -741,21 +745,11 @@ _KNOWN_THIRD_PARTY_DIRECTORY_DOMAINS = frozenset({
 # never sector/parent-company evidence, even when the row's own `domain`
 # column happens to be a Workday-hosted careers URL (e.g.
 # "shimano.wd3.myworkdayjobs.com"). Non-Italy display use only.
-_HOSTED_CAREERS_PLATFORM_DOMAINS = frozenset({
-    "myworkdayjobs.com", "workdayjobs.com", "greenhouse.io", "lever.co",
-    "smartrecruiters.com", "bamboohr.com", "workable.com", "taleo.net",
-    "icims.com", "successfactors.com",
-})
-
-
-def is_hosted_careers_platform_domain(value: "str | None") -> bool:
-    """True when a URL or bare domain resolves to a known hosted careers/job
-    platform (Workday, Greenhouse, Lever, ...) rather than the lead's own
-    site — display-only, never used for HQ/C4/C5 or scoring."""
-    if not value:
-        return False
-    host = hostname_of(value)
-    return bool(host) and _registrable_domain(host) in _HOSTED_CAREERS_PLATFORM_DOMAINS
+#
+# ``_HOSTED_CAREERS_PLATFORM_DOMAINS`` and ``is_hosted_careers_platform_domain``
+# are defined once in ``hq_simple_detector`` (imported above) and reused here
+# so the export display guards and the upstream HQ/non-HQ query building can
+# never drift apart.
 
 
 def _company_name_tokens(company_name: "str | None") -> list[str]:
@@ -1706,7 +1700,7 @@ _CONSUMED_COLUMNS = {
     "foreign_hq_signal_used_in_app", "competitor_signal_used_in_app",
     "competitor_signal_suppressed",
     "foreign_hq_country_app", "foreign_hq_city_app",
-    "domain_quality",
+    "domain_quality", "domain_is_hosted_platform",
 }
 
 
@@ -1949,6 +1943,7 @@ def _build_detail_record(
             run_metadata),
         "quality_flags": build_quality_flags(row),
         "domain_quality": clean_str(row.get("domain_quality")),
+        "domain_is_hosted_platform": to_bool(row.get("domain_is_hosted_platform")),
         "debug": {
             "lead_prioritizer_row": _build_debug_row(row, warnings),
             "evidence_rows_count": len(evidence_rows),

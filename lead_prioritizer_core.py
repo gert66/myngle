@@ -10,7 +10,7 @@ Implements AI-first HQ detection for a single lead:
 from __future__ import annotations
 
 from lead_output_schema import LeadInput, LeadPrioritizationResult, HQDetectionResult
-from hq_simple_detector import build_simple_hq_query
+from hq_simple_detector import build_simple_hq_query, is_hosted_careers_platform_domain
 from lead_hq_ai_interpreter import call_serper_for_hq, interpret_hq_with_ai
 from lead_non_hq_enrichment import collect_non_hq_enrichment_evidence
 from lead_non_hq_signal_extractor import (
@@ -112,6 +112,7 @@ def prioritize_single_lead(
     effective_country = (input_row.input_country or "").strip() or default_input_country
 
     domain_root, query = build_simple_hq_query(input_row.company_name, input_row.domain)
+    domain_is_hosted_platform = is_hosted_careers_platform_domain(input_row.domain)
 
     serper_payload = call_serper_for_hq(
         domain_root=domain_root,
@@ -195,6 +196,7 @@ def prioritize_single_lead(
         domain_root=hq.domain_root or domain_root,
         query_used=hq.query_used or query,
         parser_source=hq.parser_source,
+        domain_is_hosted_platform=domain_is_hosted_platform,
         # C4 positive-score safety audit
         hq_query_risk_flag=hq.hq_query_risk_flag,
         hq_evidence_domain_match=hq.hq_evidence_domain_match,

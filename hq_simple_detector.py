@@ -126,12 +126,101 @@ _PSEUDO_TLDS = frozenset({
 })
 
 
+# ---------------------------------------------------------------------------
+# Hosted careers/job platforms — centralized here so HQ query building,
+# non-HQ enrichment query building, and the Lovable exporter's display guards
+# all share exactly one list (no duplication). A hosted-platform domain
+# (Workday, Greenhouse, Lever, …) is never a company's own site: it must never
+# become the HQ/non-HQ query root, and downstream it must never be treated as
+# the lead's own website, sector, or parent-company evidence.
+# ---------------------------------------------------------------------------
+
+_HOSTED_CAREERS_PLATFORM_DOMAINS = frozenset({
+    "myworkdayjobs.com", "workdayjobs.com", "greenhouse.io", "lever.co",
+    "smartrecruiters.com", "bamboohr.com", "workable.com", "taleo.net",
+    "icims.com", "successfactors.com",
+})
+
+# Generic platform-side subdomain/path segments that are never the tenant
+# label (e.g. "boards.greenhouse.io", "careers.smartrecruiters.com").
+_GENERIC_HOSTED_PLATFORM_LABELS = frozenset({
+    "www", "careers", "jobs", "boards", "apply", "recruiting", "talent",
+})
+
+
+def _registrable_domain(host: str) -> str:
+    """Last two dot-separated labels of a host (simplified — no public-suffix-
+    list handling; mirrors the exporter's equivalent helper)."""
+    host = (host or "").lower()
+    parts = [p for p in host.split(".") if p]
+    if len(parts) <= 2:
+        return host
+    return ".".join(parts[-2:])
+
+
+def _url_host_and_path(value: str) -> tuple[str, str]:
+    """Bare lowercase host (no "www.") and path from a URL or bare domain."""
+    s = (value or "").strip()
+    if not s:
+        return "", ""
+    parsed = _urlparse(s if "://" in s else f"https://{s}")
+    host = re.sub(r"^www\.", "", parsed.netloc.lower())
+    return host, (parsed.path or "")
+
+
+def is_hosted_careers_platform_domain(value: Optional[str]) -> bool:
+    """True when a URL or bare domain resolves to a known hosted careers/job
+    platform (Workday, Greenhouse, Lever, …) rather than a company's own site.
+
+    >>> is_hosted_careers_platform_domain("shimano.wd3.myworkdayjobs.com")
+    True
+    >>> is_hosted_careers_platform_domain("ibm.com")
+    False
+    """
+    host, _ = _url_host_and_path(value or "")
+    return bool(host) and _registrable_domain(host) in _HOSTED_CAREERS_PLATFORM_DOMAINS
+
+
+def _hosted_platform_tenant(value: str) -> str:
+    """Best-effort tenant label for a hosted careers-platform domain/URL.
+
+    Subdomain-style platforms (Workday, SuccessFactors, BambooHR, Workable,
+    Taleo, iCIMS — ``"{tenant}.<platform-subdomain>.<platform>.<tld>"``) yield
+    the outermost subdomain label. Path-style platforms (Greenhouse, Lever,
+    SmartRecruiters — ``"boards.greenhouse.io/{tenant}"``,
+    ``"jobs.lever.co/{tenant}"``) yield the first path segment. Returns ``""``
+    when no reliable tenant label was found, so the caller falls back to the
+    company-name root.
+    """
+    host, path = _url_host_and_path(value or "")
+    if not host:
+        return ""
+
+    labels = [p for p in host.split(".") if p]
+    subdomain_labels = labels[:-2] if len(labels) > 2 else []
+    if subdomain_labels and subdomain_labels[0] not in _GENERIC_HOSTED_PLATFORM_LABELS:
+        return subdomain_labels[0]
+
+    path_parts = [p for p in path.split("/") if p]
+    if path_parts and path_parts[0].lower() not in _GENERIC_HOSTED_PLATFORM_LABELS:
+        return path_parts[0].lower()
+
+    return ""
+
+
 def derive_domain_root(domain: str) -> str:
     """Return the registrable label of a domain (no TLD, no subdomains).
 
     Handles common messy inputs without crashing on blanks or malformed values.
     Recognises pseudo-TLDs (co.uk, com.au, co.jp, …) so the registrable label
     is always one level above the effective TLD.
+
+    A hosted careers/job-platform domain (Workday, Greenhouse, Lever, …) is
+    never its own root: the platform label (e.g. "myworkdayjobs") would
+    contaminate HQ detection and non-HQ queries with the platform vendor
+    instead of the actual company. The tenant label is used instead when it
+    can be reliably determined (see ``_hosted_platform_tenant``); otherwise an
+    empty string is returned so the caller falls back to the company-name root.
 
     >>> derive_domain_root("ibm.com")
     'ibm'
@@ -151,11 +240,18 @@ def derive_domain_root(domain: str) -> str:
     'example'
     >>> derive_domain_root("macromercado.com.uy")
     'macromercado'
+    >>> derive_domain_root("shimano.wd3.myworkdayjobs.com")
+    'shimano'
+    >>> derive_domain_root("https://shimano.wd3.myworkdayjobs.com/careers")
+    'shimano'
     >>> derive_domain_root("")
     ''
     """
     if not domain or not domain.strip():
         return ""
+
+    if is_hosted_careers_platform_domain(domain):
+        return _hosted_platform_tenant(domain)
 
     d = domain.strip()
 

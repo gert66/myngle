@@ -133,6 +133,11 @@ class LeadPrioritizationResult:
     domain_root: Optional[str] = None
     query_used: Optional[str] = None
     parser_source: Optional[str] = None
+    # True when the input `domain` resolves to a hosted careers/job platform
+    # (Workday, Greenhouse, Lever, ...) rather than the company's own site.
+    # The original `domain` value is never overwritten; this only flags that
+    # it was not treated as the lead's own website for HQ/query purposes.
+    domain_is_hosted_platform: Optional[bool] = None
     # C4 positive-score safety audit (optional, backwards compatible)
     hq_query_risk_flag: Optional[str] = None
     hq_evidence_domain_match: Optional[str] = None

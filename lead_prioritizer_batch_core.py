@@ -171,7 +171,7 @@ _RESULT_FLAT_FIELDS = [
     "foreign_hq_simple", "needs_manual_review", "hq_reason",
     "hq_evidence_url", "hq_evidence_quote", "hq_structure_type",
     "sig_foreign_hq_score_for_next_scoring",
-    "domain_root", "query_used", "parser_source",
+    "domain_root", "query_used", "parser_source", "domain_is_hosted_platform",
     # C4 positive-score safety audit
     "hq_query_risk_flag", "hq_evidence_domain_match",
     "hq_evidence_domain_mismatch_warning",
