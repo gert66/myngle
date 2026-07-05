@@ -249,6 +249,7 @@ def prioritize_single_lead(
         needs_manual_review=hq.needs_manual_review,
         hq_reason=hq.hq_reason,
         hq_evidence_url=hq.hq_evidence_url,
+        hq_evidence_urls=hq.hq_evidence_urls,
         hq_evidence_quote=hq.hq_evidence_quote,
         hq_structure_type=hq.hq_structure_type,
         # Scoring

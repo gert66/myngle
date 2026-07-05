@@ -159,6 +159,7 @@ Classify and return JSON with these exact keys:
 - "parent_hq_country": country of the ultimate parent HQ (empty string if unknown)
 - "parent_hq_city": city of the ultimate parent HQ (empty string if unknown)
 - "evidence_url": best source URL from the results (empty string if none)
+- "evidence_urls": ALL result URLs (from the list above) that support your answer, best first (empty list if none)
 - "evidence_quote": short verbatim quote supporting your answer (max 200 chars, empty if none)
 - "reason": one short sentence explaining your classification
 
@@ -206,6 +207,32 @@ def _build_user_message(
         ab_text=ab_text,
         organic_text=organic_text,
     )
+
+
+def _known_urls_from_serper_payload(serper_payload: dict) -> list:
+    """URLs actually present in the supplied Serper payload, in the same
+    order they were shown to the model (KG, answer box, then organic) — used
+    to validate ``evidence_urls`` so the AI can never invent a source URL
+    that was never in the material it was given."""
+    urls: list[str] = []
+
+    def _add(url) -> None:
+        url = (url or "").strip()
+        if url and url not in urls:
+            urls.append(url)
+
+    kg: dict = serper_payload.get("knowledgeGraph") or {}
+    _add(kg.get("website"))
+    _add(kg.get("descriptionLink"))
+
+    ab: dict = serper_payload.get("answerBox") or {}
+    _add(ab.get("link"))
+
+    for item in (serper_payload.get("organic") or [])[:5]:
+        if isinstance(item, dict):
+            _add(item.get("link"))
+
+    return urls
 
 
 def _extract_json_object(text: str) -> str:
@@ -608,6 +635,20 @@ def interpret_hq_with_ai(
     ev_quote   = (ai_data.get("evidence_quote") or "").strip()[:200]
     ai_reason  = (ai_data.get("reason") or "").strip()
 
+    # Mechanical validation: only URLs actually present in the supplied
+    # Serper payload are ever trusted (never an AI-invented URL). ev_url
+    # (the existing single-URL field) is kept first when it is itself valid.
+    _known_urls = _known_urls_from_serper_payload(serper_payload)
+    _raw_ev_urls = ai_data.get("evidence_urls")
+    ev_urls: list[str] = []
+    if ev_url and ev_url in _known_urls:
+        ev_urls.append(ev_url)
+    if isinstance(_raw_ev_urls, list):
+        for u in _raw_ev_urls:
+            u = str(u or "").strip()
+            if u and u in _known_urls and u not in ev_urls:
+                ev_urls.append(u)
+
     ai_fields = dict(
         ai_hq_classification=clf,
         ai_hq_confidence=confidence,
@@ -618,6 +659,7 @@ def interpret_hq_with_ai(
         hq_detected_city=ai_city or None,
         hq_confidence=confidence or None,
         hq_evidence_url=ev_url or None,
+        hq_evidence_urls=ev_urls,
         hq_evidence_quote=ev_quote or None,
         parser_source="ai_first",
         ai_hq_raw_json=(raw_text or "")[:2000],

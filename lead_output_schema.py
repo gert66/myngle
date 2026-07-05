@@ -22,6 +22,11 @@ class HQDetectionResult:
     needs_manual_review: bool = False
     hq_reason: Optional[str] = None
     hq_evidence_url: Optional[str] = None
+    # ALL usable HQ evidence URLs (deduplicated, ordered, mechanically
+    # validated against the Serper payload actually supplied to the AI —
+    # never an invented URL); hq_evidence_url is unchanged and always
+    # equals hq_evidence_urls[0] when non-empty.
+    hq_evidence_urls: list = field(default_factory=list)
     hq_evidence_quote: Optional[str] = None
     # Parser provenance
     domain_root: Optional[str] = None
@@ -91,6 +96,10 @@ class LeadSignal:
     query_used: Optional[str] = None
     parser_source: Optional[str] = None
     needs_manual_review: bool = False
+    # ALL usable evidence URLs backing this signal (deduplicated, ordered);
+    # evidence_url above is unchanged and always equals evidence_urls[0]
+    # when non-empty. See lead_non_hq_signal_extractor.py.
+    evidence_urls: list = field(default_factory=list)
 
 
 @dataclass
@@ -121,6 +130,7 @@ class LeadPrioritizationResult:
     needs_manual_review: bool = False
     hq_reason: Optional[str] = None
     hq_evidence_url: Optional[str] = None
+    hq_evidence_urls: list = field(default_factory=list)
     hq_evidence_quote: Optional[str] = None
 
     # HQ structure type
