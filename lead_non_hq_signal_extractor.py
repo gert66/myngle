@@ -159,6 +159,17 @@ def extract_non_hq_signals(evidence_items: list[LeadEvidence]) -> list[LeadSigna
         first_url = _first([e.source_url for e in usable]) or _first([e.source_url for e in group])
         has_url = first_url is not None
 
+        # ALL usable evidence URLs (deduplicated, ordered) -- never a URL
+        # from excluded evidence (hosted-platform / external-training),
+        # even when evidence_url above falls back to one for audit purposes
+        # because usable is entirely empty. evidence_urls[0] == evidence_url
+        # whenever usable has at least one URL.
+        evidence_urls: list[str] = []
+        for e in usable:
+            url = (e.source_url or "").strip()
+            if url and url not in evidence_urls:
+                evidence_urls.append(url)
+
         if score == 2.0 and has_url:
             confidence = "High"
         elif score == 1.0 and has_url:
@@ -195,6 +206,7 @@ def extract_non_hq_signals(evidence_items: list[LeadEvidence]) -> list[LeadSigna
             signal_confidence=confidence,
             signal_reason=reason,
             evidence_url=first_url,
+            evidence_urls=evidence_urls,
             evidence_quote=(_first([e.source_snippet for e in usable])
                             or _first([e.source_snippet for e in group])),
             evidence_title=(_first([e.source_title for e in usable])
