@@ -1124,11 +1124,14 @@ def test_weak_generic_evidence_not_promoted_into_caller_facing_text(tmp_path):
     assert "Signals point to" not in joined_hot
     assert "5 employees" not in joined_hot
 
+    # Both signals belong to what_is_hot's summary-line topics (international,
+    # learning & development); with no curated evidence behind either one,
+    # they must be omitted from commercial_fit_drivers entirely rather than
+    # shown as a weak/evidence-less "Absent" row — that's what made the old
+    # BauWatch-style output inconsistent with what_is_hot.
     drivers_by_label = {d["label"]: d for d in ui["commercial_fit_drivers"]}
-    assert "evidence" not in drivers_by_label["International business context"]
-    assert "evidence" not in drivers_by_label["learning and development or onboarding needs"]
-    # Label and strength are still kept even when evidence is dropped.
-    assert drivers_by_label["International business context"]["strength"] == "Strong"
+    assert "International business context" not in drivers_by_label
+    assert "learning and development or onboarding needs" not in drivers_by_label
 
 
 # ---------------------------------------------------------------------------
@@ -1172,8 +1175,10 @@ def test_raw_multiline_location_dump_not_promoted_to_what_is_hot(tmp_path):
     joined_hot = " ".join(detail["ui_payload"]["what_is_hot"])
     assert "___" not in joined_hot
     assert "DORC locations" not in joined_hot
+    # No curated evidence survives the raw-dump filter, so the bucketed
+    # driver is omitted entirely rather than shown as an evidence-less row.
     drivers_by_label = {d["label"]: d for d in detail["ui_payload"]["commercial_fit_drivers"]}
-    assert "evidence" not in drivers_by_label["International business context"]
+    assert "International business context" not in drivers_by_label
 
 
 def test_unrelated_domain_excluded_from_source_urls_and_evidence(tmp_path):
@@ -1198,8 +1203,10 @@ def test_unrelated_domain_excluded_from_source_urls_and_evidence(tmp_path):
     joined_hot = " ".join(ui["what_is_hot"])
     assert "Back by popular demand" not in joined_hot
     assert "accor" not in joined_hot.lower()
+    # No curated evidence survives (event fragment + unrelated domain), so
+    # the bucketed driver is omitted entirely, not shown as an empty row.
     drivers_by_label = {d["label"]: d for d in ui["commercial_fit_drivers"]}
-    assert "evidence" not in drivers_by_label["learning and development or onboarding needs"]
+    assert "learning and development or onboarding needs" not in drivers_by_label
 
 
 def test_caution_warning_deduplicated_into_one_sentence(tmp_path):
@@ -1292,6 +1299,181 @@ def test_no_visible_ui_payload_field_contains_shorthand_or_raw_tokens(tmp_path):
     assert "___" not in visible_text
     for token in ("sig_", "ti_", "c4_", "c5_"):
         assert token not in visible_text
+
+
+# ---------------------------------------------------------------------------
+# BauWatch-style regression tests — topical-relevance gate. Being domain-safe
+# and not-generic-filler is not enough: generic homepage/product sales copy
+# must not be promoted as international/L&D evidence just because it was
+# tagged under that signal_name, and what_is_hot must never claim a topic
+# commercial_fit_drivers can't back up with real evidence (and vice versa).
+# ---------------------------------------------------------------------------
+
+_BAUWATCH_HOMEPAGE_COPY = (
+    "Protect your site with construction site monitoring, live cameras and "
+    "24/7 alerts for theft and vandalism prevention."
+)
+
+
+def _bauwatch_row(**overrides) -> dict:
+    row = dict(
+        source_index=1,
+        company_name="BauWatch",
+        domain="bauwatch.com",
+        website_url="https://www.bauwatch.com",
+        input_country="Netherlands",
+        enrichment_skipped=False,
+        sig_foreign_hq_score_for_next_scoring=3,
+        c5_parent_company="BauWatch Holding",
+        c5_parent_hq_country="Germany",
+        commercial_fit_score_app=55,
+        commercial_tier_app="B",
+        industry="Security services",
+        employee_range="201-500",
+    )
+    row.update(overrides)
+    return row
+
+
+def test_generic_homepage_copy_not_accepted_as_ld_evidence(tmp_path):
+    signals = [
+        {"source_index": 1, "signal_name": "onboarding_training_need", "signal_score": 2,
+         "evidence_quote": _BAUWATCH_HOMEPAGE_COPY},
+    ]
+    _, out_dir = run_export(tmp_path, [_bauwatch_row()], signals=signals,
+                            export_country="Netherlands")
+
+    detail = detail_for(out_dir, "BauWatch")
+    ui = detail["ui_payload"]
+
+    joined_hot = " ".join(ui["what_is_hot"])
+    assert "construction site monitoring" not in joined_hot
+    drivers_by_label = {d["label"]: d for d in ui["commercial_fit_drivers"]}
+    assert "learning and development or onboarding needs" not in drivers_by_label
+
+
+def test_generic_homepage_copy_not_accepted_as_international_evidence(tmp_path):
+    signals = [
+        {"source_index": 1, "signal_name": "international_profile", "signal_score": 2,
+         "evidence_quote": _BAUWATCH_HOMEPAGE_COPY},
+    ]
+    _, out_dir = run_export(tmp_path, [_bauwatch_row()], signals=signals,
+                            export_country="Netherlands")
+
+    detail = detail_for(out_dir, "BauWatch")
+    ui = detail["ui_payload"]
+
+    joined_hot = " ".join(ui["what_is_hot"])
+    assert "construction site monitoring" not in joined_hot
+    drivers_by_label = {d["label"]: d for d in ui["commercial_fit_drivers"]}
+    assert "International business context" not in drivers_by_label
+
+
+def test_unsupported_ld_signal_creates_no_bare_bullet(tmp_path):
+    # Same generic copy reused for both signals, as in the real BauWatch case.
+    signals = [
+        {"source_index": 1, "signal_name": "international_profile", "signal_score": 2,
+         "evidence_quote": _BAUWATCH_HOMEPAGE_COPY},
+        {"source_index": 1, "signal_name": "onboarding_training_need", "signal_score": 2,
+         "evidence_quote": _BAUWATCH_HOMEPAGE_COPY},
+    ]
+    _, out_dir = run_export(tmp_path, [_bauwatch_row()], signals=signals,
+                            export_country="Netherlands")
+
+    detail = detail_for(out_dir, "BauWatch")
+    what_is_hot = detail["ui_payload"]["what_is_hot"]
+
+    assert "Learning and development." not in what_is_hot
+    assert "International business context." not in what_is_hot
+    assert not any(b.startswith("Learning and development") for b in what_is_hot)
+    assert not any(b.startswith("International business context") for b in what_is_hot)
+
+
+def test_what_is_hot_summary_omits_ld_without_curated_evidence(tmp_path):
+    signals = [
+        {"source_index": 1, "signal_name": "onboarding_training_need", "signal_score": 2,
+         "evidence_quote": _BAUWATCH_HOMEPAGE_COPY},
+    ]
+    _, out_dir = run_export(tmp_path, [_bauwatch_row()], signals=signals,
+                            export_country="Netherlands")
+
+    detail = detail_for(out_dir, "BauWatch")
+    summary_line = detail["ui_payload"]["what_is_hot"][0]
+    assert "Learning and development" not in summary_line
+
+
+def test_what_is_hot_and_commercial_fit_drivers_stay_consistent_for_bauwatch(tmp_path):
+    signals = [
+        {"source_index": 1, "signal_name": "international_profile", "signal_score": 2,
+         "evidence_quote": _BAUWATCH_HOMEPAGE_COPY},
+        {"source_index": 1, "signal_name": "onboarding_training_need", "signal_score": 2,
+         "evidence_quote": _BAUWATCH_HOMEPAGE_COPY},
+    ]
+    _, out_dir = run_export(tmp_path, [_bauwatch_row()], signals=signals,
+                            export_country="Netherlands")
+
+    detail = detail_for(out_dir, "BauWatch")
+    ui = detail["ui_payload"]
+    summary_line = ui["what_is_hot"][0]
+    driver_labels = {d["label"] for d in ui["commercial_fit_drivers"]}
+
+    # Neither field claims international/L&D positively — fully consistent.
+    for topic_label in ("International business context",
+                        "learning and development or onboarding needs"):
+        claimed_in_hot = topic_label.lower() in summary_line.lower() or any(
+            b.lower().startswith(topic_label.lower()) for b in ui["what_is_hot"])
+        assert claimed_in_hot == (topic_label in driver_labels)
+
+
+def test_aldi_style_rich_evidence_is_still_promoted(tmp_path):
+    aldi_row = dict(
+        source_index=1,
+        company_name="ALDI S.R.L.",
+        domain="aldi-sued.com",
+        website_url="https://www.aldi-sued.com",
+        input_country="Italy",
+        enrichment_skipped=False,
+        sig_foreign_hq_score_for_next_scoring=3,
+        c5_parent_company="ALDI SUD",
+        c5_parent_hq_country="Germany",
+        commercial_fit_score_app=85,
+        commercial_tier_app="A",
+        industry="Retail",
+        employee_range="10001+",
+    )
+    signals = [
+        {"source_index": 1, "signal_name": "international_profile", "signal_score": 2,
+         "evidence_quote": (
+             "ALDI SUD group operates across 11 countries with 7,300+ stores globally."
+         )},
+        {"source_index": 1, "signal_name": "onboarding_training_need", "signal_score": 2,
+         "evidence_quote": (
+             "Company website explicitly details a formal training approach "
+             "with a Learning Management System and mandatory training courses."
+         )},
+        {"source_index": 1, "signal_name": "company_size_complexity", "signal_score": 2,
+         "evidence_quote": "Store management roles across distributed locations support onboarding."},
+    ]
+    _, out_dir = run_export(tmp_path, [aldi_row], signals=signals,
+                            export_country="Italy", foreign_hq_only=False)
+
+    detail = detail_for(out_dir, "ALDI S.R.L.")
+    ui = detail["ui_payload"]
+
+    summary_line = ui["what_is_hot"][0]
+    assert "International footprint" in summary_line
+    assert "Learning and development" in summary_line
+
+    joined_hot = " ".join(ui["what_is_hot"])
+    assert "11 countries" in joined_hot
+    assert "Learning Management System" in joined_hot
+
+    drivers_by_label = {d["label"]: d for d in ui["commercial_fit_drivers"]}
+    assert drivers_by_label["International business context"]["strength"] == "Strong"
+    assert "11 countries" in drivers_by_label["International business context"]["evidence"]
+    assert drivers_by_label["learning and development or onboarding needs"]["strength"] == "Strong"
+    assert "Learning Management System" in \
+        drivers_by_label["learning and development or onboarding needs"]["evidence"]
 
 
 def test_parse_key_source_links_variants():

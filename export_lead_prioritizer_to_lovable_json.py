@@ -778,6 +778,61 @@ def is_domain_relevant_for_url(
     return not own_domains
 
 
+def _topic_pattern(words: "tuple[str, ...]") -> "re.Pattern":
+    return re.compile(r"\b(?:" + "|".join(re.escape(w) for w in words) + r")\b", re.IGNORECASE)
+
+
+# Concrete topic vocabulary a signal's evidence must actually mention to be
+# promoted into ui_payload — being domain-safe and not-generic-filler is not
+# enough on its own: generic homepage/product sales copy (e.g. "Protect your
+# site with construction site monitoring...") is domain-safe but says
+# nothing about international operations or L&D, and must not be promoted
+# just because it happened to get tagged under that signal_name.
+_SIGNAL_TOPIC_PATTERNS: "dict[str, re.Pattern]" = {
+    "international_profile": _topic_pattern((
+        "countries", "country", "regions", "region", "markets", "market",
+        "international", "global", "worldwide", "cross-border",
+        "parent group", "parent company", "subsidiary", "subsidiaries",
+        "group structure", "offices", "branches", "stores", "locations",
+        "multinational",
+    )),
+    "onboarding_training_need": _topic_pattern((
+        "training", "academy", "lms", "learning management system",
+        "onboarding", "employee development", "leadership development",
+        "talent development", "mandatory training", "upskilling",
+        "career development", "learning program", "learning programs",
+    )),
+    "icp_keyword_match": _topic_pattern((
+        "training", "academy", "lms", "learning management system",
+        "onboarding", "employee development", "leadership development",
+        "talent development", "mandatory training", "upskilling",
+        "career development", "learning program", "learning programs",
+    )),
+    "company_size_complexity": _topic_pattern((
+        "employees", "employee count", "workforce", "multi-site",
+        "multi site", "branches", "stores", "locations",
+        "distributed team", "distributed teams", "operational scale",
+        "large-scale", "large scale",
+    )),
+    "employer_branding": _topic_pattern((
+        "careers page", "employer branding", "employee value proposition",
+        "evp", "team culture", "workplace", "employee testimonial",
+        "employee testimonials", "great place to work", "workplace award",
+        "workplace awards", "company culture",
+    )),
+}
+
+
+def has_topical_keywords(text: str, signal_name: "str | None") -> bool:
+    """True when evidence text actually mentions the concrete topic its
+    signal claims. Signals without a defined topic vocabulary (foreign_hq,
+    unmapped custom signals, ...) are not gated here."""
+    pattern = _SIGNAL_TOPIC_PATTERNS.get(signal_name or "")
+    if pattern is None:
+        return True
+    return bool(pattern.search(text))
+
+
 def _clean_driver_evidence(
     signal: dict,
     employee_range: "str | None",
@@ -785,12 +840,15 @@ def _clean_driver_evidence(
     company_name: "str | None" = None,
 ) -> "str | None":
     """Evidence text usable in ui_payload, or None when it's weak, generic,
-    a raw/formatting artifact, suspicious, or from an unrelated domain — the
-    label/strength is kept regardless."""
+    a raw/formatting artifact, suspicious, off-topic for its signal (e.g.
+    generic homepage sales copy tagged as an L&D or international signal),
+    or from an unrelated domain — the label/strength is kept regardless."""
     text = clean_str(signal.get("evidence"))
     if not text:
         return None
     if is_generic_or_raw_text(text) or is_suspicious_evidence(text, employee_range):
+        return None
+    if not has_topical_keywords(text, signal.get("signal_name")):
         return None
     url = signal.get("evidence_url")
     if url and not is_domain_relevant_for_url(url, own_domains, company_name, text):
@@ -883,6 +941,12 @@ _SUMMARY_SIGNAL_NAMES = {
     "size_complexity": {"company_size_complexity"},
 }
 
+# The same signal_names what_is_hot's summary line makes a topic claim
+# about. commercial_fit_drivers must not show one of these as a weak/
+# evidence-less driver while what_is_hot stays silent on it (or vice versa)
+# — see build_commercial_fit_drivers.
+_BUCKETED_SIGNAL_NAMES = frozenset().union(*_SUMMARY_SIGNAL_NAMES.values())
+
 
 def build_ui_payload_what_is_hot(
     foreign_hq_detected: bool,
@@ -903,7 +967,15 @@ def build_ui_payload_what_is_hot(
     ]
 
     def _has_signal(names: set) -> bool:
-        return any(s.get("signal_name") in names for s in positive_signals)
+        # A bucket only "counts" for the summary line when at least one of
+        # its positively-scored signals also has curated evidence — the same
+        # test the per-signal bullet loop and commercial_fit_drivers use, so
+        # what_is_hot never claims a topic the driver panel can't back up.
+        return any(
+            s.get("signal_name") in names
+            and _clean_driver_evidence(s, employee_range, own_domains, company_name) is not None
+            for s in positive_signals
+        )
 
     summary_parts = []
     if foreign_hq_detected:
@@ -935,6 +1007,11 @@ def build_ui_payload_what_is_hot(
     for signal in positive_signals:
         if len(bullets) >= max_bullets:
             break
+        # No curated evidence -> no standalone bullet at all (never a bare
+        # "Learning and development." claim with nothing behind it).
+        evidence = _clean_driver_evidence(signal, employee_range, own_domains, company_name)
+        if evidence is None:
+            continue
         label = signal.get("label") or ""
         label_lower = label.lower()
         prefix = next(
@@ -942,8 +1019,7 @@ def build_ui_payload_what_is_hot(
              if any(kw in label_lower for kw in keywords)),
             _natural_label(label),
         )
-        evidence = _clean_driver_evidence(signal, employee_range, own_domains, company_name)
-        bullet = f"{prefix}: {evidence}" if evidence else f"{prefix}."
+        bullet = f"{prefix}: {evidence}"
         if bullet not in bullets:
             bullets.append(bullet)
 
@@ -967,18 +1043,27 @@ def build_commercial_fit_drivers(
     company_name: "str | None" = None,
 ) -> list[dict]:
     """Curated {label, strength, evidence} rows from the same signal source
-    as visible_icp_signal_scores; weak/generic/unrelated-domain evidence is
-    omitted while the label and strength are always kept."""
+    as visible_icp_signal_scores. For the topics what_is_hot's summary line
+    can claim (international / learning & development / size-complexity),
+    a driver is only included when it's positively scored AND has curated
+    evidence — never shown as a weak/evidence-less "Absent" row that would
+    contradict a positive what_is_hot claim (or sit there when what_is_hot
+    made no claim at all). Other signals (foreign HQ, employer branding,
+    custom, ...) keep the label/strength even when evidence is weak."""
     drivers = []
     for signal in visible_signals:
         label = signal.get("label")
         if not label:
             continue
+        signal_name = signal.get("signal_name")
+        score = signal.get("score")
+        evidence = _clean_driver_evidence(signal, employee_range, own_domains, company_name)
+        if signal_name in _BUCKETED_SIGNAL_NAMES and (not (score and score > 0) or evidence is None):
+            continue
         driver = {
             "label": _natural_label(label),
-            "strength": _strength_for_score(signal.get("score")),
+            "strength": _strength_for_score(score),
         }
-        evidence = _clean_driver_evidence(signal, employee_range, own_domains, company_name)
         if evidence:
             driver["evidence"] = evidence
         drivers.append(driver)
