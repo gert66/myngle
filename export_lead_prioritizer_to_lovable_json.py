@@ -737,6 +737,26 @@ _KNOWN_THIRD_PARTY_DIRECTORY_DOMAINS = frozenset({
     "zoominfo.com", "owler.com",
 })
 
+# Hosted careers/job platforms — never the lead's own official website, and
+# never sector/parent-company evidence, even when the row's own `domain`
+# column happens to be a Workday-hosted careers URL (e.g.
+# "shimano.wd3.myworkdayjobs.com"). Non-Italy display use only.
+_HOSTED_CAREERS_PLATFORM_DOMAINS = frozenset({
+    "myworkdayjobs.com", "workdayjobs.com", "greenhouse.io", "lever.co",
+    "smartrecruiters.com", "bamboohr.com", "workable.com", "taleo.net",
+    "icims.com", "successfactors.com",
+})
+
+
+def is_hosted_careers_platform_domain(value: "str | None") -> bool:
+    """True when a URL or bare domain resolves to a known hosted careers/job
+    platform (Workday, Greenhouse, Lever, ...) rather than the lead's own
+    site — display-only, never used for HQ/C4/C5 or scoring."""
+    if not value:
+        return False
+    host = hostname_of(value)
+    return bool(host) and _registrable_domain(host) in _HOSTED_CAREERS_PLATFORM_DOMAINS
+
 
 def _company_name_tokens(company_name: "str | None") -> list[str]:
     """First couple of significant (3+ letter) words of a company name, used
@@ -754,16 +774,37 @@ def _mentions_company(text: "str | None", company_name: "str | None") -> bool:
     return any(tok.lower() in text_lower for tok in _company_name_tokens(company_name))
 
 
+def _domain_matches_company_name(host: "str | None", name: "str | None") -> bool:
+    """True when a URL's domain root plausibly belongs to ``name`` (e.g.
+    "samsung.com" for parent company "Samsung Electronics") — used only to
+    offer the "Parent company source" source_urls label; never used for
+    HQ/parent detection itself."""
+    if not host or not name:
+        return False
+    domain_root = _registrable_domain(host).split(".")[0].lower()
+    if not domain_root:
+        return False
+    return any(tok.lower() == domain_root or tok.lower() in domain_root
+               for tok in _company_name_tokens(name))
+
+
 def is_domain_relevant_for_url(
     url: "str | None",
     own_domains: "set[str] | None",
     company_name: "str | None" = None,
     context_text: "str | None" = None,
+    strict_third_party: bool = False,
 ) -> bool:
     """True when a URL's domain is the lead's own site, a known independent
     business directory, or its accompanying text actually mentions the lead
     — false for an unrelated domain such as a different company's careers
-    page picked up by a scraper (e.g. careers.accor.com for a DORC lead)."""
+    page picked up by a scraper (e.g. careers.accor.com for a DORC lead).
+
+    ``strict_third_party`` (default False, preserving existing behavior for
+    Italy) requires even a *known* third-party directory (Glassdoor,
+    ZoomInfo, ...) to actually mention the lead — a generic directory
+    list-page snippet must not be auto-accepted just because the domain is
+    recognized."""
     host = hostname_of(url)
     if not host:
         return False
@@ -771,6 +812,8 @@ def is_domain_relevant_for_url(
     if own_domains and domain in own_domains:
         return True
     if domain in _KNOWN_THIRD_PARTY_DIRECTORY_DOMAINS:
+        if strict_third_party:
+            return _mentions_company(context_text, company_name)
         return True
     if _mentions_company(context_text, company_name):
         return True
@@ -837,6 +880,32 @@ def has_topical_keywords(text: str, signal_name: "str | None") -> bool:
     return bool(pattern.search(text))
 
 
+# "training" alone (already required by the L&D topic patterns above) is not
+# enough — external installer/product/partner/reseller training must not be
+# promoted as internal employee learning & development just because the
+# word "training" appears. Non-Italy display use only.
+_EXTERNAL_TRAINING_RE = _topic_pattern((
+    "installer", "installers", "reseller", "resellers", "distributor",
+    "distributors", "partner training", "customer training",
+    "product training", "certification program", "become a",
+    "channel partner", "climate solutions partner",
+))
+_INTERNAL_LD_MARKERS_RE = _topic_pattern((
+    "employee", "employees", "internal", "hr team", "people team",
+    "people development", "leadership development", "talent development",
+    "lms", "academy", "career development", "upskilling", "workforce",
+    "staff training", "new hire", "new-hire", "onboarding",
+))
+
+
+def _is_external_training_evidence(text: str) -> bool:
+    """True when L&D/onboarding evidence looks like external product,
+    partner, reseller, or installer training rather than internal employee
+    development (e.g. "become a ... installer... climate solutions
+    partner") — checked only for the L&D-family signals."""
+    return bool(_EXTERNAL_TRAINING_RE.search(text)) and not bool(_INTERNAL_LD_MARKERS_RE.search(text))
+
+
 def _clean_driver_evidence(
     signal: dict,
     employee_range: "str | None",
@@ -858,6 +927,60 @@ def _clean_driver_evidence(
     if url and not is_domain_relevant_for_url(url, own_domains, company_name, text):
         return None
     return text
+
+
+# signal_names treated as the "learning & development" family for the
+# external-training check — kept as a tuple (not the _SUMMARY_SIGNAL_NAMES
+# dict below, which is Italy-path-adjacent) so this stays self-contained.
+_LD_FAMILY_SIGNAL_NAMES = ("onboarding_training_need", "icp_keyword_match")
+
+
+def classify_curated_evidence(
+    signal: dict,
+    employee_range: "str | None" = None,
+    own_domains: "set[str] | None" = None,
+    company_name: "str | None" = None,
+) -> dict:
+    """Non-Italy only: classify one non-HQ signal's evidence into
+    ``{"evidence": str | None, "rejected_reason": str | None}``.
+
+    Stricter than (and independent from) ``_clean_driver_evidence`` used by
+    the frozen Italy functions above: also rejects a hosted careers-platform
+    source, a known third-party directory snippet that never mentions the
+    company, and external installer/product/partner training passed off as
+    internal L&D. ``rejected_reason`` is ``None`` with ``evidence`` also
+    ``None`` when there was simply no evidence to begin with (-> "Not
+    evidenced" upstream); it is a specific reason string when evidence
+    existed but was rejected (-> "Rejected" upstream, with an explanatory
+    note)."""
+    text = clean_str(signal.get("evidence"))
+    if not text:
+        return {"evidence": None, "rejected_reason": None}
+
+    url = signal.get("evidence_url")
+    if url:
+        if is_hosted_careers_platform_domain(url):
+            return {"evidence": None, "rejected_reason": "hosted_platform"}
+        host = hostname_of(url)
+        domain = _registrable_domain(host)
+        if domain in _KNOWN_THIRD_PARTY_DIRECTORY_DOMAINS and not _mentions_company(text, company_name):
+            return {"evidence": None, "rejected_reason": "generic_directory"}
+
+    if is_generic_or_raw_text(text) or is_suspicious_evidence(text, employee_range):
+        return {"evidence": None, "rejected_reason": "generic"}
+
+    signal_name = signal.get("signal_name")
+    if signal_name in _LD_FAMILY_SIGNAL_NAMES and _is_external_training_evidence(text):
+        return {"evidence": None, "rejected_reason": "external_training"}
+
+    if not has_topical_keywords(text, signal_name):
+        return {"evidence": None, "rejected_reason": "generic"}
+
+    if url and not is_domain_relevant_for_url(
+            url, own_domains, company_name, text, strict_third_party=True):
+        return {"evidence": None, "rejected_reason": "unrelated_domain"}
+
+    return {"evidence": text, "rejected_reason": None}
 
 
 def resolve_parent_company(row: dict) -> "str | None":
@@ -1099,6 +1222,61 @@ _LIGHT_DISCOVERY_COLD_CALLER_SUMMARY = (
     "exist."
 )
 
+# Canonical labels for the six fixed commercial-fit dimensions, keyed by the
+# underlying Signals.signal_name (foreign_hq is handled separately). Used
+# for BOTH the curated why_relevant/what_is_hot bullets and
+# commercial_fit_drivers, so a bullet and its driver always say the exact
+# same thing — the single curated layer item A/B ask for.
+_CURATED_SIGNAL_LABELS: "dict[str, str]" = {
+    "international_profile": "International business context",
+    "icp_keyword_match": "Explicit learning and development",
+    "onboarding_training_need": "Learning and development or onboarding needs",
+    "company_size_complexity": "Possible onboarding need",
+    "employer_branding": "Employer branding or employee satisfaction",
+}
+
+# The six fixed commercial_fit_drivers dimensions in the required order —
+# (signal_name or "foreign_hq", stable id, label).
+_FIXED_DRIVER_SIGNAL_ORDER: "tuple[tuple[str, str, str], ...]" = (
+    ("foreign_hq", "foreign_ownership_or_group_structure",
+     "Foreign ownership or group structure"),
+    ("international_profile", "international_business_context",
+     "International business context"),
+    ("icp_keyword_match", "explicit_learning_and_development",
+     "Explicit learning and development"),
+    ("onboarding_training_need", "learning_and_development_or_onboarding_needs",
+     "Learning and development or onboarding needs"),
+    ("company_size_complexity", "possible_onboarding_need",
+     "Possible onboarding need"),
+    ("employer_branding", "employer_branding_or_employee_satisfaction",
+     "Employer branding or employee satisfaction"),
+)
+
+_NOT_EVIDENCED_NOTE = "No reliable company-specific evidence found in the current sources."
+_REJECTED_NOTES: "dict[str, str]" = {
+    "generic": (
+        "The available evidence was too generic to confirm this signal "
+        "for this company."
+    ),
+    "external_training": (
+        "Training evidence was found, but it appears to relate to external "
+        "product, partner, or installer training rather than internal "
+        "employee learning and development."
+    ),
+    "hosted_platform": (
+        "Evidence came from a hosted careers platform and was not used as "
+        "company sector, parent, or official website evidence."
+    ),
+    "generic_directory": (
+        "Generic third-party list-page evidence was found, but it does "
+        "not clearly mention this company."
+    ),
+    "unrelated_domain": (
+        "The evidence source does not appear related to this company and "
+        "was not used."
+    ),
+}
+
 
 def build_curated_display_signals(
     visible_signals: list[dict],
@@ -1107,26 +1285,30 @@ def build_curated_display_signals(
     company_name: "str | None" = None,
 ) -> list[dict]:
     """The single curated source of "genuinely displayable" non-HQ signals:
-    positively scored AND backed by clean, domain-relevant, signal-specific
-    evidence (see _clean_driver_evidence). Foreign HQ is excluded here — it
-    is displayed separately from confirmed HQ/parent fields, which are
-    already handled by build_foreign_hq_evidence_text."""
+    positively scored AND backed by clean, domain-relevant, signal-specific,
+    internal (not external/vendor-hosted/generic-directory) evidence — see
+    classify_curated_evidence. Foreign HQ is excluded here — it is
+    displayed separately from confirmed HQ/parent fields, already handled
+    by build_foreign_hq_evidence_text. Uses the same _CURATED_SIGNAL_LABELS
+    used by build_fixed_commercial_fit_drivers, so a why_relevant/
+    what_is_hot bullet and its driver always agree."""
     curated = []
     for signal in visible_signals:
         label = signal.get("label")
+        signal_name = signal.get("signal_name")
         if not label or label == FOREIGN_HQ_SIGNAL_LABEL:
             continue
         score = signal.get("score")
         if not (score and score > 0):
             continue
-        evidence = _clean_driver_evidence(signal, employee_range, own_domains, company_name)
-        if evidence is None:
+        result = classify_curated_evidence(signal, employee_range, own_domains, company_name)
+        if not result["evidence"]:
             continue
         curated.append({
-            "signal_name": signal.get("signal_name"),
-            "label": _natural_label(label),
+            "signal_name": signal_name,
+            "label": _CURATED_SIGNAL_LABELS.get(signal_name, _natural_label(label)),
             "strength": _strength_for_score(score),
-            "evidence": evidence,
+            "evidence": result["evidence"],
         })
     return curated
 
@@ -1240,25 +1422,70 @@ def build_curated_what_is_hot(
     return bullets[:max_bullets]
 
 
-def build_curated_commercial_fit_drivers(
+def build_fixed_commercial_fit_drivers(
     visible_signals: list[dict],
     foreign_hq_detected: bool,
-    curated_signals: list[dict],
+    parent_company: "str | None",
+    parent_hq_country: "str | None",
+    employee_range: "str | None" = None,
+    own_domains: "set[str] | None" = None,
+    company_name: "str | None" = None,
 ) -> list[dict]:
-    """Non-Italy commercial_fit_drivers: only the confirmed-HQ driver (from
-    the same evidence already shown elsewhere) plus the shared curated
-    display signals — never a Strong/Moderate/Weak row without usable
-    evidence behind it."""
-    drivers = []
+    """Non-Italy commercial_fit_drivers: always exactly the six fixed
+    dimensions in _FIXED_DRIVER_SIGNAL_ORDER, never omitted. Each is either
+    a positive Strong/Moderate/Weak driver with clean evidence, "Not
+    evidenced" (no signal row, no positive score, or no evidence at all),
+    or "Rejected" (evidence existed but failed a display-quality check,
+    with a note explaining why) — so a dimension can never be silently
+    dropped or shown as a positive claim without real evidence."""
+    by_signal_name = {
+        s.get("signal_name"): s for s in visible_signals if s.get("signal_name")
+    }
     hq_driver = _foreign_hq_driver(visible_signals, foreign_hq_detected)
-    if hq_driver:
-        drivers.append(hq_driver)
-    for signal in curated_signals:
-        drivers.append({
-            "label": signal["label"],
-            "strength": signal["strength"],
-            "evidence": signal["evidence"],
-        })
+
+    drivers = []
+    for signal_name, driver_id, label in _FIXED_DRIVER_SIGNAL_ORDER:
+        if signal_name == "foreign_hq":
+            if hq_driver:
+                drivers.append({
+                    "id": driver_id, "label": label, "strength": "Strong",
+                    "evidence": hq_driver["evidence"] or "", "note": "",
+                })
+            else:
+                drivers.append({
+                    "id": driver_id, "label": label, "strength": "Not evidenced",
+                    "evidence": "", "note": _NOT_EVIDENCED_NOTE,
+                })
+            continue
+
+        signal = by_signal_name.get(signal_name)
+        score = signal.get("score") if signal else None
+        if signal is None or not (score and score > 0):
+            drivers.append({
+                "id": driver_id, "label": label, "strength": "Not evidenced",
+                "evidence": "", "note": _NOT_EVIDENCED_NOTE,
+            })
+            continue
+
+        result = classify_curated_evidence(signal, employee_range, own_domains, company_name)
+        if result["evidence"]:
+            drivers.append({
+                "id": driver_id, "label": label,
+                "strength": _strength_for_score(score),
+                "evidence": result["evidence"], "note": "",
+            })
+        elif result["rejected_reason"]:
+            drivers.append({
+                "id": driver_id, "label": label, "strength": "Rejected",
+                "evidence": "",
+                "note": _REJECTED_NOTES.get(result["rejected_reason"], _NOT_EVIDENCED_NOTE),
+            })
+        else:
+            drivers.append({
+                "id": driver_id, "label": label, "strength": "Not evidenced",
+                "evidence": "", "note": _NOT_EVIDENCED_NOTE,
+            })
+
     return drivers
 
 
@@ -1307,6 +1534,30 @@ def build_curated_cold_caller_summary(
     return " ".join(parts)
 
 
+def build_curated_parent_hq_summary(
+    foreign_hq_detected: bool,
+    parent_company: "str | None",
+    parent_hq_country: "str | None",
+) -> "str | None":
+    """Non-Italy parent_hq_summary: built fresh from the same resolved
+    parent/HQ fields why_relevant uses (c5_parent_company/c5_parent_hq_country
+    or ai_parent_*), never copied from parent_hq_summary_app — which can be
+    contaminated by an unrelated vendor/host name (e.g. "Workday / United
+    States" for a lead whose careers page happens to be Workday-hosted)."""
+    if not foreign_hq_detected:
+        return None
+    if parent_company and parent_hq_country:
+        return (
+            f"The available evidence identifies {parent_company} as the "
+            f"parent company, with HQ context in {parent_hq_country}."
+        )
+    if parent_hq_country:
+        return f"The available evidence indicates a foreign parent/HQ context in {parent_hq_country}."
+    if parent_company:
+        return f"The available evidence identifies {parent_company} as the parent company."
+    return None
+
+
 def build_ui_payload_caution(quality_flags: list[str], caution_app: "str | None") -> list[str]:
     """Human-readable warnings only, one sentence per distinct warning —
     raw quality-flag column names (e.g. hq_evidence_domain_mismatch_warning,
@@ -1332,6 +1583,8 @@ def build_ui_payload_source_urls(
     own_domains: "set[str] | None" = None,
     company_name: "str | None" = None,
     url_context: "dict[str, str] | None" = None,
+    hosted_platform_domains: "frozenset[str] | None" = None,
+    parent_company: "str | None" = None,
 ) -> list[dict]:
     """Deduplicated (by normalized URL) {label, url} rows with stable
     labels: the lead's own domain is "Official website" (or "Careers page"
@@ -1345,9 +1598,19 @@ def build_ui_payload_source_urls(
     careers_url/linkedin_url fields), any further own-domain/LinkedIn pages
     turned up in evidence are the same site and are dropped rather than
     shown as extra "duplicate" entries under the same label. Third-party
-    profiles are not capped — distinct outside sources are legitimate."""
+    profiles are not capped — distinct outside sources are legitimate.
+
+    ``hosted_platform_domains`` (default None, preserving existing Italy
+    behavior) is a set of hosted careers/job-platform registrable domains
+    (Workday, Greenhouse, ...) — non-Italy only. Any URL on one of these is
+    always labeled "Careers platform", capped at one entry, and is NEVER
+    treated as the lead's own domain even if it happens to match
+    ``own_domains``. ``parent_company`` (non-Italy only) lets a source that
+    is clearly the resolved parent company's own domain be labeled "Parent
+    company source" instead of a generic third-party profile."""
     url_context = url_context or {}
     own_domains = own_domains or set()
+    hosted_platform_domains = hosted_platform_domains or frozenset()
     seen_norm: set[str] = set()
     seen_roles: set[str] = set()
     items: list[dict] = []
@@ -1370,8 +1633,20 @@ def build_ui_payload_source_urls(
             seen_roles.add(role)
         items.append({"label": label, "url": url})
 
-    _add(website_url, "Official website", role="official")
-    _add(careers_url, "Careers page", role="careers")
+    def _is_hosted_platform(url: "str | None") -> bool:
+        if not url or not hosted_platform_domains:
+            return False
+        host = hostname_of(url)
+        return bool(host) and _registrable_domain(host) in hosted_platform_domains
+
+    if _is_hosted_platform(website_url):
+        _add(website_url, "Careers platform", role="careers_platform")
+    else:
+        _add(website_url, "Official website", role="official")
+    if _is_hosted_platform(careers_url):
+        _add(careers_url, "Careers platform", role="careers_platform")
+    else:
+        _add(careers_url, "Careers page", role="careers")
     _add(linkedin_url, "LinkedIn", role="linkedin")
 
     for url in source_urls:
@@ -1385,12 +1660,19 @@ def build_ui_payload_source_urls(
         if "linkedin.com" in host:
             _add(url, "LinkedIn", role="linkedin")
             continue
+        if _is_hosted_platform(url):
+            _add(url, "Careers platform", role="careers_platform")
+            continue
         domain = _registrable_domain(host)
         if domain in own_domains:
             is_careers = "career" in url.lower()
             role = "careers" if is_careers else "official"
             label = "Careers page" if is_careers else "Official website"
             _add(url, label, role=role)
+            continue
+        if (parent_company and domain not in _KNOWN_THIRD_PARTY_DIRECTORY_DOMAINS
+                and _domain_matches_company_name(host, parent_company)):
+            _add(url, "Parent company source", role=f"parent:{domain}")
             continue
         if not is_domain_relevant_for_url(url, own_domains, company_name, url_context.get(url)):
             continue  # unrelated domain (e.g. careers.accor.com) — excluded
@@ -1565,6 +1847,32 @@ def _own_domains_for_row(row: dict) -> "set[str]":
     return domains
 
 
+def _own_domains_for_row_display(row: dict) -> "set[str]":
+    """Non-Italy only: like _own_domains_for_row, but excludes hosted
+    careers-platform domains (Workday, Greenhouse, ...) — these are never
+    the lead's own site even if the row's `domain` column happens to be a
+    Workday-hosted careers URL (e.g. "shimano.wd3.myworkdayjobs.com")."""
+    return {
+        d for d in _own_domains_for_row(row)
+        if d not in _HOSTED_CAREERS_PLATFORM_DOMAINS
+    }
+
+
+def _industry_display_is_vendor_contaminated(
+    row: dict, industry_source_column: "str | None",
+) -> bool:
+    """Non-Italy only, display-only guard for item G: true when the shown
+    industry would come from our own detected_industry sector detection AND
+    that detection's evidence source was a hosted careers/job platform —
+    i.e. probably not a reliable sector signal, so it should be suppressed
+    from display rather than shown as a confident (possibly wrong) sector.
+    Never touches scoring, HQ, or the underlying sector-detection fields
+    themselves — only whether the curated layer mentions the industry."""
+    if industry_source_column != "detected_industry":
+        return False
+    return is_hosted_careers_platform_domain(row.get("sector_evidence_url"))
+
+
 def _build_url_context(evidence_rows: list[dict], signal_rows: list[dict]) -> "dict[str, str]":
     """url -> nearby title/snippet/quote text, used only to check whether a
     third-party page actually mentions the lead's company name."""
@@ -1658,11 +1966,12 @@ def _build_detail_record(
 
     # Italy (content_language == "Italian") keeps today's exact ui_payload
     # behavior byte-for-byte — why_relevant/what_is_hot/commercial_fit_drivers
-    # via the original build_ui_payload_* functions, cold_caller_summary
-    # mirroring cold_caller_summary_app. It already renders well from that
-    # legacy behavior and must not change. Every other export (English,
+    # via the original build_ui_payload_* functions, cold_caller_summary and
+    # parent_hq_summary mirroring the *_app fields, source_urls with no
+    # hosted-platform/parent-company handling. It already renders well from
+    # that legacy behavior and must not change. Every other export (English,
     # Dutch, and any future country) uses the newer curated display-signal
-    # layer described above.
+    # layer described below.
     if content_language == "Italian":
         why_relevant = build_ui_payload_why_relevant(
             company_name, list_item.get("export_country"),
@@ -1677,23 +1986,54 @@ def _build_detail_record(
         commercial_fit_drivers = build_commercial_fit_drivers(
             visible_signals, employee_range, own_domains, company_name)
         cold_caller_summary = detail["cold_caller_summary_app"]
+        parent_hq_summary = detail["parent_hq_summary_app"]
+        source_urls_ui_payload = build_ui_payload_source_urls(
+            detail["website_url"], detail["careers_url"], detail["linkedin_url"],
+            detail["source_urls"], own_domains, company_name, url_context,
+        )
     else:
+        # Hosted careers/job platforms (Workday, Greenhouse, ...) are never
+        # the lead's own domain for display purposes, even when the row's
+        # `domain` column literally is one (e.g. a Workday-hosted careers
+        # URL for Shimano) — see _own_domains_for_row_display.
+        own_domains_display = _own_domains_for_row_display(row)
+
+        # Suppress a display industry that came only from our own sector
+        # detection AND whose evidence traces to a hosted platform — avoid
+        # showing a confidently wrong sector (item G); never touches the
+        # underlying detected_industry/industry fields themselves.
+        _, industry_source = _first_non_unknown(row, _INDUSTRY_COLUMN_ALIASES)
+        industry_display = (
+            None if _industry_display_is_vendor_contaminated(row, industry_source)
+            else list_item.get("industry")
+        )
+
         curated_signals = build_curated_display_signals(
-            visible_signals, employee_range, own_domains, company_name)
+            visible_signals, employee_range, own_domains_display, company_name)
         why_relevant = build_curated_why_relevant(
             company_name, list_item.get("export_country"),
-            list_item.get("industry"), foreign_hq_detected,
+            industry_display, foreign_hq_detected,
             parent_company, parent_hq_country, curated_signals,
         )
         what_is_hot = build_curated_what_is_hot(
-            foreign_hq_detected, parent_hq_country, list_item.get("industry"),
+            foreign_hq_detected, parent_hq_country, industry_display,
             employee_range, list_item.get("display_size_category_app"),
             curated_signals,
         )
-        commercial_fit_drivers = build_curated_commercial_fit_drivers(
-            visible_signals, foreign_hq_detected, curated_signals)
+        commercial_fit_drivers = build_fixed_commercial_fit_drivers(
+            visible_signals, foreign_hq_detected, parent_company, parent_hq_country,
+            employee_range, own_domains_display, company_name,
+        )
         cold_caller_summary = build_curated_cold_caller_summary(
             foreign_hq_detected, parent_company, parent_hq_country, curated_signals)
+        parent_hq_summary = build_curated_parent_hq_summary(
+            foreign_hq_detected, parent_company, parent_hq_country)
+        source_urls_ui_payload = build_ui_payload_source_urls(
+            detail["website_url"], detail["careers_url"], detail["linkedin_url"],
+            detail["source_urls"], own_domains_display, company_name, url_context,
+            hosted_platform_domains=_HOSTED_CAREERS_PLATFORM_DOMAINS,
+            parent_company=parent_company,
+        )
 
     detail["ui_payload"] = {
         "why_relevant": why_relevant,
@@ -1702,14 +2042,11 @@ def _build_detail_record(
         "caller_angle": detail["caller_angle_app"],
         "call_starter": detail["call_starter_app"],
         "cold_caller_summary": cold_caller_summary,
-        "parent_hq_summary": detail["parent_hq_summary_app"],
+        "parent_hq_summary": parent_hq_summary,
         "evidence_summary": detail["evidence_summary_app"],
         "commercial_fit_drivers": commercial_fit_drivers,
         "caution": build_ui_payload_caution(detail["quality_flags"], detail["caution_app"]),
-        "source_urls": build_ui_payload_source_urls(
-            detail["website_url"], detail["careers_url"], detail["linkedin_url"],
-            detail["source_urls"], own_domains, company_name, url_context,
-        ),
+        "source_urls": source_urls_ui_payload,
     }
     return detail
 

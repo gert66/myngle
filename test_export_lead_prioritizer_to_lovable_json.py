@@ -959,8 +959,10 @@ def test_ui_payload_and_array_fields(tmp_path):
     assert ui_payload["what_is_not"] == ["No competitor signal"]
     assert ui_payload["caller_angle"] == "Lead with onboarding angle."
     assert ui_payload["call_starter"] == "I saw you are part of a Japanese group..."
-    assert ui_payload["parent_hq_summary"] == \
-        "The enrichment data identifies Acme Group as the parent company."
+    # parent_hq_summary is now rebuilt fresh for non-Italy (never a straight
+    # mirror of parent_hq_summary_app) — no c5_parent_company/hq_country in
+    # this fixture, so there's nothing safe to build it from.
+    assert ui_payload["parent_hq_summary"] is None
     assert ui_payload["evidence_summary"] == "Two strong sources."
     # These are independently built (non-Italy curated layer), richer,
     # company-specific content — not a mirror of why_relevant_app /
@@ -978,10 +980,26 @@ def test_ui_payload_and_array_fields(tmp_path):
         "Company size: 201-500 employees.",
     ]
     assert len(ui_payload["what_is_hot"]) <= 5
-    assert ui_payload["commercial_fit_drivers"] == [
-        {"label": FOREIGN_HQ_SIGNAL_LABEL, "strength": "Strong",
-         "evidence": "Foreign headquarters or group structure detected."},
-    ]
+    # commercial_fit_drivers always lists all six fixed dimensions now — the
+    # other five have no signal data at all in this fixture, so they're
+    # "Not evidenced" rather than omitted.
+    drivers_by_label = {d["label"]: d for d in ui_payload["commercial_fit_drivers"]}
+    assert len(ui_payload["commercial_fit_drivers"]) == 6
+    assert drivers_by_label["Foreign ownership or group structure"] == {
+        "id": "foreign_ownership_or_group_structure",
+        "label": "Foreign ownership or group structure",
+        "strength": "Strong",
+        "evidence": "Foreign headquarters or group structure detected.",
+        "note": "",
+    }
+    for label in (
+        "International business context", "Explicit learning and development",
+        "Learning and development or onboarding needs", "Possible onboarding need",
+        "Employer branding or employee satisfaction",
+    ):
+        assert drivers_by_label[label]["strength"] == "Not evidenced"
+        assert drivers_by_label[label]["evidence"] == ""
+        assert drivers_by_label[label]["note"]
     assert ui_payload["cold_caller_summary"] == (
         "This company has a confirmed foreign parent or HQ context, which "
         "is a concrete reason to explore cross-border communication and "
@@ -1136,14 +1154,17 @@ def test_weak_generic_evidence_not_promoted_into_caller_facing_text(tmp_path):
     assert "Signals point to" not in joined_hot
     assert "5 employees" not in joined_hot
 
-    # Both signals belong to what_is_hot's summary-line topics (international,
-    # learning & development); with no curated evidence behind either one,
-    # they must be omitted from commercial_fit_drivers entirely rather than
-    # shown as a weak/evidence-less "Absent" row — that's what made the old
-    # BauWatch-style output inconsistent with what_is_hot.
+    # commercial_fit_drivers always lists all six fixed dimensions; with no
+    # curated evidence behind either signal, they show as "Rejected" (not
+    # positively claimed) rather than a weak/evidence-less "Strong" row —
+    # that's what made the old BauWatch-style output inconsistent with
+    # what_is_hot, and they must never be silently omitted either.
     drivers_by_label = {d["label"]: d for d in ui["commercial_fit_drivers"]}
-    assert "International business context" not in drivers_by_label
-    assert "learning and development or onboarding needs" not in drivers_by_label
+    assert len(ui["commercial_fit_drivers"]) == 6
+    assert drivers_by_label["International business context"]["strength"] == "Rejected"
+    assert drivers_by_label["International business context"]["evidence"] == ""
+    assert drivers_by_label["Learning and development or onboarding needs"]["strength"] == "Rejected"
+    assert drivers_by_label["Learning and development or onboarding needs"]["evidence"] == ""
 
 
 # ---------------------------------------------------------------------------
@@ -1187,10 +1208,12 @@ def test_raw_multiline_location_dump_not_promoted_to_what_is_hot(tmp_path):
     joined_hot = " ".join(detail["ui_payload"]["what_is_hot"])
     assert "___" not in joined_hot
     assert "DORC locations" not in joined_hot
-    # No curated evidence survives the raw-dump filter, so the bucketed
-    # driver is omitted entirely rather than shown as an evidence-less row.
+    # No curated evidence survives the raw-dump filter, so the driver shows
+    # as Rejected (with an explanatory note) rather than a positive claim —
+    # but it's still present, not silently omitted.
     drivers_by_label = {d["label"]: d for d in detail["ui_payload"]["commercial_fit_drivers"]}
-    assert "International business context" not in drivers_by_label
+    assert drivers_by_label["International business context"]["strength"] == "Rejected"
+    assert drivers_by_label["International business context"]["evidence"] == ""
 
 
 def test_unrelated_domain_excluded_from_source_urls_and_evidence(tmp_path):
@@ -1361,7 +1384,8 @@ def test_generic_homepage_copy_not_accepted_as_ld_evidence(tmp_path):
     joined_hot = " ".join(ui["what_is_hot"])
     assert "construction site monitoring" not in joined_hot
     drivers_by_label = {d["label"]: d for d in ui["commercial_fit_drivers"]}
-    assert "learning and development or onboarding needs" not in drivers_by_label
+    assert drivers_by_label["Learning and development or onboarding needs"]["strength"] == "Rejected"
+    assert drivers_by_label["Learning and development or onboarding needs"]["evidence"] == ""
 
 
 def test_generic_homepage_copy_not_accepted_as_international_evidence(tmp_path):
@@ -1378,7 +1402,8 @@ def test_generic_homepage_copy_not_accepted_as_international_evidence(tmp_path):
     joined_hot = " ".join(ui["what_is_hot"])
     assert "construction site monitoring" not in joined_hot
     drivers_by_label = {d["label"]: d for d in ui["commercial_fit_drivers"]}
-    assert "International business context" not in drivers_by_label
+    assert drivers_by_label["International business context"]["strength"] == "Rejected"
+    assert drivers_by_label["International business context"]["evidence"] == ""
 
 
 def test_unsupported_ld_signal_creates_no_bare_bullet(tmp_path):
@@ -1426,15 +1451,20 @@ def test_what_is_hot_and_commercial_fit_drivers_stay_consistent_for_bauwatch(tmp
 
     detail = detail_for(out_dir, "BauWatch")
     ui = detail["ui_payload"]
-    summary_line = ui["what_is_hot"][0]
-    driver_labels = {d["label"] for d in ui["commercial_fit_drivers"]}
+    drivers_by_label = {d["label"]: d for d in ui["commercial_fit_drivers"]}
 
-    # Neither field claims international/L&D positively — fully consistent.
+    # Neither field claims international/L&D positively — fully consistent:
+    # what_is_hot has no bullet for either topic, and their drivers are
+    # Rejected (present, but not a positive claim) rather than Strong/Moderate.
     for topic_label in ("International business context",
-                        "learning and development or onboarding needs"):
-        claimed_in_hot = topic_label.lower() in summary_line.lower() or any(
+                        "Learning and development or onboarding needs"):
+        claimed_in_hot = any(
             b.lower().startswith(topic_label.lower()) for b in ui["what_is_hot"])
-        assert claimed_in_hot == (topic_label in driver_labels)
+        driver_is_positive = drivers_by_label[topic_label]["strength"] in (
+            "Strong", "Moderate", "Weak")
+        assert claimed_in_hot == driver_is_positive
+        assert not claimed_in_hot
+        assert not driver_is_positive
 
 
 def test_aldi_style_rich_evidence_is_still_promoted(tmp_path):
@@ -1476,15 +1506,16 @@ def test_aldi_style_rich_evidence_is_still_promoted(tmp_path):
     assert "11 countries" in joined_hot
     assert "Learning Management System" in joined_hot
     assert any(b.startswith("International business context:") for b in ui["what_is_hot"])
-    assert any(b.startswith("learning and development or onboarding needs:")
+    assert any(b.startswith("Learning and development or onboarding needs:")
                for b in ui["what_is_hot"])
 
     drivers_by_label = {d["label"]: d for d in ui["commercial_fit_drivers"]}
+    assert len(ui["commercial_fit_drivers"]) == 6
     assert drivers_by_label["International business context"]["strength"] == "Strong"
     assert "11 countries" in drivers_by_label["International business context"]["evidence"]
-    assert drivers_by_label["learning and development or onboarding needs"]["strength"] == "Strong"
+    assert drivers_by_label["Learning and development or onboarding needs"]["strength"] == "Strong"
     assert "Learning Management System" in \
-        drivers_by_label["learning and development or onboarding needs"]["evidence"]
+        drivers_by_label["Learning and development or onboarding needs"]["evidence"]
 
 
 # ---------------------------------------------------------------------------
@@ -1529,8 +1560,10 @@ def test_weak_employer_branding_not_shown_as_strong_driver(tmp_path):
     detail = detail_for(out_dir, "IGM Resins")
     ui = detail["ui_payload"]
 
-    driver_labels = {d["label"] for d in ui["commercial_fit_drivers"]}
-    assert "Employer branding or employee satisfaction" not in driver_labels
+    drivers_by_label = {d["label"]: d for d in ui["commercial_fit_drivers"]}
+    driver = drivers_by_label["Employer branding or employee satisfaction"]
+    assert driver["strength"] not in ("Strong", "Moderate", "Weak")
+    assert driver["evidence"] == ""
     assert "IGM Resins delivers high-performance" not in " ".join(ui["what_is_hot"])
 
 
@@ -1548,6 +1581,13 @@ def test_sparse_record_gets_cautious_why_relevant_and_cold_caller_summary(tmp_pa
     # No curated signals, no foreign HQ -> only safe factual bullets (or none).
     for bullet in ui["what_is_hot"]:
         assert bullet.startswith("Industry:") or bullet.startswith("Company size:")
+
+    # All six fixed dimensions are still present, all "Not evidenced" —
+    # never silently omitted just because the record is sparse.
+    assert len(ui["commercial_fit_drivers"]) == 6
+    for driver in ui["commercial_fit_drivers"]:
+        assert driver["strength"] == "Not evidenced"
+        assert driver["evidence"] == ""
 
     assert ui["cold_caller_summary"] == (
         "Use this as a light discovery lead. The current evidence does not "
@@ -1599,7 +1639,12 @@ def test_generic_homepage_copy_rejected_for_all_signal_types(tmp_path):
     detail = detail_for(out_dir, "IGM Resins")
     ui = detail["ui_payload"]
 
-    assert ui["commercial_fit_drivers"] == []
+    # All six fixed dimensions are still present — none omitted — but none
+    # is a positive claim, since the only evidence offered was generic copy.
+    assert len(ui["commercial_fit_drivers"]) == 6
+    for driver in ui["commercial_fit_drivers"]:
+        assert driver["strength"] not in ("Strong", "Moderate", "Weak")
+        assert driver["evidence"] == ""
     joined_hot = " ".join(ui["what_is_hot"])
     assert "IGM Resins delivers high-performance" not in joined_hot
     assert "UV-curable" not in joined_hot
@@ -1641,6 +1686,7 @@ def test_italy_legacy_ui_payload_behavior_untouched(tmp_path):
         industry="Retail",
         employee_range="10001+",
         cold_caller_summary_app="Legacy Italian cold caller summary text.",
+        parent_hq_summary_app="Legacy Italian parent HQ summary text.",
     )
     signals = [
         {"source_index": 1, "signal_name": "international_profile", "signal_score": 2,
@@ -1653,9 +1699,10 @@ def test_italy_legacy_ui_payload_behavior_untouched(tmp_path):
     detail = detail_for(out_dir, "ALDI S.R.L.")
     ui = detail["ui_payload"]
 
-    # Italy keeps mirroring cold_caller_summary_app verbatim — never rebuilt
-    # by the new non-Italy curated layer.
+    # Italy keeps mirroring cold_caller_summary_app / parent_hq_summary_app
+    # verbatim — never rebuilt by the new non-Italy curated layer.
     assert ui["cold_caller_summary"] == "Legacy Italian cold caller summary text."
+    assert ui["parent_hq_summary"] == "Legacy Italian parent HQ summary text."
     # Italy keeps the original (pre-curated-layer) commercial_fit_drivers
     # behavior: a positively-scored non-bucketed... here the bucketed
     # international_profile signal has weak evidence ("Signals point to")
@@ -1663,6 +1710,285 @@ def test_italy_legacy_ui_payload_behavior_untouched(tmp_path):
     # build_commercial_fit_drivers logic (unchanged from before this task).
     driver_labels = {d["label"] for d in ui["commercial_fit_drivers"]}
     assert "International business context" not in driver_labels
+    # Italy's commercial_fit_drivers is still the old variable-length shape
+    # (no fixed six dimensions, no id/note fields) — only the foreign-HQ
+    # driver exists here, since it's the only signal with real evidence.
+    assert len(ui["commercial_fit_drivers"]) == 1
+    assert "id" not in ui["commercial_fit_drivers"][0]
+    assert "note" not in ui["commercial_fit_drivers"][0]
+
+
+# ---------------------------------------------------------------------------
+# Six fixed commercial_fit_drivers dimensions (non-Italy) — always present,
+# in this exact order, never silently omitted.
+# ---------------------------------------------------------------------------
+
+_FIXED_DRIVER_LABELS_IN_ORDER = (
+    "Foreign ownership or group structure",
+    "International business context",
+    "Explicit learning and development",
+    "Learning and development or onboarding needs",
+    "Possible onboarding need",
+    "Employer branding or employee satisfaction",
+)
+
+
+def test_commercial_fit_drivers_always_six_fixed_dimensions_in_order(tmp_path):
+    _, out_dir = run_export(tmp_path, [_igm_row()],
+                            export_country="Netherlands", foreign_hq_only=False)
+
+    detail = detail_for(out_dir, "IGM Resins")
+    drivers = detail["ui_payload"]["commercial_fit_drivers"]
+
+    assert [d["label"] for d in drivers] == list(_FIXED_DRIVER_LABELS_IN_ORDER)
+    assert [d["id"] for d in drivers] == [
+        "foreign_ownership_or_group_structure",
+        "international_business_context",
+        "explicit_learning_and_development",
+        "learning_and_development_or_onboarding_needs",
+        "possible_onboarding_need",
+        "employer_branding_or_employee_satisfaction",
+    ]
+    for d in drivers:
+        assert d["strength"] == "Not evidenced"
+        assert d["evidence"] == ""
+        assert d["note"] == "No reliable company-specific evidence found in the current sources."
+
+
+# ---------------------------------------------------------------------------
+# Shimano-style regression test — Workday-hosted careers domain must never
+# be treated as official website, parent company, or sector evidence, and a
+# generic Glassdoor list-page snippet must not become a positive employer-
+# branding claim.
+# ---------------------------------------------------------------------------
+
+def test_shimano_workday_hosted_case(tmp_path):
+    shimano_row = dict(
+        source_index=1,
+        company_name="Shimano Europe Group",
+        domain="shimano.wd3.myworkdayjobs.com",
+        website_url="https://shimano.wd3.myworkdayjobs.com/en-US/Shimano_Careers",
+        careers_url="https://shimano.wd3.myworkdayjobs.com/en-US/Shimano_Careers",
+        input_country="Netherlands",
+        enrichment_skipped=False,
+        sig_foreign_hq_score_for_next_scoring=3,
+        c5_parent_company="Shimano Inc.",
+        c5_parent_hq_country="Japan",
+        # Simulates the old contaminated legacy field the new non-Italy
+        # parent_hq_summary must NOT copy.
+        parent_hq_summary_app=(
+            "The enrichment data identifies Workday as the parent company, "
+            "with HQ context in United States / Santa Clara."
+        ),
+        commercial_fit_score_app=60,
+        commercial_tier_app="B",
+        industry="",
+        detected_industry="Financial services",
+        sector_evidence_url="https://shimano.wd3.myworkdayjobs.com/some-posting",
+        employee_range="10001+",
+    )
+    signals = [
+        {"source_index": 1, "signal_name": "employer_branding", "signal_score": 2,
+         "evidence_quote": "Best Places to Work 2026 is now live. Discover top-rated workplaces this year.",
+         "evidence_url": "https://www.glassdoor.com/Best-Places-to-Work-LST_KQ0,25.htm"},
+    ]
+    evidence = [
+        {"source_index": 1, "signal_name": "employer_branding",
+         "source_url": "https://www.glassdoor.com/Best-Places-to-Work-LST_KQ0,25.htm",
+         "source_title": "Best Places to Work 2026",
+         "source_snippet": "Best Places to Work 2026 is now live."},
+    ]
+    _, out_dir = run_export(tmp_path, [shimano_row], evidence, signals,
+                            export_country="Netherlands", foreign_hq_only=False)
+
+    detail = detail_for(out_dir, "Shimano Europe Group")
+    ui = detail["ui_payload"]
+
+    # Workday is never the official website / careers page label.
+    source_urls = ui["source_urls"]
+    assert not any(item["label"] == "Official website" for item in source_urls)
+    workday_entries = [item for item in source_urls if "myworkdayjobs.com" in item["url"]]
+    assert workday_entries
+    assert all(item["label"] == "Careers platform" for item in workday_entries)
+
+    # parent_hq_summary uses the clean Shimano/Japan fields, never Workday.
+    assert ui["parent_hq_summary"] is not None
+    assert "Workday" not in ui["parent_hq_summary"]
+    assert "United States" not in ui["parent_hq_summary"]
+    assert "Shimano Inc." in ui["parent_hq_summary"]
+    assert "Japan" in ui["parent_hq_summary"]
+
+    # Generic Glassdoor list-page text is not positive employer-branding evidence.
+    drivers_by_label = {d["label"]: d for d in ui["commercial_fit_drivers"]}
+    eb_driver = drivers_by_label["Employer branding or employee satisfaction"]
+    assert eb_driver["strength"] not in ("Strong", "Moderate", "Weak")
+    assert eb_driver["evidence"] == ""
+    assert eb_driver["note"]
+
+    visible_text = " ".join([
+        ui["why_relevant"] or "", " ".join(ui["what_is_hot"]),
+        ui["cold_caller_summary"] or "",
+    ])
+    assert "Best Places to Work" not in visible_text
+    assert "Workday" not in visible_text
+
+    # Industry is not confidently set from vendor/Workday-sourced sector evidence.
+    assert "Financial services" not in (ui["why_relevant"] or "")
+    assert not any("Financial services" in b for b in ui["what_is_hot"])
+
+
+# ---------------------------------------------------------------------------
+# Samsung-style regression test — external installer/product/partner
+# training must not be accepted as internal employee L&D/onboarding evidence.
+# ---------------------------------------------------------------------------
+
+def test_samsung_external_installer_training_case(tmp_path):
+    samsung_row = dict(
+        source_index=1,
+        company_name="Samsung Electronics Air Conditioner Europe",
+        domain="samsung.com",
+        website_url="https://www.samsung.com",
+        input_country="Netherlands",
+        enrichment_skipped=False,
+        sig_foreign_hq_score_for_next_scoring=0,
+        commercial_fit_score_app=45,
+        commercial_tier_app="C",
+        industry="Manufacturing",
+        employee_range="1001-5000",
+    )
+    signals = [
+        {"source_index": 1, "signal_name": "onboarding_training_need", "signal_score": 2,
+         "evidence_quote": (
+             "Find out how to become a Samsung heat pump and air "
+             "conditioning installer in the UK. Get the training you need "
+             "to become a climate solutions partner."
+         )},
+    ]
+    _, out_dir = run_export(tmp_path, [samsung_row], signals=signals,
+                            export_country="Netherlands", foreign_hq_only=False)
+
+    detail = detail_for(out_dir, "Samsung Electronics Air Conditioner Europe")
+    ui = detail["ui_payload"]
+
+    drivers_by_label = {d["label"]: d for d in ui["commercial_fit_drivers"]}
+    driver = drivers_by_label["Learning and development or onboarding needs"]
+    assert driver["strength"] == "Rejected"
+    assert driver["evidence"] == ""
+    assert "installer" in driver["note"].lower() or "partner" in driver["note"].lower()
+
+    visible_text = " ".join([
+        ui["why_relevant"] or "", " ".join(ui["what_is_hot"]),
+        ui["cold_caller_summary"] or "",
+    ])
+    assert "installer" not in visible_text.lower()
+    assert "climate solutions partner" not in visible_text.lower()
+
+
+# ---------------------------------------------------------------------------
+# Generic third-party directory text (Glassdoor/PitchBook/ZoomInfo-style)
+# must mention the lead company to be accepted.
+# ---------------------------------------------------------------------------
+
+def test_generic_third_party_directory_text_requires_company_mention(tmp_path):
+    (tmp_path / "a").mkdir()
+    signals_without_mention = [
+        {"source_index": 1, "signal_name": "employer_branding", "signal_score": 2,
+         "evidence_quote": "Explore workplace culture rankings and employer branding trends for 2026.",
+         "evidence_url": "https://www.pitchbook.com/profiles/company/best-workplaces-2026"},
+    ]
+    _, out_a = run_export(tmp_path / "a", [_igm_row()], signals=signals_without_mention,
+                          export_country="Netherlands", foreign_hq_only=False)
+    detail_a = detail_for(out_a, "IGM Resins")
+    drivers_a = {d["label"]: d for d in detail_a["ui_payload"]["commercial_fit_drivers"]}
+    assert drivers_a["Employer branding or employee satisfaction"]["strength"] not in (
+        "Strong", "Moderate", "Weak")
+
+    signals_with_mention = [
+        {"source_index": 1, "signal_name": "employer_branding", "signal_score": 2,
+         "evidence_quote": "IGM Resins employer branding and workplace culture are highly rated.",
+         "evidence_url": "https://www.pitchbook.com/profiles/company/igm-resins"},
+    ]
+    (tmp_path / "b").mkdir()
+    _, out_b = run_export(tmp_path / "b", [_igm_row()], signals=signals_with_mention,
+                          export_country="Netherlands", foreign_hq_only=False)
+    detail_b = detail_for(out_b, "IGM Resins")
+    drivers_b = {d["label"]: d for d in detail_b["ui_payload"]["commercial_fit_drivers"]}
+    assert drivers_b["Employer branding or employee satisfaction"]["strength"] in (
+        "Strong", "Moderate", "Weak")
+
+
+# ---------------------------------------------------------------------------
+# Source URL dedupe / labeling — duplicate official website and duplicate
+# Glassdoor entries removed, hosted job platform never "Official website",
+# parent company source labeled distinctly.
+# ---------------------------------------------------------------------------
+
+def test_source_urls_dedupe_and_parent_company_label(tmp_path):
+    row = dict(
+        source_index=1,
+        company_name="Samsung Electronics Air Conditioner Europe",
+        domain="samsung.com",
+        website_url="https://www.samsung.com",
+        input_country="Netherlands",
+        enrichment_skipped=False,
+        sig_foreign_hq_score_for_next_scoring=3,
+        c5_parent_company="Samsung Electronics",
+        c5_parent_hq_country="South Korea",
+        commercial_fit_score_app=50,
+        commercial_tier_app="C",
+        industry="Manufacturing",
+        employee_range="1001-5000",
+    )
+    evidence = [
+        {"source_index": 1, "signal_name": "international_profile",
+         "source_url": "http://samsung.com", "source_snippet": "dup of website"},
+        {"source_index": 1, "signal_name": "employer_branding",
+         "source_url": "https://www.glassdoor.com/Overview/Working-at-Samsung.htm",
+         "source_title": "Samsung Glassdoor profile",
+         "source_snippet": "Samsung employee reviews and ratings."},
+        {"source_index": 1, "signal_name": "employer_branding",
+         "source_url": "https://glassdoor.com/Overview/Working-at-Samsung.htm",
+         "source_title": "Samsung Glassdoor profile (dup)",
+         "source_snippet": "Samsung employee reviews and ratings."},
+        {"source_index": 1, "signal_name": "international_profile",
+         "source_url": "https://www.samsung.com/global/about-us/",
+         "source_snippet": "About the Samsung group, our parent HQ."},
+    ]
+    _, out_dir = run_export(tmp_path, [row], evidence,
+                            export_country="Netherlands", foreign_hq_only=False)
+
+    detail = detail_for(out_dir, "Samsung Electronics Air Conditioner Europe")
+    source_urls = detail["ui_payload"]["source_urls"]
+
+    official = [item for item in source_urls if item["label"] == "Official website"]
+    assert len(official) == 1
+
+    glassdoor_entries = [item for item in source_urls if "glassdoor.com" in item["url"]]
+    assert len(glassdoor_entries) == 1
+
+
+def test_hosted_job_platform_not_labeled_official_website(tmp_path):
+    row = dict(
+        source_index=1,
+        company_name="Shimano Europe Group",
+        domain="shimano.wd3.myworkdayjobs.com",
+        website_url="https://shimano.wd3.myworkdayjobs.com/en-US/Shimano_Careers",
+        input_country="Netherlands",
+        enrichment_skipped=False,
+        sig_foreign_hq_score_for_next_scoring=0,
+        commercial_fit_score_app=40,
+        commercial_tier_app="C",
+        industry="Manufacturing",
+        employee_range="10001+",
+    )
+    _, out_dir = run_export(tmp_path, [row],
+                            export_country="Netherlands", foreign_hq_only=False)
+
+    detail = detail_for(out_dir, "Shimano Europe Group")
+    source_urls = detail["ui_payload"]["source_urls"]
+
+    assert not any(item["label"] == "Official website" for item in source_urls)
+    assert any(item["label"] == "Careers platform" for item in source_urls)
 
 
 def test_parse_key_source_links_variants():
