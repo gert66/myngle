@@ -1039,6 +1039,12 @@ def main() -> None:  # pragma: no cover - exercised only under `streamlit run`
     row_limit = rc2.number_input("Row limit (0 = all remaining)", min_value=0, value=0, step=1)
     stop_on_error = st.checkbox("Stop on first row error", value=False)
     include_raw_ai_json = st.checkbox("Include raw AI JSON", value=False)
+    compose_caller_content = st.checkbox(
+        "Compose caller content via AI (Step 3, opt-in)", value=False,
+        help="Compose why_relevant/what_is_hot/cold_caller_summary/"
+             "caller_angle/call_starter via the Anthropic API instead of "
+             "deterministic templates. Falls back to templates per-row on "
+             "any failure (default: off).")
 
     # ── Autosave (output workbook to disk when the run completes) ─────────────
     autosave_enabled = st.checkbox(
@@ -1262,6 +1268,7 @@ def main() -> None:  # pragma: no cover - exercised only under `streamlit run`
             row_limit=int(row_limit),
             continue_on_error=not stop_on_error,
             include_raw_ai_json=include_raw_ai_json,
+            compose_caller_content=compose_caller_content,
             # "compare" / "compare_triple" run their own dedicated path below;
             # the config itself stays anthropic unless OpenAI-only was
             # explicitly selected.

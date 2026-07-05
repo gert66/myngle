@@ -71,6 +71,15 @@ class TestArgParsing:
         assert args.include_raw_ai_json is False
         assert args.stop_on_error is False
         assert args.yes is False
+        assert args.compose_caller_content is False
+
+    def test_compose_caller_content_flag_parses(self):
+        args = build_arg_parser().parse_args(
+            ["--input", "x.xlsx", "--company-column", "c", "--domain-column", "d",
+             "--compose-caller-content"])
+        assert args.compose_caller_content is True
+        cfg = config_from_args(args)
+        assert cfg.compose_caller_content is True
 
     def test_config_from_args_maps_stop_on_error(self):
         args = build_arg_parser().parse_args(
@@ -208,6 +217,7 @@ class TestMain:
             argv = self._base_argv(p, **{"--mode": "hq_only", "--row-limit": 3,
                                          "--default-country": "Italy",
                                          "--output": str(out_path)})
+            argv.append("--compose-caller-content")
             rc = main(argv)
 
         assert rc == 0
@@ -217,6 +227,7 @@ class TestMain:
         assert cfg.company_name_column == "company_name"
         assert cfg.domain_column == "domain"
         assert cfg.default_input_country == "Italy"
+        assert cfg.compose_caller_content is True
         # keys passed through to core but never written to disk output
         assert captured["serper"] == "SK" and captured["anthropic"] == "AK"
         assert out_path.read_bytes() == b"BYTES"
