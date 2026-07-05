@@ -79,6 +79,13 @@ def build_arg_parser() -> argparse.ArgumentParser:
                         "cold_caller_summary/caller_angle/call_starter via the "
                         "Anthropic API instead of deterministic templates. Falls "
                         "back to templates per-row on any failure (default: off).")
+    p.add_argument("--rich-icp-context", action="store_true",
+                   help="Opt-in: compose icp_buying_signals/"
+                        "icp_likely_training_interest/icp_potential_buyer_function "
+                        "via the Anthropic API using broader context evidence. "
+                        "Independent of --compose-caller-content (either may be "
+                        "used without the other); never affects scoring "
+                        "(default: off).")
     return p
 
 
@@ -134,6 +141,7 @@ def config_from_args(args: argparse.Namespace) -> BatchRunConfig:
         continue_on_error=not args.stop_on_error,
         include_raw_ai_json=args.include_raw_ai_json,
         compose_caller_content=args.compose_caller_content,
+        rich_icp_context=args.rich_icp_context,
     )
 
 

@@ -103,6 +103,11 @@ class BatchRunConfig:
     # and independent of run_mode; falls back silently to the deterministic
     # templates per-row on any failure (see lead_caller_content_composer.py).
     compose_caller_content: bool = False
+    # Rich ICP context — explicit opt-in, off by default, and INDEPENDENT of
+    # compose_caller_content above (either can be on without the other). See
+    # lead_icp_context_composer.py; never affects evidence_items, signals, or
+    # scoring.
+    rich_icp_context: bool = False
 
 
 # ---------------------------------------------------------------------------
@@ -116,6 +121,7 @@ _ALL_FLAGS = (
     "calculate_commercial_score_flag",
     "build_caller_app_fields_flag",
     "compose_caller_content_flag",
+    "compose_icp_context",
     "run_full_v2_pipeline",
 )
 
@@ -221,6 +227,9 @@ _RESULT_FLAT_FIELDS = [
     "composed_why_relevant", "composed_what_is_hot", "composed_cold_caller_summary",
     "composed_caller_angle", "composed_call_starter", "composed_driver_evidence_json",
     "composed_by_ai", "composed_content_note",
+    # AI-composed rich ICP context (opt-in, independent of the above)
+    "icp_buying_signals", "icp_likely_training_interest",
+    "icp_potential_buyer_function", "icp_context_by_ai", "icp_context_content_note",
 ]
 
 
@@ -367,6 +376,9 @@ def run_batch_dataframe(
     # Step 3 AI caller-content composition is independent of run_mode — an
     # explicit opt-in on top of whatever the mode already enables.
     flags["compose_caller_content_flag"] = config.compose_caller_content
+    # Rich ICP context is independent of run_mode AND of compose_caller_content
+    # above — an explicit opt-in on top of whatever else is enabled.
+    flags["compose_icp_context"] = config.rich_icp_context
     # Provider selection: only override the pipeline's own ai_model default
     # when the config explicitly sets one.
     ai_kwargs: dict = {

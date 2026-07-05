@@ -1753,6 +1753,8 @@ _CONSUMED_COLUMNS = {
     "composed_why_relevant", "composed_what_is_hot", "composed_cold_caller_summary",
     "composed_caller_angle", "composed_call_starter", "composed_driver_evidence_json",
     "composed_by_ai", "composed_content_note",
+    "icp_buying_signals", "icp_likely_training_interest",
+    "icp_potential_buyer_function", "icp_context_by_ai", "icp_context_content_note",
 }
 
 
@@ -2004,6 +2006,23 @@ def _build_detail_record(
             "signals_rows_count": len(signal_rows),
         },
     })
+
+    # Rich ICP context (opt-in, independent of AI-composed caller content
+    # above) — added only when actually present on the row, i.e. only when
+    # prioritize_single_lead(..., compose_icp_context=True) succeeded for
+    # this row. Never affects ui_payload, scoring, or any other field.
+    icp_context = {}
+    if clean_str(row.get("icp_buying_signals")):
+        icp_context["buying_signals"] = clean_str(row.get("icp_buying_signals"))
+    if clean_str(row.get("icp_likely_training_interest")):
+        icp_context["likely_training_interest"] = clean_str(
+            row.get("icp_likely_training_interest"))
+    if clean_str(row.get("icp_potential_buyer_function")):
+        icp_context["potential_buyer_function"] = clean_str(
+            row.get("icp_potential_buyer_function"))
+    if icp_context:
+        detail["icp_context"] = icp_context
+
     foreign_hq_detected = list_item["foreign_hq_detected_for_export"]
     visible_signals = detail["visible_icp_signal_scores"]
     employee_range = list_item.get("employee_range")

@@ -1045,6 +1045,12 @@ def main() -> None:  # pragma: no cover - exercised only under `streamlit run`
              "caller_angle/call_starter via the Anthropic API instead of "
              "deterministic templates. Falls back to templates per-row on "
              "any failure (default: off).")
+    rich_icp_context = st.checkbox(
+        "Rijkere ICP-context via AI (opt-in)", value=False,
+        help="Compose icp_buying_signals/icp_likely_training_interest/"
+             "icp_potential_buyer_function via the Anthropic API using "
+             "broader context evidence. Independent of 'Compose caller "
+             "content via AI' above; never affects scoring (default: off).")
 
     # ── Autosave (output workbook to disk when the run completes) ─────────────
     autosave_enabled = st.checkbox(
@@ -1269,6 +1275,7 @@ def main() -> None:  # pragma: no cover - exercised only under `streamlit run`
             continue_on_error=not stop_on_error,
             include_raw_ai_json=include_raw_ai_json,
             compose_caller_content=compose_caller_content,
+            rich_icp_context=rich_icp_context,
             # "compare" / "compare_triple" run their own dedicated path below;
             # the config itself stays anthropic unless OpenAI-only was
             # explicitly selected.
