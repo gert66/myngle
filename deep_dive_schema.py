@@ -34,6 +34,23 @@ DEEP_DIVE_RETRIEVAL_METHODS: tuple[str, ...] = (
 # Documented trigger_reason values (informational — not enforced).
 DEEP_DIVE_TRIGGER_REASONS: tuple[str, ...] = ("score_threshold", "foreign_hq", "manual")
 
+# Mechanical quote-verification statuses (see quote_verifier.py and the
+# self-healing logic in deep_dive_runner.py). "not_checked" is the safe
+# default for claims produced before this field existed, or when
+# verify_quotes=False. "verified_corrected" only appears when auto-correction
+# replaced the AI's quote with the actual matched page text.
+DEEP_DIVE_QUOTE_VERIFICATION_STATUSES: tuple[str, ...] = (
+    "verified", "verified_corrected", "fuzzy_match", "not_found",
+    "fetch_failed", "not_checked",
+)
+
+# Statuses whose match confidence is high enough to present as a confirmed
+# quote badge in a UI. Kept alongside DeepDiveClaim.badge as an explicit,
+# named constant so a caller can enumerate "what counts as confirmed"
+# without re-deriving the threshold logic.
+_CONFIRMED_QUOTE_STATUSES: tuple[str, ...] = ("verified", "verified_corrected")
+_FUZZY_CONFIRM_THRESHOLD = 0.85
+
 
 @dataclass
 class DeepDiveClaim:
@@ -47,6 +64,32 @@ class DeepDiveClaim:
     source_kind: str = "external"
     domain_verified: bool = False
     retrieval_method: str = "serper_localized"
+    # Mechanical quote verification (see quote_verifier.py). Defaults are
+    # chosen so a DeepDiveClaim built before this field existed — or with
+    # verify_quotes=False — deserializes/serializes safely as "not checked"
+    # rather than a false "verified".
+    quote_verified: bool = False
+    quote_verification_status: str = "not_checked"
+    quote_match_score: float = 0.0
+    quote_matched_snippet: str = ""
+    # The AI-proposed quote before self-healing replaced it with the actual
+    # matched page text (see deep_dive_runner.py). Blank unless a correction
+    # actually happened.
+    original_quote: str = ""
+
+    @property
+    def badge(self) -> str:
+        """Short, UI-ready two-way verdict so the frontend never needs to
+        re-derive the confidence threshold: "confirmed" for verified /
+        verified_corrected / a fuzzy_match at or above the confirm
+        threshold, "unconfirmed" for everything else (not_found,
+        fetch_failed, not_checked, or a low-confidence fuzzy_match)."""
+        if self.quote_verification_status in _CONFIRMED_QUOTE_STATUSES:
+            return "confirmed"
+        if (self.quote_verification_status == "fuzzy_match"
+                and self.quote_match_score >= _FUZZY_CONFIRM_THRESHOLD):
+            return "confirmed"
+        return "unconfirmed"
 
     def to_json_dict(self) -> dict:
         return {
@@ -59,6 +102,12 @@ class DeepDiveClaim:
             "source_kind": self.source_kind,
             "domain_verified": self.domain_verified,
             "retrieval_method": self.retrieval_method,
+            "quote_verified": self.quote_verified,
+            "quote_verification_status": self.quote_verification_status,
+            "quote_match_score": self.quote_match_score,
+            "quote_matched_snippet": self.quote_matched_snippet,
+            "original_quote": self.original_quote,
+            "badge": self.badge,
         }
 
 
