@@ -29,7 +29,7 @@ _COUNTRY_FOLDER_SLUGS = {
     "italy": "italy",
     "australia": "australia",
     "uruguay": "uruguay",
-    "new zealand": "new-zealand",
+    "new zealand": "newzealand",
     "netherlands": "netherlands",
     "japan": "japan",
     "south korea": "south-korea",

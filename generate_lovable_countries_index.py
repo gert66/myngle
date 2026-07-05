@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
 import sys
 from pathlib import Path
 from typing import Optional
@@ -45,6 +46,16 @@ MANIFEST_COUNTRY_LABELS = [
 DISABLED_COUNTRY_LABELS = {"Japan", "South Korea", "Switzerland", "Test"}
 
 
+def _manifest_id(label: str) -> str:
+    """Stable Lovable-facing country id: a plain kebab-case of ``label``.
+
+    Kept independent of ``country_folder_slug`` so a GCS folder-naming quirk
+    (e.g. New Zealand's bucket folder being ``newzealand``, not
+    ``new-zealand``) never changes the id Lovable already relies on.
+    """
+    return re.sub(r"[^a-z0-9]+", "-", label.strip().lower()).strip("-")
+
+
 def build_countries_manifest(bucket: str = DEFAULT_GCS_BUCKET) -> dict:
     """Build the ``countries.index.json`` manifest dict for ``bucket``.
 
@@ -55,7 +66,7 @@ def build_countries_manifest(bucket: str = DEFAULT_GCS_BUCKET) -> dict:
     for label in MANIFEST_COUNTRY_LABELS:
         slug = country_folder_slug(label)
         countries.append({
-            "id": slug,
+            "id": _manifest_id(label),
             "label": label,
             "enabled": label not in DISABLED_COUNTRY_LABELS,
             "baseUrl": f"https://storage.googleapis.com/{bucket}/{slug}/current",

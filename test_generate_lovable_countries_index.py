@@ -39,7 +39,7 @@ class TestBuildCountriesManifest:
         for entry in manifest["countries"]:
             assert entry["baseUrl"] == (
                 f"https://storage.googleapis.com/{DEFAULT_GCS_BUCKET}/"
-                f"{entry['id']}/current"
+                f"{country_folder_slug(entry['label'])}/current"
             )
 
     def test_new_countries_are_disabled(self):
@@ -58,10 +58,28 @@ class TestBuildCountriesManifest:
         ):
             assert by_id[country_id]["enabled"] is True
 
-    def test_ids_match_country_folder_slug(self):
+    def test_ids_match_country_folder_slug_except_known_folder_quirks(self):
+        # The manifest id is a stable, plain kebab-case of the label and is
+        # normally identical to the GCS folder slug. New Zealand is the one
+        # deliberate exception: its GCS bucket folder is "newzealand" (no
+        # hyphen), but Lovable's id must stay "new-zealand".
         manifest = build_countries_manifest(DEFAULT_GCS_BUCKET)
         for entry in manifest["countries"]:
-            assert entry["id"] == country_folder_slug(entry["label"])
+            if entry["label"] == "New Zealand":
+                assert entry["id"] == "new-zealand"
+                assert country_folder_slug(entry["label"]) == "newzealand"
+            else:
+                assert entry["id"] == country_folder_slug(entry["label"])
+
+    def test_new_zealand_base_url_uses_newzealand_folder(self):
+        manifest = build_countries_manifest(DEFAULT_GCS_BUCKET)
+        by_id = {entry["id"]: entry for entry in manifest["countries"]}
+        nz = by_id["new-zealand"]
+        assert nz["label"] == "New Zealand"
+        assert nz["enabled"] is True
+        assert nz["baseUrl"] == (
+            f"https://storage.googleapis.com/{DEFAULT_GCS_BUCKET}/newzealand/current"
+        )
 
     def test_uses_the_given_bucket(self):
         manifest = build_countries_manifest("other-bucket")

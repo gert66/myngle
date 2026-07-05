@@ -40,7 +40,7 @@ class TestCountryFolderSlug:
         assert country_folder_slug("Italy") == "italy"
         assert country_folder_slug("Australia") == "australia"
         assert country_folder_slug("Uruguay") == "uruguay"
-        assert country_folder_slug("New Zealand") == "new-zealand"
+        assert country_folder_slug("New Zealand") == "newzealand"
         assert country_folder_slug("Netherlands") == "netherlands"
 
     def test_new_manifest_countries(self):
@@ -50,7 +50,7 @@ class TestCountryFolderSlug:
         assert country_folder_slug("Test") == "test"
 
     def test_case_and_whitespace_insensitive(self):
-        assert country_folder_slug("  new   zealand  ") == "new-zealand"
+        assert country_folder_slug("  new   zealand  ") == "newzealand"
         assert country_folder_slug("BRAZIL") == "brazil"
 
     def test_unknown_country_falls_back_to_generic_slug(self):

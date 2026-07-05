@@ -1063,7 +1063,7 @@ class TestDefaultGcsCountryPrefix:
         assert default_gcs_country_prefix("Brazil", "myngle-data") == "myngle-data/brazil"
 
     def test_base_prefix_with_slashes_normalized(self):
-        assert default_gcs_country_prefix("New Zealand", "/exports/") == "exports/new-zealand"
+        assert default_gcs_country_prefix("New Zealand", "/exports/") == "exports/newzealand"
 
 
 class TestValidateAutoExportSettings:
