@@ -14,6 +14,12 @@ see only that failure; it predates this work and is not caused by it.
 
 Branch: `work`. No PRs opened, nothing merged to `main`, per repo convention.
 
+**A later handoff addendum — multi-source evidence links, opt-in AI signal scoring,
+and multilingual retrieval — is appended at the bottom of this file
+("Addendum: evidence links, AI signal scoring, multilingual keywords"). Read that
+section for the most recent work; the rest of this file is unchanged from the
+original handoff below.**
+
 ## What's new, at a glance
 
 Three independent opt-in layers were added to the v2 pipeline, all off the critical
@@ -216,3 +222,209 @@ All new/changed test files (run individually or via the full `pytest -q`):
 - No UI for browsing Deep Dive claims yet — the `badge` field exists precisely so a
   future Lovable frontend doesn't have to re-derive the confirm threshold, but no such
   frontend has been built here.
+
+---
+
+# Addendum: evidence links, AI signal scoring, multilingual keywords
+
+Status as of this addendum: all three parts below (Onderdeel 1, 2, 3) are complete,
+wired end-to-end, and fully tested.
+
+```
+pytest -q
+```
+should report all tests passing (1295 at the time of writing; the pre-existing flaky
+`TestContentLanguageEnglishUnchanged` test noted above is unrelated and unaffected).
+
+Branch: `work`. No PRs opened, nothing merged to `main`. No API keys were logged
+anywhere in this work.
+
+## Onderdeel 1 — multiple clickable evidence links per signal/driver
+
+Never changes scores; purely additive.
+
+- `lead_output_schema.py`: `LeadSignal.evidence_urls` (ordered, deduplicated list;
+  `evidence_urls[0] == evidence_url` whenever non-empty — `evidence_url` itself is
+  untouched). Same pattern for the HQ signal: `HQDetectionResult.hq_evidence_urls` /
+  `LeadPrioritizationResult.hq_evidence_urls`, plus five new semicolon-joined
+  `*_evidence_urls` string fields on `LeadPrioritizationResult` (one per non-HQ signal),
+  mirroring the existing singular `*_evidence_url` fields.
+- `lead_non_hq_signal_extractor.py`: `evidence_urls` is built strictly from the
+  `usable` evidence list per signal (same guards as everything else — hosted-platform
+  and external-training evidence is never included, even in the rare case where the
+  singular `evidence_url` itself falls back to an excluded item for audit purposes).
+- `lead_hq_ai_interpreter.py`: the AI is asked for `evidence_urls` alongside the
+  existing single URL; every returned URL is mechanically checked against
+  `_known_urls_from_serper_payload()` (KG/answerBox/organic links actually present in
+  the Serper payload) before being kept — an invented URL is silently dropped, exactly
+  like Deep Dive's claim-URL validation.
+- `export_lead_prioritizer_to_lovable_json.py`: `build_evidence_sources(urls,
+  own_domains, primary_title, max_sources=5)` turns a URL list into
+  `[{"url", "domain", "title"}, ...]` — own-domain URLs first, then others, hosted
+  platform URLs excluded, capped at 5. Wired into:
+  - `commercial_fit_drivers[]` — each driver gets `evidence_source_url` /
+    `evidence_source_domain` (unchanged singular fields, now always equal to the first
+    array element) plus a new `evidence_sources` array (omitted entirely when empty).
+  - `what_is_hot_items[]` — a new array parallel to the existing `what_is_hot` (same
+    bullet text and order, deliberately a separate function
+    `build_curated_what_is_hot_items()` so the well-tested original is never touched),
+    each item optionally carrying its own `evidence_sources`. Non-Italy only — Italy's
+    `ui_payload` omits `what_is_hot_items` entirely, exactly like every other
+    curated-layer addition in this pipeline.
+- Excel: one semicolon-joined `*_evidence_urls` column per signal, plus
+  `hq_evidence_urls`, alongside (never replacing) the existing singular columns.
+
+### Mini-JSON example of `evidence_sources` (for the Lovable frontend prompt)
+
+```json
+{
+  "commercial_fit_drivers": [
+    {
+      "id": "international_business_context",
+      "label": "International business context",
+      "strength": "Strong",
+      "evidence": "Operates across 11 countries with 40+ offices worldwide.",
+      "note": "",
+      "evidence_source_url": "https://www.acmeglobal.com/about",
+      "evidence_source_domain": "acmeglobal.com",
+      "evidence_sources": [
+        {"url": "https://www.acmeglobal.com/about", "domain": "acmeglobal.com", "title": null},
+        {"url": "https://en.wikipedia.org/wiki/Acme_Global", "domain": "wikipedia.org", "title": null}
+      ]
+    }
+  ],
+  "what_is_hot_items": [
+    {
+      "text": "International business context: Operates across 11 countries with 40+ offices worldwide.",
+      "evidence_sources": [
+        {"url": "https://www.acmeglobal.com/about", "domain": "acmeglobal.com", "title": null}
+      ]
+    }
+  ]
+}
+```
+
+Frontend notes: `evidence_source_url` / `evidence_source_domain` (singular) always
+equal `evidence_sources[0]` when present — safe to keep using the singular fields for
+a simple "source" link and use the array only when a "show all sources" affordance is
+wanted. Both `evidence_source_url` and `evidence_sources` are entirely absent from a
+driver/item object when there is no usable evidence — always check for the key, don't
+assume an empty array.
+
+## Onderdeel 2 — opt-in AI signal scoring (changes scores, explicitly opt-in only)
+
+- `lead_ai_signal_scorer.py` (new): `score_signals_with_ai(company_name, country,
+  evidence_items, anthropic_api_key, ai_model=...)`. Reuses the deterministic
+  extractor's own guard (`_usable_evidence_for_signal` — hosted-platform and external-
+  training evidence already excluded, not re-implemented) to build the evidence pool,
+  then makes one Anthropic call asking for a `verdict`
+  (`positive_evidence`/`weak_evidence`/`no_positive_match`), a short `reason`, and
+  `supporting_evidence_ids` per supported signal name. Judgment is semantic (any
+  language, synonyms, derived facts like "11 countries" = international); a parent/
+  ownership claim requires the evidence to recognizably name the company; ties go to
+  the lower verdict.
+- **Mechanical validation, always applied, regardless of what the AI said:**
+  `supporting_evidence_ids` not present in that signal's own supplied evidence are
+  dropped; a `positive_evidence`/`weak_evidence` verdict left with zero valid ids is
+  downgraded to `no_positive_match`. The AI never gets the final say on which sources
+  exist. `evidence_url(s)` are then derived purely from the validated ids, so evidence
+  links work identically to Onderdeel 1 in both scoring modes.
+- Any call/parse failure (including no API key) yields `call_success=False` with an
+  `error` string and an empty `signals` list — the caller always falls back to the
+  deterministic extractor, so a row is never shipped with no signals.
+- `lead_prioritizer_core.py`: `prioritize_single_lead(..., ai_signal_scoring=False)`.
+  When `True` and `extract_non_hq_signals_flag` is also on, AI verdicts replace the
+  deterministic ones **before** the existing score mapping — `lead_v2_scoring_adapter.py`
+  and `commercial_fit_scoring.py` are completely unchanged (same formula, same weights,
+  only the signal input differs). `False` (the default) is byte-for-byte identical to
+  today, covered by a regression test. `run_full_v2_pipeline=True` does **not** enable
+  this flag — it stays a separate, explicit opt-in as required.
+- `result.signal_scoring_mode` is `"deterministic"` or `"ai"` — recorded in the result,
+  the Excel "Enriched Leads" sheet, and the Lovable JSON `evidence_audit` block, so a
+  deterministic- and AI-scored dataset are never silently mixed.
+- `lead_prioritizer_batch_core.py`: `BatchRunConfig.ai_signal_scoring` (default
+  `False`), independent of every other opt-in flag.
+- CLI: `--ai-signal-scoring`. Streamlit: a checkbox with an explicit warning that this
+  changes `final_commercial_fit_score` versus the default mode.
+
+## Onderdeel 3 — multilingual keywords + localized retrieval (deterministic mode)
+
+This one **is** allowed to change scores in the default (deterministic) path — more
+local-language snippets now match — which is why it bumps a version field.
+
+- `lead_non_hq_enrichment.py`: `call_serper_for_enrichment(query, serper_api_key, gl=None,
+  hl=None)` — `gl`/`hl` are only added to the Serper request body when explicitly given,
+  so any existing caller that doesn't pass them keeps today's exact request shape.
+  `gl_hl_for_country(country)` maps at least Netherlands→nl/nl, Italy→it/it,
+  Germany→de/de, France→fr/fr, Spain→es/es, Belgium→be/nl; any other/unknown country
+  returns `(None, None)` (today's unlocalized behavior). `collect_non_hq_enrichment_evidence(...,
+  country=None)` derives `gl`/`hl` from the lead's effective input country and passes
+  them through. `lead_prioritizer_core.py` now passes `country=effective_country` at
+  its one call site.
+- `lead_non_hq_signal_extractor.py`: `_SIGNAL_KEYWORDS` gained a short, deliberately
+  narrow set of NL/IT/DE/FR/ES equivalents per signal (e.g. medewerkers/dipendenti/
+  Mitarbeiter/employés/empleados for "employees"; opleiding/formazione/Schulung/
+  formation/formación for "training"; internationaal/internazionale/internacional for
+  "international" — DE/FR already share the English spelling so aren't duplicated;
+  vestigingen/sedi/Standorte/sedes for "locations/sites"). Only words judged safe from
+  false positives were added — no ambiguous short tokens.
+- `SIGNAL_EXTRACTOR_VERSION = "v2-multilingual"` (new constant) is exposed as
+  `result.signal_extractor_version` (also on Excel and in the Lovable JSON
+  `evidence_audit` block) so a keyword-set change is never silently invisible in old
+  vs. new datasets.
+- `lead_icp_context_composer.py` was **not** touched — it calls
+  `call_serper_for_enrichment` without `gl`/`hl` and keeps its existing unlocalized
+  behavior, since Onderdeel 3 only asked for the non-HQ enrichment path.
+
+## Tests (this addendum)
+
+- `test_lead_non_hq_signal_extractor.py`: `TestEvidenceUrls` (extractor
+  `evidence_urls`), `TestMultilingualKeywords` (one test per new language per signal
+  family, plus an English-still-matches regression), `TestSummary`'s two new
+  `signal_extractor_version` tests.
+- `test_lead_prioritizer_ai_hq.py`: `TestHqEvidenceUrls` (7 tests — ordering,
+  singular/array parity, invented-URL rejection, dedupe, missing-key fallback, no-URL
+  case, score/classification invariance).
+- `test_export_lead_prioritizer_to_lovable_json.py`: driver `evidence_sources`
+  (ordering/dedupe/own-domain-first/hosted-platform exclusion/5-cap/singular-equals-
+  first/omitted-when-empty), `what_is_hot_items` (parallel to `what_is_hot`, Italy
+  absence), and an explicit score/backward-compat invariance test comparing a run with
+  and without `evidence_urls` populated.
+- `test_lead_non_hq_enrichment.py`: `TestGlHlLocalization` (country mapping,
+  case-insensitivity, unknown-country fallback, `gl`/`hl` included/omitted on the
+  actual request body, passthrough from `collect_non_hq_enrichment_evidence`), plus a
+  `TestCoreFlagGating` case proving `effective_country` reaches the collector.
+- `test_lead_ai_signal_scorer.py` (new, 17 tests): prompt/evidence filtering
+  (guard reuse proven — hosted-platform/external-training evidence never reaches the
+  prompt), verdict translation into `LeadSignal`, the full mechanical-validation suite
+  (invented id dropped, positive verdict downgraded when no valid id, cross-signal id
+  rejected), and API-failure fallback.
+- `test_lead_v2_full_pipeline.py`: `TestAiSignalScoringFlag` (off by default and
+  byte-identical to today, full-preset does not enable it, AI success replaces
+  signals and marks `signal_scoring_mode`, AI failure falls back to the deterministic
+  extractor with matching signal names/scores, and same-signal-input-in ⇒
+  same-score-out proving the scoring formula itself is untouched).
+- `test_lead_prioritizer_batch_cli.py` / `test_lead_prioritizer_batch_core.py`: flag
+  parsing/defaults and independent passthrough for `--ai-signal-scoring` /
+  `ai_signal_scoring`, alongside the existing compose-flag combinations.
+
+## Design choices worth knowing about (this addendum)
+
+- **Per-signal id validation, not global.** The task text said "ids not present in
+  the input are removed," which could be read as validating against every evidence
+  item handed to the AI across all signals. This implementation validates each
+  signal's `supporting_evidence_ids` only against the evidence collected *for that
+  same signal* — so one signal's verdict can never be backed by another signal's
+  evidence, which matches how the deterministic extractor already scopes evidence per
+  signal. See `test_lead_ai_signal_scorer.py::TestMechanicalValidation::
+  test_evidence_id_from_a_different_signal_is_not_accepted`.
+- **A signal with zero usable evidence never reaches the AI prompt and never gets a
+  `LeadSignal`** — mirroring the deterministic extractor's "no evidence group → no
+  signal" rule. The one edge-case divergence: if a signal's evidence exists but every
+  item is guard-excluded, the deterministic extractor still emits an explicit
+  score-0 signal with an "excluded" reason, while AI mode simply omits that signal
+  entirely. Functionally equivalent for scoring (both contribute nothing), but the
+  audit trail differs slightly in that specific edge case.
+- **`ai_signal_scoring` reuses the pipeline's single `ai_model` parameter** rather than
+  introducing a dedicated model override, matching the existing precedent
+  (`compose_icp_context` / `compose_caller_content_flag` do the same).
