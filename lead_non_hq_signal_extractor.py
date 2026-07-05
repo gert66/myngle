@@ -11,6 +11,7 @@ from __future__ import annotations
 import re
 from typing import Optional
 
+from hq_simple_detector import is_hosted_careers_platform_domain
 from lead_output_schema import LeadEvidence, LeadSignal
 
 
@@ -62,12 +63,74 @@ def _first(values: list[Optional[str]]) -> Optional[str]:
     return None
 
 
+# ---------------------------------------------------------------------------
+# External-training / hosted-platform guards.
+#
+# Shared with export_lead_prioritizer_to_lovable_json.py (imported from here)
+# so the signal *score* and the exporter's *displayed* rationale can never
+# disagree — before this, a Samsung-style external-installer-training snippet
+# scored a full 2.0 onboarding_training_need signal here while the export
+# layer's independent (display-only) guard rejected the very same evidence,
+# producing a high commercial score with every driver shown as "Rejected".
+# ---------------------------------------------------------------------------
+
+def _topic_pattern(words: tuple[str, ...]) -> re.Pattern:
+    return re.compile(r"\b(?:" + "|".join(re.escape(w) for w in words) + r")\b", re.IGNORECASE)
+
+
+# "training" alone is not enough — external installer/product/partner/
+# reseller training must not be counted as internal employee learning &
+# development just because the word "training" appears.
+_EXTERNAL_TRAINING_RE = _topic_pattern((
+    "installer", "installers", "reseller", "resellers", "distributor",
+    "distributors", "partner training", "customer training",
+    "product training", "certification program", "become a",
+    "channel partner", "climate solutions partner",
+))
+_INTERNAL_LD_MARKERS_RE = _topic_pattern((
+    "employee", "employees", "internal", "hr team", "people team",
+    "people development", "leadership development", "talent development",
+    "lms", "academy", "career development", "upskilling", "workforce",
+    "staff training", "new hire", "new-hire", "onboarding",
+))
+
+
+def is_external_training_evidence(text: str) -> bool:
+    """True when L&D/onboarding evidence looks like external product,
+    partner, reseller, or installer training rather than internal employee
+    development (e.g. "become a ... installer... climate solutions
+    partner") — checked only for the L&D-family signals."""
+    return bool(_EXTERNAL_TRAINING_RE.search(text or "")) and not bool(
+        _INTERNAL_LD_MARKERS_RE.search(text or ""))
+
+
+# signal_names treated as the "learning & development" family for the
+# external-training check.
+_LD_FAMILY_SIGNAL_NAMES = frozenset({"onboarding_training_need", "icp_keyword_match"})
+
+
+def _usable_evidence_for_signal(ev: LeadEvidence, signal_name: str) -> bool:
+    """False when evidence must not count toward a positive score for this
+    signal: hosted careers-platform evidence never counts for any signal (it
+    is about the platform vendor, not the company), and L&D-family evidence
+    describing external installer/product/partner training never counts as
+    an internal L&D/onboarding keyword hit."""
+    if is_hosted_careers_platform_domain(ev.source_url):
+        return False
+    if signal_name in _LD_FAMILY_SIGNAL_NAMES and is_external_training_evidence(_evidence_text(ev)):
+        return False
+    return True
+
+
 def extract_non_hq_signals(evidence_items: list[LeadEvidence]) -> list[LeadSignal]:
     """Extract deterministic non-HQ signals from collected evidence.
 
     Produces at most one ``LeadSignal`` per supported signal name, and only for
     signals that actually have evidence.  No signal is created for a name with
-    no evidence.
+    no evidence.  Evidence that is a hosted careers-platform hit, or (for the
+    L&D-family signals) external installer/product/partner training, never
+    counts toward a positive keyword match — it stays in ``evidence_items``
+    for audit purposes, but cannot be the sole basis for a positive score.
     """
     signals: list[LeadSignal] = []
 
@@ -76,8 +139,13 @@ def extract_non_hq_signals(evidence_items: list[LeadEvidence]) -> list[LeadSigna
         if not group:
             continue  # no evidence → no signal
 
+        usable: list[LeadEvidence] = []
+        excluded: list[LeadEvidence] = []
+        for e in group:
+            (usable if _usable_evidence_for_signal(e, signal_name) else excluded).append(e)
+
         keywords = _SIGNAL_KEYWORDS[signal_name]
-        combined = " ".join(_evidence_text(e) for e in group)
+        combined = " ".join(_evidence_text(e) for e in usable)
         matched = [kw for kw in keywords if kw in combined]
         n_hits = len(matched)
 
@@ -88,7 +156,7 @@ def extract_non_hq_signals(evidence_items: list[LeadEvidence]) -> list[LeadSigna
         else:
             score, value = 0.0, "no_positive_match"
 
-        first_url = _first([e.source_url for e in group])
+        first_url = _first([e.source_url for e in usable]) or _first([e.source_url for e in group])
         has_url = first_url is not None
 
         if score == 2.0 and has_url:
@@ -103,6 +171,20 @@ def extract_non_hq_signals(evidence_items: list[LeadEvidence]) -> list[LeadSigna
                 f"{n_hits} distinct keyword match(es) in evidence: "
                 + ", ".join(matched)
             )
+        elif excluded:
+            excluded_notes = []
+            if any(is_hosted_careers_platform_domain(e.source_url) for e in excluded):
+                excluded_notes.append("hosted careers-platform evidence excluded")
+            if signal_name in _LD_FAMILY_SIGNAL_NAMES and any(
+                is_external_training_evidence(_evidence_text(e)) for e in excluded
+            ):
+                excluded_notes.append("external installer/partner/product training evidence excluded")
+            reason = (
+                "No positive keywords matched in available evidence ("
+                + "; ".join(excluded_notes) + ")."
+                if excluded_notes
+                else "No positive keywords matched in available evidence."
+            )
         else:
             reason = "No positive keywords matched in available evidence."
 
@@ -113,8 +195,10 @@ def extract_non_hq_signals(evidence_items: list[LeadEvidence]) -> list[LeadSigna
             signal_confidence=confidence,
             signal_reason=reason,
             evidence_url=first_url,
-            evidence_quote=_first([e.source_snippet for e in group]),
-            evidence_title=_first([e.source_title for e in group]),
+            evidence_quote=(_first([e.source_snippet for e in usable])
+                            or _first([e.source_snippet for e in group])),
+            evidence_title=(_first([e.source_title for e in usable])
+                            or _first([e.source_title for e in group])),
             query_used=_first([e.query_used for e in group]),
             parser_source=_first([e.parser_source for e in group]),
             needs_manual_review=False,
@@ -345,8 +429,20 @@ def extract_sector_industry(evidence_items: list[LeadEvidence]) -> dict:
     """
     out: dict = {key: None for key in _SECTOR_RESULT_KEYS}
 
-    group = [e for e in (evidence_items or []) if e.signal_name == "sector_industry"]
+    raw_group = [e for e in (evidence_items or []) if e.signal_name == "sector_industry"]
+    if not raw_group:
+        return out
+
+    # Hosted careers-platform evidence (Workday, Greenhouse, ...) describes the
+    # platform vendor, not the company's own sector — it must never count
+    # toward sector detection.
+    group = [e for e in raw_group if not is_hosted_careers_platform_domain(e.source_url)]
     if not group:
+        out["sector_confidence"] = "Low"
+        out["sector_reason"] = (
+            "Sector evidence came only from a hosted careers/job platform "
+            "and was not used for sector detection."
+        )
         return out
 
     ordered = sorted(group, key=_sector_evidence_priority)

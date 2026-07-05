@@ -295,6 +295,83 @@ class TestUnclearResult:
 
 
 # ---------------------------------------------------------------------------
+# Shimano — hosted careers-platform input domain (Step 1 upstream fix).
+#
+# Before Step 1, build_simple_hq_query("Shimano Europe Group",
+# "shimano.wd3.myworkdayjobs.com") returned ("myworkdayjobs",
+# "myworkdayjobs headquarters"), so the query sent to the AI interpreter was
+# about Workday, not Shimano — the AI would then (correctly, given the bad
+# query) report Workday/United States as the "foreign parent HQ". The
+# assertions below pin the query actually built and sent, plus the new
+# domain_is_hosted_platform audit flag.
+# ---------------------------------------------------------------------------
+
+class TestShimanoHostedPlatformDomain:
+    _lead = LeadInput(
+        company_name="Shimano Europe Group",
+        domain="shimano.wd3.myworkdayjobs.com",
+        input_country="Netherlands",
+    )
+
+    _ai = _ai_json(
+        classification="foreign_parent",
+        confidence="High",
+        parent_company="Shimano Inc.",
+        parent_hq_country="Japan",
+        parent_hq_city="Sakai",
+        evidence_url="https://www.shimano.com/en/corporate/",
+        evidence_quote="Shimano Inc. is headquartered in Sakai, Osaka, Japan.",
+        reason="Shimano Inc. is the ultimate parent, headquartered in Japan.",
+    )
+
+    def test_query_uses_tenant_not_platform_label(self):
+        with patch(
+            "lead_prioritizer_core.call_serper_for_hq",
+        ) as mock_serper, _mock_anthropic(self._ai):
+            mock_serper.return_value = _EMPTY_SERPER
+            prioritize_single_lead(
+                self._lead,
+                serper_api_key="fake-serper",
+                anthropic_api_key="fake-anthropic",
+            )
+        _, call_kwargs = mock_serper.call_args
+        assert call_kwargs["domain_root"] == "shimano"
+        assert call_kwargs["query"] == "shimano headquarters"
+        assert "myworkdayjobs" not in call_kwargs["query"]
+
+    def test_domain_is_hosted_platform_flag_set(self):
+        with _mock_serper(_EMPTY_SERPER), _mock_anthropic(self._ai):
+            result = prioritize_single_lead(
+                self._lead,
+                serper_api_key="fake-serper",
+                anthropic_api_key="fake-anthropic",
+            )
+        assert result.domain_is_hosted_platform is True
+        # Original domain must never be overwritten.
+        assert result.domain == "shimano.wd3.myworkdayjobs.com"
+
+    def test_hq_result_reflects_shimano_not_workday(self):
+        with _mock_serper(_EMPTY_SERPER), _mock_anthropic(self._ai):
+            result = prioritize_single_lead(
+                self._lead,
+                serper_api_key="fake-serper",
+                anthropic_api_key="fake-anthropic",
+            )
+        assert result.ai_parent_company == "Shimano Inc."
+        assert result.hq_detected_country == "Japan"
+
+
+class TestNonHostedPlatformDomainFlag:
+    def test_domain_is_hosted_platform_false_for_normal_domain(self):
+        lead = LeadInput(company_name="IBM", domain="ibm.com", input_country="Italy")
+        with _mock_serper(_EMPTY_SERPER), _mock_anthropic(_ai_json()):
+            result = prioritize_single_lead(
+                lead, serper_api_key="fake-serper", anthropic_api_key="fake-anthropic",
+            )
+        assert result.domain_is_hosted_platform is False
+
+
+# ---------------------------------------------------------------------------
 # Experimental OpenAI provider (opt-in; default Anthropic behavior unchanged)
 # ---------------------------------------------------------------------------
 

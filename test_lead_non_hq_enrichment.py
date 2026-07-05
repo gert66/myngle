@@ -86,6 +86,26 @@ class TestQueryBuilder:
     def test_empty_input_yields_no_queries(self):
         assert build_non_hq_enrichment_queries("", None) == []
 
+    def test_hosted_platform_domain_uses_tenant_not_platform_label(self):
+        """Shimano's Workday-hosted domain must never leak "myworkdayjobs"
+        into the non-HQ enrichment queries (Step 1 upstream fix)."""
+        specs = build_non_hq_enrichment_queries(
+            "Shimano Europe Group", "shimano.wd3.myworkdayjobs.com",
+        )
+        assert specs
+        for spec in specs:
+            assert spec["query"].startswith("shimano "), spec["query"]
+            assert "myworkdayjobs" not in spec["query"].lower()
+
+    def test_bare_hosted_platform_domain_falls_back_to_company_name(self):
+        """A bare hosted-platform domain with no recoverable tenant falls
+        back to the company name rather than ever using the platform root."""
+        specs = build_non_hq_enrichment_queries("Shimano Europe Group", "boards.greenhouse.io")
+        assert specs
+        for spec in specs:
+            assert spec["query"].startswith("shimano europe group")
+            assert "greenhouse" not in spec["query"].lower()
+
 
 # ---------------------------------------------------------------------------
 # Evidence extractor

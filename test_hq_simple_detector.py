@@ -1,7 +1,12 @@
 """Pytest tests for hq_simple_detector."""
 
 import pytest
-from hq_simple_detector import build_simple_hq_query, derive_domain_root, detect_hq_from_serper_payload
+from hq_simple_detector import (
+    build_simple_hq_query,
+    derive_domain_root,
+    detect_hq_from_serper_payload,
+    is_hosted_careers_platform_domain,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -71,6 +76,80 @@ def test_derive_domain_root_public_suffix(input_domain, expected):
 def test_derive_domain_root_uruguay_not_truncated_to_pseudo_tld_label(input_domain):
     root = derive_domain_root(input_domain)
     assert root not in ("com", "net", "org")
+
+
+# ---------------------------------------------------------------------------
+# is_hosted_careers_platform_domain
+# ---------------------------------------------------------------------------
+
+@pytest.mark.parametrize("value, expected", [
+    ("shimano.wd3.myworkdayjobs.com", True),
+    ("https://shimano.wd3.myworkdayjobs.com/en-US/Shimano_Careers", True),
+    ("boards.greenhouse.io", True),
+    ("boards.greenhouse.io/shimano", True),
+    ("jobs.lever.co/shimano", True),
+    ("careers.smartrecruiters.com", True),
+    ("ibm.com", False),
+    ("example.co.uk", False),
+    ("", False),
+    (None, False),
+])
+def test_is_hosted_careers_platform_domain(value, expected):
+    assert is_hosted_careers_platform_domain(value) is expected
+
+
+# ---------------------------------------------------------------------------
+# derive_domain_root / build_simple_hq_query — hosted careers-platform domains
+# (Step 1: hosted platforms must never contaminate HQ/non-HQ query building)
+# ---------------------------------------------------------------------------
+
+@pytest.mark.parametrize("input_domain, expected_root", [
+    # Workday — subdomain-style tenant.
+    ("shimano.wd3.myworkdayjobs.com", "shimano"),
+    ("https://shimano.wd3.myworkdayjobs.com/careers", "shimano"),
+    ("https://shimano.wd3.myworkdayjobs.com/en-US/Shimano_Careers", "shimano"),
+    # Greenhouse — path-style tenant; bare platform domain has no tenant.
+    ("boards.greenhouse.io/shimano", "shimano"),
+    ("shimano.greenhouse.io", "shimano"),
+    ("boards.greenhouse.io", ""),
+    # Lever — path-style tenant.
+    ("jobs.lever.co/shimano", "shimano"),
+    ("careers.smartrecruiters.com", ""),
+])
+def test_derive_domain_root_hosted_platform_never_platform_label(input_domain, expected_root):
+    root = derive_domain_root(input_domain)
+    assert root == expected_root
+    assert "myworkdayjobs" not in root
+    assert "greenhouse" not in root
+    assert "lever" not in root
+    assert "smartrecruiters" not in root
+
+
+@pytest.mark.parametrize("input_domain, expected", [
+    ("ibm.com", "ibm"),
+    ("example.co.uk", "example"),
+])
+def test_derive_domain_root_normal_domains_unchanged(input_domain, expected):
+    """Non-hosted-platform domains must behave exactly as before Step 1."""
+    assert derive_domain_root(input_domain) == expected
+
+
+def test_build_simple_hq_query_shimano_uses_tenant_not_platform():
+    root, query = build_simple_hq_query(
+        "Shimano Europe Group", "shimano.wd3.myworkdayjobs.com",
+    )
+    assert root == "shimano"
+    assert query == "shimano headquarters"
+    assert "myworkdayjobs" not in query
+
+
+def test_build_simple_hq_query_falls_back_to_company_name_when_tenant_unrecoverable():
+    """A bare hosted-platform domain with no recoverable tenant falls back to
+    the company-name root instead of ever using the platform label."""
+    root, query = build_simple_hq_query("Shimano Europe Group", "boards.greenhouse.io")
+    assert root == "shimano europe group"
+    assert query == "shimano europe group headquarters"
+    assert "greenhouse" not in query
 
 
 # ---------------------------------------------------------------------------

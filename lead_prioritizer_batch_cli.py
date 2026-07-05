@@ -74,6 +74,11 @@ def build_arg_parser() -> argparse.ArgumentParser:
                    help="Stop the batch on the first row error (default: continue).")
     p.add_argument("--yes", action="store_true",
                    help=f"Confirm running more than {_CONFIRM_THRESHOLD} rows.")
+    p.add_argument("--compose-caller-content", action="store_true",
+                   help="Opt-in Step 3: compose why_relevant/what_is_hot/"
+                        "cold_caller_summary/caller_angle/call_starter via the "
+                        "Anthropic API instead of deterministic templates. Falls "
+                        "back to templates per-row on any failure (default: off).")
     return p
 
 
@@ -128,6 +133,7 @@ def config_from_args(args: argparse.Namespace) -> BatchRunConfig:
         row_limit=args.row_limit,
         continue_on_error=not args.stop_on_error,
         include_raw_ai_json=args.include_raw_ai_json,
+        compose_caller_content=args.compose_caller_content,
     )
 
 

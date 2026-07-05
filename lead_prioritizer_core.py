@@ -9,8 +9,10 @@ Implements AI-first HQ detection for a single lead:
 
 from __future__ import annotations
 
+import json
+
 from lead_output_schema import LeadInput, LeadPrioritizationResult, HQDetectionResult
-from hq_simple_detector import build_simple_hq_query
+from hq_simple_detector import build_simple_hq_query, is_hosted_careers_platform_domain
 from lead_hq_ai_interpreter import call_serper_for_hq, interpret_hq_with_ai
 from lead_non_hq_enrichment import collect_non_hq_enrichment_evidence
 from lead_non_hq_signal_extractor import (
@@ -21,8 +23,28 @@ from lead_non_hq_signal_extractor import (
 from lead_app_summary_builder import build_app_summary_fields
 from lead_v2_scoring_adapter import score_lead_v2_result
 from lead_caller_app_fields_builder import build_caller_app_fields
+from lead_caller_content_composer import (
+    DRIVER_SIGNAL_NAMES,
+    build_curated_signals_from_result,
+    compose_caller_content,
+)
 
 _DEFAULT_AI_MODEL = "claude-haiku-4-5-20251001"
+
+
+def _quality_flags_for_result(result: LeadPrioritizationResult) -> list[str]:
+    """Short list of already-known caveats to pass as prompt context — never
+    used to invent facts, only so the composed text does not contradict them."""
+    flags = []
+    if result.needs_manual_review:
+        flags.append("needs_manual_review")
+    if result.hq_evidence_domain_mismatch_warning == "Yes":
+        flags.append("hq_evidence_domain_mismatch_warning")
+    if result.hq_positive_score_suppressed_for_review == "Yes":
+        flags.append("hq_positive_score_suppressed_for_review")
+    if result.domain_is_hosted_platform:
+        flags.append("domain_is_hosted_platform")
+    return flags
 
 
 def prioritize_single_lead(
@@ -40,6 +62,7 @@ def prioritize_single_lead(
     build_app_summary_fields_flag: bool = False,
     calculate_commercial_score_flag: bool = False,
     build_caller_app_fields_flag: bool = False,
+    compose_caller_content_flag: bool = False,
     run_full_v2_pipeline: bool = False,
 ) -> LeadPrioritizationResult:
     """Orchestrate HQ detection and scoring for a single lead.
@@ -83,14 +106,32 @@ def prioritize_single_lead(
     app-facing fields; it never collects evidence, extracts signals, builds
     summaries, or scores implicitly.
 
+    ``compose_caller_content_flag`` (default ``False``) enables the Step-3 AI
+    caller-content composition step: it calls the Anthropic Messages API with
+    the curated (already quality-checked) non-HQ signals and the HQ/parent
+    conclusion already on the result, and — on success — fills the
+    ``composed_*`` fields (``composed_why_relevant``, ``composed_what_is_hot``,
+    ``composed_cold_caller_summary``, ``composed_caller_angle``,
+    ``composed_call_starter``, ``composed_driver_evidence_json``).  It never
+    collects evidence, extracts signals, or scores implicitly; it only reads
+    what Steps 2–6 already produced.  On any failure (no Anthropic key, call
+    error, unparseable response) it leaves the ``composed_*`` fields blank and
+    records why in ``composed_content_note`` — the exporter then falls back to
+    its existing deterministic templates, exactly as if this flag were off.
+    Deliberately **not** part of the ``run_full_v2_pipeline`` preset: it must
+    be turned on explicitly.
+
     ``run_full_v2_pipeline`` (default ``False``) is an explicit opt-in preset
     that turns on all optional v2 steps (2–6) for a single-lead end-to-end run.
     It does not add batch processing, change legacy ranking, or alter the
-    canonical HQ-first order.  ``v2_pipeline_mode`` on the result records which
-    mode ran: ``"hq_only"``, ``"partial_v2"``, or ``"full_v2_single_lead"``.
+    canonical HQ-first order.  It deliberately does NOT enable
+    ``compose_caller_content_flag`` — that stays an explicit, separate opt-in.
+    ``v2_pipeline_mode`` on the result records which mode ran: ``"hq_only"``,
+    ``"partial_v2"``, or ``"full_v2_single_lead"``.
     """
     # Full-pipeline preset: enable every optional v2 step explicitly (order of
-    # operations below is unchanged — HQ first, then 2→6).
+    # operations below is unchanged — HQ first, then 2→6). Deliberately does
+    # NOT include compose_caller_content_flag — that stays a separate opt-in.
     if run_full_v2_pipeline:
         collect_non_hq_evidence = True
         extract_non_hq_signals_flag = True
@@ -103,7 +144,7 @@ def prioritize_single_lead(
     elif any((
         collect_non_hq_evidence, extract_non_hq_signals_flag,
         build_app_summary_fields_flag, calculate_commercial_score_flag,
-        build_caller_app_fields_flag,
+        build_caller_app_fields_flag, compose_caller_content_flag,
     )):
         v2_pipeline_mode = "partial_v2"
     else:
@@ -112,6 +153,7 @@ def prioritize_single_lead(
     effective_country = (input_row.input_country or "").strip() or default_input_country
 
     domain_root, query = build_simple_hq_query(input_row.company_name, input_row.domain)
+    domain_is_hosted_platform = is_hosted_careers_platform_domain(input_row.domain)
 
     serper_payload = call_serper_for_hq(
         domain_root=domain_root,
@@ -195,6 +237,7 @@ def prioritize_single_lead(
         domain_root=hq.domain_root or domain_root,
         query_used=hq.query_used or query,
         parser_source=hq.parser_source,
+        domain_is_hosted_platform=domain_is_hosted_platform,
         # C4 positive-score safety audit
         hq_query_risk_flag=hq.hq_query_risk_flag,
         hq_evidence_domain_match=hq.hq_evidence_domain_match,
@@ -299,5 +342,49 @@ def prioritize_single_lead(
         result.foreign_hq_city_app = caller_fields["foreign_hq_city_app"]
         result.cold_caller_summary_app = caller_fields["cold_caller_summary_app"]
         result.parent_hq_summary_app = caller_fields["parent_hq_summary_app"]
+
+    # ── Step 3 (opt-in): AI-composed caller content ───────────────────────────
+    # Explicit opt-in only — never enabled by run_full_v2_pipeline. Falls back
+    # silently to the deterministic *_app templates above on any failure (no
+    # key, call error, unparseable response); composed_content_note records
+    # why for audit purposes.
+    if compose_caller_content_flag:
+        composed = compose_caller_content(
+            company_name=result.company_name,
+            country=result.input_country,
+            industry=result.detected_industry,
+            foreign_hq_detected=bool(
+                result.sig_foreign_hq_score_for_next_scoring
+                and result.sig_foreign_hq_score_for_next_scoring > 0
+            ),
+            parent_company=result.ai_parent_company,
+            parent_hq_country=result.ai_parent_hq_country,
+            parent_hq_city=result.ai_parent_hq_city,
+            hq_adjudication=result.hq_structure_type,
+            curated_signals=build_curated_signals_from_result(result),
+            driver_ids=list(DRIVER_SIGNAL_NAMES),
+            quality_flags=_quality_flags_for_result(result),
+            anthropic_api_key=anthropic_api_key,
+            model=ai_model,
+        )
+        if composed.call_success:
+            result.composed_why_relevant = composed.why_relevant
+            result.composed_what_is_hot = (
+                "\n".join(composed.what_is_hot) if composed.what_is_hot else None
+            )
+            result.composed_cold_caller_summary = composed.cold_caller_summary
+            result.composed_caller_angle = composed.caller_angle
+            result.composed_call_starter = composed.call_starter
+            result.composed_driver_evidence_json = (
+                json.dumps(composed.driver_evidence) if composed.driver_evidence else None
+            )
+            result.composed_by_ai = True
+            result.composed_content_note = "AI-composed caller content used."
+        else:
+            result.composed_by_ai = False
+            result.composed_content_note = (
+                f"AI composition unavailable ({composed.error}); "
+                "fell back to deterministic templates."
+            )
 
     return result
