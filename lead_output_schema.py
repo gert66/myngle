@@ -240,6 +240,20 @@ class LeadPrioritizationResult:
     cold_caller_summary_app: Optional[str] = None
     parent_hq_summary_app: Optional[str] = None
 
+    # ── AI-composed caller content (Step 3 — opt-in, off by default; never
+    # auto-enabled by run_full_v2_pipeline). Falls back silently to the
+    # deterministic *_app templates above when unavailable;
+    # composed_content_note records why (missing key, call/parse failure, or
+    # success) for audit purposes. ────────────────────────────────────────────
+    composed_why_relevant: Optional[str] = None
+    composed_what_is_hot: Optional[str] = None
+    composed_cold_caller_summary: Optional[str] = None
+    composed_caller_angle: Optional[str] = None
+    composed_call_starter: Optional[str] = None
+    composed_driver_evidence_json: Optional[str] = None
+    composed_by_ai: Optional[bool] = None
+    composed_content_note: Optional[str] = None
+
     # ── Run metadata ──────────────────────────────────────────────────────────
     # "hq_only" | "partial_v2" | "full_v2_single_lead"
     v2_pipeline_mode: Optional[str] = None

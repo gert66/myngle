@@ -99,6 +99,10 @@ class BatchRunConfig:
     # means "use the pipeline's own default model for the provider".
     ai_provider: str = "anthropic"
     ai_model: str = ""
+    # Step 3 — explicit opt-in AI caller-content composition. Off by default
+    # and independent of run_mode; falls back silently to the deterministic
+    # templates per-row on any failure (see lead_caller_content_composer.py).
+    compose_caller_content: bool = False
 
 
 # ---------------------------------------------------------------------------
@@ -111,6 +115,7 @@ _ALL_FLAGS = (
     "build_app_summary_fields_flag",
     "calculate_commercial_score_flag",
     "build_caller_app_fields_flag",
+    "compose_caller_content_flag",
     "run_full_v2_pipeline",
 )
 
@@ -212,6 +217,10 @@ _RESULT_FLAT_FIELDS = [
     "caller_angle_app", "call_starter_app", "caution_app",
     "foreign_hq_signal_used_in_app", "foreign_hq_country_app", "foreign_hq_city_app",
     "cold_caller_summary_app", "parent_hq_summary_app",
+    # AI-composed caller content (Step 3, opt-in)
+    "composed_why_relevant", "composed_what_is_hot", "composed_cold_caller_summary",
+    "composed_caller_angle", "composed_call_starter", "composed_driver_evidence_json",
+    "composed_by_ai", "composed_content_note",
 ]
 
 
@@ -355,6 +364,9 @@ def run_batch_dataframe(
     never break enrichment.
     """
     flags = resolve_pipeline_flags(config.run_mode)
+    # Step 3 AI caller-content composition is independent of run_mode — an
+    # explicit opt-in on top of whatever the mode already enables.
+    flags["compose_caller_content_flag"] = config.compose_caller_content
     # Provider selection: only override the pipeline's own ai_model default
     # when the config explicitly sets one.
     ai_kwargs: dict = {

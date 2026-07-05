@@ -6,8 +6,10 @@ no live API keys required.
 
 from __future__ import annotations
 
+import json
 from unittest.mock import patch
 
+from lead_caller_content_composer import ComposedCallerContent
 from lead_output_schema import LeadInput, HQDetectionResult, LeadEvidence
 from lead_prioritizer_core import prioritize_single_lead
 
@@ -142,3 +144,64 @@ class TestGuardrails:
             prioritize_single_lead(_LEAD, serper_api_key="fake",
                                    anthropic_api_key="fake", run_full_v2_pipeline=True)
         assert calls == ["hq", "non_hq"]
+
+
+# ---------------------------------------------------------------------------
+# Step 3 — AI caller-content composition (explicit opt-in only)
+# ---------------------------------------------------------------------------
+
+class TestComposeCallerContentFlag:
+    def test_not_run_by_default(self):
+        r = _run()
+        assert r.composed_by_ai is None
+        assert r.composed_why_relevant is None
+
+    def test_full_preset_does_not_enable_it(self):
+        # run_full_v2_pipeline turns on steps 2-6, but composition stays an
+        # explicit, separate opt-in.
+        r = _run(run_full_v2_pipeline=True)
+        assert r.composed_by_ai is None
+        assert r.composed_why_relevant is None
+
+    def test_success_populates_composed_fields(self):
+        composed = ComposedCallerContent(
+            why_relevant="Acme is a Germany-linked company with clear international reach.",
+            what_is_hot=["Global offices across many countries.", "Active onboarding academy."],
+            cold_caller_summary="Acme looks like a strong first-conversation candidate.",
+            caller_angle="Ask how they coordinate training across countries.",
+            call_starter="I noticed Acme operates internationally — how do you handle onboarding?",
+            driver_evidence={"international_profile": "Global company with offices in many countries."},
+            call_attempted=True,
+            call_success=True,
+        )
+        with patch("lead_prioritizer_core.compose_caller_content", return_value=composed):
+            r = _run(run_full_v2_pipeline=True, compose_caller_content_flag=True)
+        assert r.composed_by_ai is True
+        assert r.composed_why_relevant == composed.why_relevant
+        assert r.composed_what_is_hot == "\n".join(composed.what_is_hot)
+        assert r.composed_cold_caller_summary == composed.cold_caller_summary
+        assert r.composed_caller_angle == composed.caller_angle
+        assert r.composed_call_starter == composed.call_starter
+        assert json.loads(r.composed_driver_evidence_json) == composed.driver_evidence
+        assert r.v2_pipeline_mode == "full_v2_single_lead"
+
+    def test_failure_falls_back_silently_with_audit_note(self):
+        composed = ComposedCallerContent(
+            call_attempted=True, call_success=False, error="no_anthropic_api_key",
+        )
+        with patch("lead_prioritizer_core.compose_caller_content", return_value=composed):
+            r = _run(run_full_v2_pipeline=True, compose_caller_content_flag=True)
+        assert r.composed_by_ai is False
+        assert r.composed_why_relevant is None
+        assert r.composed_what_is_hot is None
+        # Deterministic templates from Step 6 are still present (the fallback).
+        assert r.why_relevant_app is not None
+        assert r.what_is_hot_app is not None
+        assert r.composed_content_note is not None
+        assert "no_anthropic_api_key" in r.composed_content_note
+
+    def test_flag_alone_marks_partial_v2(self):
+        composed = ComposedCallerContent(call_attempted=True, call_success=False, error="no_anthropic_api_key")
+        with patch("lead_prioritizer_core.compose_caller_content", return_value=composed):
+            r = _run(compose_caller_content_flag=True)
+        assert r.v2_pipeline_mode == "partial_v2"

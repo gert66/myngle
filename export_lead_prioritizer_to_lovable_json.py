@@ -1470,6 +1470,68 @@ def build_fixed_commercial_fit_drivers(
     return drivers
 
 
+# ---------------------------------------------------------------------------
+# AI-composed caller content (Step 3, opt-in — non-Italy only) — see
+# lead_caller_content_composer.py. When ``prioritize_single_lead(...,
+# compose_caller_content_flag=True)`` succeeded for a row, the Enriched Leads
+# sheet carries ``composed_why_relevant`` / ``composed_what_is_hot`` / ...
+# alongside the deterministic ``*_app`` templates. This exporter prefers the
+# composed fields when present; otherwise it falls back to exactly the
+# existing curated-layer behavior above, unchanged.
+# ---------------------------------------------------------------------------
+
+_POSITIVE_DRIVER_STRENGTHS = frozenset({"Strong", "Moderate", "Weak"})
+
+
+def parse_composed_driver_evidence(value) -> dict:
+    """Parse the JSON-encoded ``signal_name -> sentence`` mapping written by
+    ``lead_caller_content_composer.compose_caller_content``. Never raises —
+    a malformed/blank value yields ``{}``."""
+    text = clean_str(value)
+    if not text:
+        return {}
+    try:
+        loaded = json.loads(text)
+    except (json.JSONDecodeError, TypeError):
+        return {}
+    if not isinstance(loaded, dict):
+        return {}
+    out = {}
+    for key, val in loaded.items():
+        val = clean_str(val)
+        if val:
+            out[str(key)] = val
+    return out
+
+
+def apply_composed_driver_evidence(
+    commercial_fit_drivers: list[dict],
+    driver_evidence: dict,
+) -> list[dict]:
+    """Overlay AI-composed evidence sentences onto the fixed
+    commercial_fit_drivers rows, keyed by signal_name (``"foreign_hq"`` for
+    the HQ/parent driver). Only refines the wording of a driver that is
+    ALREADY positively evidenced (Strong/Moderate/Weak) — a "Not evidenced"
+    or "Rejected" row is never upgraded to a positive claim just because the
+    AI returned text for that key, since compose_caller_content() is only
+    ever given curated evidence for signals that already scored positively."""
+    if not driver_evidence:
+        return commercial_fit_drivers
+    by_signal_name = {
+        signal_name: idx
+        for idx, (signal_name, _driver_id, _label) in enumerate(_FIXED_DRIVER_SIGNAL_ORDER)
+    }
+    updated = [dict(d) for d in commercial_fit_drivers]
+    for signal_name, sentence in driver_evidence.items():
+        idx = by_signal_name.get(signal_name)
+        if idx is None or idx >= len(updated):
+            continue
+        driver = updated[idx]
+        if driver.get("strength") in _POSITIVE_DRIVER_STRENGTHS:
+            driver["evidence"] = sentence
+    return updated
+
+
 def build_curated_cold_caller_summary(
     foreign_hq_detected: bool,
     parent_company: "str | None",
@@ -1688,6 +1750,9 @@ _CONSUMED_COLUMNS = {
     "competitor_signal_suppressed",
     "foreign_hq_country_app", "foreign_hq_city_app",
     "domain_quality", "domain_is_hosted_platform",
+    "composed_why_relevant", "composed_what_is_hot", "composed_cold_caller_summary",
+    "composed_caller_angle", "composed_call_starter", "composed_driver_evidence_json",
+    "composed_by_ai", "composed_content_note",
 }
 
 
@@ -1931,6 +1996,8 @@ def _build_detail_record(
         "quality_flags": build_quality_flags(row),
         "domain_quality": clean_str(row.get("domain_quality")),
         "domain_is_hosted_platform": to_bool(row.get("domain_is_hosted_platform")),
+        "composed_by_ai": to_bool(row.get("composed_by_ai")),
+        "composed_content_note": clean_str(row.get("composed_content_note")),
         "debug": {
             "lead_prioritizer_row": _build_debug_row(row, warnings),
             "evidence_rows_count": len(evidence_rows),
@@ -1973,6 +2040,9 @@ def _build_detail_record(
             detail["website_url"], detail["careers_url"], detail["linkedin_url"],
             detail["source_urls"], own_domains, company_name, url_context,
         )
+        # Italy path is frozen — never touched by AI-composed content.
+        caller_angle_text = detail["caller_angle_app"]
+        call_starter_text = detail["call_starter_app"]
     else:
         # Hosted careers/job platforms (Workday, Greenhouse, ...) are never
         # the lead's own domain for display purposes, even when the row's
@@ -2016,13 +2086,35 @@ def _build_detail_record(
             hosted_platform_domains=_HOSTED_CAREERS_PLATFORM_DOMAINS,
             parent_company=parent_company,
         )
+        caller_angle_text = detail["caller_angle_app"]
+        call_starter_text = detail["call_starter_app"]
+
+        # AI-composed caller content (Step 3, opt-in) — use it in place of the
+        # curated-layer text above wherever it is present on this row; any
+        # field the composer didn't fill keeps the curated-layer value.
+        if clean_str(row.get("composed_why_relevant")):
+            why_relevant = clean_str(row.get("composed_why_relevant"))
+        composed_what_is_hot = parse_array_field(row.get("composed_what_is_hot"))
+        if composed_what_is_hot:
+            what_is_hot = composed_what_is_hot
+        if clean_str(row.get("composed_cold_caller_summary")):
+            cold_caller_summary = clean_str(row.get("composed_cold_caller_summary"))
+        if clean_str(row.get("composed_caller_angle")):
+            caller_angle_text = clean_str(row.get("composed_caller_angle"))
+        if clean_str(row.get("composed_call_starter")):
+            call_starter_text = clean_str(row.get("composed_call_starter"))
+        composed_driver_evidence = parse_composed_driver_evidence(
+            row.get("composed_driver_evidence_json"))
+        if composed_driver_evidence:
+            commercial_fit_drivers = apply_composed_driver_evidence(
+                commercial_fit_drivers, composed_driver_evidence)
 
     detail["ui_payload"] = {
         "why_relevant": why_relevant,
         "what_is_hot": what_is_hot,
         "what_is_not": detail["what_is_not_app"],
-        "caller_angle": detail["caller_angle_app"],
-        "call_starter": detail["call_starter_app"],
+        "caller_angle": caller_angle_text,
+        "call_starter": call_starter_text,
         "cold_caller_summary": cold_caller_summary,
         "parent_hq_summary": parent_hq_summary,
         "evidence_summary": detail["evidence_summary_app"],
