@@ -114,6 +114,99 @@ class TestExtractor:
 
 
 # ---------------------------------------------------------------------------
+# Step 2 — external-training and hosted-platform guards moved into the
+# extraction layer, so the signal score and the exporter's displayed
+# rationale can never disagree (previously: a high score with every driver
+# shown as "Rejected").
+# ---------------------------------------------------------------------------
+
+class TestExternalTrainingAndHostedPlatformGuards:
+    def test_samsung_external_installer_training_scores_zero(self):
+        """External installer/partner training must not count as an internal
+        onboarding_training_need or icp_keyword_match keyword hit."""
+        ev = [_ev(
+            "onboarding_training_need",
+            title="Become a Samsung installer",
+            snippet=(
+                "Find out how to become a certified Samsung heat pump "
+                "installer. Get the training you need to become a climate "
+                "solutions partner."
+            ),
+            url="https://www.samsung.com/uk/installer-training",
+        )]
+        s = extract_non_hq_signals(ev)[0]
+        assert s.signal_score == 0.0
+        assert s.signal_value == "no_positive_match"
+        assert "external installer" in s.signal_reason.lower() \
+            or "partner" in s.signal_reason.lower()
+
+    def test_samsung_case_also_zero_for_icp_keyword_match(self):
+        ev = [_ev(
+            "icp_keyword_match",
+            snippet=(
+                "Become a certified installer and climate solutions partner "
+                "with our product training and certification program."
+            ),
+        )]
+        s = extract_non_hq_signals(ev)[0]
+        assert s.signal_score == 0.0
+
+    def test_internal_onboarding_academy_scores_positively(self):
+        """A genuine internal L&D case must still score normally."""
+        ev = [_ev(
+            "onboarding_training_need",
+            title="Careers at Acme",
+            snippet="Our employee onboarding academy and internal LMS support "
+                    "every new hire's career development.",
+        )]
+        s = extract_non_hq_signals(ev)[0]
+        assert s.signal_score == 2.0
+        assert s.signal_value == "positive_evidence"
+
+    def test_mixed_evidence_counts_only_internal_keywords(self):
+        """When both external-training and internal evidence exist for the
+        same signal, only the internal evidence may drive the score."""
+        ev = [
+            _ev("onboarding_training_need", snippet=(
+                "Become a certified installer and channel partner."
+            ), url="https://x.example/installer"),
+            _ev("onboarding_training_need", snippet=(
+                "Our employee onboarding academy supports every new hire."
+            ), url="https://x.example/careers"),
+        ]
+        s = extract_non_hq_signals(ev)[0]
+        assert s.signal_score == 2.0
+        assert s.evidence_url == "https://x.example/careers"
+
+    def test_hosted_platform_evidence_never_scores_any_signal(self):
+        """A hosted careers-platform hit (Workday, Greenhouse, ...) is about
+        the platform vendor, not the company, for ANY non-HQ signal — not
+        just the L&D family."""
+        ev = [_ev(
+            "international_profile",
+            snippet="Global company with offices in many countries worldwide.",
+            url="https://shimano.wd3.myworkdayjobs.com/some-posting",
+        )]
+        s = extract_non_hq_signals(ev)[0]
+        assert s.signal_score == 0.0
+        assert "hosted careers-platform" in s.signal_reason.lower()
+
+    def test_hosted_platform_evidence_kept_in_evidence_items_for_audit(self):
+        """Rejected evidence must stay available for audit — only the score
+        (never the raw evidence_items list) changes."""
+        evidence_items = [_ev(
+            "onboarding_training_need",
+            snippet="Become a certified installer and channel partner.",
+            url="https://shimano.wd3.myworkdayjobs.com/some-posting",
+        )]
+        sigs = extract_non_hq_signals(evidence_items)
+        assert sigs[0].signal_score == 0.0
+        # The evidence item itself is untouched by extraction.
+        assert len(evidence_items) == 1
+        assert evidence_items[0].source_url == "https://shimano.wd3.myworkdayjobs.com/some-posting"
+
+
+# ---------------------------------------------------------------------------
 # Summary mapping
 # ---------------------------------------------------------------------------
 
@@ -261,6 +354,38 @@ class TestSectorIndustry:
         assert out["sector_confidence"] == "High"
         assert out["sector_evidence_url"] == "https://www.dorc.nl/about"
         assert out["sector_source_title"] == "DORC | Dutch Ophthalmic Research Center"
+
+    def test_workday_hosted_platform_snippet_ignored_for_sector(self):
+        """Sector evidence from a hosted careers platform (e.g. a Workday job
+        posting) must never drive sector detection — it describes the
+        platform vendor, not the company (Step 2 upstream fix)."""
+        ev = [_ev(
+            "sector_industry",
+            title="Shimano Careers - Financial Analyst",
+            snippet="Join our financial services team supporting banking "
+                    "operations on the Workday platform.",
+            url="https://shimano.wd3.myworkdayjobs.com/some-posting",
+        )]
+        out = extract_sector_industry(ev)
+        assert out["detected_industry"] is None
+        assert out["sector_confidence"] == "Low"
+        assert "hosted careers" in out["sector_reason"].lower()
+
+    def test_workday_snippet_ignored_but_other_evidence_still_used(self):
+        ev = [
+            _ev("sector_industry",
+                title="Shimano Careers - Financial Analyst",
+                snippet="Join our financial services team on Workday.",
+                url="https://shimano.wd3.myworkdayjobs.com/some-posting"),
+            _ev("sector_industry",
+                title="Shimano | Company profile",
+                snippet="Shimano is a manufacturer of bicycle components "
+                        "and fishing tackle.",
+                url="https://www.shimano.com/en/corporate/"),
+        ]
+        out = extract_sector_industry(ev)
+        assert out["detected_industry"] == "Manufacturing"
+        assert out["sector_evidence_url"] == "https://www.shimano.com/en/corporate/"
 
 
 # ---------------------------------------------------------------------------

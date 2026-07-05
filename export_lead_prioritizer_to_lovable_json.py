@@ -40,6 +40,7 @@ from hq_simple_detector import (
     _HOSTED_CAREERS_PLATFORM_DOMAINS,
     is_hosted_careers_platform_domain,
 )
+from lead_non_hq_signal_extractor import is_external_training_evidence
 from lovable_content_localization import (
     localize_caller_angle_app,
     localize_caller_angle_app_it,
@@ -878,26 +879,12 @@ def has_topical_keywords(text: str, signal_name: "str | None") -> bool:
 # enough — external installer/product/partner/reseller training must not be
 # promoted as internal employee learning & development just because the
 # word "training" appears. Non-Italy display use only.
-_EXTERNAL_TRAINING_RE = _topic_pattern((
-    "installer", "installers", "reseller", "resellers", "distributor",
-    "distributors", "partner training", "customer training",
-    "product training", "certification program", "become a",
-    "channel partner", "climate solutions partner",
-))
-_INTERNAL_LD_MARKERS_RE = _topic_pattern((
-    "employee", "employees", "internal", "hr team", "people team",
-    "people development", "leadership development", "talent development",
-    "lms", "academy", "career development", "upskilling", "workforce",
-    "staff training", "new hire", "new-hire", "onboarding",
-))
-
-
-def _is_external_training_evidence(text: str) -> bool:
-    """True when L&D/onboarding evidence looks like external product,
-    partner, reseller, or installer training rather than internal employee
-    development (e.g. "become a ... installer... climate solutions
-    partner") — checked only for the L&D-family signals."""
-    return bool(_EXTERNAL_TRAINING_RE.search(text)) and not bool(_INTERNAL_LD_MARKERS_RE.search(text))
+#
+# The check itself (``_is_external_training_evidence``) is defined once in
+# lead_non_hq_signal_extractor.py (imported above as
+# ``is_external_training_evidence``) and reused here, so this display-only
+# guard can never disagree with the signal score computed upstream.
+_is_external_training_evidence = is_external_training_evidence
 
 
 def _clean_driver_evidence(
