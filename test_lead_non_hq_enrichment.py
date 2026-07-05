@@ -71,6 +71,8 @@ class TestQueryBuilder:
         assert q.startswith("acme ")
         assert "industry" in q
         assert "sector" in q
+        assert "products" in q
+        assert "services" in q
         assert "business activity" in q
         assert "company profile" in q
 

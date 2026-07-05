@@ -76,8 +76,8 @@ def build_non_hq_enrichment_queries(
         },
         {
             "signal_name": "sector_industry",
-            "query": f"{root} company industry sector business activity "
-                     "company profile official",
+            "query": f"{root} company industry sector products services "
+                     "business activity company profile official",
         },
     ]
 

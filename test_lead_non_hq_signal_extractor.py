@@ -208,6 +208,60 @@ class TestSectorIndustry:
         out = extract_sector_industry(ev)
         assert out["detected_industry"] != "Public sector / government"
 
+    # -----------------------------------------------------------------
+    # Representative B2B/industrial snippets (expanded keyword coverage).
+    # -----------------------------------------------------------------
+
+    def test_igm_resins_detects_chemicals(self):
+        ev = [_ev("sector_industry",
+                  title="IGM Resins | Company profile",
+                  snippet="IGM Resins is a global producer of specialty "
+                          "chemicals, photoinitiators and UV curing resins "
+                          "for coatings, inks and adhesives.",
+                  url="https://www.igmresins.com/about")]
+        out = extract_sector_industry(ev)
+        assert out["detected_industry"] == "Chemicals"
+        assert out["detected_sub_industry"] in (
+            "Specialty chemicals", "Resins", "Coatings", "Adhesives",
+            "Inks", "Polymers", "UV curing", "Photoinitiators",
+        )
+        assert out["sector_confidence"] == "High"
+        # Evidence quote/URL/source title/reason are preserved, not invented.
+        assert out["sector_evidence_url"] == "https://www.igmresins.com/about"
+        assert out["sector_source_title"] == "IGM Resins | Company profile"
+        assert "chemicals" in out["sector_reason"].lower() or \
+            "specialty chemicals" in out["sector_reason"].lower()
+
+    def test_bauwatch_detects_security_services_site_monitoring(self):
+        ev = [_ev("sector_industry",
+                  title="BauWatch | About us",
+                  snippet="BauWatch provides mobile security services and "
+                          "24/7 site monitoring for construction sites "
+                          "across Europe.",
+                  url="https://www.bauwatch.com/about")]
+        out = extract_sector_industry(ev)
+        assert out["detected_industry"] == "Security services"
+        assert out["detected_sub_industry"] == "Site monitoring"
+        assert out["sector_confidence"] == "High"
+        assert out["sector_evidence_url"] == "https://www.bauwatch.com/about"
+        assert out["sector_source_title"] == "BauWatch | About us"
+
+    def test_dorc_detects_healthcare_ophthalmic_devices(self):
+        ev = [_ev("sector_industry",
+                  title="DORC | Dutch Ophthalmic Research Center",
+                  snippet="DORC is a medical technology company "
+                          "specializing in ophthalmic devices for eye "
+                          "surgery.",
+                  url="https://www.dorc.nl/about")]
+        out = extract_sector_industry(ev)
+        assert out["detected_industry"] == "Healthcare"
+        assert out["detected_sub_industry"] in (
+            "Medical devices", "Ophthalmic devices", "Medical technology",
+        )
+        assert out["sector_confidence"] == "High"
+        assert out["sector_evidence_url"] == "https://www.dorc.nl/about"
+        assert out["sector_source_title"] == "DORC | Dutch Ophthalmic Research Center"
+
 
 # ---------------------------------------------------------------------------
 # Core flag gating

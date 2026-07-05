@@ -264,6 +264,34 @@ _SECTOR_KEYWORD_MAP: dict[str, tuple[str, Optional[str]]] = {
     "municipality": ("Public sector / government", None),
     "public agency": ("Public sector / government", None),
     "public administration": ("Public sector / government", None),
+    # Specialty/industrial chemicals (e.g. resins, coatings, inks manufacturers).
+    "specialty chemicals": ("Chemicals", "Specialty chemicals"),
+    "resins": ("Chemicals", "Resins"),
+    "resin": ("Chemicals", "Resins"),
+    "coatings": ("Chemicals", "Coatings"),
+    "adhesives": ("Chemicals", "Adhesives"),
+    "inks": ("Chemicals", "Inks"),
+    "polymers": ("Chemicals", "Polymers"),
+    "raw materials": ("Chemicals", "Raw materials"),
+    "uv curing": ("Chemicals", "UV curing"),
+    "photoinitiators": ("Chemicals", "Photoinitiators"),
+    # Industrial equipment, machinery, packaging, building materials.
+    "industrial equipment": ("Industrial equipment and machinery", None),
+    "machinery": ("Industrial equipment and machinery", None),
+    "packaging": ("Packaging", None),
+    "building materials": ("Building materials", None),
+    # Security / site monitoring services.
+    "security services": ("Security services", None),
+    "site monitoring": ("Security services", "Site monitoring"),
+    # Medical technology / ophthalmic devices — more specific sub-industry
+    # terms alongside the existing Healthcare / "medical devices" entry.
+    "medical technology": ("Healthcare", "Medical technology"),
+    "ophthalmic devices": ("Healthcare", "Ophthalmic devices"),
+    "ophthalmic": ("Healthcare", "Ophthalmic devices"),
+    # Logistics / manufacturing services — sub-industry of the existing
+    # "logistics" and "manufacturing" entries above.
+    "logistics services": ("Logistics", "Logistics services"),
+    "manufacturing services": ("Manufacturing", "Manufacturing services"),
 }
 
 # Company-type phrase -> label; first phrase found in evidence text wins.
