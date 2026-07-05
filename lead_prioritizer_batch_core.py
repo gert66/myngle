@@ -31,6 +31,7 @@ import pandas as pd
 
 from lead_output_schema import LeadInput
 from lead_prioritizer_core import prioritize_single_lead
+from deep_dive_runner import run_deep_dive
 
 
 # ---------------------------------------------------------------------------
@@ -108,6 +109,15 @@ class BatchRunConfig:
     # lead_icp_context_composer.py; never affects evidence_items, signals, or
     # scoring.
     rich_icp_context: bool = False
+    # Deep Dive (Step B) — explicit opt-in, off by default, and INDEPENDENT
+    # of both flags above. Runs AFTER scoring, only for rows that clear the
+    # trigger gate (score threshold and/or confirmed foreign HQ); the result
+    # is a separate DeepDiveResult per row, never fed back into scoring. See
+    # deep_dive_runner.py.
+    deep_dive: bool = False
+    deep_dive_min_score: float = 8.0
+    deep_dive_on_foreign_hq: bool = True
+    deep_dive_max_pages: int = 6
 
 
 # ---------------------------------------------------------------------------
@@ -290,6 +300,52 @@ def flatten_evidence_for_excel(result, source_index) -> list[dict]:
     return rows
 
 
+def should_run_deep_dive(result, config: "BatchRunConfig") -> tuple:
+    """Deep-dive trigger gate, evaluated AFTER scoring for one row.
+
+    Returns ``(should_run, trigger_reason)``. ``trigger_reason`` is
+    ``"score_threshold"`` when ``final_commercial_fit_score`` clears
+    ``config.deep_dive_min_score``, ``"foreign_hq"`` when
+    ``config.deep_dive_on_foreign_hq`` is set and the row has a confirmed
+    foreign-HQ signal, or ``("", False)``-equivalent when neither applies or
+    ``config.deep_dive`` is off. Score takes priority when both conditions
+    are true. Never mutates ``result`` or any scoring field.
+    """
+    if not config.deep_dive:
+        return False, ""
+    score = getattr(result, "final_commercial_fit_score", None)
+    if score is not None and score >= config.deep_dive_min_score:
+        return True, "score_threshold"
+    foreign_hq = bool(
+        getattr(result, "sig_foreign_hq_score_for_next_scoring", None)
+        and result.sig_foreign_hq_score_for_next_scoring > 0
+    )
+    if config.deep_dive_on_foreign_hq and foreign_hq:
+        return True, "foreign_hq"
+    return False, ""
+
+
+def flatten_deep_dive_for_excel(result, source_index) -> list[dict]:
+    """One row per claim on a ``DeepDiveResult`` (per the Deep Dive sheet
+    contract). Company-level context columns repeat on every claim row."""
+    rows: list[dict] = []
+    for claim in (getattr(result, "claims", None) or []):
+        rows.append({
+            "source_index": source_index,
+            "company_name": result.company_name,
+            "trigger_reason": result.trigger_reason,
+            "category": claim.category,
+            "statement": claim.statement,
+            "quote": claim.quote,
+            "source_url": claim.source_url,
+            "source_kind": claim.source_kind,
+            "domain_verified": claim.domain_verified,
+            "retrieval_method": claim.retrieval_method,
+            "error": result.error,
+        })
+    return rows
+
+
 def flatten_signals_for_excel(result, source_index) -> list[dict]:
     """One row per LeadSignal on the result."""
     rows: list[dict] = []
@@ -354,17 +410,29 @@ def run_batch_dataframe(
     anthropic_api_key: str,
     progress_callback: Optional[Callable[[dict], None]] = None,
     openai_api_key: str = "",
+    firecrawl_api_key: str = "",
 ) -> dict:
     """Run Lead Prioritizer v2 over selected rows.
 
     Returns a dict of DataFrames: ``enriched_leads``, ``evidence``, ``signals``,
-    ``run_summary``.  API keys are passed through only; they are never printed or
-    written into any output.
+    ``deep_dive``, ``run_summary``.  API keys are passed through only; they are
+    never printed or written into any output.
 
     ``config.ai_provider`` / ``config.ai_model`` select the experimental AI
     provider for HQ interpretation; defaults ("anthropic", "") preserve the
     existing behavior exactly. ``openai_api_key`` is only used when the
-    provider is "openai".
+    provider is "openai". ``firecrawl_api_key`` is optional — an empty value
+    is not an error, it only means Deep Dive (below) uses its Serper/urllib
+    fallback path instead of Firecrawl.
+
+    ``config.deep_dive`` (default ``False``) runs an opt-in Deep Dive
+    (``deep_dive_runner.run_deep_dive``) AFTER scoring for each row that
+    clears ``should_run_deep_dive`` (score >= ``config.deep_dive_min_score``
+    and/or, when ``config.deep_dive_on_foreign_hq``, a confirmed foreign-HQ
+    signal). The result is a separate ``DeepDiveResult`` per row — it is
+    never fed back into ``evidence_items``, ``signals``, or any scoring
+    field, and a per-row Deep Dive failure never stops the batch. Fully
+    independent of ``config.compose_caller_content`` / ``config.rich_icp_context``.
 
     ``progress_callback`` (optional) is invoked once after each processed row —
     including rows that error — with a secret-free payload dict.  It defaults to
@@ -393,6 +461,7 @@ def run_batch_dataframe(
     enriched_rows: list[dict] = []
     evidence_rows: list[dict] = []
     signal_rows: list[dict] = []
+    deep_dive_rows: list[dict] = []
     processed = success = error = 0
 
     for idx, row in selected.iterrows():
@@ -429,6 +498,30 @@ def run_batch_dataframe(
             evidence_rows.extend(flatten_evidence_for_excel(result, idx))
             signal_rows.extend(flatten_signals_for_excel(result, idx))
 
+            # ── Deep Dive (Step B, opt-in) — runs AFTER scoring, never
+            # feeds back into evidence_items/signals/scoring. A failure here
+            # is per-row only (DeepDiveResult.error) and never raises.
+            if config.deep_dive:
+                should_run, trigger_reason = should_run_deep_dive(result, config)
+                if should_run:
+                    dd_result = run_deep_dive(
+                        company_name=result.company_name or company,
+                        domain=domain,
+                        country=result.input_country,
+                        parent_company=result.ai_parent_company,
+                        # No parent-domain field exists yet anywhere in the v2
+                        # pipeline (only the parent's name/country/city are
+                        # known) — Deep Dive still works from parent_company
+                        # alone via its fallback queries.
+                        parent_domain=None,
+                        trigger_reason=trigger_reason,
+                        serper_api_key=serper_api_key,
+                        anthropic_api_key=anthropic_api_key,
+                        firecrawl_api_key=firecrawl_api_key,
+                        max_pages=config.deep_dive_max_pages,
+                    )
+                    deep_dive_rows.extend(flatten_deep_dive_for_excel(dd_result, idx))
+
         # Secret-free progress notification (never breaks the batch).
         if progress_callback is not None:
             try:
@@ -453,6 +546,7 @@ def run_batch_dataframe(
         "enriched_leads": pd.DataFrame(enriched_rows),
         "evidence": pd.DataFrame(evidence_rows),
         "signals": pd.DataFrame(signal_rows),
+        "deep_dive": pd.DataFrame(deep_dive_rows),
         "run_summary": build_run_summary_dataframe(
             config,
             total_input_rows=len(df),
@@ -477,7 +571,13 @@ _SHEET_NAMES = {
 
 
 def build_excel_workbook_bytes(output_tables: dict) -> bytes:
-    """Write the batch output tables to an xlsx workbook and return the bytes."""
+    """Write the batch output tables to an xlsx workbook and return the bytes.
+
+    The "Deep Dive" sheet (``output_tables["deep_dive"]``) is only written
+    when it actually has at least one row — a run without Deep Dive enabled,
+    or one where no row cleared the trigger gate, produces a workbook with
+    no Deep Dive sheet at all rather than an empty one.
+    """
     buf = io.BytesIO()
     with pd.ExcelWriter(buf, engine="openpyxl") as writer:
         for key, sheet_name in _SHEET_NAMES.items():
@@ -485,6 +585,9 @@ def build_excel_workbook_bytes(output_tables: dict) -> bytes:
             if frame is None:
                 frame = pd.DataFrame()
             frame.to_excel(writer, sheet_name=sheet_name, index=False)
+        deep_dive_frame = output_tables.get("deep_dive")
+        if deep_dive_frame is not None and len(deep_dive_frame) > 0:
+            deep_dive_frame.to_excel(writer, sheet_name="Deep Dive", index=False)
     buf.seek(0)
     return buf.getvalue()
 
@@ -1596,6 +1699,7 @@ def run_single_batch_unit(
     c5_model_used: str = "",
     c5_model_tier: str = "",
     openai_api_key: str = "",
+    firecrawl_api_key: str = "",
     progress_callback: Optional[Callable[[dict], None]] = None,
 ) -> dict:
     """Run one batch unit through the same code path as a sequential run.
@@ -1632,6 +1736,7 @@ def run_single_batch_unit(
         df, config, serper_api_key, anthropic_api_key,
         progress_callback=progress_callback,
         openai_api_key=openai_api_key,
+        firecrawl_api_key=firecrawl_api_key,
     )
     c5_counts: dict = {}
     if c5_enabled:
@@ -1749,6 +1854,7 @@ def run_batch_dataframe_parallel(
     c5_model_used: str = "",
     c5_model_tier: str = "",
     openai_api_key: str = "",
+    firecrawl_api_key: str = "",
     progress_callback: Optional[Callable[[dict], None]] = None,
     chunk_result_callback: Optional[Callable[[dict, dict], None]] = None,
     heartbeat_interval_seconds: float = DEFAULT_PARALLEL_HEARTBEAT_INTERVAL_SECONDS,
@@ -1883,6 +1989,7 @@ def run_batch_dataframe_parallel(
                     c5_model_used=c5_model_used,
                     c5_model_tier=c5_model_tier,
                     openai_api_key=openai_api_key,
+                    firecrawl_api_key=firecrawl_api_key,
                     progress_callback=_make_chunk_progress_callback(i),
                 ): i
                 for i, chunk in enumerate(chunks)
@@ -1912,7 +2019,7 @@ def run_batch_dataframe_parallel(
                             pass  # checkpoint saving must never break the run
 
     # ── Combine in chunk order (original selected-row order) ─────────────────
-    enriched_frames, evidence_frames, signal_frames = [], [], []
+    enriched_frames, evidence_frames, signal_frames, deep_dive_frames = [], [], [], []
     processed = success = error = 0
     for i, chunk in enumerate(chunks):
         if reports[i]["success"]:
@@ -1922,6 +2029,11 @@ def run_batch_dataframe_parallel(
                 evidence_frames.append(tables["evidence"])
             if len(tables["signals"]):
                 signal_frames.append(tables["signals"])
+            # Not every mode in the foreign-HQ-only family produces a
+            # "deep_dive" table — only run_batch_dataframe does.
+            dd_table = tables.get("deep_dive")
+            if dd_table is not None and len(dd_table):
+                deep_dive_frames.append(dd_table)
             summary = tables["run_summary"].iloc[0].to_dict() if len(tables["run_summary"]) else {}
             processed += int(summary.get("processed_rows", 0) or 0)
             success += int(summary.get("success_count", 0) or 0)
@@ -1941,6 +2053,7 @@ def run_batch_dataframe_parallel(
     enriched = pd.concat(enriched_frames, ignore_index=True) if enriched_frames else pd.DataFrame()
     evidence = pd.concat(evidence_frames, ignore_index=True) if evidence_frames else pd.DataFrame()
     signals = pd.concat(signal_frames, ignore_index=True) if signal_frames else pd.DataFrame()
+    deep_dive = pd.concat(deep_dive_frames, ignore_index=True) if deep_dive_frames else pd.DataFrame()
 
     # ── Combined Run Summary ──────────────────────────────────────────────────
     run_summary = build_run_summary_dataframe(
@@ -1986,6 +2099,7 @@ def run_batch_dataframe_parallel(
         "enriched_leads": enriched,
         "evidence": evidence,
         "signals": signals,
+        "deep_dive": deep_dive,
         "run_summary": run_summary,
         "chunk_reports": reports,
     }
