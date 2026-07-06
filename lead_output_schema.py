@@ -291,6 +291,27 @@ class LeadPrioritizationResult:
     icp_context_by_ai: Optional[bool] = None
     icp_context_content_note: Optional[str] = None
 
+    # ── Legacy enrichment mode (opt-in, off by default; comparison feature —
+    # see lead_legacy_enrichment.py). Reproduces the enrich_clients_claude.py
+    # Step-2 evaluation style for direct side-by-side comparison against the
+    # v2 pipeline. Runs NEXT TO the normal v2 flow, never replacing it —
+    # final_commercial_fit_score and signals are completely untouched.
+    # NOTE: the icp_* names here are deliberately prefixed with "legacy_"
+    # (legacy_icp_*) even though LegacyEnrichmentResult itself uses the bare
+    # enrich_clients_claude.py field names (icp_buying_signals, etc.) --
+    # bare names would collide with the rich-ICP-context fields directly
+    # above, and the two features must stay independently usable (including
+    # both at once) without overwriting each other. ───────────────────────
+    legacy_score: Optional[float] = None
+    legacy_tier: Optional[str] = None
+    legacy_icp_lead_score: Optional[str] = None
+    legacy_icp_buying_signals: Optional[str] = None
+    legacy_icp_likely_training_interest: Optional[str] = None
+    legacy_icp_potential_buyer_function: Optional[str] = None
+    legacy_icp_why_relevant: Optional[str] = None
+    legacy_icp_evidence: Optional[str] = None
+    legacy_enrichment_error: Optional[str] = None
+
     # ── Run metadata ──────────────────────────────────────────────────────────
     # "hq_only" | "partial_v2" | "full_v2_single_lead"
     v2_pipeline_mode: Optional[str] = None

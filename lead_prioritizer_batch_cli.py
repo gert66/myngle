@@ -126,6 +126,15 @@ def build_arg_parser() -> argparse.ArgumentParser:
                         "default (same scoring formula, AI-judged signal input). "
                         "Falls back to deterministic scoring on any AI failure. "
                         "Recorded per row via signal_scoring_mode (default: off).")
+    p.add_argument("--legacy-enrichment-mode", action="store_true",
+                   help="Opt-in comparison feature: reproduce the old "
+                        "enrich_clients_claude.py Step-2 Serper+Claude evaluation "
+                        "style (same holistic buying-signal judgment, minus the "
+                        "competitor signal/query, no Jina page scraping) alongside "
+                        "the normal v2 flow, for direct old-vs-new comparison. Fills "
+                        "legacy_score/legacy_tier/legacy_icp_* columns; never "
+                        "touches final_commercial_fit_score or signals either way "
+                        "(default: off).")
     p.add_argument("--deep-dive", action="store_true",
                    help="Opt-in Step B: run a deeper, source-backed evidence "
                         "collection (Firecrawl if FIRECRAWL_API_KEY is set, "
@@ -211,6 +220,7 @@ def config_from_args(args: argparse.Namespace) -> BatchRunConfig:
         compose_caller_content=args.compose_caller_content,
         rich_icp_context=args.rich_icp_context,
         ai_signal_scoring=args.ai_signal_scoring,
+        legacy_enrichment_mode=args.legacy_enrichment_mode,
         deep_dive=args.deep_dive,
         deep_dive_min_score=args.deep_dive_min_score,
         deep_dive_max_pages=args.deep_dive_max_pages,

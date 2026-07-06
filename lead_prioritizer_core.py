@@ -33,6 +33,7 @@ from lead_icp_context_composer import (
     collect_icp_context_evidence,
     compose_icp_context as run_icp_context_composition,
 )
+from lead_legacy_enrichment import run_legacy_enrichment
 
 _DEFAULT_AI_MODEL = "claude-haiku-4-5-20251001"
 
@@ -70,6 +71,7 @@ def prioritize_single_lead(
     build_caller_app_fields_flag: bool = False,
     compose_caller_content_flag: bool = False,
     compose_icp_context: bool = False,
+    legacy_enrichment_mode: bool = False,
     run_full_v2_pipeline: bool = False,
 ) -> LeadPrioritizationResult:
     """Orchestrate HQ detection and scoring for a single lead.
@@ -154,6 +156,21 @@ def prioritize_single_lead(
     ``icp_context_content_note``. Deliberately **not** part of the
     ``run_full_v2_pipeline`` preset: it must be turned on explicitly.
 
+    ``legacy_enrichment_mode`` (default ``False``) runs a separate, parallel
+    scoring path (``lead_legacy_enrichment.run_legacy_enrichment``) that
+    reproduces the old ``enrich_clients_claude.py`` Step-2 Serper+Claude
+    evaluation style (same holistic 9-signal judgment, minus the competitor
+    signal and its query; no Jina full-page scraping) purely so the two
+    systems can be compared on the same lead. It runs NEXT TO the normal v2
+    flow — ``final_commercial_fit_score`` and ``signals`` are completely
+    untouched either way. On success it fills ``legacy_score`` (a numeric
+    High/Medium/Low → 9.0/6.0/3.0 mapping), ``legacy_tier`` (the raw
+    High/Medium/Low label, deliberately NOT renamed to the v2 A/B/C/D tier
+    scale), and the ``legacy_icp_*`` fields. On any failure it leaves those
+    fields blank and records why in ``legacy_enrichment_error``. Deliberately
+    **not** part of the ``run_full_v2_pipeline`` preset: it must be turned on
+    explicitly.
+
     ``run_full_v2_pipeline`` (default ``False``) is an explicit opt-in preset
     that turns on all optional v2 steps (2–6) for a single-lead end-to-end run.
     It does not add batch processing, change legacy ranking, or alter the
@@ -180,7 +197,7 @@ def prioritize_single_lead(
         collect_non_hq_evidence, extract_non_hq_signals_flag,
         build_app_summary_fields_flag, calculate_commercial_score_flag,
         build_caller_app_fields_flag, compose_caller_content_flag,
-        compose_icp_context,
+        compose_icp_context, legacy_enrichment_mode,
     )):
         v2_pipeline_mode = "partial_v2"
     else:
@@ -483,5 +500,30 @@ def prioritize_single_lead(
             result.icp_context_content_note = (
                 f"AI ICP context unavailable ({icp_composed.error})."
             )
+
+    # ── Legacy enrichment mode (opt-in): comparison-only parallel scoring ─────
+    # Runs NEXT TO the normal v2 flow above, never replacing any of it.
+    # final_commercial_fit_score / signals / evidence_items are untouched
+    # regardless of what this produces.
+    if legacy_enrichment_mode:
+        legacy = run_legacy_enrichment(
+            company_name=input_row.company_name,
+            domain=input_row.domain,
+            country=effective_country,
+            serper_api_key=serper_api_key,
+            anthropic_api_key=anthropic_api_key,
+            ai_model=ai_model,
+        )
+        if legacy.call_success:
+            result.legacy_score = legacy.legacy_score
+            result.legacy_tier = legacy.legacy_tier
+            result.legacy_icp_lead_score = legacy.icp_lead_score
+            result.legacy_icp_buying_signals = legacy.icp_buying_signals
+            result.legacy_icp_likely_training_interest = legacy.icp_likely_training_interest
+            result.legacy_icp_potential_buyer_function = legacy.icp_potential_buyer_function
+            result.legacy_icp_why_relevant = legacy.icp_why_relevant
+            result.legacy_icp_evidence = legacy.icp_evidence
+        else:
+            result.legacy_enrichment_error = legacy.error
 
     return result

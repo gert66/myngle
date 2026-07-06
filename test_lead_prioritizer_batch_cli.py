@@ -75,6 +75,7 @@ class TestArgParsing:
         assert args.compose_caller_content is False
         assert args.rich_icp_context is False
         assert args.ai_signal_scoring is False
+        assert args.legacy_enrichment_mode is False
         assert args.deep_dive is False
         assert args.deep_dive_min_score == 8.0
         assert args.deep_dive_max_pages == 6
@@ -84,6 +85,7 @@ class TestArgParsing:
         assert cfg.verify_quotes is True
         assert cfg.auto_correct_quotes is True
         assert cfg.ai_signal_scoring is False
+        assert cfg.legacy_enrichment_mode is False
 
     def test_compose_caller_content_flag_parses(self):
         args = build_arg_parser().parse_args(
@@ -136,6 +138,24 @@ class TestArgParsing:
         assert cfg.ai_signal_scoring is True
         assert cfg.compose_caller_content is False
         assert cfg.rich_icp_context is False
+
+    def test_legacy_enrichment_mode_flag_parses(self):
+        args = build_arg_parser().parse_args(
+            ["--input", "x.xlsx", "--company-column", "c", "--domain-column", "d",
+             "--legacy-enrichment-mode"])
+        assert args.legacy_enrichment_mode is True
+        cfg = config_from_args(args)
+        assert cfg.legacy_enrichment_mode is True
+
+    def test_legacy_enrichment_mode_independent_of_other_flags(self):
+        args = build_arg_parser().parse_args(
+            ["--input", "x.xlsx", "--company-column", "c", "--domain-column", "d",
+             "--legacy-enrichment-mode"])
+        cfg = config_from_args(args)
+        assert cfg.legacy_enrichment_mode is True
+        assert cfg.compose_caller_content is False
+        assert cfg.rich_icp_context is False
+        assert cfg.ai_signal_scoring is False
 
     def test_deep_dive_flags_parse(self):
         args = build_arg_parser().parse_args(

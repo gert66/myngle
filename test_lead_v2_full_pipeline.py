@@ -439,3 +439,139 @@ class TestAiSignalScoringFlag:
         assert r_ai.final_commercial_fit_score == r_deterministic.final_commercial_fit_score
         assert r_ai.signal_scoring_mode == "ai"
         assert r_deterministic.signal_scoring_mode == "deterministic"
+
+
+# ---------------------------------------------------------------------------
+# Legacy enrichment mode: a separate, parallel comparison score. Must never
+# touch final_commercial_fit_score or signals, whether it succeeds or fails.
+# ---------------------------------------------------------------------------
+
+class TestLegacyEnrichmentModeFlag:
+    _SCORE_FIELDS = (
+        "final_commercial_fit_score", "commercial_tier", "icp_similarity_score",
+        "lean_model_prob", "lr_z_score", "scoring_profile",
+        "sig_foreign_hq_score_for_next_scoring",
+        "sig_international_profile_score", "sig_onboarding_training_need_score",
+        "sig_company_size_complexity_score", "sig_icp_keyword_match_score",
+    )
+
+    def _snapshot(self, r):
+        snap = {f: getattr(r, f) for f in self._SCORE_FIELDS}
+        snap["evidence_items"] = list(r.evidence_items or [])
+        snap["signals"] = list(r.signals or [])
+        return snap
+
+    def test_off_by_default(self):
+        r = _run()
+        assert r.legacy_score is None
+        assert r.legacy_tier is None
+        assert r.legacy_icp_lead_score is None
+
+    def test_full_preset_does_not_enable_it(self):
+        r = _run(run_full_v2_pipeline=True)
+        assert r.legacy_score is None
+        assert r.legacy_icp_lead_score is None
+
+    def test_success_populates_legacy_fields(self):
+        from lead_legacy_enrichment import LegacyEnrichmentResult
+
+        legacy = LegacyEnrichmentResult(
+            icp_lead_score="High", icp_buying_signals="International footprint",
+            icp_likely_training_interest="Language training / Business English",
+            icp_potential_buyer_function="HR", icp_why_relevant="Clear fit.",
+            icp_evidence="Found international offices.",
+            legacy_score=9.0, legacy_tier="High",
+            call_attempted=True, call_success=True,
+        )
+        with patch("lead_prioritizer_core.run_legacy_enrichment", return_value=legacy):
+            r = _run(run_full_v2_pipeline=True, calculate_commercial_score_flag=True,
+                     legacy_enrichment_mode=True)
+
+        assert r.legacy_score == 9.0
+        assert r.legacy_tier == "High"
+        assert r.legacy_icp_lead_score == "High"
+        assert r.legacy_icp_buying_signals == "International footprint"
+        assert r.legacy_icp_likely_training_interest == \
+            "Language training / Business English"
+        assert r.legacy_icp_potential_buyer_function == "HR"
+        assert r.legacy_icp_why_relevant == "Clear fit."
+        assert r.legacy_icp_evidence == "Found international offices."
+        assert r.legacy_enrichment_error is None
+        # Real v2 tier stays completely independent, never overwritten or
+        # renamed to match the legacy High/Medium/Low scale.
+        assert r.commercial_tier != "High"
+
+    def test_failure_leaves_fields_blank_with_error_recorded(self):
+        from lead_legacy_enrichment import LegacyEnrichmentResult
+
+        legacy = LegacyEnrichmentResult(
+            call_attempted=True, call_success=False,
+            error="legacy_enrichment_call_failed: connection reset",
+        )
+        with patch("lead_prioritizer_core.run_legacy_enrichment", return_value=legacy):
+            r = _run(legacy_enrichment_mode=True)
+
+        assert r.legacy_score is None
+        assert r.legacy_tier is None
+        assert r.legacy_icp_lead_score is None
+        assert r.legacy_enrichment_error == "legacy_enrichment_call_failed: connection reset"
+
+    def test_flag_alone_marks_partial_v2(self):
+        legacy = __import__("lead_legacy_enrichment").LegacyEnrichmentResult(
+            call_attempted=True, call_success=False, error="no_anthropic_api_key")
+        with patch("lead_prioritizer_core.run_legacy_enrichment", return_value=legacy):
+            r = _run(legacy_enrichment_mode=True)
+        assert r.v2_pipeline_mode == "partial_v2"
+
+    def test_never_touches_score_or_signals_on_success(self):
+        from lead_legacy_enrichment import LegacyEnrichmentResult
+
+        legacy = LegacyEnrichmentResult(
+            icp_lead_score="High", legacy_score=9.0, legacy_tier="High",
+            call_attempted=True, call_success=True,
+        )
+        r_without = _run(extract_non_hq_signals_flag=True,
+                         calculate_commercial_score_flag=True)
+        with patch("lead_prioritizer_core.run_legacy_enrichment", return_value=legacy):
+            r_with = _run(extract_non_hq_signals_flag=True,
+                          calculate_commercial_score_flag=True,
+                          legacy_enrichment_mode=True)
+
+        assert self._snapshot(r_without) == self._snapshot(r_with)
+        assert r_with.legacy_score == 9.0
+        assert r_without.legacy_score is None
+
+    def test_never_touches_score_or_signals_on_failure(self):
+        from lead_legacy_enrichment import LegacyEnrichmentResult
+
+        legacy = LegacyEnrichmentResult(
+            call_attempted=True, call_success=False, error="legacy_enrichment_parse_failed")
+        r_without = _run(extract_non_hq_signals_flag=True,
+                         calculate_commercial_score_flag=True)
+        with patch("lead_prioritizer_core.run_legacy_enrichment", return_value=legacy):
+            r_with = _run(extract_non_hq_signals_flag=True,
+                          calculate_commercial_score_flag=True,
+                          legacy_enrichment_mode=True)
+
+        assert self._snapshot(r_without) == self._snapshot(r_with)
+
+    def test_independent_of_rich_icp_context_and_ai_signal_scoring(self):
+        from lead_legacy_enrichment import LegacyEnrichmentResult
+        from lead_icp_context_composer import IcpContextResult
+
+        legacy = LegacyEnrichmentResult(
+            icp_lead_score="Medium", legacy_score=6.0, legacy_tier="Medium",
+            call_attempted=True, call_success=True,
+        )
+        icp = IcpContextResult(
+            buying_signals="rich icp signals", call_attempted=True, call_success=True)
+        with patch("lead_prioritizer_core.run_legacy_enrichment", return_value=legacy), \
+             patch("lead_prioritizer_core.run_icp_context_composition", return_value=icp):
+            r = _run(run_full_v2_pipeline=True, legacy_enrichment_mode=True,
+                     compose_icp_context=True)
+
+        # The rich-ICP-context fields and the legacy_icp_* fields must stay
+        # in their own separate namespace and not clobber each other.
+        assert r.icp_buying_signals == "rich icp signals"
+        assert r.legacy_icp_lead_score == "Medium"
+        assert r.legacy_score == 6.0

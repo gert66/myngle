@@ -161,6 +161,36 @@ class TestFlatten:
         assert row["icp_context_content_note"] == "AI-composed ICP context used."
         assert row["evidence_count"] == 1 and row["signal_count"] == 1
 
+    def test_flattens_legacy_enrichment_fields(self):
+        row = flatten_result_for_excel(
+            _sample_result(
+                legacy_score=9.0, legacy_tier="High",
+                legacy_icp_lead_score="High",
+                legacy_icp_buying_signals="International footprint",
+                legacy_icp_likely_training_interest="Language training / Business English",
+                legacy_icp_potential_buyer_function="HR",
+                legacy_icp_why_relevant="Clear fit.",
+                legacy_icp_evidence="Found international offices.",
+            ), {"c": "Acme", "d": "acme.com"}, source_index=1, run_success=True, run_error="")
+        assert row["legacy_score"] == 9.0
+        assert row["legacy_tier"] == "High"
+        assert row["legacy_icp_lead_score"] == "High"
+        assert row["legacy_icp_buying_signals"] == "International footprint"
+        assert row["legacy_icp_likely_training_interest"] == \
+            "Language training / Business English"
+        assert row["legacy_icp_potential_buyer_function"] == "HR"
+        assert row["legacy_icp_why_relevant"] == "Clear fit."
+        assert row["legacy_icp_evidence"] == "Found international offices."
+        assert row["legacy_enrichment_error"] is None
+
+    def test_legacy_enrichment_fields_blank_when_flag_off(self):
+        row = flatten_result_for_excel(
+            _sample_result(), {"c": "Acme", "d": "acme.com"},
+            source_index=1, run_success=True, run_error="")
+        assert row["legacy_score"] is None
+        assert row["legacy_tier"] is None
+        assert row["legacy_icp_lead_score"] is None
+
     def test_raw_ai_json_excluded_by_default(self):
         row = flatten_result_for_excel(_sample_result(), {}, 0, True, "")
         assert "ai_hq_raw_json" not in row
@@ -365,6 +395,30 @@ class TestRunBatch:
     def test_ai_signal_scoring_default_is_false(self):
         cfg = BatchRunConfig(company_name_column="company", domain_column="domain")
         assert cfg.ai_signal_scoring is False
+
+    @pytest.mark.parametrize("legacy_enrichment_mode", [False, True])
+    def test_legacy_enrichment_mode_passthrough_independent_of_other_flags(
+        self, legacy_enrichment_mode,
+    ):
+        seen = {}
+
+        def _fake(lead_input, **kwargs):
+            seen.update(kwargs)
+            return _sample_result(company_name=lead_input.company_name)
+
+        cfg = BatchRunConfig(company_name_column="company", domain_column="domain",
+                             run_mode="full", row_limit=1,
+                             legacy_enrichment_mode=legacy_enrichment_mode)
+        with patch("lead_prioritizer_batch_core.prioritize_single_lead", side_effect=_fake):
+            run_batch_dataframe(self._df, cfg, "SERP", "ANTH")
+        assert seen.get("legacy_enrichment_mode") is legacy_enrichment_mode
+        assert seen.get("compose_caller_content_flag") is False
+        assert seen.get("compose_icp_context") is False
+        assert seen.get("ai_signal_scoring") is False
+
+    def test_legacy_enrichment_mode_default_is_false(self):
+        cfg = BatchRunConfig(company_name_column="company", domain_column="domain")
+        assert cfg.legacy_enrichment_mode is False
 
     def test_continue_on_error(self):
         calls = {"n": 0}

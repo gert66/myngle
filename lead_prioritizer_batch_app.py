@@ -1073,6 +1073,15 @@ def main() -> None:  # pragma: no cover - exercised only under `streamlit run`
             "afwijken van de standaard (deterministische) modus. Meng geen "
             "datasets van beide modi zonder signal_scoring_mode te checken."
         )
+    legacy_enrichment_mode = st.checkbox(
+        "Legacy enrichment mode (vergelijking met oud systeem)", value=False,
+        help="Draait het oude enrich_clients_claude.py Step-2 Serper+Claude-"
+             "beoordelingsstijl (dezelfde holistische 9-signalen-beoordeling, "
+             "zonder het competitor-signaal/query, zonder Jina-scraping) NAAST "
+             "de normale v2-flow, puur om oud en nieuw op dezelfde lead te "
+             "vergelijken. Vult legacy_score/legacy_tier/legacy_icp_*-kolommen; "
+             "verandert final_commercial_fit_score of signals nooit "
+             "(default: uit).")
     deep_dive = st.checkbox(
         "Deep dive voor top-leads (opt-in)", value=False,
         help="Runs a deeper, source-backed evidence collection AFTER "
@@ -1336,6 +1345,7 @@ def main() -> None:  # pragma: no cover - exercised only under `streamlit run`
             compose_caller_content=compose_caller_content,
             rich_icp_context=rich_icp_context,
             ai_signal_scoring=ai_signal_scoring,
+            legacy_enrichment_mode=legacy_enrichment_mode,
             deep_dive=deep_dive,
             deep_dive_min_score=deep_dive_min_score,
             deep_dive_on_foreign_hq=deep_dive_on_foreign_hq,

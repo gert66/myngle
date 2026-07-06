@@ -114,6 +114,12 @@ class BatchRunConfig:
     # final_commercial_fit_score (same formula/weights, AI-judged signal
     # input instead of keyword-counted). See lead_ai_signal_scorer.py.
     ai_signal_scoring: bool = False
+    # Legacy enrichment mode — explicit opt-in comparison feature, off by
+    # default and INDEPENDENT of every flag above. Reproduces the old
+    # enrich_clients_claude.py Step-2 evaluation style side by side with the
+    # v2 pipeline; never touches final_commercial_fit_score or signals. See
+    # lead_legacy_enrichment.py.
+    legacy_enrichment_mode: bool = False
     # Deep Dive (Step B) — explicit opt-in, off by default, and INDEPENDENT
     # of both flags above. Runs AFTER scoring, only for rows that clear the
     # trigger gate (score threshold and/or confirmed foreign HQ); the result
@@ -255,6 +261,12 @@ _RESULT_FLAT_FIELDS = [
     # AI-composed rich ICP context (opt-in, independent of the above)
     "icp_buying_signals", "icp_likely_training_interest",
     "icp_potential_buyer_function", "icp_context_by_ai", "icp_context_content_note",
+    # Legacy enrichment mode (opt-in comparison feature, independent of the
+    # above) — see lead_legacy_enrichment.py.
+    "legacy_score", "legacy_tier", "legacy_icp_lead_score",
+    "legacy_icp_buying_signals", "legacy_icp_likely_training_interest",
+    "legacy_icp_potential_buyer_function", "legacy_icp_why_relevant",
+    "legacy_icp_evidence", "legacy_enrichment_error",
 ]
 
 
@@ -477,6 +489,9 @@ def run_batch_dataframe(
     # Onderdeel 2: opt-in AI signal scoring, independent of every flag above.
     # Off by default; changes scores only when explicitly enabled.
     flags["ai_signal_scoring"] = config.ai_signal_scoring
+    # Comparison feature: opt-in legacy-style enrichment, independent of
+    # every flag above. Off by default; never changes v2 scores/signals.
+    flags["legacy_enrichment_mode"] = config.legacy_enrichment_mode
     # Provider selection: only override the pipeline's own ai_model default
     # when the config explicitly sets one.
     ai_kwargs: dict = {
