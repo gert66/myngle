@@ -4074,3 +4074,157 @@ def test_hq_location_summary_localized_for_dutch(tmp_path):
     # sanity: the direct localizer agrees.
     assert localize_hq_location_summary(detail["hq_location_summary"]) == (
         "Hoofdkantoor moederbedrijf: Tokio, Japan")
+
+
+# ---------------------------------------------------------------------------
+# "Confirmed domestic" driver badge — detect_confirmed_domestic_hq_for_export
+# and its wiring into build_fixed_commercial_fit_drivers.
+# ---------------------------------------------------------------------------
+
+from export_lead_prioritizer_to_lovable_json import detect_confirmed_domestic_hq_for_export
+
+
+def _domestic_row(**overrides) -> dict:
+    row = enriched_row(
+        sig_foreign_hq_score_for_next_scoring=0,
+        hq_structure_type="domestic",
+        hq_confidence="High",
+        hq_detected_country="Netherlands",
+        hq_detected_city="Amsterdam",
+        hq_evidence_url="https://coolblue.nl/about",
+        hq_location_summary="Headquarters: Amsterdam, Netherlands",
+    )
+    row.update(overrides)
+    return row
+
+
+class TestDetectConfirmedDomesticHqForExportUnit:
+    def test_fires_for_high_confidence_domestic_with_location(self):
+        row = _domestic_row()
+        confirmed, location = detect_confirmed_domestic_hq_for_export(row, False)
+        assert confirmed is True
+        assert location == "Amsterdam, Netherlands"
+
+    def test_fires_for_medium_confidence(self):
+        row = _domestic_row(hq_confidence="Medium")
+        confirmed, _ = detect_confirmed_domestic_hq_for_export(row, False)
+        assert confirmed is True
+
+    def test_never_fires_when_foreign_hq_detected_true(self):
+        # Mutual exclusivity guard, even if hq_structure_type is inconsistent.
+        row = _domestic_row()
+        confirmed, location = detect_confirmed_domestic_hq_for_export(row, True)
+        assert confirmed is False
+        assert location is None
+
+    def test_low_confidence_does_not_fire(self):
+        row = _domestic_row(hq_confidence="Low")
+        confirmed, location = detect_confirmed_domestic_hq_for_export(row, False)
+        assert confirmed is False
+        assert location is None
+
+    def test_non_domestic_structure_type_does_not_fire(self):
+        row = _domestic_row(hq_structure_type="regional_branch_only")
+        confirmed, location = detect_confirmed_domestic_hq_for_export(row, False)
+        assert confirmed is False
+
+    def test_no_resolvable_location_does_not_fire(self):
+        row = _domestic_row(hq_detected_country="", hq_detected_city="",
+                            ai_parent_hq_country="", c5_parent_hq_country="")
+        confirmed, location = detect_confirmed_domestic_hq_for_export(row, False)
+        assert confirmed is False
+        assert location is None
+
+    def test_blank_row_does_not_fire(self):
+        row = enriched_row(sig_foreign_hq_score_for_next_scoring=0)
+        confirmed, location = detect_confirmed_domestic_hq_for_export(row, False)
+        assert confirmed is False
+        assert location is None
+
+    def test_location_matches_hq_location_summary_chain(self):
+        # C5 > AI > detected priority — same chain hq_location_summary uses.
+        row = _domestic_row(
+            hq_detected_country="Belgium", hq_detected_city="Brussels")
+        confirmed, location = detect_confirmed_domestic_hq_for_export(row, False)
+        assert confirmed is True
+        assert location == "Brussels, Belgium"
+
+
+class TestConfirmedDomesticDriverCard(object):
+    def test_driver_card_shows_confirmed_domestic(self, tmp_path):
+        enriched = [_domestic_row()]
+        _, out_dir = run_export(tmp_path, enriched, foreign_hq_only=False)
+        detail = detail_for(out_dir, "Acme Brasil")
+        drivers_by_label = {
+            d["label"]: d for d in detail["ui_payload"]["commercial_fit_drivers"]
+        }
+        driver = drivers_by_label["Foreign ownership or group structure"]
+        assert driver["strength"] == "Confirmed domestic"
+        assert driver["evidence"] == (
+            "Amsterdam, Netherlands is the confirmed local headquarters; "
+            "no foreign parent identified.")
+        assert driver["evidence_source_url"] == "https://coolblue.nl/about"
+        assert driver.get("evidence_sources")
+
+    def test_driver_location_text_agrees_with_hq_location_summary(self, tmp_path):
+        enriched = [_domestic_row(
+            hq_detected_country="Belgium", hq_detected_city="Brussels",
+            hq_location_summary="Headquarters: Brussels, Belgium")]
+        _, out_dir = run_export(tmp_path, enriched, foreign_hq_only=False)
+        detail = detail_for(out_dir, "Acme Brasil")
+        driver = next(
+            d for d in detail["ui_payload"]["commercial_fit_drivers"]
+            if d["id"] == "foreign_ownership_or_group_structure")
+        location_from_summary = detail["hq_location_summary"].removeprefix("Headquarters: ")
+        assert location_from_summary in driver["evidence"]
+
+    def test_genuinely_blank_row_still_not_evidenced(self, tmp_path):
+        enriched = [enriched_row(sig_foreign_hq_score_for_next_scoring=0)]
+        _, out_dir = run_export(tmp_path, enriched, foreign_hq_only=False)
+        detail = detail_for(out_dir, "Acme Brasil")
+        driver = next(
+            d for d in detail["ui_payload"]["commercial_fit_drivers"]
+            if d["id"] == "foreign_ownership_or_group_structure")
+        assert driver["strength"] == "Not evidenced"
+        assert detail.get("hq_location_summary") is None
+
+    def test_low_confidence_domestic_stays_not_evidenced_in_driver(self, tmp_path):
+        # Stricter bar for the driver card than hq_location_summary itself:
+        # a Low-confidence domestic call never earns "Confirmed domestic".
+        enriched = [_domestic_row(hq_confidence="Low")]
+        _, out_dir = run_export(tmp_path, enriched, foreign_hq_only=False)
+        detail = detail_for(out_dir, "Acme Brasil")
+        driver = next(
+            d for d in detail["ui_payload"]["commercial_fit_drivers"]
+            if d["id"] == "foreign_ownership_or_group_structure")
+        assert driver["strength"] == "Not evidenced"
+
+    def test_confirmed_domestic_never_positive_in_why_relevant_or_what_is_hot(self, tmp_path):
+        enriched = [_domestic_row()]
+        _, out_dir = run_export(tmp_path, enriched, foreign_hq_only=False)
+        detail = detail_for(out_dir, "Acme Brasil")
+        why_relevant = detail["ui_payload"]["why_relevant"]
+        what_is_hot = detail["ui_payload"]["what_is_hot"]
+        assert "foreign" not in why_relevant.lower()
+        assert not any("foreign" in bullet.lower() for bullet in what_is_hot)
+        assert not any(
+            "confirmed local headquarters" in bullet.lower() for bullet in what_is_hot)
+
+    def test_confirmed_domestic_not_in_positive_driver_strengths(self):
+        from export_lead_prioritizer_to_lovable_json import _POSITIVE_DRIVER_STRENGTHS
+        assert "Confirmed domestic" not in _POSITIVE_DRIVER_STRENGTHS
+
+    def test_foreign_and_confirmed_domestic_are_mutually_exclusive_in_export(self, tmp_path):
+        # A row with BOTH a foreign score-3 AND domestic-looking fields (should
+        # never happen upstream, but the export-side guard must still hold):
+        # foreign wins, "Confirmed domestic" never appears.
+        enriched = [_domestic_row(
+            sig_foreign_hq_score_for_next_scoring=3,
+            ai_parent_hq_country="Japan", ai_parent_company="Acme KK",
+        )]
+        _, out_dir = run_export(tmp_path, enriched)
+        detail = detail_for(out_dir, "Acme Brasil")
+        driver = next(
+            d for d in detail["ui_payload"]["commercial_fit_drivers"]
+            if d["id"] == "foreign_ownership_or_group_structure")
+        assert driver["strength"] == "Strong"

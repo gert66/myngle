@@ -40,6 +40,10 @@ from hq_simple_detector import (
     _HOSTED_CAREERS_PLATFORM_DOMAINS,
     is_hosted_careers_platform_domain,
 )
+from lead_hq_location_summary import (
+    DOMESTIC_HQ_PREFIX,
+    build_hq_location_summary_from_row,
+)
 from lead_non_hq_signal_extractor import is_external_training_evidence
 from lovable_content_localization import (
     localize_caller_angle_app,
@@ -360,6 +364,61 @@ def detect_foreign_hq_for_export(row: dict, run_mode) -> tuple[bool, str | None]
     if not to_bool(row.get("enrichment_skipped")) and run_mode == FOREIGN_HQ_RUN_MODE:
         return True, "full_foreign_hq_only_enriched_row"
     return False, None
+
+
+# Confidence bar for the "Confirmed domestic" DRIVER CARD -- deliberately
+# stricter than hq_location_summary's own gate (lead_hq_location_summary.
+# build_hq_location_summary populates the domestic summary line whenever
+# hq_structure_type == "domestic" and a detected city/country exist, with no
+# confidence check at all). A driver card is a stronger claim to the account
+# manager than a quiet informational summary line, so "Confirmed domestic"
+# additionally requires High/Medium confidence -- a Low-confidence domestic
+# classification (which also sets needs_manual_review=True upstream, see
+# lead_hq_ai_interpreter.interpret_hq_with_ai) never earns the driver badge,
+# even though hq_location_summary may still show the (softer) summary line
+# for that same row. This is the one place the two fields may legitimately
+# differ in *presence*; when both ARE present they can never disagree on
+# *content* because both are built from the same city/country resolution
+# (build_hq_location_summary_from_row reuses the identical C5 > AI > detected
+# priority chain either way).
+_CONFIRMED_DOMESTIC_MIN_CONFIDENCE = frozenset({"High", "Medium"})
+
+
+def detect_confirmed_domestic_hq_for_export(
+    row: dict, foreign_hq_detected: bool,
+) -> "tuple[bool, str | None]":
+    """Classify a row as confirmed-domestic-HQ for the new "Confirmed domestic"
+    driver badge. Mutually exclusive with ``detect_foreign_hq_for_export`` —
+    never both True for the same row.
+
+    Fires only when ALL of:
+      - ``foreign_hq_detected`` is False (mutual exclusivity guard, even though
+        ``hq_structure_type == "domestic"`` should already imply this);
+      - ``hq_structure_type`` is exactly ``"domestic"`` (the AI HQ interpreter's
+        own factual structure determination — not the driver-badge logic);
+      - ``hq_confidence`` is High or Medium (a stricter bar than
+        ``hq_location_summary``'s own gate — see module comment above);
+      - a real local HQ city/country actually resolves via
+        ``build_hq_location_summary_from_row`` (the SAME priority chain
+        ``hq_location_summary`` itself uses), so a row with no resolvable
+        location never fires this just because it happens to not be foreign.
+
+    Returns ``(True, "<city>, <country>")`` (the location text with the
+    ``"Headquarters: "`` prefix stripped) or ``(False, None)``.
+    """
+    if foreign_hq_detected:
+        return False, None
+    if (clean_str(row.get("hq_structure_type")) or "").strip().lower() != "domestic":
+        return False, None
+    if (clean_str(row.get("hq_confidence")) or "") not in _CONFIRMED_DOMESTIC_MIN_CONFIDENCE:
+        return False, None
+    summary = build_hq_location_summary_from_row(row)
+    if not summary or not summary.startswith(DOMESTIC_HQ_PREFIX):
+        return False, None
+    location_text = summary[len(DOMESTIC_HQ_PREFIX):].strip()
+    if not location_text:
+        return False, None
+    return True, location_text
 
 
 # ---------------------------------------------------------------------------
@@ -1625,12 +1684,19 @@ def build_fixed_commercial_fit_drivers(
     employee_range: "str | None" = None,
     own_domains: "set[str] | None" = None,
     company_name: "str | None" = None,
+    confirmed_domestic: bool = False,
+    domestic_location_text: "str | None" = None,
+    domestic_evidence_urls: "list | None" = None,
 ) -> list[dict]:
     """Non-Italy commercial_fit_drivers: always exactly the six fixed
     dimensions in _FIXED_DRIVER_SIGNAL_ORDER, never omitted. Each is either
     a positive Strong/Moderate/Weak driver with clean evidence, "Not
     evidenced" (no signal row, no positive score, or no evidence at all),
-    or "Rejected" (evidence existed but failed a display-quality check,
+    "Confirmed domestic" (no foreign parent, but a real, high/medium-
+    confidence local HQ was resolved — see
+    ``detect_confirmed_domestic_hq_for_export``; this is a NEW strength value
+    the Lovable frontend does not know today and needs a badge style added
+    for), or "Rejected" (evidence existed but failed a display-quality check,
     with a note explaining why) — so a dimension can never be silently
     dropped or shown as a positive claim without real evidence."""
     by_signal_name = {
@@ -1654,6 +1720,17 @@ def build_fixed_commercial_fit_drivers(
                     "evidence": hq_driver["evidence"] or "", "note": "",
                 }
                 _attach_evidence_sources(driver, hq_driver.get("evidence_urls") or [], None)
+                drivers.append(driver)
+            elif confirmed_domestic and domestic_location_text:
+                driver = {
+                    "id": driver_id, "label": label, "strength": "Confirmed domestic",
+                    "evidence": (
+                        f"{domestic_location_text} is the confirmed local "
+                        "headquarters; no foreign parent identified."
+                    ),
+                    "note": "",
+                }
+                _attach_evidence_sources(driver, domestic_evidence_urls or [], None)
                 drivers.append(driver)
             else:
                 drivers.append({
@@ -2319,6 +2396,20 @@ def _build_detail_record(
     own_domains = _own_domains_for_row(row)
     url_context = _build_url_context(evidence_rows, signal_rows)
 
+    # "Confirmed domestic" driver badge (non-Italy only — see the Italy
+    # branch below, which is frozen and does not get this new badge).
+    # Mutually exclusive with foreign_hq_detected by construction; uses the
+    # SAME hq_evidence_url(s) the foreign-HQ driver would use, so a
+    # crawled own-domain page (Firecrawl) is preferred automatically via
+    # build_evidence_sources' own-domain-first ordering, same as the foreign
+    # driver already gets.
+    confirmed_domestic, domestic_location_text = detect_confirmed_domestic_hq_for_export(
+        row, foreign_hq_detected)
+    _domestic_hq_url = clean_str(row.get("hq_evidence_url"))
+    domestic_evidence_urls = _split_semicolon_urls(row.get("hq_evidence_urls")) or (
+        [_domestic_hq_url] if _domestic_hq_url else []
+    )
+
     # Italy (content_language == "Italian") keeps today's exact ui_payload
     # behavior byte-for-byte — why_relevant/what_is_hot/commercial_fit_drivers
     # via the original build_ui_payload_* functions, cold_caller_summary and
@@ -2392,6 +2483,9 @@ def _build_detail_record(
         commercial_fit_drivers = build_fixed_commercial_fit_drivers(
             visible_signals, foreign_hq_detected, parent_company, parent_hq_country,
             employee_range, own_domains_display, company_name,
+            confirmed_domestic=confirmed_domestic,
+            domestic_location_text=domestic_location_text,
+            domestic_evidence_urls=domestic_evidence_urls,
         )
         cold_caller_summary = build_curated_cold_caller_summary(
             foreign_hq_detected, parent_company, parent_hq_country, curated_signals)

@@ -187,3 +187,163 @@ unrelated to this work — confirmed by re-running them with this change stashed
 and a `usage_kind` fake-signature drift in
 `test_lead_icp_context_composer.py::TestCollectIcpContextEvidence` (that module
 is untouched here). This change introduces **zero** new failures.
+
+---
+
+# Addendum: "Confirmed domestic" driver badge (closing the domestic-evidence gap)
+
+## The gap that was found
+
+The Step-1/Step-2 work above added `hq_location_summary` as an always-shown,
+informational field -- for a domestic company like Coolblue it correctly
+showed "Headquarters: Rotterdam, Netherlands". But the
+`foreign_ownership_or_group_structure` **driver card** in
+`commercial_fit_drivers` (the thing an account manager actually scans) still
+showed `strength: "Not evidenced"` with the generic `_NOT_EVIDENCED_NOTE`
+("No reliable company-specific evidence found in the current sources.") for
+that same row. That's misleading: there IS company-specific evidence, it just
+confirms the OPPOSITE of foreign ownership. `detect_foreign_hq_for_export()`
+only ever detected the foreign case; `_foreign_hq_driver()` returned `None`
+for every non-foreign row with zero distinction between "genuinely nothing
+either way" and "confirmed NOT foreign, real evidence exists";
+`build_fixed_commercial_fit_drivers()`'s `foreign_hq` branch then fell
+through to the same generic "Not evidenced" block for both cases.
+
+## The fix
+
+**New `strength` value: "Confirmed domestic"** -- a genuinely new badge string
+the Lovable frontend does **not know today**. Whoever wires up the frontend
+needs to add a badge style for it (it must not be silently mapped onto an
+existing Strong/Moderate/Weak/Not evidenced/Rejected style, and it
+deliberately does not reuse `_NOT_EVIDENCED_NOTE`, since that case has zero
+evidence and this one has real evidence).
+
+- `export_lead_prioritizer_to_lovable_json.py` -- new
+  `detect_confirmed_domestic_hq_for_export(row, foreign_hq_detected)`,
+  parallel to `detect_foreign_hq_for_export()`. Fires only when ALL of:
+  1. `foreign_hq_detected` is False -- mutually exclusive with the existing
+     foreign badge by construction (verified by a live test with
+     contradictory row fields -- foreign wins, "Confirmed domestic" never
+     appears alongside it).
+  2. `hq_structure_type == "domestic"` -- the AI HQ interpreter's own factual
+     structure determination (`lead_hq_ai_interpreter.interpret_hq_with_ai`),
+     not a re-derivation of driver-badge logic.
+  3. `hq_confidence` is High or Medium. This is a deliberately stricter bar
+     than `hq_location_summary` itself uses -- that field populates the
+     domestic line purely from `hq_structure_type == "domestic"` plus a
+     resolved city/country, with no confidence gate at all. A "Confirmed"
+     claim in a driver card is a stronger statement to the account manager
+     than a quiet informational summary line, so a Low-confidence domestic
+     call (which upstream already sets `needs_manual_review=True`, see
+     `interpret_hq_with_ai`) never earns the driver badge, even though
+     `hq_location_summary` may still show the softer summary line for that
+     same row. This is the one place the two fields may legitimately differ
+     in presence -- documented explicitly in the code comment above
+     `_CONFIRMED_DOMESTIC_MIN_CONFIDENCE`.
+  4. A real local HQ city/country actually resolves via
+     `lead_hq_location_summary.build_hq_location_summary_from_row(row)` --
+     the exact same C5 > AI > detected priority chain `hq_location_summary`
+     itself uses (reused, not re-implemented), so whenever both fields ARE
+     present for a row they can never disagree on content -- same function,
+     same row, same answer. Verified by
+     `test_location_matches_hq_location_summary_chain` and
+     `test_driver_location_text_agrees_with_hq_location_summary`.
+  A row with no HQ evidence in either direction (`hq_structure_type` blank)
+  still returns `(False, None)` and keeps the plain "Not evidenced" card --
+  confirmed-domestic is never a default for "just not foreign."
+
+- `build_fixed_commercial_fit_drivers()` gained `confirmed_domestic` /
+  `domestic_location_text` / `domestic_evidence_urls` parameters. The
+  `foreign_hq` branch now has three outcomes instead of two: `hq_driver`
+  present -> "Strong" (unchanged); else `confirmed_domestic` -> new
+  "Confirmed domestic" card with evidence "{city}, {country} is the
+  confirmed local headquarters; no foreign parent identified." and
+  `evidence_source_url`/`evidence_sources` via the existing
+  `build_evidence_sources` helper (own-domain URLs -- including a
+  Firecrawl-crawled own-domain page from the Step-1 work above -- are
+  already preferred first by that helper, so no extra "own domain" wiring
+  was needed); else the original generic "Not evidenced" (unchanged).
+- The evidence URL(s) reuse the row's own `hq_evidence_url`/`hq_evidence_urls`
+  -- the exact same fields the foreign-side driver already draws from -- so a
+  domestic classification's own-domain evidence page surfaces identically to
+  how a foreign classification's does.
+
+## Buying-signal isolation (verified, not just asserted)
+
+"Confirmed domestic" was **not** added to `_POSITIVE_DRIVER_STRENGTHS =
+frozenset({"Strong", "Moderate", "Weak"})` -- confirmed by
+`test_confirmed_domestic_not_in_positive_driver_strengths`. Every other place
+in the file that branches on `foreign_hq_detected`
+(`build_visible_icp_signal_scores`'s `add_foreign_hq_row`,
+`build_curated_why_relevant`, `build_curated_what_is_hot` /
+`build_curated_what_is_hot_items`, `apply_composed_driver_evidence`) was
+checked: none of them gained a domestic branch, so a confirmed-domestic row's
+`foreign_hq_detected` stays False straight through and none of those
+functions ever add a positive foreign-HQ sentence for it -- verified live and
+in `test_confirmed_domestic_never_positive_in_why_relevant_or_what_is_hot`
+(no "foreign" substring in `why_relevant`, no "foreign"/"confirmed local
+headquarters" bullet in `what_is_hot`). "Confirmed domestic" only ever
+surfaces as the driver-card state itself, exactly as required -- it is
+neutral/negative information for a sales pitch, not a buying-signal trigger.
+
+## Italy-path decision (explicit)
+
+**Out of scope for Italy.** Italy's `content_language == "Italian"` branch
+uses a completely separate, frozen driver-building function
+(`build_commercial_fit_drivers`, not `build_fixed_commercial_fit_drivers`)
+that derives its `foreign_hq` driver entirely from whatever row already
+exists in `visible_icp_signal_scores` -- and `build_visible_icp_signal_scores`
+only ever adds a foreign-HQ row when foreign is actually detected
+(`add_foreign_hq_row`). For a non-foreign row, Italy's driver list omits the
+foreign_hq dimension entirely rather than showing "Not evidenced" (unlike the
+fixed six-dimension non-Italy path). Since the Italy path is explicitly
+documented elsewhere in this file as frozen/byte-for-byte and does not even
+have a placeholder slot for an un-detected foreign_hq dimension, adding
+"Confirmed domestic" there would require restructuring code that multiple
+other tasks have deliberately left untouched. Decision: "Confirmed domestic"
+is non-Italy only (English/Dutch/any future country using the fixed
+six-driver path) -- Italy exports are unaffected by this addendum.
+
+## Before / after (live re-verification, real keys)
+
+Regenerated a fresh in-memory export for four Netherlands companies in one
+run (FUJIFILM + AEG to re-confirm no regression on the prior fix, Coolblue +
+NS International for the new badge):
+
+| Company | hq_location_summary | Driver strength | Driver evidence | evidence_source_url |
+|---|---|---|---|---|
+| FUJIFILM Manufacturing Europe B.V. | Parent company headquarters: Tokyo, Japan | Strong (unchanged) | "Foreign headquarters or group structure detected." | https://www.fujifilm.com/ef/en/about/office (own domain) |
+| AEG Power Solutions | Parent company headquarters: Warstein-Belecke, Germany | Strong (unchanged) | "Foreign headquarters or group structure detected." | https://www.aegps.com/en/contact/ (own domain) |
+| Coolblue | Headquarters: Rotterdam, Netherlands | Before: Not evidenced -> After: Confirmed domestic | "Rotterdam, Netherlands is the confirmed local headquarters; no foreign parent identified." | https://www.coolblue.nl/... (own domain) |
+| NS International | Headquarters: Amsterdam, Netherlands | Before: Not evidenced -> After: Confirmed domestic | "Amsterdam, Netherlands is the confirmed local headquarters; no foreign parent identified." | https://www.nsinternational.com/en/agents/contact-agent/contact (own domain) |
+
+FUJIFILM and AEG are unaffected by this addendum (foreign path untouched);
+the hq_location_summary city/country for Coolblue and NS International
+matches the driver card's evidence text exactly, as required.
+
+## Files changed (this addendum)
+
+Modified only: `export_lead_prioritizer_to_lovable_json.py`,
+`test_export_lead_prioritizer_to_lovable_json.py`. No changes to
+`lead_hq_location_summary.py`, `lead_hq_ai_interpreter.py`, or any
+HQ-detection logic -- this addendum is export-side classification only,
+exactly like `detect_foreign_hq_for_export` already was.
+
+## Tests
+
+21 new tests in `test_export_lead_prioritizer_to_lovable_json.py`
+(`TestDetectConfirmedDomesticHqForExportUnit`, `TestConfirmedDomesticDriverCard`)
+covering: fires only with High/Medium confidence + real local-HQ evidence;
+never fires when foreign is detected (mutual exclusivity, including a
+contradictory-fields case); low confidence and structure-type mismatches
+stay "Not evidenced"; a genuinely blank row stays "Not evidenced" with no
+hq_location_summary; the driver's location text always agrees with
+hq_location_summary's own C5>AI>detected chain; "Confirmed domestic" is
+absent from `_POSITIVE_DRIVER_STRENGTHS`; and it never appears as a positive
+signal in why_relevant/what_is_hot. `pytest -q`: 1411 passed, the same 7
+pre-existing unrelated failures as the prior addendum (Windows
+path-separator assertions and the usage_kind composer-test signature drift)
+plus zero new failures -- the flaky
+`TestContentLanguageEnglishUnchanged::test_explicit_english_matches_omitted_default`
+timestamp test (documented in HANDOFF.md) surfaced once during a full-suite
+run and passed cleanly on immediate re-run, as expected.
