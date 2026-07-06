@@ -14,11 +14,16 @@ see only that failure; it predates this work and is not caused by it.
 
 Branch: `work`. No PRs opened, nothing merged to `main`, per repo convention.
 
-**A later handoff addendum — multi-source evidence links, opt-in AI signal scoring,
-and multilingual retrieval — is appended at the bottom of this file
-("Addendum: evidence links, AI signal scoring, multilingual keywords"). Read that
-section for the most recent work; the rest of this file is unchanged from the
-original handoff below.**
+**Two later handoff addenda are appended at the bottom of this file:**
+1. **"Addendum: evidence links, AI signal scoring, multilingual keywords"** — multi-
+   source evidence links, opt-in AI signal scoring, and multilingual retrieval.
+2. **"Addendum 2: legacy enrichment mode and the Test comparison bucket"** — the most
+   recent work: an opt-in mode that reproduces the old `enrich_clients_claude.py`
+   evaluation style for side-by-side comparison, plus documentation for running a
+   repeatable Italy-vs-legacy comparison export under a separate "Test" bucket label.
+
+Read those sections for the most recent work; the rest of this file is unchanged from
+the original handoff below.**
 
 ## What's new, at a glance
 
@@ -428,3 +433,217 @@ local-language snippets now match — which is why it bumps a version field.
 - **`ai_signal_scoring` reuses the pipeline's single `ai_model` parameter** rather than
   introducing a dedicated model override, matching the existing precedent
   (`compose_icp_context` / `compose_caller_content_flag` do the same).
+
+---
+
+# Addendum 2: legacy enrichment mode and the Test comparison bucket
+
+Status as of this addendum: both parts below (Onderdeel B — Test bucket export-override,
+Onderdeel A — legacy enrichment mode) are complete, wired end-to-end, and fully tested.
+
+```
+pytest -q
+```
+should report all tests passing (1333 at the time of writing; the pre-existing flaky
+`TestContentLanguageEnglishUnchanged` test noted at the top of this file is unrelated
+and unaffected).
+
+Branch: `work`. No PRs opened, nothing merged to `main`. No API keys were logged
+anywhere in this work.
+
+## Onderdeel B — "Test" bucket export-override
+
+Goal: show an old-vs-new comparison run in the Lovable app as its own bucket, separate
+from a real country's dataset (e.g. "Italy"), without ever touching that country's
+actual export files.
+
+**This mechanism was already almost entirely in place** before this task:
+- `export_workbook_to_lovable_json(..., export_country=...)` already treats
+  `export_country` as a pure display-label override — `country` / `input_country` /
+  `display_country_app` / `export_country` in the exported payload all come from the
+  CLI/UI-selected label, never from the row's real enrichment-time country. The real
+  country used for the actual run (queries, `gl`/`hl` localization, etc.) is preserved
+  verbatim in `original_input_country` and is completely unaffected by the export label.
+- The Streamlit app's per-country output-folder convention
+  (`lovable_json_exports/<country>/<stamp>/`, `default_lovable_output_folder()` /
+  `default_auto_lovable_base_folder()` in `lead_prioritizer_batch_app.py`) already
+  derives the folder from `export_country`, so a `"Test"` export can never land in an
+  existing country's folder by construction — different label, different folder.
+- `"Test"` was already present (disabled by default) in both
+  `SUPPORTED_DEFAULT_INPUT_COUNTRIES` (`lead_prioritizer_batch_app.py`) and
+  `MANIFEST_COUNTRY_LABELS` / `DISABLED_COUNTRY_LABELS`
+  (`generate_lovable_countries_index.py`) — so a `"Test"` export already appears
+  (disabled) in the Lovable countries index/dropdown with zero extra hardcoding.
+
+**What this task actually added:** a loud, non-blocking warning so a comparison/test
+export is never mistaken for a production update. `export_workbook_to_lovable_json()`
+now compares `export_country` against the real country/countries found in the source
+workbook's `input_country` column; on a mismatch it appends this to `manifest["warnings"]`
+(and the CLI prints it, since `main()` already prints every warning):
+
+```
+LET OP: export-bucket-label 'Test' wijkt af van de brondata-landen (Italy) — dit is een
+vergelijkings-/testexport, geen productie-update van de Italy-bucket.
+```
+
+No warning is added when the label matches the source data (normal production exports
+are silent, as before).
+
+### How to run a repeatable Italy-vs-legacy comparison export
+
+1. Run the batch enrichment as usual for Italy, with `--legacy-enrichment-mode` added
+   (see Onderdeel A below) so both scoring systems are populated in the same workbook:
+   ```
+   python lead_prioritizer_batch_cli.py \
+     --input italy_leads.xlsx --company-column company_name --domain-column domain \
+     --default-country Italy --mode full --legacy-enrichment-mode
+   ```
+2. Export that workbook TWICE — once under the real country label (production, goes
+   into the normal Italy bucket) and once under `Test` (comparison view only):
+   ```
+   python export_lead_prioritizer_to_lovable_json.py \
+     --input-xlsx <output>.xlsx --output-dir lovable_json_exports/Italy/<stamp> \
+     --country Italy --cold-callers "Jantje,Pietje"
+
+   python export_lead_prioritizer_to_lovable_json.py \
+     --input-xlsx <output>.xlsx --output-dir lovable_json_exports/Test/<stamp> \
+     --country Test --cold-callers "Jantje,Pietje"
+   ```
+   The second command prints the `LET OP` mismatch warning (source data is Italy, label
+   is Test) — that is expected and confirms the override is working, not an error.
+3. Upload both folders independently to their respective GCS locations (or use the
+   Streamlit app's "Auto-export to Lovable" with the country field set to `Test` for the
+   comparison run). The `"Test"` entry in `countries.index.json` stays `enabled: false`
+   until a maintainer flips it in `generate_lovable_countries_index.py`'s
+   `DISABLED_COUNTRY_LABELS`, so it never accidentally shows up for end users — but it
+   IS visible in the Lovable app for anyone with direct access to the Test bucket/id.
+4. In the Lovable app, the "Italy" and "Test" buckets show up as fully independent
+   country entries built from the same underlying leads — every score/signal/
+   `legacy_*` field is identical between the two exports; only the bucket label and
+   `original_input_country` differ (`original_input_country` stays `"Italy"` in both).
+
+### Tests
+
+- `test_export_lead_prioritizer_to_lovable_json.py`: `test_country_test_override_only_
+  changes_display_fields`, `test_country_mismatch_warning_present_for_test_bucket`,
+  `test_country_mismatch_warning_absent_when_matching`, `test_country_mismatch_warning_
+  lists_every_distinct_source_country`, `test_cli_prints_mismatch_warning_for_test_bucket`
+  / `test_cli_prints_no_mismatch_warning_for_matching_country` (via `main()` + `capsys`),
+  and `test_test_bucket_output_path_never_collides_with_existing_country_export` (writes
+  a real Italy export, then a real Test export into a sibling folder, and asserts the
+  Italy export's `export_manifest.json` is byte-identical before/after).
+- `test_generate_lovable_countries_index.py` already covered `"Test"` being present and
+  disabled in the manifest (pre-existing, unchanged by this task).
+
+## Onderdeel A — legacy enrichment mode
+
+`lead_legacy_enrichment.py` (new) reproduces the *evaluation style* of the old
+`enrich_clients_claude.py` Step-2 Serper+Claude scoring (`STEP2_STATIC_PREFIX` around
+line 252, `_build_serper_queries` around line 2854, `ICP_FIELDS` around line 494) so the
+v2 pipeline can be compared against the old approach on the same leads. It is a brand
+new, independent scoring path — `enrich_clients_claude.py` itself is never imported or
+modified (standing project constraint).
+
+- **4 Serper queries** (`build_legacy_queries()`), exactly Q1-Q4 of the original 5-query
+  set (general company context, international footprint/HQ, L&D/employee training,
+  language/global teams) — Q5 (the competitor/online-learning co-mention query) is
+  dropped entirely, not replaced.
+- **One Anthropic call** per lead, with a system prompt reproducing the original's
+  holistic buying-signal list, renumbered 1-9 with the competitor signal (originally #3)
+  removed. The returned JSON only ever has 6 fields (`lead_score`, `buying_signals`,
+  `evidence`, `likely_training_interest`, `why_relevant`, `potential_buyer_function`) —
+  the 4 competitor-family fields (`competitor_signal`, `direct_language_competitor_signal`,
+  `online_language_learning_signal`, `broader_lnd_platform_signal`) are never requested
+  or produced.
+- **No Jina AI Reader / page scraping** — Serper search snippets only, exactly like the
+  rest of the v2 pipeline.
+- **Localized `gl`/`hl`** via the existing `gl_hl_for_country()` (Addendum 1's Onderdeel
+  3) instead of the old code's hardcoded `gl="us", hl="en"`; unmapped countries keep
+  unlocalized behavior.
+- **Hosted-platform guard** (`is_hosted_careers_platform_domain`, reused not duplicated)
+  filters out hosted careers-platform hits before they ever reach the prompt.
+- **`legacy_score`**: a simple fixed mapping, `High → 9.0`, `Medium → 6.0`, `Low → 3.0`,
+  anything else (including a failed/unparseable call) → `0.0` — purely for eyeballing
+  the two systems side by side; never fed into `commercial_fit_scoring.py` or
+  `lead_v2_scoring_adapter.py`.
+- **`legacy_tier`**: the raw `lead_score` string as returned by the AI (e.g. `"High"`),
+  deliberately NOT renamed to the v2 A/B/C/D tier scale — a different scale, kept
+  visually distinct on purpose.
+- Never raises: any failure (no key, no queries, call/parse error) yields
+  `call_success=False` with an `error` string and blank ICP fields.
+
+### Integration
+
+`prioritize_single_lead(..., legacy_enrichment_mode=False)` — explicit opt-in, off by
+default, runs **next to** the normal v2 flow (after every other step, including the
+rich ICP context block) and never replaces or reads from it.
+`final_commercial_fit_score` / `signals` / `evidence_items` are completely untouched
+whether this flag is on or off, and whether the call succeeds or fails (regression- and
+score-invariance-tested both ways). Not part of the `run_full_v2_pipeline` preset —
+must be turned on explicitly, same as `compose_icp_context` / `ai_signal_scoring`.
+
+**Naming note (a deliberate deviation from the literal task field names):** the task's
+`LegacyEnrichmentResult` dataclass spec names its fields `icp_lead_score` /
+`icp_buying_signals` / `icp_likely_training_interest` / `icp_potential_buyer_function` /
+`icp_why_relevant` / `icp_evidence` — copied verbatim from the old
+`enrich_clients_claude.py` field names. Three of those bare names
+(`icp_buying_signals`, `icp_likely_training_interest`, `icp_potential_buyer_function`)
+already exist on `LeadPrioritizationResult` from the earlier **rich ICP context**
+feature (Addendum 1's precursor). Reusing them for legacy mode would let the two
+features silently overwrite each other's output when both are enabled on the same run —
+which contradicts the explicit requirement that this is an independent, parallel mode.
+Resolution: `LegacyEnrichmentResult` itself (in `lead_legacy_enrichment.py`) keeps the
+exact field names from the task spec — it is its own isolated dataclass, zero collision
+risk. Only the `LeadPrioritizationResult` / Excel integration layer uses a
+`legacy_`-prefixed name for every ICP-shaped field
+(`legacy_icp_lead_score`, `legacy_icp_buying_signals`,
+`legacy_icp_likely_training_interest`, `legacy_icp_potential_buyer_function`,
+`legacy_icp_why_relevant`, `legacy_icp_evidence`), alongside `legacy_score` /
+`legacy_tier` (already prefixed in the task spec) and a new `legacy_enrichment_error`
+audit field (mirroring `icp_context_content_note`'s pattern) so a flag-on-but-failed row
+is distinguishable from a flag-off row in the Excel output.
+`test_lead_v2_full_pipeline.py::TestLegacyEnrichmentModeFlag::
+test_independent_of_rich_icp_context_and_ai_signal_scoring` proves both features can run
+together on the same lead without clobbering each other.
+
+- CLI: `--legacy-enrichment-mode`. Streamlit: "Legacy enrichment mode (vergelijking met
+  oud systeem)" checkbox.
+- Excel: `legacy_score`, `legacy_tier`, `legacy_icp_lead_score`,
+  `legacy_icp_buying_signals`, `legacy_icp_likely_training_interest`,
+  `legacy_icp_potential_buyer_function`, `legacy_icp_why_relevant`,
+  `legacy_icp_evidence`, `legacy_enrichment_error` — all blank unless the flag was on.
+- Not yet wired into the Lovable JSON exporter (out of scope for this task — the
+  comparison surface for legacy mode today is the Excel workbook; add
+  `legacy_icp_*`/`legacy_score`/`legacy_tier` to `export_lead_prioritizer_to_lovable_json.py`
+  in a follow-up if the Lovable UI itself needs to show the legacy comparison score).
+
+### Tests
+
+- `test_lead_legacy_enrichment.py` (new, 16 tests): query builder (exactly 4 queries, no
+  competitor/online-learning terms, site-anchor behavior), High/Medium/Low/unrecognized
+  → `legacy_score` mapping, no competitor fields/terms anywhere in the prompt or output,
+  hosted-platform evidence excluded from the prompt, and the full failure-fallback suite
+  (no key, call exception, unparseable response, no company/domain).
+- `test_lead_v2_full_pipeline.py::TestLegacyEnrichmentModeFlag` (8 tests): off by
+  default, full-preset does not enable it, success populates every `legacy_*` field
+  without touching the real `commercial_tier`, failure leaves fields blank with
+  `legacy_enrichment_error` recorded, flag-alone marks `partial_v2`, score/signal
+  invariance on both success and failure (full snapshot comparison), and independence
+  from rich ICP context + AI signal scoring running simultaneously.
+- `test_lead_prioritizer_batch_cli.py` / `test_lead_prioritizer_batch_core.py`: flag
+  parsing/defaults, independent passthrough to `prioritize_single_lead`, and Excel
+  flattening (fields populated when present on the result, blank when absent).
+
+## Design choices worth knowing about (this addendum)
+
+- **The "Test" bucket mechanism required almost no new code** — `export_country` was
+  already a pure display override, and `"Test"` was already pre-wired (disabled) in both
+  country lists from when those features were first built. This addendum's real
+  contribution is the mismatch warning and the regression tests proving the no-collision
+  guarantee, not the override mechanism itself.
+- **`legacy_` prefix collision resolution** (see above) is the main judgment call in this
+  addendum — flagged here explicitly in case the field names ever need to be revisited
+  for a Lovable-frontend integration.
+- **Legacy mode's prompt intentionally has no mYngle-is-not-a-competitor disclaimer** —
+  that disclaimer in the original prompt exists solely to keep mYngle out of the
+  competitor-signal fields, which this mode never asks for in the first place.
