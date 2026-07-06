@@ -327,6 +327,8 @@ def run_legacy_enrichment(
             system=_SYSTEM_PROMPT,
             messages=[{"role": "user", "content": prompt}],
         )
+        import usage_tracker
+        usage_tracker.record_anthropic_response(response, ai_model, "legacy_enrichment")
         raw_text = extract_anthropic_text(response)
     except Exception as exc:
         return LegacyEnrichmentResult(

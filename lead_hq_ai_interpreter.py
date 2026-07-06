@@ -105,10 +105,12 @@ def call_serper_for_hq(
     Returns an empty dict on any error so callers can treat it defensively.
     """
     import urllib.request
+    import usage_tracker
 
     if not serper_api_key or not query:
         return {}
 
+    usage_tracker.record_serper_call("hq")
     payload_bytes = json.dumps({"q": query, "num": 10}).encode()
     req = urllib.request.Request(
         "https://google.serper.dev/search",
@@ -461,6 +463,8 @@ def _call_anthropic_hq(api_key: str, model: str, user_msg: str) -> tuple[str, di
         messages=[{"role": "user", "content": user_msg}],
     )
     raw_text = response.content[0].text if response.content else ""
+    import usage_tracker
+    usage_tracker.record_anthropic_response(response, model, "hq")
     usage_obj = getattr(response, "usage", None)
     input_tokens = _usage_field(usage_obj, "input_tokens")
     output_tokens = _usage_field(usage_obj, "output_tokens")

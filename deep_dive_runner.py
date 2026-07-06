@@ -83,6 +83,8 @@ def _firecrawl_scrape_page(url: str, firecrawl_api_key: str, timeout: int = 15) 
     Firecrawl entirely and fall back, rather than just skipping this page.
     """
     try:
+        import usage_tracker
+        usage_tracker.record_firecrawl_call()
         resp = requests.post(
             _FC_API_URL,
             headers={"Authorization": f"Bearer {firecrawl_api_key}",
@@ -195,6 +197,8 @@ def _call_serper_localized(query: str, serper_api_key: str, gl: str = "", hl: st
     """
     if not serper_api_key or not query:
         return {}
+    import usage_tracker
+    usage_tracker.record_serper_call("other")
     payload: dict = {"q": query, "num": 10}
     if gl:
         payload["gl"] = gl
@@ -521,6 +525,8 @@ def _distill_claims(
             system=_SYSTEM_PROMPT,
             messages=[{"role": "user", "content": prompt}],
         )
+        import usage_tracker
+        usage_tracker.record_anthropic_response(response, ai_model, "deep_dive")
         raw_text = extract_anthropic_text(response)
     except Exception as exc:
         return [], f"deep_dive_call_failed: {str(exc)[:200]}"
@@ -626,6 +632,8 @@ def _reextract_not_found_quotes(
             system=_REEXTRACT_SYSTEM_PROMPT,
             messages=[{"role": "user", "content": prompt}],
         )
+        import usage_tracker
+        usage_tracker.record_anthropic_response(response, ai_model, "deep_dive_reextract")
         raw_text = extract_anthropic_text(response)
     except Exception:
         return {}

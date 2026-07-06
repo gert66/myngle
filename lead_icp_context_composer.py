@@ -121,7 +121,8 @@ def collect_icp_context_evidence(
     specs = build_icp_context_queries(root)
     out: list[dict] = []
     for spec in specs:
-        payload = call_serper_for_enrichment(spec["query"], serper_api_key)
+        payload = call_serper_for_enrichment(
+            spec["query"], serper_api_key, usage_kind="icp_context")
         items = extract_evidence_from_serper_payload(
             payload, signal_name=spec["label"], query_used=spec["query"],
             max_items=max_evidence_per_query,
@@ -318,6 +319,8 @@ def compose_icp_context(
             system=_SYSTEM_PROMPT,
             messages=[{"role": "user", "content": prompt}],
         )
+        import usage_tracker
+        usage_tracker.record_anthropic_response(response, ai_model, "icp_context")
         raw_text = extract_anthropic_text(response)
     except Exception as exc:
         return IcpContextResult(

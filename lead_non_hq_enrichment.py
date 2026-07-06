@@ -113,6 +113,7 @@ def call_serper_for_enrichment(
     serper_api_key: str,
     gl: Optional[str] = None,
     hl: Optional[str] = None,
+    usage_kind: str = "non_hq",
 ) -> dict:
     """Fire a single Serper search and return the raw JSON payload.
 
@@ -122,10 +123,12 @@ def call_serper_for_enrichment(
     treat it defensively; never raises on API / network failure.
     """
     import urllib.request
+    import usage_tracker
 
     if not serper_api_key or not query:
         return {}
 
+    usage_tracker.record_serper_call(usage_kind)
     request_payload: dict = {"q": query, "num": 10}
     if gl:
         request_payload["gl"] = gl

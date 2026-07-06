@@ -344,6 +344,8 @@ def score_signals_with_ai(
             system=_SYSTEM_PROMPT,
             messages=[{"role": "user", "content": prompt}],
         )
+        import usage_tracker
+        usage_tracker.record_anthropic_response(response, ai_model, "ai_signal_scoring")
         raw_text = extract_anthropic_text(response)
     except Exception as exc:
         return AiSignalScoringResult(

@@ -734,6 +734,56 @@ _FOREIGN_HQ_ONLY_EXPORT_DEFAULT_MODES = (
 )
 
 
+def render_usage_summary(snapshot: dict) -> None:
+    """Render the per-run API usage + estimated cost as a Streamlit expander.
+
+    Mirrors the CLI's ``usage_tracker.format_summary_text`` numbers so the app
+    and the CLI always report the same thing. ``st`` is imported lazily to keep
+    this module import-clean (same pattern as the rest of the app)."""
+    import streamlit as st
+
+    s = snapshot or {}
+    with st.expander("Verbruik deze run (API-calls, tokens & geschatte kosten)", expanded=True):
+        c1, c2, c3, c4 = st.columns(4)
+        c1.metric("Serper searches", s.get("serper_total", 0))
+        c2.metric("Anthropic calls", s.get("anthropic_calls", 0))
+        c3.metric("Firecrawl scrapes", s.get("firecrawl_calls", 0))
+        c4.metric("Geschatte kosten", f"€{s.get('estimated_total_eur', 0):.4f}")
+
+        kinds = s.get("serper_by_kind", {}) or {}
+        if kinds:
+            st.caption("Serper per type: "
+                       + ", ".join(f"{k}={v}" for k, v in kinds.items() if v))
+
+        by_model = s.get("anthropic_by_model", {}) or {}
+        if by_model:
+            st.markdown(
+                f"**Anthropic tokens** — input {s.get('anthropic_input_tokens', 0):,} "
+                f"(avg {s.get('anthropic_avg_input_tokens', 0)}/call), "
+                f"output {s.get('anthropic_output_tokens', 0):,} "
+                f"(avg {s.get('anthropic_avg_output_tokens', 0)}/call)")
+            st.dataframe(
+                [{"model": m,
+                  "calls": e.get("calls", 0),
+                  "input_tokens": e.get("input_tokens", 0),
+                  "output_tokens": e.get("output_tokens", 0)}
+                 for m, e in by_model.items()],
+                hide_index=True, use_container_width=True)
+
+        a_usd = s.get("estimated_anthropic_usd")
+        a_usd_str = f"${a_usd:.4f}" if a_usd is not None else "n/a (unpriced model)"
+        st.markdown(
+            "**Geschatte kosten** — "
+            f"Anthropic {a_usd_str}, "
+            f"Serper ${s.get('estimated_serper_usd', 0):.4f}, "
+            f"Firecrawl ${s.get('estimated_firecrawl_usd', 0):.4f} · "
+            f"**Totaal ${s.get('estimated_total_usd', 0):.4f} ≈ "
+            f"€{s.get('estimated_total_eur', 0):.4f}**")
+        st.caption("Kosten zijn schattingen o.b.v. de pricing-config in usage_tracker.py "
+                   "(Anthropic-tarieven via lead_hq_ai_interpreter.MODEL_PRICING_USD_PER_MTOK). "
+                   "Verbruik wordt ook weggeschreven naar logs/usage_history.csv.")
+
+
 def parse_cold_callers(text) -> list[str]:
     """Parse a comma-separated cold-caller string into a clean name list.
 
@@ -1456,6 +1506,11 @@ def main() -> None:  # pragma: no cover - exercised only under `streamlit run`
         chunk_files: dict = {}
         chunk_reports: list = []
 
+        # Reset the per-run API usage tracker so the "Verbruik deze run" section
+        # below reflects only this run (all chunks/threads share one process).
+        import usage_tracker
+        usage_tracker.reset()
+
         if use_parallel:
             # Chunked parallel run: each chunk goes through the exact same code
             # path as a sequential smaller batch (incl. FHO mode and C5 config).
@@ -1622,6 +1677,14 @@ def main() -> None:  # pragma: no cover - exercised only under `streamlit run`
             f"Completed {_summary.get('processed_rows', 0)} rows in {_total_elapsed} "
             f"(success {_summary.get('success_count', 0)}, errors {_summary.get('error_count', 0)})."
         )
+
+        # ── Per-run API usage + estimated cost ────────────────────────────────
+        _usage_snapshot = usage_tracker.snapshot()
+        usage_tracker.append_history(
+            companies=_summary.get("processed_rows"), snapshot=_usage_snapshot)
+        st.session_state["v2_usage_snapshot"] = _usage_snapshot
+        render_usage_summary(_usage_snapshot)
+
         st.session_state["v2_batch_output_bytes"] = data
         st.session_state["v2_batch_tables"] = tables
         st.session_state["v2_batch_mode"] = run_mode

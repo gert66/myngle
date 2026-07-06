@@ -302,6 +302,11 @@ def main(argv: Optional[list[str]] = None) -> int:
         return 3
 
     # ── Run batch via shared core ─────────────────────────────────────────────
+    # Reset the per-run API usage tracker so the summary below reflects only
+    # this invocation (the CLI runs one batch per process).
+    import usage_tracker
+    usage_tracker.reset()
+
     tables = run_batch_dataframe(df, config, serper, anthropic, firecrawl_api_key=firecrawl)
     data = build_excel_workbook_bytes(tables)
     output_path.write_bytes(data)
@@ -312,6 +317,15 @@ def main(argv: Optional[list[str]] = None) -> int:
     print(f"Success count : {summary.get('success_count')}")
     print(f"Error count   : {summary.get('error_count')}")
     print(f"Output written: {output_path}")
+
+    # ── Per-run API usage + estimated cost ────────────────────────────────────
+    usage_snapshot = usage_tracker.snapshot()
+    print()
+    print(usage_tracker.format_summary_text(usage_snapshot))
+    history_path = usage_tracker.append_history(
+        companies=summary.get("processed_rows") or selected_count,
+        snapshot=usage_snapshot)
+    print(f"(usage appended to {history_path})")
     return 0
 
 

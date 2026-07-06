@@ -323,6 +323,8 @@ def adjudicate_hq_with_sonnet(
             system=_SYSTEM_PROMPT,
             messages=[{"role": "user", "content": prompt}],
         )
+        import usage_tracker
+        usage_tracker.record_anthropic_response(resp, model, "hq_sonnet_adjudicator")
         raw_text = extract_anthropic_text(resp)
     except Exception as exc:
         return SonnetHQAdjudicationResult(
