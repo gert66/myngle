@@ -11,7 +11,7 @@ from __future__ import annotations
 import re
 from typing import Optional
 
-from hq_simple_detector import is_hosted_careers_platform_domain
+from hq_simple_detector import is_hosted_careers_platform_domain, derive_domain_root
 from lead_output_schema import LeadEvidence, LeadSignal
 
 
@@ -77,7 +77,57 @@ SUPPORTED_SIGNALS: tuple[str, ...] = tuple(_SIGNAL_KEYWORDS.keys())
 # can alter signal_score/signal_value output, so old and new datasets (e.g.
 # pre- and post-multilingual-keywords Excel/Lovable exports) can be told
 # apart. v1 = English-only keywords; v2 = adds NL/IT/DE/FR/ES equivalents.
-SIGNAL_EXTRACTOR_VERSION = "v2-multilingual"
+# v3 = per-signal positive threshold with an own-domain gate (see below).
+SIGNAL_EXTRACTOR_VERSION = "v3-own-domain-threshold"
+
+
+# ---------------------------------------------------------------------------
+# Per-signal positive-tier threshold (ICP_COMPARE_REPORT.md, proposals #1 + #2).
+#
+# Default: a signal needs >= _DEFAULT_POSITIVE_THRESHOLD (2) distinct keyword
+# hits to reach the positive tier (score 2.0). Unchanged for every signal not
+# listed in _SIGNAL_POSITIVE_THRESHOLD.
+#
+# The two signals the report found chronically under-coloured
+# (icp_keyword_match = explicit L&D, international_profile = international
+# business context) get a lowered threshold of 1 hit, but ONLY when the signal
+# is also in _OWN_DOMAIN_GATED_SIGNALS and at least one usable evidence URL sits
+# on the company's OWN registrable domain (own-domain gate, proposal #2). That
+# gate simultaneously blocks entity-contaminated evidence (Villa Silvana ->
+# Korian, SIDEL -> sidel.com) and any hosted platform / aggregator (Glassdoor,
+# Indeed, LinkedIn company pages, ...), because their registrable root never
+# equals the company's own. company_size_complexity and onboarding_training_need
+# already perform well and are left at the default; employer_branding is
+# deliberately NOT lowered — its evidence leans almost entirely on hosted review
+# platforms, so a lowered threshold there would manufacture false positives.
+#
+# Everything here is data, not logic scattered through the function: to revert
+# to the old uniform >= 2 behaviour, clear both collections below (or set the
+# thresholds back to 2) and nothing else changes.
+_DEFAULT_POSITIVE_THRESHOLD = 2
+
+_SIGNAL_POSITIVE_THRESHOLD: dict[str, int] = {
+    "icp_keyword_match": 1,
+    "international_profile": 1,
+}
+
+# Signals whose lowered threshold only applies when own-domain evidence backs it.
+_OWN_DOMAIN_GATED_SIGNALS = frozenset({"icp_keyword_match", "international_profile"})
+
+
+def _evidence_on_company_domain(ev: LeadEvidence, company_root: str) -> bool:
+    """True when this evidence URL sits on the company's own registrable domain.
+
+    ``company_root`` is the registrable label of the company's input domain
+    (``derive_domain_root``). A hosted careers platform, aggregator, review
+    site, or entity-contaminated URL yields a different root (or ``""``) and is
+    therefore rejected — exactly the guard the lowered per-signal threshold
+    needs so it can never promote off-company evidence.
+    """
+    if not company_root:
+        return False
+    ev_root = derive_domain_root(ev.source_url or "")
+    return bool(ev_root) and ev_root == company_root
 
 
 def _evidence_text(ev: LeadEvidence) -> str:
@@ -155,7 +205,10 @@ def _usable_evidence_for_signal(ev: LeadEvidence, signal_name: str) -> bool:
     return True
 
 
-def extract_non_hq_signals(evidence_items: list[LeadEvidence]) -> list[LeadSignal]:
+def extract_non_hq_signals(
+    evidence_items: list[LeadEvidence],
+    company_domain: Optional[str] = None,
+) -> list[LeadSignal]:
     """Extract deterministic non-HQ signals from collected evidence.
 
     Produces at most one ``LeadSignal`` per supported signal name, and only for
@@ -164,8 +217,17 @@ def extract_non_hq_signals(evidence_items: list[LeadEvidence]) -> list[LeadSigna
     L&D-family signals) external installer/product/partner training, never
     counts toward a positive keyword match — it stays in ``evidence_items``
     for audit purposes, but cannot be the sole basis for a positive score.
+
+    ``company_domain`` is the lead's input domain. It only matters for the
+    own-domain-gated signals (``_OWN_DOMAIN_GATED_SIGNALS``): their lowered
+    per-signal threshold (1 hit) is applied solely when at least one usable
+    evidence URL sits on the company's own registrable domain. When
+    ``company_domain`` is omitted/blank the gate can never open, so those
+    signals fall back to the default >= 2 threshold — i.e. behaviour is
+    identical to the pre-v3 uniform rule for any caller that does not pass it.
     """
     signals: list[LeadSignal] = []
+    company_root = derive_domain_root(company_domain or "")
 
     for signal_name in SUPPORTED_SIGNALS:
         group = [e for e in (evidence_items or []) if e.signal_name == signal_name]
@@ -182,7 +244,23 @@ def extract_non_hq_signals(evidence_items: list[LeadEvidence]) -> list[LeadSigna
         matched = [kw for kw in keywords if kw in combined]
         n_hits = len(matched)
 
-        if n_hits >= 2:
+        # Per-signal positive threshold. A lowered threshold only takes effect
+        # for own-domain-gated signals when at least one usable evidence URL is
+        # on the company's own registrable domain; otherwise the signal falls
+        # back to the default so off-company / hosted / contaminated evidence
+        # can never be promoted at the lowered bar.
+        threshold = _SIGNAL_POSITIVE_THRESHOLD.get(signal_name, _DEFAULT_POSITIVE_THRESHOLD)
+        own_domain_ok = (
+            signal_name in _OWN_DOMAIN_GATED_SIGNALS
+            and any(_evidence_on_company_domain(e, company_root) for e in usable)
+        )
+        if signal_name in _OWN_DOMAIN_GATED_SIGNALS and not own_domain_ok:
+            threshold = _DEFAULT_POSITIVE_THRESHOLD
+        lowered_promotion = (
+            threshold < _DEFAULT_POSITIVE_THRESHOLD and n_hits >= threshold
+        )
+
+        if n_hits >= threshold and n_hits >= 1:
             score, value = 2.0, "positive_evidence"
         elif n_hits == 1:
             score, value = 1.0, "weak_evidence"
@@ -215,6 +293,11 @@ def extract_non_hq_signals(evidence_items: list[LeadEvidence]) -> list[LeadSigna
                 f"{n_hits} distinct keyword match(es) in evidence: "
                 + ", ".join(matched)
             )
+            if lowered_promotion:
+                reason += (
+                    " (promoted to positive at lowered per-signal threshold "
+                    f"of {threshold}: backed by own-domain evidence)"
+                )
         elif excluded:
             excluded_notes = []
             if any(is_hosted_careers_platform_domain(e.source_url) for e in excluded):

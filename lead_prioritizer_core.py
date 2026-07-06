@@ -267,9 +267,9 @@ def prioritize_single_lead(
                 signals = ai_scoring_result.signals
                 signal_scoring_mode = "ai"
             else:
-                signals = extract_non_hq_signals(evidence_items)
+                signals = extract_non_hq_signals(evidence_items, company_domain=input_row.domain)
         else:
-            signals = extract_non_hq_signals(evidence_items)
+            signals = extract_non_hq_signals(evidence_items, company_domain=input_row.domain)
     non_hq_summary = summarize_non_hq_signals_for_result(signals)
 
     # Sector/industry metadata from sector_industry evidence (deterministic,

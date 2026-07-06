@@ -632,3 +632,91 @@ class TestCoreGating:
         assert r.employer_branding_evidence_quote == \
             "Great place to work with strong employee satisfaction."
         assert "keyword match" in r.employer_branding_reason
+
+
+# ---------------------------------------------------------------------------
+# Per-signal lowered threshold + own-domain gate (ICP_COMPARE_REPORT.md #1 + #2)
+# ---------------------------------------------------------------------------
+
+class TestOwnDomainThreshold:
+    """icp_keyword_match and international_profile reach the positive tier on a
+    single keyword hit ONLY when backed by evidence on the company's own
+    registrable domain. Everything else keeps the default >= 2 threshold."""
+
+    def test_one_hit_promotes_with_own_domain_evidence(self):
+        # Single keyword hit ("support") on the company's own domain.
+        ev = [_ev("icp_keyword_match",
+                  snippet="Customer support team based in Milan.",
+                  url="https://solgar.it/lavora-con-noi")]
+        s = extract_non_hq_signals(ev, company_domain="solgar.it")[0]
+        assert s.signal_score == 2.0
+        assert s.signal_value == "positive_evidence"
+        assert "lowered per-signal threshold" in s.signal_reason
+
+    def test_one_hit_not_promoted_without_company_domain(self):
+        # No company_domain -> gate closed -> falls back to default threshold.
+        ev = [_ev("icp_keyword_match",
+                  snippet="Customer support team based in Milan.",
+                  url="https://solgar.it/lavora-con-noi")]
+        s = extract_non_hq_signals(ev)[0]
+        assert s.signal_score == 1.0
+        assert s.signal_value == "weak_evidence"
+
+    def test_one_hit_not_promoted_when_evidence_off_domain(self):
+        # Entity contamination: input domain sidelitalia.it, hit sits on
+        # sidel.com -> registrable roots differ -> not promoted (SIDEL case).
+        ev = [_ev("icp_keyword_match",
+                  snippet="Join an international team with customer service roles.",
+                  url="https://www.sidel.com/en/about/careers/vacancies/")]
+        s = extract_non_hq_signals(ev, company_domain="sidelitalia.it")[0]
+        assert s.signal_score == 1.0
+        assert s.signal_value == "weak_evidence"
+
+    def test_one_hit_not_promoted_on_hosted_platform_url(self):
+        # Glassdoor/aggregator evidence never matches the company root.
+        ev = [_ev("icp_keyword_match",
+                  snippet="Reviews mention customer support responsiveness.",
+                  url="https://www.glassdoor.it/Recensioni/Acme.htm")]
+        s = extract_non_hq_signals(ev, company_domain="acme.it")[0]
+        assert s.signal_score == 1.0
+
+    def test_international_profile_promotes_with_own_domain(self):
+        ev = [_ev("international_profile",
+                  snippet="We export corrugated paper across Europe.",
+                  url="https://acme.it/company/")]
+        s = extract_non_hq_signals(ev, company_domain="acme.it")[0]
+        assert s.signal_score == 2.0
+
+    def test_zero_hits_never_promoted_even_with_own_domain(self):
+        # Threshold lowering only lifts weak(1)->positive, never none(0).
+        ev = [_ev("icp_keyword_match",
+                  snippet="Produzione di carta per cartone ondulato.",
+                  url="https://acme.it/azienda/")]
+        s = extract_non_hq_signals(ev, company_domain="acme.it")[0]
+        assert s.signal_score == 0.0
+
+    def test_employer_branding_not_lowered(self):
+        # employer_branding is intentionally excluded from the lowered threshold.
+        ev = [_ev("employer_branding",
+                  snippet="Recognised for workplace culture.",
+                  url="https://acme.it/careers")]
+        s = extract_non_hq_signals(ev, company_domain="acme.it")[0]
+        assert s.signal_score == 1.0
+        assert s.signal_value == "weak_evidence"
+
+    def test_non_gated_signal_not_lowered(self):
+        # company_size_complexity keeps the default threshold even on-domain.
+        ev = [_ev("company_size_complexity",
+                  snippet="Part of a larger industrial group.",
+                  url="https://acme.it/company/")]
+        s = extract_non_hq_signals(ev, company_domain="acme.it")[0]
+        assert s.signal_score == 1.0
+
+    def test_subdomain_and_pseudo_tld_match(self):
+        # Own-domain match is registrable-label based (handles www/subdomains).
+        ev = [_ev("icp_keyword_match",
+                  snippet="Customer support and academy for employees.",
+                  url="https://careers.acme.it/jobs")]
+        s = extract_non_hq_signals(ev, company_domain="www.acme.it")[0]
+        # "academy", "support", "employees" -> already >=2 anyway, stays positive
+        assert s.signal_score == 2.0
