@@ -432,6 +432,90 @@ def localize_parent_hq_summary_app(text):
 
 
 # ---------------------------------------------------------------------------
+# hq_location_summary (lead_hq_location_summary.build_hq_location_summary)
+#
+# Two fixed English prefixes + a "City, Country" (or bare "Country") location.
+# Only country/city tokens with a known target-language spelling are
+# translated; anything unknown passes through in English, matching this
+# module's "never guess a translation" rule. Structural (not fragment-patch)
+# so the whole line is rebuilt in the target language.
+# ---------------------------------------------------------------------------
+
+_HQ_FOREIGN_PREFIX = "Parent company headquarters: "
+_HQ_DOMESTIC_PREFIX = "Headquarters: "
+
+# Small, deliberately narrow known-name maps. Country names differ more often
+# than city names across NL/IT; only add entries known to be unambiguous.
+_COUNTRY_NAME_NL = {
+    "Netherlands": "Nederland", "The Netherlands": "Nederland",
+    "Germany": "Duitsland", "France": "Frankrijk", "Belgium": "België",
+    "Italy": "Italië", "Spain": "Spanje", "Japan": "Japan", "China": "China",
+    "United States": "Verenigde Staten", "USA": "Verenigde Staten",
+    "United Kingdom": "Verenigd Koninkrijk", "Switzerland": "Zwitserland",
+    "Sweden": "Zweden", "Austria": "Oostenrijk", "Denmark": "Denemarken",
+    "Norway": "Noorwegen", "Finland": "Finland", "Ireland": "Ierland",
+    "Poland": "Polen", "Portugal": "Portugal", "Brazil": "Brazilië",
+    "South Korea": "Zuid-Korea", "Luxembourg": "Luxemburg",
+}
+_CITY_NAME_NL = {"Tokyo": "Tokio"}
+
+_COUNTRY_NAME_IT = {
+    "Netherlands": "Paesi Bassi", "The Netherlands": "Paesi Bassi",
+    "Germany": "Germania", "France": "Francia", "Belgium": "Belgio",
+    "Italy": "Italia", "Spain": "Spagna", "Japan": "Giappone", "China": "Cina",
+    "United States": "Stati Uniti", "USA": "Stati Uniti",
+    "United Kingdom": "Regno Unito", "Switzerland": "Svizzera",
+    "Sweden": "Svezia", "Austria": "Austria", "Denmark": "Danimarca",
+    "Norway": "Norvegia", "Finland": "Finlandia", "Ireland": "Irlanda",
+    "Poland": "Polonia", "Portugal": "Portogallo", "Brazil": "Brasile",
+    "South Korea": "Corea del Sud", "Luxembourg": "Lussemburgo",
+}
+_CITY_NAME_IT = {"Tokyo": "Tokyo", "Munich": "Monaco di Baviera"}
+
+
+def _translate_location(location: str, city_map: dict, country_map: dict) -> str:
+    """Translate a "City, Country" (or bare "Country") location token-wise.
+
+    Known city/country names are translated; unknown ones pass through. The
+    last comma-separated part is the country, everything before it the city.
+    """
+    parts = [p.strip() for p in location.split(",")]
+    if len(parts) >= 2:
+        country = parts[-1]
+        city = ", ".join(parts[:-1])
+        city = city_map.get(city, city)
+        country = country_map.get(country, country)
+        return f"{city}, {country}"
+    only = parts[0]
+    return country_map.get(only, city_map.get(only, only))
+
+
+def _localize_hq_location_summary(text, foreign_label, domestic_label,
+                                  city_map, country_map):
+    if not text:
+        return text
+    if text.startswith(_HQ_FOREIGN_PREFIX):
+        loc = text[len(_HQ_FOREIGN_PREFIX):].strip()
+        return f"{foreign_label}{_translate_location(loc, city_map, country_map)}"
+    if text.startswith(_HQ_DOMESTIC_PREFIX):
+        loc = text[len(_HQ_DOMESTIC_PREFIX):].strip()
+        return f"{domestic_label}{_translate_location(loc, city_map, country_map)}"
+    return text
+
+
+def localize_hq_location_summary(text):
+    return _localize_hq_location_summary(
+        text, "Hoofdkantoor moederbedrijf: ", "Hoofdkantoor: ",
+        _CITY_NAME_NL, _COUNTRY_NAME_NL)
+
+
+def localize_hq_location_summary_it(text):
+    return _localize_hq_location_summary(
+        text, "Sede centrale della capogruppo: ", "Sede centrale: ",
+        _CITY_NAME_IT, _COUNTRY_NAME_IT)
+
+
+# ---------------------------------------------------------------------------
 # cold_caller_summary_app — a two-sentence concatenation:
 #   f"{foreign_hq_sentence} {caller_angle_app}"   (foreign-HQ leads)
 #   f"{why_relevant_app} {caller_angle_app}"      (otherwise)

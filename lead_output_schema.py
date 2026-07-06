@@ -135,6 +135,12 @@ class LeadPrioritizationResult:
 
     # HQ structure type
     hq_structure_type: Optional[str] = None
+    # Always-shown structured HQ location line for the app (ADDITIONAL to, and
+    # independent of, the foreign_ownership_or_group_structure driver badge).
+    # "Parent company headquarters: {city}, {country}" for a foreign parent,
+    # "Headquarters: {city}, {country}" for a domestic HQ, else None. Localized
+    # for NL/IT in the export. See lead_hq_location_summary.py.
+    hq_location_summary: Optional[str] = None
     # Scoring input signals (not scores themselves)
     sig_foreign_hq_score_for_next_scoring: Optional[float] = None
     # Competitor evidence is audit-only; excluded from scoring

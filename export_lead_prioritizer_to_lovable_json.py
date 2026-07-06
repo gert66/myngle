@@ -54,6 +54,8 @@ from lovable_content_localization import (
     localize_evidence_summary_app_it,
     localize_foreign_hq_evidence_text,
     localize_foreign_hq_evidence_text_it,
+    localize_hq_location_summary,
+    localize_hq_location_summary_it,
     localize_parent_hq_summary_app,
     localize_parent_hq_summary_app_it,
     localize_what_is_hot_item,
@@ -2204,6 +2206,10 @@ def _build_detail_record(
         "caution_app": clean_str(row.get("caution_app")),
         "cold_caller_summary_app": clean_str(row.get("cold_caller_summary_app")),
         "parent_hq_summary_app": clean_str(row.get("parent_hq_summary_app")),
+        # Always-shown structured HQ location line (top-level, present only when
+        # derivable). Independent of the foreign-ownership driver badge; the
+        # frontend can rely on its presence/absence. Localized for NL/IT below.
+        "hq_location_summary": clean_str(row.get("hq_location_summary")),
         "evidence_summary_app": clean_str(row.get("evidence_summary_app")),
         "key_source_links_app": key_source_links,
         "advanced_notes_app": clean_str(row.get("advanced_notes_app")),
@@ -2463,6 +2469,7 @@ _APP_FIELD_LOCALIZERS_NL: dict[str, "Callable[[object], object]"] = {
     "caution_app": localize_caution_app,
     "cold_caller_summary_app": localize_cold_caller_summary_app,
     "parent_hq_summary_app": localize_parent_hq_summary_app,
+    "hq_location_summary": localize_hq_location_summary,
     "evidence_summary_app": localize_evidence_summary_app,
 }
 _APP_FIELD_LOCALIZERS_IT: dict[str, "Callable[[object], object]"] = {
@@ -2472,6 +2479,7 @@ _APP_FIELD_LOCALIZERS_IT: dict[str, "Callable[[object], object]"] = {
     "caution_app": localize_caution_app_it,
     "cold_caller_summary_app": localize_cold_caller_summary_app_it,
     "parent_hq_summary_app": localize_parent_hq_summary_app_it,
+    "hq_location_summary": localize_hq_location_summary_it,
     "evidence_summary_app": localize_evidence_summary_app_it,
 }
 

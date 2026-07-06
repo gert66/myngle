@@ -134,8 +134,10 @@ def call_serper_for_hq(
 
 _SYSTEM_PROMPT = (
     "You are a corporate structure analyst. "
-    "Given search-engine results about a company, determine where its ultimate parent "
-    "group headquarters is located. "
+    "Given the company's own website content plus search-engine results, "
+    "determine where its ultimate parent group headquarters is located. "
+    "Treat the company's own website content as the primary, most-authoritative "
+    "source; use the search-engine results only as secondary corroboration. "
     "Reply ONLY with a valid JSON object — no prose, no markdown fences."
 )
 
@@ -143,7 +145,11 @@ _USER_TEMPLATE = """\
 Company domain root: {domain_root}
 Input country (where the local entity operates): {input_country}
 
-Search results for query: "{query}"
+PRIMARY SOURCE — the company's own website content (most authoritative;
+redirects followed). Base your answer on this first when it is present:
+{own_site_text}
+
+SECONDARY SOURCE — search results for query: "{query}"
 
 Knowledge Graph:
 {kg_text}
@@ -160,18 +166,43 @@ Classify and return JSON with these exact keys:
 - "parent_company": name of the ultimate parent group (empty string if unknown)
 - "parent_hq_country": country of the ultimate parent HQ (empty string if unknown)
 - "parent_hq_city": city of the ultimate parent HQ (empty string if unknown)
-- "evidence_url": best source URL from the results (empty string if none)
-- "evidence_urls": ALL result URLs (from the list above) that support your answer, best first (empty list if none)
+- "evidence_url": best source URL from the material above (empty string if none)
+- "evidence_urls": ALL URLs (from the primary or secondary material above) that support your answer, best first (empty list if none)
 - "evidence_quote": short verbatim quote supporting your answer (max 200 chars, empty if none)
 - "reason": one short sentence explaining your classification
 
 Rules:
-- Use "foreign_parent" when the ultimate controlling group HQ is in a DIFFERENT country than input_country.
+- Use "foreign_parent" when the ultimate controlling group/parent HQ is in a
+  DIFFERENT country than input_country. This applies EVEN IF this specific
+  entity is described as a regional/local branch, subsidiary, or division:
+  being a local branch of a foreign-headquartered group is still foreign_parent.
 - Use "domestic" when the ultimate HQ is in the SAME country as input_country.
-- Use "regional_branch_only" when the result clearly describes a regional/local branch, not the global HQ.
+- Use "regional_branch_only" ONLY when the entity is a regional/local branch
+  AND its ultimate/global parent HQ is in the SAME country as input_country, or
+  the parent's country genuinely cannot be determined from the material.
 - Use "unclear" only when evidence is contradictory or absent.
-- Never invent information not present in the search results.
+- Never invent information not present in the supplied material (neither the
+  own-website content nor the search results). Prefer the own-website content
+  when the two sources disagree.
 """
+
+
+def _format_own_site_pages(crawled_pages) -> str:
+    """Render the crawled own-domain pages for the primary-source section.
+
+    Each page is a ``{"url", "text", ...}`` dict as produced by
+    ``lead_hq_firecrawl_source.collect_own_domain_hq_pages``. Returns
+    ``"  (none — no own-website content was retrieved)"`` when there is
+    nothing, so the classifier knows the primary source was absent.
+    """
+    pages = [p for p in (crawled_pages or []) if (p.get("text") or "").strip()]
+    if not pages:
+        return "  (none — no own-website content was retrieved)"
+    lines = []
+    for page in pages:
+        text = (page.get("text") or "").strip()[:1500]
+        lines.append(f"  URL: {page.get('url')}\n    {text}")
+    return "\n".join(lines)
 
 
 def _build_user_message(
@@ -180,7 +211,10 @@ def _build_user_message(
     input_country: str,
     query: str,
     serper_payload: dict,
+    crawled_pages=None,
 ) -> str:
+    own_site_text = _format_own_site_pages(crawled_pages)
+
     kg: dict = serper_payload.get("knowledgeGraph") or {}
     kg_parts = []
     for key in ("title", "type", "address", "headquarters", "location", "description"):
@@ -205,6 +239,7 @@ def _build_user_message(
         domain_root=domain_root,
         input_country=input_country or "(unknown)",
         query=query,
+        own_site_text=own_site_text,
         kg_text=kg_text,
         ab_text=ab_text,
         organic_text=organic_text,
@@ -234,6 +269,30 @@ def _known_urls_from_serper_payload(serper_payload: dict) -> list:
         if isinstance(item, dict):
             _add(item.get("link"))
 
+    return urls
+
+
+def _known_urls_for_hq(serper_payload: dict, crawled_pages=None) -> list:
+    """All URLs the model was actually shown for HQ classification — the Serper
+    payload URLs PLUS the crawled own-domain page URLs. Used to validate
+    ``evidence_url(s)`` so the AI can cite a Firecrawl-sourced own-domain page
+    (e.g. ``https://www.fujifilm.com/nl``) as evidence, but still can never
+    invent a URL that was in neither source.
+    """
+    # Crawled own-domain pages first so a genuinely own-domain-grounded answer
+    # surfaces its real crawled URL; membership is what actually validates a
+    # cited URL, so exact ordering is not load-bearing.
+    urls: list[str] = []
+
+    def _add(url) -> None:
+        url = str(url or "").strip()
+        if url and url not in urls:
+            urls.append(url)
+
+    for page in (crawled_pages or []):
+        _add((page or {}).get("url"))
+    for url in _known_urls_from_serper_payload(serper_payload):
+        _add(url)
     return urls
 
 
@@ -552,6 +611,7 @@ def interpret_hq_with_ai(
     ai_provider: str = "anthropic",
     openai_api_key: str = "",
     deepseek_api_key: str = "",
+    crawled_pages=None,
 ) -> "HQDetectionResult":
     """Interpret HQ from a Serper payload using Anthropic (Haiku by default).
 
@@ -604,6 +664,7 @@ def interpret_hq_with_ai(
             input_country=lead_input.input_country or "",
             query=query,
             serper_payload=serper_payload,
+            crawled_pages=crawled_pages,
         )
         if provider == "openai":
             raw_text, usage = _call_openai_hq(provider_api_key, model, user_msg)
@@ -640,9 +701,10 @@ def interpret_hq_with_ai(
     ai_reason  = (ai_data.get("reason") or "").strip()
 
     # Mechanical validation: only URLs actually present in the supplied
-    # Serper payload are ever trusted (never an AI-invented URL). ev_url
-    # (the existing single-URL field) is kept first when it is itself valid.
-    _known_urls = _known_urls_from_serper_payload(serper_payload)
+    # material — the Serper payload OR the crawled own-domain pages — are ever
+    # trusted (never an AI-invented URL). ev_url (the existing single-URL
+    # field) is kept first when it is itself valid.
+    _known_urls = _known_urls_for_hq(serper_payload, crawled_pages)
     _raw_ev_urls = ai_data.get("evidence_urls")
     ev_urls: list[str] = []
     if ev_url and ev_url in _known_urls:

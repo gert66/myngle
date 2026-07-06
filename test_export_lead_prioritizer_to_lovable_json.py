@@ -4045,3 +4045,32 @@ def test_italy_score_zero_still_omitted(tmp_path):
                             foreign_hq_only=False)
     drivers = detail_for(out_dir, "Acme Brasil")["ui_payload"]["commercial_fit_drivers"]
     assert not any("nternational business" in d["label"] for d in drivers)
+
+
+# ---------------------------------------------------------------------------
+# hq_location_summary — always-shown structured HQ location line.
+# ---------------------------------------------------------------------------
+
+def test_hq_location_summary_flows_into_detail_record(tmp_path):
+    enriched = [enriched_row(
+        hq_location_summary="Parent company headquarters: Tokyo, Japan")]
+    _, out_dir = run_export(tmp_path, enriched)
+    detail = detail_for(out_dir, "Acme Brasil")
+    assert detail["hq_location_summary"] == "Parent company headquarters: Tokyo, Japan"
+
+
+def test_hq_location_summary_absent_when_blank(tmp_path):
+    enriched = [enriched_row()]  # no hq_location_summary key at all
+    _, out_dir = run_export(tmp_path, enriched)
+    detail = detail_for(out_dir, "Acme Brasil")
+    assert detail["hq_location_summary"] is None
+
+
+def test_hq_location_summary_localized_for_dutch(tmp_path):
+    from lovable_content_localization import localize_hq_location_summary
+    detail = {"hq_location_summary": "Parent company headquarters: Tokyo, Japan"}
+    localized, _, _ = localize_detail_record_for_dutch(detail)
+    assert localized["hq_location_summary"] == "Hoofdkantoor moederbedrijf: Tokio, Japan"
+    # sanity: the direct localizer agrees.
+    assert localize_hq_location_summary(detail["hq_location_summary"]) == (
+        "Hoofdkantoor moederbedrijf: Tokio, Japan")

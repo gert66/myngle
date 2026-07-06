@@ -14,6 +14,8 @@ import json
 from lead_output_schema import LeadInput, LeadPrioritizationResult, HQDetectionResult
 from hq_simple_detector import build_simple_hq_query, is_hosted_careers_platform_domain
 from lead_hq_ai_interpreter import call_serper_for_hq, interpret_hq_with_ai
+from lead_hq_firecrawl_source import collect_own_domain_hq_pages
+from lead_hq_location_summary import build_hq_location_summary
 from lead_non_hq_enrichment import collect_non_hq_enrichment_evidence
 from lead_non_hq_signal_extractor import (
     extract_non_hq_signals,
@@ -58,6 +60,7 @@ def prioritize_single_lead(
     *,
     serper_api_key: str = "",
     anthropic_api_key: str = "",
+    firecrawl_api_key: str = "",
     ai_model: str = _DEFAULT_AI_MODEL,
     ai_provider: str = "anthropic",
     openai_api_key: str = "",
@@ -214,6 +217,21 @@ def prioritize_single_lead(
         serper_api_key=serper_api_key,
     )
 
+    # ── PRIMARY HQ source: crawl the company's own domain via Firecrawl ────────
+    # The single Serper query above is non-deterministic run-to-run, which used
+    # to flip the HQ classification of the exact same company (see
+    # HQ_FIRECRAWL_STABILITY_NOTES.md). The company's own website content is
+    # stable, so we feed it to the classifier as the first, most-trusted source
+    # with the Serper snippets as secondary corroboration. A missing Firecrawl
+    # key, a hosted-platform "domain" (not the company's own site), or any hard
+    # Firecrawl failure falls back cleanly to exactly today's Serper-only
+    # behavior — never an error, mirroring the Deep Dive precedent.
+    crawled_pages: list = []
+    if firecrawl_api_key and input_row.domain and not domain_is_hosted_platform:
+        fc = collect_own_domain_hq_pages(input_row.domain, firecrawl_api_key)
+        if fc["used"]:
+            crawled_pages = fc["pages"]
+
     # Use the effective (defaulted) country for interpretation without mutating
     # the caller's input row.
     interp_input = LeadInput(
@@ -232,6 +250,7 @@ def prioritize_single_lead(
         ai_provider=ai_provider,
         openai_api_key=openai_api_key,
         deepseek_api_key=deepseek_api_key,
+        crawled_pages=crawled_pages,
     )
 
     # ── Step 2: non-HQ evidence collection (evidence only, no scores) ─────────
@@ -302,6 +321,18 @@ def prioritize_single_lead(
         hq_evidence_urls=hq.hq_evidence_urls,
         hq_evidence_quote=hq.hq_evidence_quote,
         hq_structure_type=hq.hq_structure_type,
+        # Always-shown structured HQ location line (independent of the
+        # foreign-ownership driver badge). Built here from the AI/detected HQ
+        # fields; the batch C5 layer recomputes it once richer c5_parent_*
+        # fields exist so C5 takes priority — see lead_hq_location_summary.py.
+        hq_location_summary=build_hq_location_summary(
+            foreign_hq_simple=hq.foreign_hq_simple,
+            hq_structure_type=hq.hq_structure_type,
+            ai_parent_hq_country=hq.ai_parent_hq_country,
+            ai_parent_hq_city=hq.ai_parent_hq_city,
+            hq_detected_country=hq.hq_detected_country,
+            hq_detected_city=hq.hq_detected_city,
+        ),
         # Scoring
         sig_foreign_hq_score_for_next_scoring=hq.sig_foreign_hq_score_for_next_scoring,
         # Competitor evidence is audit-only and never enters HQ scoring.

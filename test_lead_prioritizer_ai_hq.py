@@ -845,3 +845,134 @@ class TestHqEvidenceUrls:
         assert r_without.sig_foreign_hq_score_for_next_scoring == r_with.sig_foreign_hq_score_for_next_scoring
         assert r_without.hq_structure_type == r_with.hq_structure_type
         assert r_without.needs_manual_review == r_with.needs_manual_review
+
+
+# ---------------------------------------------------------------------------
+# Firecrawl own-domain content as the PRIMARY HQ source (crawled_pages).
+# ---------------------------------------------------------------------------
+
+def _mock_anthropic_capture(ai_json_str: str):
+    """Like _mock_anthropic but also returns the mock client so the caller can
+    inspect the user message that was actually sent to the model."""
+    mock_msg = MagicMock()
+    mock_msg.content = [MagicMock(text=ai_json_str)]
+    mock_client = MagicMock()
+    mock_client.messages.create.return_value = mock_msg
+    mock_lib = MagicMock()
+    mock_lib.Anthropic.return_value = mock_client
+    return patch("lead_hq_ai_interpreter._anthropic_lib", mock_lib), mock_client
+
+
+def _user_message_sent(mock_client) -> str:
+    _, kwargs = mock_client.messages.create.call_args
+    return kwargs["messages"][0]["content"]
+
+
+class TestCrawledOwnDomainPrimarySource:
+    _lead = LeadInput(company_name="Fujifilm NL", domain="fujifilmtilburg.nl",
+                      input_country="Netherlands")
+    _crawled = [{
+        "url": "https://www.fujifilm.com/nl",
+        "text": "FUJIFILM Holdings Corporation is headquartered in Tokyo, Japan.",
+        "source_kind": "own_domain", "retrieval_method": "firecrawl",
+    }]
+    _serper = {"organic": [
+        {"title": "LinkedIn", "snippet": "European HQ in Tilburg.",
+         "link": "https://nl.linkedin.com/company/fujifilm-europe"},
+    ]}
+
+    def _interpret(self, ai_json_str, crawled_pages):
+        mock_ctx, client = _mock_anthropic_capture(ai_json_str)
+        with mock_ctx:
+            result = interpret_hq_with_ai(
+                lead_input=self._lead, domain_root="fujifilmtilburg",
+                query="fujifilmtilburg headquarters", serper_payload=self._serper,
+                anthropic_api_key="fake", crawled_pages=crawled_pages,
+            )
+        return result, client
+
+    def test_crawled_text_included_as_primary_in_prompt(self):
+        ai = _ai_json(classification="foreign_parent", confidence="High",
+                      parent_hq_country="Japan", parent_hq_city="Tokyo")
+        _, client = self._interpret(ai, self._crawled)
+        msg = _user_message_sent(client)
+        assert "PRIMARY SOURCE" in msg
+        assert "FUJIFILM Holdings Corporation" in msg
+        assert "https://www.fujifilm.com/nl" in msg
+
+    def test_crawled_url_accepted_as_evidence(self):
+        data = json.loads(_ai_json(classification="foreign_parent",
+                                   confidence="High", parent_hq_country="Japan"))
+        data["evidence_url"] = "https://www.fujifilm.com/nl"
+        data["evidence_urls"] = ["https://www.fujifilm.com/nl"]
+        result, _ = self._interpret(json.dumps(data), self._crawled)
+        assert result.hq_evidence_url == "https://www.fujifilm.com/nl"
+        assert "https://www.fujifilm.com/nl" in result.hq_evidence_urls
+
+    def test_invented_url_still_rejected_even_with_crawl(self):
+        data = json.loads(_ai_json(classification="foreign_parent",
+                                   confidence="High", parent_hq_country="Japan"))
+        data["evidence_url"] = "https://www.fujifilm.com/nl"
+        data["evidence_urls"] = ["https://www.fujifilm.com/nl",
+                                 "https://invented.example/fake"]
+        result, _ = self._interpret(json.dumps(data), self._crawled)
+        assert result.hq_evidence_urls == ["https://www.fujifilm.com/nl"]
+
+    def test_no_crawled_pages_is_backward_compatible(self):
+        # Serper-only path (empty crawled_pages) still classifies and the
+        # prompt marks the primary source absent.
+        ai = _ai_json(classification="foreign_parent", confidence="High",
+                      parent_hq_country="Japan", parent_hq_city="Tokyo")
+        result, client = self._interpret(ai, [])
+        assert result.sig_foreign_hq_score_for_next_scoring == 3.0
+        msg = _user_message_sent(client)
+        assert "no own-website content was retrieved" in msg
+
+
+class TestPrioritizeSingleLeadFirecrawlWiring:
+    """prioritize_single_lead: Firecrawl own-domain crawl feeds the classifier
+    and hq_location_summary is populated on the result."""
+
+    _lead = LeadInput(company_name="Fujifilm NL", domain="fujifilmtilburg.nl",
+                      input_country="Netherlands")
+    _ai = _ai_json(classification="foreign_parent", confidence="High",
+                   parent_company="FUJIFILM Holdings",
+                   parent_hq_country="Japan", parent_hq_city="Tokyo",
+                   evidence_url="https://www.fujifilm.com/nl")
+
+    def _run(self, firecrawl_key, fc_return):
+        crawl_patch = patch(
+            "lead_prioritizer_core.collect_own_domain_hq_pages",
+            return_value=fc_return)
+        with _mock_serper(_EMPTY_SERPER), _mock_anthropic(self._ai), crawl_patch as m:
+            result = prioritize_single_lead(
+                self._lead, serper_api_key="s", anthropic_api_key="a",
+                firecrawl_api_key=firecrawl_key)
+        return result, m
+
+    def test_crawl_invoked_when_key_present(self):
+        fc = {"pages": [{"url": "https://www.fujifilm.com/nl", "text": "Tokyo HQ",
+                         "source_kind": "own_domain", "retrieval_method": "firecrawl"}],
+              "pages_crawled": [], "used": True}
+        result, m = self._run("fc-key", fc)
+        m.assert_called_once()
+        assert result.hq_location_summary == "Parent company headquarters: Tokyo, Japan"
+
+    def test_no_crawl_when_key_absent(self):
+        fc = {"pages": [], "pages_crawled": [], "used": False}
+        result, m = self._run("", fc)
+        m.assert_not_called()
+        # Still classifies from Serper-only path; summary still derived from AI fields.
+        assert result.hq_location_summary == "Parent company headquarters: Tokyo, Japan"
+
+    def test_hosted_platform_domain_is_not_crawled(self):
+        hosted_lead = LeadInput(
+            company_name="X", domain="jobs.lever.co", input_country="Netherlands")
+        crawl_patch = patch(
+            "lead_prioritizer_core.collect_own_domain_hq_pages",
+            return_value={"pages": [], "pages_crawled": [], "used": False})
+        with _mock_serper(_EMPTY_SERPER), _mock_anthropic(self._ai), crawl_patch as m:
+            prioritize_single_lead(
+                hosted_lead, serper_api_key="s", anthropic_api_key="a",
+                firecrawl_api_key="fc-key")
+        m.assert_not_called()

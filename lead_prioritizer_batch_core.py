@@ -31,6 +31,7 @@ import pandas as pd
 
 from lead_output_schema import LeadInput
 from lead_prioritizer_core import prioritize_single_lead
+from lead_hq_location_summary import build_hq_location_summary_from_row
 from deep_dive_runner import run_deep_dive
 
 
@@ -208,6 +209,7 @@ _RESULT_FLAT_FIELDS = [
     "hq_detected_country", "hq_detected_city", "hq_confidence",
     "foreign_hq_simple", "needs_manual_review", "hq_reason",
     "hq_evidence_url", "hq_evidence_urls", "hq_evidence_quote", "hq_structure_type",
+    "hq_location_summary",
     "sig_foreign_hq_score_for_next_scoring",
     "domain_root", "query_used", "parser_source", "domain_is_hosted_platform",
     # C4 positive-score safety audit
@@ -497,6 +499,10 @@ def run_batch_dataframe(
     ai_kwargs: dict = {
         "ai_provider": config.ai_provider,
         "openai_api_key": openai_api_key,
+        # Firecrawl own-domain crawl as the PRIMARY HQ source (see
+        # lead_hq_firecrawl_source.py). Empty key → Serper-only HQ, exactly as
+        # before. Runs for every HQ detection regardless of run_mode.
+        "firecrawl_api_key": firecrawl_api_key,
     }
     if config.ai_model:
         ai_kwargs["ai_model"] = config.ai_model
@@ -837,6 +843,13 @@ def apply_c5_adjudication(
         if scoring_behavior == "conservative_adjustment":
             _apply_conservative_adjustment(enriched, result, counts)
         # append_only: never touch score / needs_manual_review.
+
+        # Recompute the always-shown HQ location line now that C5's richer
+        # parent HQ fields exist, so C5 takes priority (C5 > AI > detected).
+        # Idempotent for rows where C5 added no parent info.
+        _c5_summary = build_hq_location_summary_from_row(enriched)
+        if _c5_summary:
+            enriched["hq_location_summary"] = _c5_summary
 
         out_rows.append(enriched)
         done += 1

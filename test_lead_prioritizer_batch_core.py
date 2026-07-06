@@ -1064,6 +1064,49 @@ class TestC5AppendOnly:
         assert counts["c5_rows_attempted"] == 2
 
 
+class TestC5RecomputesHqLocationSummary:
+    """apply_c5_adjudication recomputes hq_location_summary so C5's richer
+    parent HQ (C5 > AI > detected) takes priority."""
+
+    def _foreign_row(self):
+        return {
+            "company_name": "Fujifilm NL", "domain": "fujifilmtilburg.nl",
+            "input_country": "Netherlands",
+            "sig_foreign_hq_score_for_next_scoring": 3.0,
+            "needs_manual_review": False,
+            "hq_positive_score_suppressed_for_review": "No",
+            "hq_structure_type": "foreign_parent",
+            "foreign_hq_simple": True,
+            # Base summary from AI fields (no city) before C5.
+            "ai_parent_hq_country": "Japan", "ai_parent_hq_city": "",
+            "hq_detected_country": "Japan", "hq_detected_city": "",
+            "hq_location_summary": "Parent company headquarters: Japan",
+        }
+
+    def test_c5_parent_city_upgrades_summary(self):
+        result = _mk_result(adjudication="foreign_parent_confirmed",
+                            confidence="High", target="yes")
+        result.parent_hq_country = "Japan"
+        result.parent_hq_city = "Tokyo"
+        with _patch_adjudicator(result):
+            out, _ = apply_c5_adjudication(
+                [self._foreign_row()], anthropic_api_key="k",
+                model_used="claude-sonnet-5", model_tier="sonnet",
+                scoring_behavior="append_only", scope="all_rows")
+        assert out[0]["hq_location_summary"] == (
+            "Parent company headquarters: Tokyo, Japan")
+
+    def test_blank_row_keeps_base_summary(self):
+        # A row not selected for C5 keeps whatever summary it already had.
+        row = self._foreign_row()
+        with _patch_adjudicator(_mk_result()):
+            out, _ = apply_c5_adjudication(
+                [row], anthropic_api_key="k", model_used="claude-sonnet-5",
+                model_tier="sonnet", scoring_behavior="append_only",
+                scope="manual_review_or_suppressed")  # this row is not selected
+        assert out[0]["hq_location_summary"] == "Parent company headquarters: Japan"
+
+
 class TestC5Conservative:
     def test_confirms_old_score_3(self):
         rows = [_enriched_rows()[0]]  # score 3
