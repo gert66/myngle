@@ -61,6 +61,14 @@ class HQDetectionResult:
     ai_hq_output_tokens: Optional[int] = None
     ai_hq_total_tokens: Optional[int] = None
     ai_hq_estimated_cost_usd: Optional[float] = None
+    # Anthropic prompt-caching audit (Anthropic path only; always None for
+    # OpenAI/DeepSeek). See lead_hq_ai_interpreter._call_anthropic_hq.
+    ai_hq_cache_creation_tokens: Optional[int] = None
+    ai_hq_cache_read_tokens: Optional[int] = None
+    # Cache-aware cost estimate, kept alongside (not replacing)
+    # ai_hq_estimated_cost_usd above so the two can be compared during
+    # validation. See lead_hq_ai_interpreter.estimate_ai_cost_usd_with_cache.
+    ai_hq_estimated_cost_usd_with_cache: Optional[float] = None
     # C4 positive-score safety audit (optional, backwards compatible)
     hq_query_risk_flag: Optional[str] = None                    # "Yes" | "No"
     hq_evidence_domain_match: Optional[str] = None              # "Yes" | "No" | ""
@@ -191,6 +199,14 @@ class LeadPrioritizationResult:
     ai_hq_output_tokens: Optional[int] = None
     ai_hq_total_tokens: Optional[int] = None
     ai_hq_estimated_cost_usd: Optional[float] = None
+    # Anthropic prompt-caching audit (Anthropic path only; always None for
+    # OpenAI/DeepSeek). See lead_hq_ai_interpreter._call_anthropic_hq.
+    ai_hq_cache_creation_tokens: Optional[int] = None
+    ai_hq_cache_read_tokens: Optional[int] = None
+    # Cache-aware cost estimate, kept alongside (not replacing)
+    # ai_hq_estimated_cost_usd above so the two can be compared during
+    # validation. See lead_hq_ai_interpreter.estimate_ai_cost_usd_with_cache.
+    ai_hq_estimated_cost_usd_with_cache: Optional[float] = None
 
     # ── Non-HQ v2 signal scores (placeholders — no live enrichment yet) ────────
     sig_international_profile_score: Optional[float] = None

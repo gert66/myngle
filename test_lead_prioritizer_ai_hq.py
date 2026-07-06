@@ -715,6 +715,171 @@ class TestAnthropicUsageAndCost:
         assert result.ai_hq_total_tokens == 1100
         # claude-haiku-4-5 pricing is known: 1000/1M*1.00 + 100/1M*5.00
         assert result.ai_hq_estimated_cost_usd == 0.0015
+        # Backwards compatible: a usage object without cache attributes at all
+        # (older SDK / no caching) must never crash and must leave the new
+        # cache fields blank rather than guessed.
+        assert result.ai_hq_cache_creation_tokens is None
+        assert result.ai_hq_cache_read_tokens is None
+        # With no cache activity, the cache-aware estimate must equal the
+        # plain per-token estimate.
+        assert result.ai_hq_estimated_cost_usd_with_cache == result.ai_hq_estimated_cost_usd
+
+
+class TestAnthropicPromptCaching:
+    """Prompt-caching wiring in _call_anthropic_hq: the cache_control-marked
+    system block, and cache_creation/cache_read usage propagation through to
+    HQDetectionResult."""
+
+    _lead = LeadInput(company_name="Thales Italia", domain="thalesgroup.com",
+                      input_country="Italy")
+
+    def _interpret(self, ai_json_str, usage):
+        mock_msg = MagicMock()
+        mock_msg.content = [MagicMock(text=ai_json_str)]
+        mock_msg.usage = usage
+        mock_client = MagicMock()
+        mock_client.messages.create.return_value = mock_msg
+        mock_lib = MagicMock()
+        mock_lib.Anthropic.return_value = mock_client
+        with patch("lead_hq_ai_interpreter._anthropic_lib", mock_lib):
+            result = interpret_hq_with_ai(
+                lead_input=self._lead, domain_root="thalesgroup",
+                query="thalesgroup headquarters", serper_payload=_EMPTY_SERPER,
+                anthropic_api_key="fake-anthropic",
+            )
+        return result, mock_client
+
+    def test_system_sent_as_single_cache_control_block(self):
+        from lead_hq_ai_interpreter import (
+            _SYSTEM_PROMPT, _USER_TEMPLATE_STATIC_INSTRUCTIONS,
+        )
+        ai = _ai_json(classification="domestic", confidence="High",
+                      parent_hq_country="Italy")
+        _, client = self._interpret(
+            ai, SimpleNamespace(input_tokens=200, output_tokens=100))
+        _, kwargs = client.messages.create.call_args
+        system_blocks = kwargs["system"]
+        assert isinstance(system_blocks, list)
+        assert len(system_blocks) == 1
+        block = system_blocks[0]
+        assert block["type"] == "text"
+        assert block["cache_control"] == {"type": "ephemeral"}
+        assert block["text"] == _SYSTEM_PROMPT + "\n\n" + _USER_TEMPLATE_STATIC_INSTRUCTIONS
+        # The per-lead message must NOT be duplicated into the cached block.
+        assert "thalesgroup" not in block["text"]
+        # And the user message must stay per-lead-only (no static instructions).
+        assert '"classification": one of' not in kwargs["messages"][0]["content"]
+
+    def test_static_instructions_are_stable_across_calls(self):
+        # A second, independent import-level read must be byte-for-byte equal
+        # -- this is what makes Anthropic's prompt cache able to hit at all.
+        import lead_hq_ai_interpreter as m
+        first = m._SYSTEM_PROMPT + "\n\n" + m._USER_TEMPLATE_STATIC_INSTRUCTIONS
+        second = m._SYSTEM_PROMPT + "\n\n" + m._USER_TEMPLATE_STATIC_INSTRUCTIONS
+        assert first == second
+
+    def test_cache_creation_and_read_tokens_propagated(self):
+        ai = _ai_json(classification="domestic", confidence="High",
+                      parent_hq_country="Italy")
+        usage = SimpleNamespace(
+            input_tokens=200, output_tokens=100,
+            cache_creation_input_tokens=1500, cache_read_input_tokens=0,
+        )
+        result, _ = self._interpret(ai, usage)
+        assert result.ai_hq_input_tokens == 200
+        assert result.ai_hq_output_tokens == 100
+        assert result.ai_hq_cache_creation_tokens == 1500
+        assert result.ai_hq_cache_read_tokens == 0
+        # 200*1.00 + 100*5.00 + 1500*1.00*1.25, all /1e6
+        assert result.ai_hq_estimated_cost_usd_with_cache == 0.002575
+        # Plain (non-cache-aware) estimate is unaffected by cache fields.
+        assert result.ai_hq_estimated_cost_usd == 0.0007
+
+    def test_cache_read_hit_on_subsequent_call(self):
+        ai = _ai_json(classification="domestic", confidence="High",
+                      parent_hq_country="Italy")
+        usage = SimpleNamespace(
+            input_tokens=200, output_tokens=100,
+            cache_creation_input_tokens=0, cache_read_input_tokens=1500,
+        )
+        result, _ = self._interpret(ai, usage)
+        assert result.ai_hq_cache_creation_tokens == 0
+        assert result.ai_hq_cache_read_tokens == 1500
+        # 200*1.00 + 100*5.00 + 1500*1.00*0.1, all /1e6
+        assert result.ai_hq_estimated_cost_usd_with_cache == 0.00085
+
+    def test_usage_without_cache_attributes_at_all_is_backwards_compatible(self):
+        # A plain SimpleNamespace with only input/output tokens (as an older
+        # SDK response, or any response where caching was never used, would
+        # look) must not crash and must leave the cache fields blank.
+        ai = _ai_json(classification="domestic", confidence="High",
+                      parent_hq_country="Italy")
+        usage = SimpleNamespace(input_tokens=200, output_tokens=100)
+        result, _ = self._interpret(ai, usage)
+        assert result.ai_hq_input_tokens == 200
+        assert result.ai_hq_output_tokens == 100
+        assert result.ai_hq_cache_creation_tokens is None
+        assert result.ai_hq_cache_read_tokens is None
+        assert result.ai_hq_estimated_cost_usd_with_cache == result.ai_hq_estimated_cost_usd
+
+
+class TestEstimateAiCostWithCache:
+    """Manual worked examples for estimate_ai_cost_usd_with_cache — an
+    instruction block of ~1500 tokens, cache write vs. cache read vs. no
+    caching, against claude-haiku-4-5-20251001 pricing (1.00, 5.00 USD/MTOK)."""
+
+    def test_no_cache_activity_matches_plain_estimate(self):
+        from lead_hq_ai_interpreter import estimate_ai_cost_usd_with_cache
+        assert estimate_ai_cost_usd_with_cache(
+            "claude-haiku-4-5-20251001", 1000, 100) == 0.0015
+        assert estimate_ai_cost_usd_with_cache(
+            "claude-haiku-4-5-20251001", 1000, 100,
+            cache_creation_input_tokens=None, cache_read_input_tokens=None,
+        ) == estimate_ai_cost_usd("claude-haiku-4-5-20251001", 1000, 100)
+
+    def test_cache_write_billed_at_1_25x_input_price(self):
+        from lead_hq_ai_interpreter import estimate_ai_cost_usd_with_cache
+        # First call for a batch: 1500-token instruction block written to
+        # cache, 200 per-lead input tokens, 100 output tokens.
+        # 200*1.00 + 100*5.00 + 1500*1.00*1.25, all /1e6 = 0.002575
+        cost = estimate_ai_cost_usd_with_cache(
+            "claude-haiku-4-5-20251001", 200, 100,
+            cache_creation_input_tokens=1500, cache_read_input_tokens=0,
+        )
+        assert cost == 0.002575
+
+    def test_cache_read_billed_at_0_1x_input_price(self):
+        from lead_hq_ai_interpreter import estimate_ai_cost_usd_with_cache
+        # Every subsequent lead in the batch: same 1500-token instruction
+        # block, now served from cache instead of rewritten.
+        # 200*1.00 + 100*5.00 + 1500*1.00*0.1, all /1e6 = 0.00085
+        cost = estimate_ai_cost_usd_with_cache(
+            "claude-haiku-4-5-20251001", 200, 100,
+            cache_creation_input_tokens=0, cache_read_input_tokens=1500,
+        )
+        assert cost == 0.00085
+        # A cache read is far cheaper than paying full input price for the
+        # same 1500 tokens every time.
+        full_price_equivalent = estimate_ai_cost_usd(
+            "claude-haiku-4-5-20251001", 200 + 1500, 100)
+        assert cost < full_price_equivalent
+
+    def test_unknown_model_returns_none(self):
+        from lead_hq_ai_interpreter import estimate_ai_cost_usd_with_cache
+        assert estimate_ai_cost_usd_with_cache(
+            "gpt-9-unreleased", 1000, 100, cache_creation_input_tokens=100,
+        ) is None
+
+    def test_missing_base_tokens_return_none(self):
+        from lead_hq_ai_interpreter import estimate_ai_cost_usd_with_cache
+        assert estimate_ai_cost_usd_with_cache(
+            "claude-haiku-4-5-20251001", None, 100,
+            cache_creation_input_tokens=1500,
+        ) is None
+        assert estimate_ai_cost_usd_with_cache(
+            "claude-haiku-4-5-20251001", 1000, None,
+            cache_read_input_tokens=1500,
+        ) is None
 
 
 class TestEstimateAiCost:
@@ -866,6 +1031,14 @@ def _mock_anthropic_capture(ai_json_str: str):
 def _user_message_sent(mock_client) -> str:
     _, kwargs = mock_client.messages.create.call_args
     return kwargs["messages"][0]["content"]
+
+
+def _system_text_sent(mock_client) -> str:
+    """The cache_control-marked system block's text (see _call_anthropic_hq) —
+    ``_SYSTEM_PROMPT`` + ``_USER_TEMPLATE_STATIC_INSTRUCTIONS``, sent once
+    per call as ``system=[{"type": "text", "text": ..., "cache_control": ...}]``."""
+    _, kwargs = mock_client.messages.create.call_args
+    return kwargs["system"][0]["text"]
 
 
 class TestCrawledOwnDomainPrimarySource:
@@ -1029,14 +1202,18 @@ class TestHqDerivedIndustry:
         assert result.ai_hq_industry == "Power electronics"
 
     def test_prompt_asks_for_industry_and_known_categories(self):
+        # The "industry"/"sub_industry" instructions are static across every
+        # lead, so they now live in the cache_control-marked system block
+        # (see _call_anthropic_hq / _USER_TEMPLATE_STATIC_INSTRUCTIONS)
+        # instead of the per-lead user message.
         ai = _ai_json(classification="domestic", confidence="High",
                       industry="Power electronics")
         _, client = self._interpret(ai)
-        msg = _user_message_sent(client)
-        assert '"industry"' in msg
-        assert '"sub_industry"' in msg
+        system_text = _system_text_sent(client)
+        assert '"industry"' in system_text
+        assert '"sub_industry"' in system_text
         # Style-guidance vocabulary from the deterministic sector detector.
-        assert "Chemicals" in msg or "Manufacturing" in msg
+        assert "Chemicals" in system_text or "Manufacturing" in system_text
 
     def test_regex_fallback_recovers_industry(self):
         # Malformed JSON (unterminated "reason") -- core fields incl. industry

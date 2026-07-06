@@ -395,6 +395,9 @@ def prioritize_single_lead(
         ai_hq_output_tokens=hq.ai_hq_output_tokens,
         ai_hq_total_tokens=hq.ai_hq_total_tokens,
         ai_hq_estimated_cost_usd=hq.ai_hq_estimated_cost_usd,
+        ai_hq_cache_creation_tokens=hq.ai_hq_cache_creation_tokens,
+        ai_hq_cache_read_tokens=hq.ai_hq_cache_read_tokens,
+        ai_hq_estimated_cost_usd_with_cache=hq.ai_hq_estimated_cost_usd_with_cache,
         # ── Non-HQ signal scores (Step 3 — intermediate, not final fit score) ──
         # Filled from deterministic extraction when the flag is on; otherwise the
         # summary is all-None, matching the previous placeholder behavior.
