@@ -1,0 +1,1802 @@
+[
+ {
+  "company":"SIDEL S.P.A.",
+  "signal":"international_profile",
+  "old":3.0,
+  "old_cls":"POS",
+  "new":2,
+  "new_cls":"POS",
+  "own_domain_url":true,
+  "urls":"https:\/\/sidelitalia.it\/; https:\/\/www.sidel.com\/en; https:\/\/en.wikipedia.org\/wiki\/Sidel"
+ },
+ {
+  "company":"SIDEL S.P.A.",
+  "signal":"company_size_complexity",
+  "old":2.0,
+  "old_cls":"POS",
+  "new":2,
+  "new_cls":"POS",
+  "own_domain_url":true,
+  "urls":"https:\/\/sidelitalia.it\/; https:\/\/prospeo.io\/c\/sidel-revenue; https:\/\/ca.linkedin.com\/company\/sidel"
+ },
+ {
+  "company":"SIDEL S.P.A.",
+  "signal":"onboarding_training_need",
+  "old":3.0,
+  "old_cls":"POS",
+  "new":2,
+  "new_cls":"POS",
+  "own_domain_url":true,
+  "urls":"https:\/\/www.linkedin.com\/company\/sidel-academy\/; https:\/\/www.sidel.com\/en\/sustainability\/people\/training-development\/; https:\/\/sidelitalia.it\/"
+ },
+ {
+  "company":"SIDEL S.P.A.",
+  "signal":"employer_branding",
+  "old":1.0,
+  "old_cls":"weak",
+  "new":0,
+  "new_cls":"none",
+  "own_domain_url":false,
+  "urls":"https:\/\/www.glassdoor.com\/Reviews\/Sidel-fantastic-culture-Reviews-EI_IE10347.0,5_KH6,23.htm; https:\/\/www.glassdoor.it\/Panoramica\/Lavorando-in-Glassdoor-EI_IE100431.13,22.htm; https:\/\/www.glassdoor.com\/Reviews\/Sidel-people-Reviews-EI_IE10347.0,5_KH6,12.htm"
+ },
+ {
+  "company":"SIDEL S.P.A.",
+  "signal":"icp_keyword_match",
+  "old":3.0,
+  "old_cls":"POS",
+  "new":1,
+  "new_cls":"weak",
+  "own_domain_url":false,
+  "urls":"https:\/\/www.theknowledgeacademy.com\/it\/courses\/personal-development-training\/exceptional-customer-service-training\/; https:\/\/jobdetails.nestle.com\/job\/Linda-a-Velha-Customer-Service-Specialist-Italian-Speaker-2799-554\/1396948433\/; https:\/\/www.sidel.com\/en\/about\/careers\/vacancies\/"
+ },
+ {
+  "company":"NORDCOM S.P.A.",
+  "signal":"international_profile",
+  "old":null,
+  "old_cls":"none",
+  "new":2,
+  "new_cls":"POS",
+  "own_domain_url":false,
+  "urls":"https:\/\/www.nord.com\/en\/nord-group\/about-us\/global-partner-and-manufacturer\/global-partner.jsp; https:\/\/www.electricmotorengineering.com\/nord-drivesystem-strengthens-its-global-network\/; https:\/\/www.ucima.it\/public\/files\/Brochure_Nord_Motoriduttori_inglese.pdf"
+ },
+ {
+  "company":"NORDCOM S.P.A.",
+  "signal":"company_size_complexity",
+  "old":3.0,
+  "old_cls":"POS",
+  "new":2,
+  "new_cls":"POS",
+  "own_domain_url":true,
+  "urls":"https:\/\/www.zoominfo.com\/c\/nord-drivesystems\/86771433; https:\/\/www.emis.com\/php\/company-profile\/CZ\/Nord_-_Pohaneci_Technika_SRO_en_1426504.html; https:\/\/www.nord-com.it\/en\/"
+ },
+ {
+  "company":"NORDCOM S.P.A.",
+  "signal":"onboarding_training_need",
+  "old":3.0,
+  "old_cls":"POS",
+  "new":2,
+  "new_cls":"POS",
+  "own_domain_url":true,
+  "urls":"https:\/\/www.nord.com\/us\/jobs\/training-development\/training_and_development_us_employment.jsp; https:\/\/www.tuev-nord.de\/en\/services\/education-and-training\/; https:\/\/www.nord-com.it\/en\/lavora-con-noi-en\/"
+ },
+ {
+  "company":"NORDCOM S.P.A.",
+  "signal":"employer_branding",
+  "old":1.0,
+  "old_cls":"weak",
+  "new":1,
+  "new_cls":"weak",
+  "own_domain_url":false,
+  "urls":"https:\/\/www.glassdoor.it\/Updates\/Glassdoor-Company-Updates-E100431.htm; https:\/\/www.glassdoor.com\/Award\/Best-Places-to-Work-LST_KQ0,19.htm; https:\/\/www.linkedin.com\/pulse\/insiders-advice-becoming-glassdoor-best-place-work-marc-cowlin"
+ },
+ {
+  "company":"NORDCOM S.P.A.",
+  "signal":"icp_keyword_match",
+  "old":3.0,
+  "old_cls":"POS",
+  "new":2,
+  "new_cls":"POS",
+  "own_domain_url":true,
+  "urls":"https:\/\/www.nord.com\/us\/company\/current-events\/news-archives\/articles\/news_220866.jsp; https:\/\/gearsolutions.com\/news\/nord-offers-continuous-learning-opportunities-to-better-serve-customers\/; https:\/\/www.nord-com.it\/en\/direzione-commerciale-en\/"
+ },
+ {
+  "company":"COMET SPA",
+  "signal":"international_profile",
+  "old":3.0,
+  "old_cls":"POS",
+  "new":2,
+  "new_cls":"POS",
+  "own_domain_url":true,
+  "urls":"https:\/\/comet.tech\/; https:\/\/www.iversen-trading.dk\/wp-content\/uploads\/2014\/07\/Comet-Profilbrochure.pdf; https:\/\/www.cometfans.com\/en\/history\/organizations-and-headquarters\/"
+ },
+ {
+  "company":"COMET SPA",
+  "signal":"company_size_complexity",
+  "old":2.0,
+  "old_cls":"POS",
+  "new":2,
+  "new_cls":"POS",
+  "own_domain_url":true,
+  "urls":"https:\/\/www.globaldata.com\/company-profile\/comet-holding-ag\/; https:\/\/www.zoominfo.com\/c\/comet-group\/344480797; https:\/\/comet.tech\/"
+ },
+ {
+  "company":"COMET SPA",
+  "signal":"onboarding_training_need",
+  "old":2.0,
+  "old_cls":"POS",
+  "new":2,
+  "new_cls":"POS",
+  "own_domain_url":true,
+  "urls":"https:\/\/www.cometanalysis.com\/services; https:\/\/www.comet.com\/site\/about-us\/careers\/; https:\/\/comet.tech\/en\/careers"
+ },
+ {
+  "company":"COMET SPA",
+  "signal":"employer_branding",
+  "old":1.0,
+  "old_cls":"weak",
+  "new":1,
+  "new_cls":"weak",
+  "own_domain_url":false,
+  "urls":"https:\/\/www.glassdoor.it\/Recensioni\/Recensione-dipendente-Comet-E915403-RVW89097010.htm; https:\/\/www.glassdoor.com\/Award\/Best-Places-to-Work-LST_KQ0,19.htm; https:\/\/www.glassdoor.it\/Panoramica\/Lavorando-in-Glassdoor-EI_IE100431.13,22.htm"
+ },
+ {
+  "company":"COMET SPA",
+  "signal":"icp_keyword_match",
+  "old":2.0,
+  "old_cls":"POS",
+  "new":2,
+  "new_cls":"POS",
+  "own_domain_url":false,
+  "urls":"https:\/\/www.richardson.com\/en-gb\/sales-training-programs\/customer-service-professionals\/customer-service; https:\/\/www.traninger.com\/leistungen\/international-training\/customer-communication-training-for-international-sales-and-service-teams\/; https:\/\/www.catalystglobal.net\/sales-excellence-programs"
+ },
+ {
+  "company":"SOLGAR ITALIA MULTINUTRIENT S.P.A.",
+  "signal":"international_profile",
+  "old":3.0,
+  "old_cls":"POS",
+  "new":2,
+  "new_cls":"POS",
+  "own_domain_url":true,
+  "urls":"https:\/\/www.sec.gov\/Archives\/edgar\/data\/70793\/000110465905043495\/a05-16005_3ex99d4.htm; https:\/\/www.nestlehealthscience.com\/brands\/solgar; https:\/\/www.highperformr.ai\/company\/solgar"
+ },
+ {
+  "company":"SOLGAR ITALIA MULTINUTRIENT S.P.A.",
+  "signal":"company_size_complexity",
+  "old":1.0,
+  "old_cls":"weak",
+  "new":2,
+  "new_cls":"POS",
+  "own_domain_url":true,
+  "urls":"https:\/\/pitchbook.com\/profiles\/company\/161535-61; https:\/\/www.dnb.com\/business-directory\/company-profiles.solgar_inc.0e6bf47030ae93a091fc26480737652e.html; https:\/\/www.owler.com\/company\/solgar"
+ },
+ {
+  "company":"SOLGAR ITALIA MULTINUTRIENT S.P.A.",
+  "signal":"onboarding_training_need",
+  "old":1.0,
+  "old_cls":"weak",
+  "new":2,
+  "new_cls":"POS",
+  "own_domain_url":false,
+  "urls":"https:\/\/www.employbridge.com\/job-search\/online-career-development-training; https:\/\/www.pgcareers.com\/cr\/en\/leadership-development; https:\/\/jobs.natwestgroup.com\/pages\/learning-and-development"
+ },
+ {
+  "company":"SOLGAR ITALIA MULTINUTRIENT S.P.A.",
+  "signal":"employer_branding",
+  "old":null,
+  "old_cls":"none",
+  "new":1,
+  "new_cls":"weak",
+  "own_domain_url":false,
+  "urls":"https:\/\/www.01net.it\/glassdoor-reveals-best-places-to-work-2026-winners\/; https:\/\/www.instagram.com\/reel\/DTx7R92D4kX\/; https:\/\/www.glassdoor.it\/Updates\/Glassdoor-Company-Updates-E100431.htm"
+ },
+ {
+  "company":"SOLGAR ITALIA MULTINUTRIENT S.P.A.",
+  "signal":"icp_keyword_match",
+  "old":2.0,
+  "old_cls":"POS",
+  "new":1,
+  "new_cls":"weak",
+  "own_domain_url":true,
+  "urls":"https:\/\/solgari.com\/; https:\/\/www.solgar.it\/lavora-con-noi; https:\/\/solgari.com\/about-old\/microsoft-teams-contact-center\/"
+ },
+ {
+  "company":"CARTIERE MODESTO CARDELLA SPA",
+  "signal":"international_profile",
+  "old":2.0,
+  "old_cls":"POS",
+  "new":0,
+  "new_cls":"none",
+  "own_domain_url":true,
+  "urls":"https:\/\/www.cartierecardella.it\/azienda\/; https:\/\/www.cartierecardella.it\/contatti\/; https:\/\/it.linkedin.com\/company\/cartiere-modesto-cardella"
+ },
+ {
+  "company":"CARTIERE MODESTO CARDELLA SPA",
+  "signal":"company_size_complexity",
+  "old":1.0,
+  "old_cls":"weak",
+  "new":1,
+  "new_cls":"weak",
+  "own_domain_url":true,
+  "urls":"https:\/\/www.cartierecardella.it\/en\/company\/; https:\/\/www.zoominfo.com\/c\/cartiere-modesto-cardella-spa\/475537776; https:\/\/www.cartierecardella.it\/en\/contacts\/"
+ },
+ {
+  "company":"CARTIERE MODESTO CARDELLA SPA",
+  "signal":"onboarding_training_need",
+  "old":1.0,
+  "old_cls":"weak",
+  "new":1,
+  "new_cls":"weak",
+  "own_domain_url":true,
+  "urls":"https:\/\/www.cartierecardella.it\/contatti\/; https:\/\/www.cartierecardella.it\/en\/company\/; https:\/\/it.linkedin.com\/company\/cartiere-modesto-cardella"
+ },
+ {
+  "company":"CARTIERE MODESTO CARDELLA SPA",
+  "signal":"employer_branding",
+  "old":null,
+  "old_cls":"none",
+  "new":1,
+  "new_cls":"weak",
+  "own_domain_url":false,
+  "urls":"https:\/\/www.glassdoor.it\/Recensioni\/Cartier-work-life-balance-Recensioni-EI_IE9207.0,7_KH8,25.htm; https:\/\/www.glassdoor.it\/Panoramica\/Lavorando-in-Great-Place-To-Work-EI_IE259956.13,32.htm; https:\/\/www.glassdoor.it\/Panoramica\/Lavorando-in-Cartiere-Carrara-EI_IE1375431.13,29.htm"
+ },
+ {
+  "company":"CARTIERE MODESTO CARDELLA SPA",
+  "signal":"icp_keyword_match",
+  "old":2.0,
+  "old_cls":"POS",
+  "new":0,
+  "new_cls":"none",
+  "own_domain_url":true,
+  "urls":"https:\/\/www.cartierecardella.it\/contatti\/; https:\/\/www.cartierecardella.it\/; https:\/\/www.cartierecardella.it\/azienda\/"
+ },
+ {
+  "company":"INTERNATIONAL SCHOOL OF EUROPE S.P.A.",
+  "signal":"international_profile",
+  "old":3.0,
+  "old_cls":"POS",
+  "new":2,
+  "new_cls":"POS",
+  "own_domain_url":true,
+  "urls":"https:\/\/www.internationalschoolofeurope.it\/en; https:\/\/www.linkedin.com\/company\/international-school-of-europe-srl; https:\/\/www.inspirededu.com\/news\/international-school-europe-join-inspired"
+ },
+ {
+  "company":"INTERNATIONAL SCHOOL OF EUROPE S.P.A.",
+  "signal":"company_size_complexity",
+  "old":null,
+  "old_cls":"none",
+  "new":2,
+  "new_cls":"POS",
+  "own_domain_url":false,
+  "urls":"https:\/\/www.zoominfo.com\/c\/international-school-of-europe\/372849563; https:\/\/pitchbook.com\/profiles\/company\/99821-98; https:\/\/rocketreach.co\/international-school-of-europe-profile_b5eb3ba4f42e7bd0"
+ },
+ {
+  "company":"INTERNATIONAL SCHOOL OF EUROPE S.P.A.",
+  "signal":"onboarding_training_need",
+  "old":null,
+  "old_cls":"none",
+  "new":0,
+  "new_cls":"none",
+  "own_domain_url":true,
+  "urls":"https:\/\/www.internationalschoolofeurope.it\/en; https:\/\/www.linkedin.com\/company\/international-school-of-europe-srl; https:\/\/www.iscomo.com\/"
+ },
+ {
+  "company":"INTERNATIONAL SCHOOL OF EUROPE S.P.A.",
+  "signal":"employer_branding",
+  "old":null,
+  "old_cls":"none",
+  "new":0,
+  "new_cls":"none",
+  "own_domain_url":false,
+  "urls":"https:\/\/www.glassdoor.it\/Recensioni\/Recensione-dipendente-INTERNATIONAL-SCHOOL-OF-EUROPE-E5116450-RVW91167558.htm; https:\/\/www.glassdoor.com\/Overview\/Working-at-international-School-of-Europe-EI_IE455785.11,41.htm; https:\/\/www.glassdoor.it\/Stipendio\/international-School-of-Europe-Stipendi-E455785.htm"
+ },
+ {
+  "company":"INTERNATIONAL SCHOOL OF EUROPE S.P.A.",
+  "signal":"icp_keyword_match",
+  "old":2.0,
+  "old_cls":"POS",
+  "new":1,
+  "new_cls":"weak",
+  "own_domain_url":true,
+  "urls":"https:\/\/www.internationalschoolofeurope.it\/en; https:\/\/www.linkedin.com\/company\/international-school-of-europe-srl; https:\/\/it.indeed.com\/q-international-school-offerte-lavoro.html"
+ },
+ {
+  "company":"FORD ITALIA S.P.A.",
+  "signal":"international_profile",
+  "old":3.0,
+  "old_cls":"POS",
+  "new":2,
+  "new_cls":"POS",
+  "own_domain_url":true,
+  "urls":"https:\/\/www.getronics.com\/ford-providing-a-wide-range-of-global-network-services\/; https:\/\/corporate.ford.com\/operations\/locations\/global-pl; https:\/\/en.wikipedia.org\/wiki\/Ford_Motor_Company"
+ },
+ {
+  "company":"FORD ITALIA S.P.A.",
+  "signal":"company_size_complexity",
+  "old":1.0,
+  "old_cls":"weak",
+  "new":2,
+  "new_cls":"POS",
+  "own_domain_url":true,
+  "urls":"https:\/\/corporate.ford.com\/operations\/locations\/global-pl; https:\/\/www.globaldata.com\/company-profile\/ford-motor-co\/; https:\/\/www.zoominfo.com\/c\/ford\/43897815"
+ },
+ {
+  "company":"FORD ITALIA S.P.A.",
+  "signal":"onboarding_training_need",
+  "old":1.0,
+  "old_cls":"weak",
+  "new":2,
+  "new_cls":"POS",
+  "own_domain_url":true,
+  "urls":"https:\/\/www.trustfordjobs.co.uk\/jobs\/learning-development\/; https:\/\/www.fromtheroad.ford.com\/eur\/en\/articles\/2026\/ford-youth-academy-apprenticeship; https:\/\/fordngl.com\/courses\/getting-on-board-with-onboarding-key-community-roles\/"
+ },
+ {
+  "company":"FORD ITALIA S.P.A.",
+  "signal":"employer_branding",
+  "old":1.0,
+  "old_cls":"weak",
+  "new":1,
+  "new_cls":"weak",
+  "own_domain_url":true,
+  "urls":"https:\/\/www.glassdoor.com\/Award\/Best-Places-to-Work-LST_KQ0,19.htm; https:\/\/media.lincoln.com\/content\/fordmedia\/fna\/us\/en\/news\/2014\/12\/10\/ford-earns-2015-glassdoor-employees-choice-award.html; https:\/\/www.glassdoor.it\/Panoramica\/Lavorando-in-Ford-Motor-Company-EI_IE263.13,31.htm"
+ },
+ {
+  "company":"FORD ITALIA S.P.A.",
+  "signal":"icp_keyword_match",
+  "old":2.0,
+  "old_cls":"POS",
+  "new":2,
+  "new_cls":"POS",
+  "own_domain_url":true,
+  "urls":"https:\/\/www.fromtheroad.ford.com\/us\/en\/articles\/2024\/a-new-era-of-dealer-training-and-customer-service-is-here; https:\/\/fordglobalfleetsales.com\/; https:\/\/traineroo.com\/clients\/ford-academy-client\/"
+ },
+ {
+  "company":"CA.DI.GROUP S.P.A.",
+  "signal":"international_profile",
+  "old":3.0,
+  "old_cls":"POS",
+  "new":1,
+  "new_cls":"weak",
+  "own_domain_url":true,
+  "urls":"https:\/\/cadigroup.it\/; https:\/\/cadigroup.it\/pages\/chi-siamo; https:\/\/ca.linkedin.com\/company\/cadigroup"
+ },
+ {
+  "company":"CA.DI.GROUP S.P.A.",
+  "signal":"company_size_complexity",
+  "old":2.0,
+  "old_cls":"POS",
+  "new":2,
+  "new_cls":"POS",
+  "own_domain_url":true,
+  "urls":"https:\/\/ca.linkedin.com\/company\/cadigroup; https:\/\/cadigroup.it\/; https:\/\/rocketreach.co\/cadigroup-profile_b4572f8afca65f2f"
+ },
+ {
+  "company":"CA.DI.GROUP S.P.A.",
+  "signal":"onboarding_training_need",
+  "old":2.0,
+  "old_cls":"POS",
+  "new":2,
+  "new_cls":"POS",
+  "own_domain_url":true,
+  "urls":"https:\/\/it.linkedin.com\/jobs\/view\/learning-development-specialist-%E2%80%93-global-team-at-fortidia-4423391700; https:\/\/cadigroup.it\/; https:\/\/www.gigroup.it\/aziende\/soluzioni\/formazione\/gi-group-training-hub-competenze-competitivita-e-crescita\/"
+ },
+ {
+  "company":"CA.DI.GROUP S.P.A.",
+  "signal":"employer_branding",
+  "old":1.0,
+  "old_cls":"weak",
+  "new":1,
+  "new_cls":"weak",
+  "own_domain_url":false,
+  "urls":"https:\/\/www.glassdoor.it\/Panoramica\/Lavorando-in-Glassdoor-EI_IE100431.13,22.htm; https:\/\/www.glassdoor.com\/Award\/Best-Places-to-Work-LST_KQ0,19.htm; https:\/\/www.glassdoor.com\/Overview\/Working-at-Cadigroup-EI_IE10157570.11,20.htm"
+ },
+ {
+  "company":"CA.DI.GROUP S.P.A.",
+  "signal":"icp_keyword_match",
+  "old":2.0,
+  "old_cls":"POS",
+  "new":2,
+  "new_cls":"POS",
+  "own_domain_url":true,
+  "urls":"https:\/\/cadigroup.it\/; https:\/\/www.theknowledgeacademy.com\/it\/courses\/personal-development-training\/exceptional-customer-service-training\/; https:\/\/mercuri.net\/sales-training\/international-sales-training\/"
+ },
+ {
+  "company":"ART COSMETICS S.R.L.",
+  "signal":"international_profile",
+  "old":3.0,
+  "old_cls":"POS",
+  "new":1,
+  "new_cls":"weak",
+  "own_domain_url":true,
+  "urls":"https:\/\/www.artcosmetics.it\/locations\/; https:\/\/www.linkedin.com\/company\/artcosmetics-srl\/; https:\/\/www.artcosmetics.it\/"
+ },
+ {
+  "company":"ART COSMETICS S.R.L.",
+  "signal":"company_size_complexity",
+  "old":2.0,
+  "old_cls":"POS",
+  "new":2,
+  "new_cls":"POS",
+  "own_domain_url":true,
+  "urls":"https:\/\/www.zoominfo.com\/c\/art-cosmetics-srl\/374844781; https:\/\/rocketreach.co\/artcosmetics-profile_b44ab68afd0933df; https:\/\/lt.linkedin.com\/company\/artcosmetics-srl"
+ },
+ {
+  "company":"ART COSMETICS S.R.L.",
+  "signal":"onboarding_training_need",
+  "old":3.0,
+  "old_cls":"POS",
+  "new":2,
+  "new_cls":"POS",
+  "own_domain_url":true,
+  "urls":"https:\/\/www.artcosmetics.it\/working-at-art-cosmetics-how-our-employees-feel\/; https:\/\/www.artcosmetics.it\/work-with-us\/; https:\/\/www.linkedin.com\/company\/artcosmetics-srl\/"
+ },
+ {
+  "company":"ART COSMETICS S.R.L.",
+  "signal":"employer_branding",
+  "old":2.0,
+  "old_cls":"POS",
+  "new":0,
+  "new_cls":"none",
+  "own_domain_url":false,
+  "urls":"https:\/\/www.glassdoor.it\/Recensioni\/Recensione-dipendente-Art-Cosmetics-E3228419-RVW91950499.htm; https:\/\/www.glassdoor.it\/Panoramica\/Lavorando-in-Art-Cosmetics-EI_IE3228419.13,26.htm; https:\/\/www.glassdoor.it\/Recensioni\/Recensione-dipendente-Art-Cosmetics-E3228419-RVW91768045.htm"
+ },
+ {
+  "company":"ART COSMETICS S.R.L.",
+  "signal":"icp_keyword_match",
+  "old":3.0,
+  "old_cls":"POS",
+  "new":1,
+  "new_cls":"weak",
+  "own_domain_url":true,
+  "urls":"https:\/\/www.linkedin.com\/company\/artcosmetics-srl\/; https:\/\/www.artcosmetics.it\/working-at-art-cosmetics-how-our-employees-feel\/; https:\/\/www.artcosmetics.it\/work-with-us\/"
+ },
+ {
+  "company":"VILLA SILVANA - S.P.A.",
+  "signal":"international_profile",
+  "old":2.0,
+  "old_cls":"POS",
+  "new":2,
+  "new_cls":"POS",
+  "own_domain_url":false,
+  "urls":"https:\/\/www.confindustria.babt.it\/files\/old\/List_of_Korean_companies_with_branch_offices_in_Italy_2016.12.pdf; https:\/\/www.worldbank.org\/ext\/en\/country\/korea; https:\/\/www.intergest.com\/en\/korea\/"
+ },
+ {
+  "company":"VILLA SILVANA - S.P.A.",
+  "signal":"company_size_complexity",
+  "old":2.0,
+  "old_cls":"POS",
+  "new":2,
+  "new_cls":"POS",
+  "own_domain_url":true,
+  "urls":"https:\/\/www.globaldata.com\/company-profile\/korian-sa\/; https:\/\/www.clariane.com\/en\/news\/all-the-news\/4-pages-to-discover-the-activities-and-jobs-of-the-korian-group; https:\/\/pitchbook.com\/profiles\/company\/10878-67"
+ },
+ {
+  "company":"VILLA SILVANA - S.P.A.",
+  "signal":"onboarding_training_need",
+  "old":2.0,
+  "old_cls":"POS",
+  "new":2,
+  "new_cls":"POS",
+  "own_domain_url":true,
+  "urls":"https:\/\/goausbildung.com\/company\/korian; https:\/\/www.clariane.com\/en\/press-room\/press-releases\/one-in-10-korian-employees-in-europe-were-engaged-in-a-qualifying; https:\/\/careers.scalian.com\/en\/scalian-academy"
+ },
+ {
+  "company":"VILLA SILVANA - S.P.A.",
+  "signal":"employer_branding",
+  "old":1.0,
+  "old_cls":"weak",
+  "new":1,
+  "new_cls":"weak",
+  "own_domain_url":false,
+  "urls":"https:\/\/www.glassdoor.it\/Updates\/Glassdoor-Company-Updates-E100431.htm; https:\/\/www.glassdoor.com\/Award\/Best-Places-to-Work-LST_KQ0,19.htm; https:\/\/www.linkedin.com\/pulse\/insiders-advice-becoming-glassdoor-best-place-work-marc-cowlin"
+ },
+ {
+  "company":"VILLA SILVANA - S.P.A.",
+  "signal":"icp_keyword_match",
+  "old":2.0,
+  "old_cls":"POS",
+  "new":1,
+  "new_cls":"weak",
+  "own_domain_url":true,
+  "urls":"https:\/\/www.theknowledgeacademy.com\/it\/courses\/personal-development-training\/exceptional-customer-service-training\/; https:\/\/korian.convenzioniaziendali.it\/; https:\/\/it.indeed.com\/q-international-customer-care-offerte-lavoro.html"
+ },
+ {
+  "company":"FB BALZANELLI S.P.A.",
+  "signal":"international_profile",
+  "old":3.0,
+  "old_cls":"POS",
+  "new":0,
+  "new_cls":"none",
+  "own_domain_url":true,
+  "urls":"https:\/\/www.fb-balzanelli.it\/contacts\/; https:\/\/www.fb-balzanelli.it\/the-company\/; https:\/\/www.fb-balzanelli.it\/"
+ },
+ {
+  "company":"FB BALZANELLI S.P.A.",
+  "signal":"company_size_complexity",
+  "old":3.0,
+  "old_cls":"POS",
+  "new":2,
+  "new_cls":"POS",
+  "own_domain_url":true,
+  "urls":"https:\/\/www.fb-balzanelli.it\/the-company\/; https:\/\/www.linkedin.com\/company\/fb-balzanelli---automatic-coilers\/; https:\/\/www.fb-balzanelli.it\/family-day-2025\/"
+ },
+ {
+  "company":"FB BALZANELLI S.P.A.",
+  "signal":"onboarding_training_need",
+  "old":2.0,
+  "old_cls":"POS",
+  "new":1,
+  "new_cls":"weak",
+  "own_domain_url":true,
+  "urls":"https:\/\/www.fb-balzanelli.it\/careers\/; https:\/\/www.fb-balzanelli.it\/automation\/; https:\/\/www.fb-balzanelli.it\/the-company\/"
+ },
+ {
+  "company":"FB BALZANELLI S.P.A.",
+  "signal":"employer_branding",
+  "old":null,
+  "old_cls":"none",
+  "new":2,
+  "new_cls":"POS",
+  "own_domain_url":false,
+  "urls":"https:\/\/www.glassdoor.it\/Updates\/Glassdoor-Company-Updates-E100431.htm; https:\/\/employerbranding.news\/time-for-employers-to-embrace-review-sites-as-hoteliers-and-restaurant-owners-do\/; https:\/\/greatplacetowork.ie\/resources\/glassdoor-how-great-place-to-work-can-improve-your-score-profile"
+ },
+ {
+  "company":"FB BALZANELLI S.P.A.",
+  "signal":"icp_keyword_match",
+  "old":2.0,
+  "old_cls":"POS",
+  "new":1,
+  "new_cls":"weak",
+  "own_domain_url":true,
+  "urls":"https:\/\/www.fb-balzanelli.it\/fb-service\/; https:\/\/www.fb-balzanelli.it\/; https:\/\/www.fb-balzanelli.it\/careers\/"
+ },
+ {
+  "company":"GEBERIT MARKETING E DISTRIBUZIONE S.A.",
+  "signal":"international_profile",
+  "old":3.0,
+  "old_cls":"POS",
+  "new":2,
+  "new_cls":"POS",
+  "own_domain_url":true,
+  "urls":"https:\/\/www.geberit.com\/en\/worldwide; https:\/\/www.idfdesign.com\/companies\/geberit-international.htm; https:\/\/en.wikipedia.org\/wiki\/Geberit"
+ },
+ {
+  "company":"GEBERIT MARKETING E DISTRIBUZIONE S.A.",
+  "signal":"company_size_complexity",
+  "old":2.0,
+  "old_cls":"POS",
+  "new":2,
+  "new_cls":"POS",
+  "own_domain_url":true,
+  "urls":"https:\/\/www.geberit.com\/en\/company; https:\/\/www.zoominfo.com\/c\/geberit-ag\/15728951; https:\/\/www.forbes.com\/companies\/geberit\/"
+ },
+ {
+  "company":"GEBERIT MARKETING E DISTRIBUZIONE S.A.",
+  "signal":"onboarding_training_need",
+  "old":3.0,
+  "old_cls":"POS",
+  "new":2,
+  "new_cls":"POS",
+  "own_domain_url":true,
+  "urls":"https:\/\/www.geberit.com\/en\/career; https:\/\/www.geberit.com\/en\/career\/apprenticeship; https:\/\/www.geberit.it\/carriera\/"
+ },
+ {
+  "company":"GEBERIT MARKETING E DISTRIBUZIONE S.A.",
+  "signal":"employer_branding",
+  "old":2.0,
+  "old_cls":"POS",
+  "new":0,
+  "new_cls":"none",
+  "own_domain_url":false,
+  "urls":"https:\/\/www.glassdoor.com\/Reviews\/Geberit-Reviews-E15690.htm; https:\/\/www.glassdoor.it\/Updates\/Glassdoor-Company-Updates-E100431.htm; https:\/\/www.glassdoor.it\/Recensioni\/Recensione-dipendente-Geberit-E15690-RVW74300030.htm"
+ },
+ {
+  "company":"GEBERIT MARKETING E DISTRIBUZIONE S.A.",
+  "signal":"icp_keyword_match",
+  "old":3.0,
+  "old_cls":"POS",
+  "new":2,
+  "new_cls":"POS",
+  "own_domain_url":true,
+  "urls":"https:\/\/www.geberit.com\/en\/career\/students-and-graduates\/sales-development-programme; https:\/\/www.facebook.com\/Geberit.NSEA\/posts\/-welcome-to-geberit-apac-2025-to-welcome-our-newly-joined-colleagues-in-2025-the\/870281335566137\/; https:\/\/www.facebook.com\/geberit\/videos\/-did-you-know-how-geberits-customer-service-team-and-service-technicians-work-to\/1123135989929615\/"
+ },
+ {
+  "company":"SOCIETA' PER AZIONI*MICHELIN ITALIANA*S.A.M.I.",
+  "signal":"international_profile",
+  "old":3.0,
+  "old_cls":"POS",
+  "new":2,
+  "new_cls":"POS",
+  "own_domain_url":true,
+  "urls":"https:\/\/jobs.michelinman.com\/recruitment-sites; https:\/\/jobs.michelin.in\/about-us; https:\/\/en.wikipedia.org\/wiki\/Michelin"
+ },
+ {
+  "company":"SOCIETA' PER AZIONI*MICHELIN ITALIANA*S.A.M.I.",
+  "signal":"company_size_complexity",
+  "old":1.0,
+  "old_cls":"weak",
+  "new":2,
+  "new_cls":"POS",
+  "own_domain_url":true,
+  "urls":"https:\/\/www.globaldata.com\/company-profile\/michelin-sca\/; https:\/\/www.zoominfo.com\/c\/michelin\/93505925; https:\/\/jobs.michelin.in\/about-us"
+ },
+ {
+  "company":"SOCIETA' PER AZIONI*MICHELIN ITALIANA*S.A.M.I.",
+  "signal":"onboarding_training_need",
+  "old":1.0,
+  "old_cls":"weak",
+  "new":2,
+  "new_cls":"POS",
+  "own_domain_url":true,
+  "urls":"https:\/\/www.michelin.com\/en\/expertise\/talents; https:\/\/360learning.com\/customers\/michelin\/; https:\/\/www.facebook.com\/MichelinCareers\/posts\/at-michelin-the-professional-development-fulfillment-of-our-employees-is-importa\/4931326203638517\/"
+ },
+ {
+  "company":"SOCIETA' PER AZIONI*MICHELIN ITALIANA*S.A.M.I.",
+  "signal":"employer_branding",
+  "old":null,
+  "old_cls":"none",
+  "new":0,
+  "new_cls":"none",
+  "own_domain_url":false,
+  "urls":"https:\/\/www.glassdoor.it\/Recensioni\/Michelin-Recensioni-E3294.htm; https:\/\/www.glassdoor.com\/Reviews\/Michelin-Reviews-E3294.htm; https:\/\/www.glassdoor.com\/Reviews\/Michelin-culture-Reviews-EI_IE3294.0,8_KH9,16.htm"
+ },
+ {
+  "company":"SOCIETA' PER AZIONI*MICHELIN ITALIANA*S.A.M.I.",
+  "signal":"icp_keyword_match",
+  "old":1.0,
+  "old_cls":"weak",
+  "new":2,
+  "new_cls":"POS",
+  "own_domain_url":true,
+  "urls":"https:\/\/jobs.michelin.it\/offerte-di-lavoro\/account-manager-b2c; https:\/\/360learning.com\/customers\/michelin\/"
+ },
+ {
+  "company":"SOPRA STERIA GROUP S.P.A.",
+  "signal":"international_profile",
+  "old":3.0,
+  "old_cls":"POS",
+  "new":2,
+  "new_cls":"POS",
+  "own_domain_url":true,
+  "urls":"https:\/\/www.soprasteria.com\/about-us\/our-offices; https:\/\/www.highperformr.ai\/company\/soprasteria; https:\/\/en.wikipedia.org\/wiki\/Sopra_Steria"
+ },
+ {
+  "company":"SOPRA STERIA GROUP S.P.A.",
+  "signal":"company_size_complexity",
+  "old":2.0,
+  "old_cls":"POS",
+  "new":2,
+  "new_cls":"POS",
+  "own_domain_url":true,
+  "urls":"https:\/\/www.soprasteria.com\/about-us; https:\/\/it.linkedin.com\/company\/soprasteria; https:\/\/www.globaldata.com\/company-profile\/sopra-steria-group\/"
+ },
+ {
+  "company":"SOPRA STERIA GROUP S.P.A.",
+  "signal":"onboarding_training_need",
+  "old":3.0,
+  "old_cls":"POS",
+  "new":2,
+  "new_cls":"POS",
+  "own_domain_url":true,
+  "urls":"https:\/\/careers.soprasteria.com\/be-life-at-sopra-steria; https:\/\/www.instagram.com\/p\/DNnx_1gOPgc\/; https:\/\/www.eujobs.co\/career-guides\/sopra-steria-group-career-guide"
+ },
+ {
+  "company":"SOPRA STERIA GROUP S.P.A.",
+  "signal":"employer_branding",
+  "old":2.0,
+  "old_cls":"POS",
+  "new":0,
+  "new_cls":"none",
+  "own_domain_url":false,
+  "urls":"https:\/\/www.glassdoor.it\/Panoramica\/Lavorando-in-Sopra-Steria-EI_IE466295.13,25.htm; https:\/\/www.glassdoor.com\/Overview\/Working-at-Sopra-Steria-EI_IE466295.11,23.htm; https:\/\/www.glassdoor.it\/Recensioni\/Sopra-Steria-Recensioni-E466295.htm"
+ },
+ {
+  "company":"SOPRA STERIA GROUP S.P.A.",
+  "signal":"icp_keyword_match",
+  "old":3.0,
+  "old_cls":"POS",
+  "new":1,
+  "new_cls":"weak",
+  "own_domain_url":true,
+  "urls":"https:\/\/www.soprasteria.it\/services\/customer-experience; https:\/\/business.udemy.com\/case-studies\/sopra-steria\/; https:\/\/it.linkedin.com\/company\/soprasteria"
+ },
+ {
+  "company":"A.M.R.A. S.P.A.",
+  "signal":"international_profile",
+  "old":2.0,
+  "old_cls":"POS",
+  "new":2,
+  "new_cls":"POS",
+  "own_domain_url":true,
+  "urls":"https:\/\/www.amra-chauvin-arnoux.it\/en\/about_us; https:\/\/www.amra-chauvin-arnoux.it\/en\/about_us\/where_we_are; https:\/\/www.amra-chauvin-arnoux.it\/en\/about_us\/company-7"
+ },
+ {
+  "company":"A.M.R.A. S.P.A.",
+  "signal":"company_size_complexity",
+  "old":1.0,
+  "old_cls":"weak",
+  "new":2,
+  "new_cls":"POS",
+  "own_domain_url":true,
+  "urls":"https:\/\/www.zoominfo.com\/c\/amra-spa\/429998616; https:\/\/www.amra-chauvin-arnoux.it\/en\/about_us\/company-7; https:\/\/rocketreach.co\/chauvin-arnoux-profile_b5c79dcbf42e0d70"
+ },
+ {
+  "company":"A.M.R.A. S.P.A.",
+  "signal":"onboarding_training_need",
+  "old":null,
+  "old_cls":"none",
+  "new":2,
+  "new_cls":"POS",
+  "own_domain_url":true,
+  "urls":"https:\/\/www.chauvin-arnoux.com\/it\/formations\/france; https:\/\/www.amra-chauvin-arnoux.it\/en\/about_us\/where_we_are; https:\/\/it.linkedin.com\/company\/amra-spa---chauvin-arnoux-group"
+ },
+ {
+  "company":"A.M.R.A. S.P.A.",
+  "signal":"employer_branding",
+  "old":null,
+  "old_cls":"none",
+  "new":1,
+  "new_cls":"weak",
+  "own_domain_url":false,
+  "urls":"https:\/\/www.glassdoor.it\/Recensioni\/Recensione-dipendente-Chauvin-Arnoux-Group-E845949-RVW41817071.htm; https:\/\/www.glassdoor.it\/Recensioni\/Recensione-dipendente-Employ-MA-E7498985-RVW23001736.htm; https:\/\/www.instagram.com\/reel\/DTx7R92D4kX\/"
+ },
+ {
+  "company":"A.M.R.A. S.P.A.",
+  "signal":"icp_keyword_match",
+  "old":1.0,
+  "old_cls":"weak",
+  "new":0,
+  "new_cls":"none",
+  "own_domain_url":true,
+  "urls":"https:\/\/www.amra-chauvin-arnoux.it\/en\/about_us\/company-7; https:\/\/www.amra-chauvin-arnoux.it\/en\/about_us; https:\/\/www.chauvin-arnoux.it\/en\/contact-us\/international"
+ },
+ {
+  "company":"VECTOR - S.P.A.",
+  "signal":"international_profile",
+  "old":3.0,
+  "old_cls":"POS",
+  "new":2,
+  "new_cls":"POS",
+  "own_domain_url":true,
+  "urls":"https:\/\/www.vectorspa.it\/spedizioni_internazionali\/en; https:\/\/www.linkedin.com\/company\/vector-spa\/; https:\/\/vectorspa.it\/spedizioni_internazionali\/index.php\/en\/news\/177-wca-worldwide-conference"
+ },
+ {
+  "company":"VECTOR - S.P.A.",
+  "signal":"company_size_complexity",
+  "old":1.0,
+  "old_cls":"weak",
+  "new":1,
+  "new_cls":"weak",
+  "own_domain_url":true,
+  "urls":"https:\/\/www.vectorspa.it\/spedizioni_internazionali\/en\/contact-us; https:\/\/www.linkedin.com\/company\/vector-spa\/; https:\/\/www.creditsafe.com\/business-index\/en-gb\/company\/vector-spa-it04173782"
+ },
+ {
+  "company":"VECTOR - S.P.A.",
+  "signal":"onboarding_training_need",
+  "old":2.0,
+  "old_cls":"POS",
+  "new":2,
+  "new_cls":"POS",
+  "own_domain_url":true,
+  "urls":"https:\/\/www.vectorspa.it\/spedizioni_internazionali\/en\/hr-managment; https:\/\/www.linkedin.com\/company\/vector-spa\/; https:\/\/www.vectorta.com\/learn"
+ },
+ {
+  "company":"VECTOR - S.P.A.",
+  "signal":"employer_branding",
+  "old":1.0,
+  "old_cls":"weak",
+  "new":1,
+  "new_cls":"weak",
+  "own_domain_url":false,
+  "urls":"https:\/\/www.glassdoor.it\/Panoramica\/Lavorando-in-Glassdoor-EI_IE100431.13,22.htm; https:\/\/link.springer.com\/article\/10.1186\/s40359-024-01882-8; https:\/\/www.glassdoor.com\/Award\/Best-Places-to-Work-LST_KQ0,19.htm"
+ },
+ {
+  "company":"VECTOR - S.P.A.",
+  "signal":"icp_keyword_match",
+  "old":2.0,
+  "old_cls":"POS",
+  "new":1,
+  "new_cls":"weak",
+  "own_domain_url":true,
+  "urls":"https:\/\/www.vectorspa.it\/spedizioni_internazionali\/en; https:\/\/www.theknowledgeacademy.com\/it\/courses\/personal-development-training\/exceptional-customer-service-training\/; https:\/\/www.linkedin.com\/company\/vector-spa\/"
+ },
+ {
+  "company":"GAMELIFE S.R.L.",
+  "signal":"international_profile",
+  "old":2.0,
+  "old_cls":"POS",
+  "new":1,
+  "new_cls":"weak",
+  "own_domain_url":true,
+  "urls":"https:\/\/www.gamelife.it\/store\/locator?srsltid=AfmBOoq6UhyJwxFR5OqEpkLrL-oWvaMsETT76cBIDA1RIQzMk_S2xBFk; https:\/\/cidiverte.it\/wp-content\/uploads\/2025\/03\/CID_company-profile-ENG_025.pdf; https:\/\/www.gamelife.it\/gamelife?srsltid=AfmBOopAwV1lSRK4Bo2RvZ5uskvpGV8w1y5f_ru7cHq-laAx2aLokaIW"
+ },
+ {
+  "company":"GAMELIFE S.R.L.",
+  "signal":"company_size_complexity",
+  "old":2.0,
+  "old_cls":"POS",
+  "new":2,
+  "new_cls":"POS",
+  "own_domain_url":true,
+  "urls":"https:\/\/cidiverte.it\/wp-content\/uploads\/2025\/03\/CID_company-profile-ENG_025.pdf; https:\/\/www.creditsafe.com\/business-index\/en-gb\/company\/gamelife-srl-it02853011; https:\/\/www.linkedin.com\/company\/gamelifeitalia"
+ },
+ {
+  "company":"GAMELIFE S.R.L.",
+  "signal":"onboarding_training_need",
+  "old":3.0,
+  "old_cls":"POS",
+  "new":2,
+  "new_cls":"POS",
+  "own_domain_url":false,
+  "urls":"https:\/\/www.indeed.com\/q-learning-development-video-game-industry-jobs.html; https:\/\/uk.linkedin.com\/company\/game-academy; https:\/\/teacakeclub.org\/2024\/06\/17\/game-academy-are-recruiting-for-play-games-build-careers-bootcamp\/"
+ },
+ {
+  "company":"GAMELIFE S.R.L.",
+  "signal":"employer_branding",
+  "old":2.0,
+  "old_cls":"POS",
+  "new":2,
+  "new_cls":"POS",
+  "own_domain_url":false,
+  "urls":"https:\/\/www.glassdoor.it\/Panoramica\/Lavorando-in-Glassdoor-EI_IE100431.13,22.htm; https:\/\/www.glassdoor.com\/Award\/Best-Places-to-Work-LST_KQ0,19.htm; https:\/\/www.linkedin.com\/posts\/glassdoor_check-out-glassdoors-top-10-best-places-activity-7287852126930644992-j_A8"
+ },
+ {
+  "company":"GAMELIFE S.R.L.",
+  "signal":"icp_keyword_match",
+  "old":3.0,
+  "old_cls":"POS",
+  "new":2,
+  "new_cls":"POS",
+  "own_domain_url":false,
+  "urls":"https:\/\/gamestrategies.io\/en\/customer-service-course-2100\/; https:\/\/www.elitetraining.co.uk\/customer-service-decisions-business-game; https:\/\/gamified-training.com\/en\/serious-business-games-2\/2100-2"
+ },
+ {
+  "company":"ELECTRIC S.P.A.",
+  "signal":"international_profile",
+  "old":3.0,
+  "old_cls":"POS",
+  "new":2,
+  "new_cls":"POS",
+  "own_domain_url":false,
+  "urls":"https:\/\/en.kiepe-electric.com\/company\/; https:\/\/www.enel.com\/company\/about-us\/where-we-are; https:\/\/www.se.com\/ww\/en\/"
+ },
+ {
+  "company":"ELECTRIC S.P.A.",
+  "signal":"company_size_complexity",
+  "old":2.0,
+  "old_cls":"POS",
+  "new":2,
+  "new_cls":"POS",
+  "own_domain_url":false,
+  "urls":"https:\/\/rocketreach.co\/lovato-electric-spa-profile_b5f69c53f42e8e2a; https:\/\/www.linkedin.com\/company\/lovato-electric-spa; https:\/\/www.lovatoelectric.com\/us_en\/about-us\/company\/"
+ },
+ {
+  "company":"ELECTRIC S.P.A.",
+  "signal":"onboarding_training_need",
+  "old":3.0,
+  "old_cls":"POS",
+  "new":2,
+  "new_cls":"POS",
+  "own_domain_url":true,
+  "urls":"https:\/\/www.electricspa.it\/lavora-con-noi\/; https:\/\/www.electricspa.it\/; https:\/\/www.mecspebari.it\/en\/mecspe-young-career\/"
+ },
+ {
+  "company":"ELECTRIC S.P.A.",
+  "signal":"employer_branding",
+  "old":1.0,
+  "old_cls":"weak",
+  "new":2,
+  "new_cls":"POS",
+  "own_domain_url":false,
+  "urls":"https:\/\/www.glassdoor.com\/Award\/Best-Places-to-Work-2025-LST_KQ0,24.htm; https:\/\/www.prnewswire.com\/news-releases\/glassdoor-reveals-best-places-to-work-2025-winners-302356603.html; https:\/\/www.glassdoor.com\/Overview\/Working-at-Great-Place-To-Work-EI_IE259956.11,30.htm"
+ },
+ {
+  "company":"ELECTRIC S.P.A.",
+  "signal":"icp_keyword_match",
+  "old":3.0,
+  "old_cls":"POS",
+  "new":2,
+  "new_cls":"POS",
+  "own_domain_url":true,
+  "urls":"https:\/\/www.theknowledgeacademy.com\/it\/courses\/personal-development-training\/exceptional-customer-service-training\/; https:\/\/globalpartnerstraining.com\/training\/sales-training\/; https:\/\/www.electricspa.it\/lavora-con-noi\/"
+ },
+ {
+  "company":"SAINT-GOBAIN SEKURIT ITALIA S.R.L.",
+  "signal":"international_profile",
+  "old":3.0,
+  "old_cls":"POS",
+  "new":2,
+  "new_cls":"POS",
+  "own_domain_url":true,
+  "urls":"https:\/\/en.wikipedia.org\/wiki\/Saint-Gobain; https:\/\/www.saint-gobain-northamerica.com\/who-we-are\/locations; https:\/\/www.saint-gobain-africa.com\/en\/our-presence"
+ },
+ {
+  "company":"SAINT-GOBAIN SEKURIT ITALIA S.R.L.",
+  "signal":"company_size_complexity",
+  "old":1.0,
+  "old_cls":"weak",
+  "new":2,
+  "new_cls":"POS",
+  "own_domain_url":true,
+  "urls":"https:\/\/www.saint-gobain.com\/en\/group\/who-are-we; https:\/\/en.wikipedia.org\/wiki\/Saint-Gobain; https:\/\/www.globaldata.com\/company-profile\/compagnie-de-saint-gobain\/"
+ },
+ {
+  "company":"SAINT-GOBAIN SEKURIT ITALIA S.R.L.",
+  "signal":"onboarding_training_need",
+  "old":2.0,
+  "old_cls":"POS",
+  "new":2,
+  "new_cls":"POS",
+  "own_domain_url":true,
+  "urls":"https:\/\/www.saint-gobain-northamerica.com\/career-development; https:\/\/www.uk.weber\/careers\/development; https:\/\/careers.saint-gobain.ie\/future-talent\/learning-and-development\/"
+ },
+ {
+  "company":"SAINT-GOBAIN SEKURIT ITALIA S.R.L.",
+  "signal":"employer_branding",
+  "old":null,
+  "old_cls":"none",
+  "new":1,
+  "new_cls":"weak",
+  "own_domain_url":false,
+  "urls":"https:\/\/www.glassdoor.it\/Recensioni\/Recensione-dipendente-Saint-Gobain-E3120-RVW84746443.htm; https:\/\/www.hrgrapevine.com\/us\/content\/article\/2025-01-23-glassdoor-reveals-its-latest-best-places-to-work-ratings; https:\/\/www.linkedin.com\/pulse\/insiders-advice-becoming-glassdoor-best-place-work-marc-cowlin"
+ },
+ {
+  "company":"SAINT-GOBAIN SEKURIT ITALIA S.R.L.",
+  "signal":"icp_keyword_match",
+  "old":2.0,
+  "old_cls":"POS",
+  "new":2,
+  "new_cls":"POS",
+  "own_domain_url":true,
+  "urls":"https:\/\/joinus.saint-gobain.com\/nl\/usa\/sal\/p\/34400\/297265\/customer-service-representative?; https:\/\/www.saint-gobain-northamerica.com\/; https:\/\/www.saint-gobain-emme.com\/careers"
+ },
+ {
+  "company":"HYDAC S.P.A",
+  "signal":"international_profile",
+  "old":3.0,
+  "old_cls":"POS",
+  "new":2,
+  "new_cls":"POS",
+  "own_domain_url":false,
+  "urls":"https:\/\/www.hydac.com\/en\/locations\/; https:\/\/www.hydac.com\/en\/about-hydac\/; https:\/\/www2.hydac.com\/_de-en\/nc\/company\/locations.html"
+ },
+ {
+  "company":"HYDAC S.P.A",
+  "signal":"company_size_complexity",
+  "old":2.0,
+  "old_cls":"POS",
+  "new":2,
+  "new_cls":"POS",
+  "own_domain_url":true,
+  "urls":"https:\/\/www.zoominfo.com\/c\/hydac\/110330664; https:\/\/www.hydac.com\/en-it\/our-company-it\/; https:\/\/www.owler.com\/company\/hydacusa"
+ },
+ {
+  "company":"HYDAC S.P.A",
+  "signal":"onboarding_training_need",
+  "old":3.0,
+  "old_cls":"POS",
+  "new":2,
+  "new_cls":"POS",
+  "own_domain_url":true,
+  "urls":"https:\/\/www.hydac.com\/en\/service\/trainings\/training-center\/; https:\/\/modofluido.hydac.it\/it-it\/hydac-academy-1-0; https:\/\/www.hydac.com\/en-gb\/careers-at-hydac\/"
+ },
+ {
+  "company":"HYDAC S.P.A",
+  "signal":"employer_branding",
+  "old":2.0,
+  "old_cls":"POS",
+  "new":0,
+  "new_cls":"none",
+  "own_domain_url":false,
+  "urls":"https:\/\/www.glassdoor.it\/Recensioni\/Recensione-dipendente-HYDAC-E287130-RVW100996333.htm; https:\/\/www.glassdoor.com\/Overview\/Working-at-HYDAC-EI_IE287130.11,16.htm; https:\/\/www.glassdoor.com\/Reviews\/HYDAC-Reviews-E287130.htm"
+ },
+ {
+  "company":"HYDAC S.P.A",
+  "signal":"icp_keyword_match",
+  "old":3.0,
+  "old_cls":"POS",
+  "new":2,
+  "new_cls":"POS",
+  "own_domain_url":true,
+  "urls":"https:\/\/www.hydac.com\/en-it\/our-company-it\/; https:\/\/www.hydac.com\/en-ch\/careers\/; https:\/\/www2.hydac.com\/_de-en\/cmx\/news\/sales-training-with-the-industry-40-vehicle.html"
+ },
+ {
+  "company":"COMMERZBANK AG",
+  "signal":"international_profile",
+  "old":3.0,
+  "old_cls":"POS",
+  "new":2,
+  "new_cls":"POS",
+  "own_domain_url":true,
+  "urls":"https:\/\/www.commerzbank.com\/corporateclients\/contact\/our-international-network\/; https:\/\/www.commerzbank.de\/group\/who-we-are\/commerzbank-worldwide\/; https:\/\/en.wikipedia.org\/wiki\/Commerzbank"
+ },
+ {
+  "company":"COMMERZBANK AG",
+  "signal":"company_size_complexity",
+  "old":3.0,
+  "old_cls":"POS",
+  "new":2,
+  "new_cls":"POS",
+  "own_domain_url":true,
+  "urls":"https:\/\/www.globaldata.com\/company-profile\/commerzbank-ag\/; https:\/\/en.wikipedia.org\/wiki\/Commerzbank; https:\/\/www.commerzbank.de\/group\/who-we-are\/facts-figures\/"
+ },
+ {
+  "company":"COMMERZBANK AG",
+  "signal":"onboarding_training_need",
+  "old":3.0,
+  "old_cls":"POS",
+  "new":2,
+  "new_cls":"POS",
+  "own_domain_url":true,
+  "urls":"https:\/\/www.commerzbank.de\/group\/careers\/; https:\/\/goausbildung.com\/company\/commerzbank-4c2743ac; https:\/\/rainbow-career.de\/en\/companies\/commerzbank-ag\/"
+ },
+ {
+  "company":"COMMERZBANK AG",
+  "signal":"employer_branding",
+  "old":2.0,
+  "old_cls":"POS",
+  "new":0,
+  "new_cls":"none",
+  "own_domain_url":false,
+  "urls":"https:\/\/www.glassdoor.sg\/Reviews\/Commerzbank-culture-Reviews-EI_IE10650.0,11_KH12,19.htm; https:\/\/www.glassdoor.com\/Reviews\/Commerzbank-Reviews-E10650.htm; https:\/\/www.linkedin.com\/posts\/sindhubiswal_if-you-read-glassdoor-reviews-of-any-company-activity-7176065006860464128--F4n"
+ },
+ {
+  "company":"COMMERZBANK AG",
+  "signal":"icp_keyword_match",
+  "old":3.0,
+  "old_cls":"POS",
+  "new":2,
+  "new_cls":"POS",
+  "own_domain_url":true,
+  "urls":"https:\/\/www.commerzbank.de\/group\/careers\/job-opportunities\/customer-advisory-sales.html; https:\/\/www.commerzbank.com\/corporateclients\/contact\/; https:\/\/www.commerz-gss.com\/careers"
+ },
+ {
+  "company":"HSBC CONTINENTAL EUROPE",
+  "signal":"international_profile",
+  "old":3.0,
+  "old_cls":"POS",
+  "new":2,
+  "new_cls":"POS",
+  "own_domain_url":true,
+  "urls":"https:\/\/en.wikipedia.org\/wiki\/HSBC; https:\/\/www.hsbc.com\/who-we-are\/our-markets; https:\/\/internationalservices.hsbc.com\/global-directory\/"
+ },
+ {
+  "company":"HSBC CONTINENTAL EUROPE",
+  "signal":"company_size_complexity",
+  "old":2.0,
+  "old_cls":"POS",
+  "new":2,
+  "new_cls":"POS",
+  "own_domain_url":true,
+  "urls":"https:\/\/www.globaldata.com\/company-profile\/hsbc-holdings-plc\/; https:\/\/en.wikipedia.org\/wiki\/HSBC; https:\/\/www.theguardian.com\/sustainable-business\/profile-hsbc1"
+ },
+ {
+  "company":"HSBC CONTINENTAL EUROPE",
+  "signal":"onboarding_training_need",
+  "old":3.0,
+  "old_cls":"POS",
+  "new":2,
+  "new_cls":"POS",
+  "own_domain_url":true,
+  "urls":"https:\/\/www.hsbc.com\/careers\/students-and-graduates; https:\/\/apply.careers.hsbc.com\/job\/Kowloon-City-Learning-and-Development-Manager%2C-Insurance-Academy-HSBC-Life-Kowl\/1361181457\/; https:\/\/hk.linkedin.com\/jobs\/view\/learning-and-development-manager-insurance-academy-hsbc-life-at-hsbc-3784120002"
+ },
+ {
+  "company":"HSBC CONTINENTAL EUROPE",
+  "signal":"employer_branding",
+  "old":2.0,
+  "old_cls":"POS",
+  "new":0,
+  "new_cls":"none",
+  "own_domain_url":false,
+  "urls":"https:\/\/www.glassdoor.co.uk\/Overview\/Working-at-HSBC-EI_IE3482.11,15.htm; https:\/\/www.glassdoor.it\/Recensioni\/HSBC-Recensioni-E3482.htm; https:\/\/www.linkedin.com\/pulse\/glassdoor-friend-foe-dipti-salopek"
+ },
+ {
+  "company":"HSBC CONTINENTAL EUROPE",
+  "signal":"icp_keyword_match",
+  "old":3.0,
+  "old_cls":"POS",
+  "new":1,
+  "new_cls":"weak",
+  "own_domain_url":true,
+  "urls":"https:\/\/www.business.hsbc.com\/en-gb\/campaigns\/international-business; https:\/\/www.facebook.com\/SalesNinjaHanzo\/posts\/hsbc-is-one-of-the-largest-banks-in-the-world-with-a-diverse-range-of-solutions-\/579411254199577\/; https:\/\/www.wayup.com\/i-Financial-Services-j-Associate-Corporate-Sales-HSBC-702631739569846\/"
+ },
+ {
+  "company":"DM DROGERIE MARKT SRL",
+  "signal":"international_profile",
+  "old":3.0,
+  "old_cls":"POS",
+  "new":2,
+  "new_cls":"POS",
+  "own_domain_url":true,
+  "urls":"https:\/\/en.wikipedia.org\/wiki\/Dm-drogerie_markt; https:\/\/www.dm-drogeriemarkt.it\/la-nostra-azienda\/struttura-aziendale\/dm-in-europa; https:\/\/needl.co\/company\/dm-drogeriemarkt_germany\/"
+ },
+ {
+  "company":"DM DROGERIE MARKT SRL",
+  "signal":"company_size_complexity",
+  "old":2.0,
+  "old_cls":"POS",
+  "new":2,
+  "new_cls":"POS",
+  "own_domain_url":false,
+  "urls":"https:\/\/www.zoominfo.com\/c\/dm-drogerie-markt-srl\/466729428; https:\/\/prospeo.io\/c\/dm-drogerie-markt-italia-revenue; https:\/\/www.emis.com\/php\/company-profile\/RO\/Dm_Drogerie_Markt_SRL_en_3162095.html"
+ },
+ {
+  "company":"DM DROGERIE MARKT SRL",
+  "signal":"onboarding_training_need",
+  "old":2.0,
+  "old_cls":"POS",
+  "new":2,
+  "new_cls":"POS",
+  "own_domain_url":true,
+  "urls":"https:\/\/goausbildung.com\/company\/dm-drogerie-markt-f38ad223; https:\/\/www.linkedin.com\/jobs\/dm-drogerie-markt-italia-jobs-worldwide; https:\/\/www.dm-drogeriemarkt.it\/la-nostra-azienda\/lavora-con-noi"
+ },
+ {
+  "company":"DM DROGERIE MARKT SRL",
+  "signal":"employer_branding",
+  "old":1.0,
+  "old_cls":"weak",
+  "new":0,
+  "new_cls":"none",
+  "own_domain_url":false,
+  "urls":"https:\/\/www.glassdoor.com\/Reviews\/dm-drogerie-markt-Reviews-E895834.htm; https:\/\/www.glassdoor.com\/Overview\/Working-at-dm-drogerie-markt-EI_IE895834.11,28.htm; https:\/\/www.glassdoor.it\/Colloquio\/dm-drogerie-markt-Domande-di-colloquio-E895834.htm"
+ },
+ {
+  "company":"DM DROGERIE MARKT SRL",
+  "signal":"icp_keyword_match",
+  "old":2.0,
+  "old_cls":"POS",
+  "new":2,
+  "new_cls":"POS",
+  "own_domain_url":false,
+  "urls":"https:\/\/goausbildung.com\/company\/dm-drogerie-markt-f38ad223; https:\/\/www.opentext.com\/customers\/dm-drogerie-markt-gmbh-co-kg; https:\/\/curity.io\/company\/customers\/dm-tech-dm-drogerie-markt\/"
+ },
+ {
+  "company":"CASSA PADANA BANCA DI CREDITO COOPERATIVO SOCIETA' COOPERATIVA",
+  "signal":"international_profile",
+  "old":2.0,
+  "old_cls":"POS",
+  "new":0,
+  "new_cls":"none",
+  "own_domain_url":true,
+  "urls":"https:\/\/www.cassapadana.it\/estero\/; https:\/\/www.cassapadana.it\/news\/ufficioestero\/; https:\/\/thebanks.eu\/banks\/15886"
+ },
+ {
+  "company":"CASSA PADANA BANCA DI CREDITO COOPERATIVO SOCIETA' COOPERATIVA",
+  "signal":"company_size_complexity",
+  "old":2.0,
+  "old_cls":"POS",
+  "new":1,
+  "new_cls":"weak",
+  "own_domain_url":true,
+  "urls":"https:\/\/thebanks.eu\/banks\/15886; https:\/\/www.zoominfo.com\/c\/cassa-padana\/399423157; https:\/\/www.cassapadana.it\/chi-siamo\/"
+ },
+ {
+  "company":"CASSA PADANA BANCA DI CREDITO COOPERATIVO SOCIETA' COOPERATIVA",
+  "signal":"onboarding_training_need",
+  "old":3.0,
+  "old_cls":"POS",
+  "new":1,
+  "new_cls":"weak",
+  "own_domain_url":true,
+  "urls":"https:\/\/www.cassapadana.it\/news\/cassa-padana-academy\/; https:\/\/www.cassapadana.it\/invio-cv\/; https:\/\/www.cassapadana.it\/"
+ },
+ {
+  "company":"CASSA PADANA BANCA DI CREDITO COOPERATIVO SOCIETA' COOPERATIVA",
+  "signal":"employer_branding",
+  "old":2.0,
+  "old_cls":"POS",
+  "new":0,
+  "new_cls":"none",
+  "own_domain_url":false,
+  "urls":"https:\/\/www.glassdoor.it\/Recensioni\/Cassa-Padana-Recensioni-E3094177.htm; https:\/\/www.glassdoor.co.in\/Overview\/Working-at-Cassa-Padana-EI_IE3094177.11,23.htm; https:\/\/www.glassdoor.it\/pay-and-benefits\/Cassa-Padana-E3094177"
+ },
+ {
+  "company":"CASSA PADANA BANCA DI CREDITO COOPERATIVO SOCIETA' COOPERATIVA",
+  "signal":"icp_keyword_match",
+  "old":3.0,
+  "old_cls":"POS",
+  "new":1,
+  "new_cls":"weak",
+  "own_domain_url":true,
+  "urls":"https:\/\/www.cassapadana.it\/imprese\/; https:\/\/www.cassapadana.it\/; https:\/\/www.cassapadana.it\/estero\/"
+ },
+ {
+  "company":"CREDIT AGRICOLE ASSICURAZIONI S.P.A.",
+  "signal":"international_profile",
+  "old":2.0,
+  "old_cls":"POS",
+  "new":1,
+  "new_cls":"weak",
+  "own_domain_url":true,
+  "urls":"https:\/\/www.ca-assicurazioni.it\/; https:\/\/www.credit-agricole.com\/en\/group\/list-of-our-locations; https:\/\/www.ca-assicurazioni.it\/contattaci"
+ },
+ {
+  "company":"CREDIT AGRICOLE ASSICURAZIONI S.P.A.",
+  "signal":"company_size_complexity",
+  "old":2.0,
+  "old_cls":"POS",
+  "new":0,
+  "new_cls":"none",
+  "own_domain_url":true,
+  "urls":"https:\/\/www.ca-assicurazioni.it\/; https:\/\/www.ca-assicurazioni.it\/chi-siamo; https:\/\/www.ca-assicurazioni.it\/contattaci"
+ },
+ {
+  "company":"CREDIT AGRICOLE ASSICURAZIONI S.P.A.",
+  "signal":"onboarding_training_need",
+  "old":2.0,
+  "old_cls":"POS",
+  "new":0,
+  "new_cls":"none",
+  "own_domain_url":true,
+  "urls":"https:\/\/www.ca-assicurazioni.it\/lavora-con-noi; https:\/\/www.ca-assicurazioni.it\/; https:\/\/www.ca-vita.it\/lavora-con-noi"
+ },
+ {
+  "company":"CREDIT AGRICOLE ASSICURAZIONI S.P.A.",
+  "signal":"employer_branding",
+  "old":2.0,
+  "old_cls":"POS",
+  "new":0,
+  "new_cls":"none",
+  "own_domain_url":false,
+  "urls":"https:\/\/www.glassdoor.it\/Panoramica\/Lavorando-in-Prima-Assicurazioni-EI_IE1395225.13,32.htm; https:\/\/www.glassdoor.it\/Updates\/Glassdoor-Company-Updates-E100431.htm; https:\/\/www.glassdoor.com\/Reviews\/Prima-Assicurazioni-Reviews-E1395225.htm"
+ },
+ {
+  "company":"CREDIT AGRICOLE ASSICURAZIONI S.P.A.",
+  "signal":"icp_keyword_match",
+  "old":1.0,
+  "old_cls":"weak",
+  "new":0,
+  "new_cls":"none",
+  "own_domain_url":true,
+  "urls":"https:\/\/www.ca-assicurazioni.it\/; https:\/\/www.ca-assicurazioni.it\/contattaci; https:\/\/www.ca-assicurazioni.it\/assicurazione-aziendale"
+ },
+ {
+  "company":"IBF S.P.A.",
+  "signal":"international_profile",
+  "old":1.0,
+  "old_cls":"weak",
+  "new":2,
+  "new_cls":"POS",
+  "own_domain_url":true,
+  "urls":"https:\/\/www.ibfgroup.it\/about-us\/; https:\/\/www.tubacex.com\/en\/tubacex-acquires-the-italian-company-ibf\/; https:\/\/www.zoominfo.com\/c\/ibf-spa\/431608236"
+ },
+ {
+  "company":"IBF S.P.A.",
+  "signal":"company_size_complexity",
+  "old":2.0,
+  "old_cls":"POS",
+  "new":2,
+  "new_cls":"POS",
+  "own_domain_url":true,
+  "urls":"https:\/\/www.ibfgroup.it\/; https:\/\/www.zoominfo.com\/c\/ibf-spa\/431608236; https:\/\/www.linkedin.com\/company\/ibfspa\/"
+ },
+ {
+  "company":"IBF S.P.A.",
+  "signal":"onboarding_training_need",
+  "old":3.0,
+  "old_cls":"POS",
+  "new":2,
+  "new_cls":"POS",
+  "own_domain_url":true,
+  "urls":"https:\/\/www.ibfgroup.it\/careers\/; https:\/\/www.ibfsaedu.com\/; https:\/\/www.ibf.org.sg\/home\/for-individuals\/skills-and-jobs-development\/training-support\/IBF-STS"
+ },
+ {
+  "company":"IBF S.P.A.",
+  "signal":"employer_branding",
+  "old":1.0,
+  "old_cls":"weak",
+  "new":1,
+  "new_cls":"weak",
+  "own_domain_url":false,
+  "urls":"https:\/\/www.instagram.com\/reel\/DTx7R92D4kX\/; https:\/\/www.glassdoor.com\/Award\/Best-Places-to-Work-LST_KQ0,19.htm; https:\/\/www.glassdoor.it\/Panoramica\/Lavorando-in-Glassdoor-EI_IE100431.13,22.htm"
+ },
+ {
+  "company":"IBF S.P.A.",
+  "signal":"icp_keyword_match",
+  "old":3.0,
+  "old_cls":"POS",
+  "new":1,
+  "new_cls":"weak",
+  "own_domain_url":true,
+  "urls":"https:\/\/www.ibfgroup.it\/; https:\/\/www.ibfgroup.it\/careers\/; https:\/\/www.ibf-solutions.com\/en\/contact"
+ },
+ {
+  "company":"CENTRO EUROPEO DI GESTIONE E ORGANIZZAZIONE SCIENTIFICA C.E.G.O.S. ITALIA SPA",
+  "signal":"international_profile",
+  "old":3.0,
+  "old_cls":"POS",
+  "new":1,
+  "new_cls":"weak",
+  "own_domain_url":false,
+  "urls":"https:\/\/m.fatturatoitalia.it\/world-office-srl-06738641213; https:\/\/it.wikipedia.org\/wiki\/Fortune_Global_500; https:\/\/www.fatturatoitalia.it\/"
+ },
+ {
+  "company":"CENTRO EUROPEO DI GESTIONE E ORGANIZZAZIONE SCIENTIFICA C.E.G.O.S. ITALIA SPA",
+  "signal":"company_size_complexity",
+  "old":2.0,
+  "old_cls":"POS",
+  "new":1,
+  "new_cls":"weak",
+  "own_domain_url":true,
+  "urls":"https:\/\/www.fatturatoitalia.it\/; https:\/\/www.reportaziende.it\/; https:\/\/play.google.com\/store\/apps\/details?id=it.fatturatoitalia.m"
+ },
+ {
+  "company":"CENTRO EUROPEO DI GESTIONE E ORGANIZZAZIONE SCIENTIFICA C.E.G.O.S. ITALIA SPA",
+  "signal":"onboarding_training_need",
+  "old":3.0,
+  "old_cls":"POS",
+  "new":1,
+  "new_cls":"weak",
+  "own_domain_url":true,
+  "urls":"https:\/\/www.fatturatoitalia.it\/; https:\/\/elearning.sviluppolavoroitalia.it\/course\/index.php?categoryid=159&lang=en; https:\/\/play.google.com\/store\/apps\/details?id=it.fatturatoitalia.m"
+ },
+ {
+  "company":"CENTRO EUROPEO DI GESTIONE E ORGANIZZAZIONE SCIENTIFICA C.E.G.O.S. ITALIA SPA",
+  "signal":"employer_branding",
+  "old":1.0,
+  "old_cls":"weak",
+  "new":2,
+  "new_cls":"POS",
+  "own_domain_url":false,
+  "urls":"https:\/\/www.greatplacetowork.it\/; https:\/\/www.glassdoor.it\/Panoramica\/Lavorando-in-Glassdoor-EI_IE100431.13,22.htm; https:\/\/www.glassdoor.it\/Colloquio\/Great-Place-To-Work-Domande-di-colloquio-E259956.htm"
+ },
+ {
+  "company":"CENTRO EUROPEO DI GESTIONE E ORGANIZZAZIONE SCIENTIFICA C.E.G.O.S. ITALIA SPA",
+  "signal":"icp_keyword_match",
+  "old":3.0,
+  "old_cls":"POS",
+  "new":2,
+  "new_cls":"POS",
+  "own_domain_url":false,
+  "urls":"https:\/\/m.fatturatoitalia.it\/dettaglio\/video-team-italia-srl-05568710635; https:\/\/www.gility.it\/catalogo\/categorie\/sales-customer-service; https:\/\/www.fatturatoitalia.it\/global-italia-societa-a-responsabilita-limitata-semplificata-03810310361"
+ },
+ {
+  "company":"MICHAEL PAGE INTERNATIONAL ITALIA S.R.L.",
+  "signal":"international_profile",
+  "old":3.0,
+  "old_cls":"POS",
+  "new":2,
+  "new_cls":"POS",
+  "own_domain_url":true,
+  "urls":"https:\/\/www.page.com\/europe-locations\/a; https:\/\/www.michaelpage.it\/about-us; https:\/\/www.michaelpage.co.uk\/about-us"
+ },
+ {
+  "company":"MICHAEL PAGE INTERNATIONAL ITALIA S.R.L.",
+  "signal":"company_size_complexity",
+  "old":1.0,
+  "old_cls":"weak",
+  "new":2,
+  "new_cls":"POS",
+  "own_domain_url":true,
+  "urls":"https:\/\/www.linkedin.com\/company\/michael-page; https:\/\/www.michaelpage.it\/; https:\/\/www.reveliolabs.com\/companies\/michael-page\/employees\/"
+ },
+ {
+  "company":"MICHAEL PAGE INTERNATIONAL ITALIA S.R.L.",
+  "signal":"onboarding_training_need",
+  "old":1.0,
+  "old_cls":"weak",
+  "new":2,
+  "new_cls":"POS",
+  "own_domain_url":true,
+  "urls":"https:\/\/www.michaelpage.it\/lavora-con-noi\/perch%C3%A9-sceglierci\/talent-development; https:\/\/www.michaelpage.at\/work-for-us\/training-and-career-development; https:\/\/www.michaelpage.it\/lavora-con-noi\/the-technology-recruitment-academy"
+ },
+ {
+  "company":"MICHAEL PAGE INTERNATIONAL ITALIA S.R.L.",
+  "signal":"employer_branding",
+  "old":1.0,
+  "old_cls":"weak",
+  "new":1,
+  "new_cls":"weak",
+  "own_domain_url":true,
+  "urls":"https:\/\/www.glassdoor.it\/Recensioni\/Recensione-dipendente-Michael-Page-RVW92597931.htm; https:\/\/www.glassdoor.com\/Reviews\/Michael-Page-culture-Reviews-EI_IE5092879.0,12_KH13,20.htm; https:\/\/www.michaelpage.co.uk\/news-and-research\/media-releases\/pagegroup-best-places-work-2017"
+ },
+ {
+  "company":"MICHAEL PAGE INTERNATIONAL ITALIA S.R.L.",
+  "signal":"icp_keyword_match",
+  "old":2.0,
+  "old_cls":"POS",
+  "new":2,
+  "new_cls":"POS",
+  "own_domain_url":true,
+  "urls":"https:\/\/www.michaelpage.it\/lavora-con-noi\/perch%C3%A9-sceglierci\/talent-development; https:\/\/www.michaelpage.it\/lavora-con-noi\/the-technology-recruitment-academy; https:\/\/www.michaelpage.ch\/join-pagegroup\/why-choose-us\/talent-development"
+ },
+ {
+  "company":"O.M.S. SALERI S.P.A.",
+  "signal":"international_profile",
+  "old":3.0,
+  "old_cls":"POS",
+  "new":1,
+  "new_cls":"weak",
+  "own_domain_url":true,
+  "urls":"https:\/\/www.oms-saleri.it\/; https:\/\/www.oms-saleri.it\/history\/; https:\/\/www.thaipnb.co.th\/o-m-s-saleri-s-p-a\/"
+ },
+ {
+  "company":"O.M.S. SALERI S.P.A.",
+  "signal":"company_size_complexity",
+  "old":2.0,
+  "old_cls":"POS",
+  "new":2,
+  "new_cls":"POS",
+  "own_domain_url":false,
+  "urls":"https:\/\/www.zoominfo.com\/c\/oms-saleri-spa\/435174955; https:\/\/www.thaipnb.co.th\/wp-content\/uploads\/2021\/09\/OMS-COMPANY-PROFILE_2021.pdf; https:\/\/www.saleri.com\/wp-content\/uploads\/2023\/09\/Saleri_Annual_report_22_ENG.pdf"
+ },
+ {
+  "company":"O.M.S. SALERI S.P.A.",
+  "signal":"onboarding_training_need",
+  "old":2.0,
+  "old_cls":"POS",
+  "new":2,
+  "new_cls":"POS",
+  "own_domain_url":true,
+  "urls":"https:\/\/www.saleri.com\/2025\/06\/saleri-launches-academy\/; https:\/\/www.oms-saleri.it\/engineering\/; https:\/\/www.oms-saleri.it\/certification\/omssaleri-presentation\/"
+ },
+ {
+  "company":"O.M.S. SALERI S.P.A.",
+  "signal":"employer_branding",
+  "old":1.0,
+  "old_cls":"weak",
+  "new":0,
+  "new_cls":"none",
+  "own_domain_url":false,
+  "urls":"https:\/\/www.glassdoor.com\/Reviews\/Employee-Review-O-M-S-Saleri-E5743437-RVW93496163.htm; https:\/\/www.glassdoor.it\/Panoramica\/Lavorando-in-O-M-S-Saleri-S-P-A-EI_IE5743437.13,31.htm; https:\/\/www.glassdoor.it\/Recensioni\/Recensione-dipendente-OMS-E501585-RVW99613528.htm"
+ },
+ {
+  "company":"O.M.S. SALERI S.P.A.",
+  "signal":"icp_keyword_match",
+  "old":2.0,
+  "old_cls":"POS",
+  "new":0,
+  "new_cls":"none",
+  "own_domain_url":true,
+  "urls":"https:\/\/www.oms-saleri.it\/; https:\/\/www.oms-saleri.it\/privacy-policy\/; https:\/\/www.oms-saleri.it\/presentation\/"
+ },
+ {
+  "company":"BNP PARIBAS REAL ESTATE ADVISORY ITALY S.P.A.",
+  "signal":"international_profile",
+  "old":3.0,
+  "old_cls":"POS",
+  "new":2,
+  "new_cls":"POS",
+  "own_domain_url":false,
+  "urls":"https:\/\/group.bnpparibas\/en\/group\/bnp-paribas-worldwide; https:\/\/www.bnpparibas.it\/it\/bnp-paribas-in-the-world\/; https:\/\/apac.bnpparibas\/en\/bnp-paribas-in-the-world\/"
+ },
+ {
+  "company":"BNP PARIBAS REAL ESTATE ADVISORY ITALY S.P.A.",
+  "signal":"company_size_complexity",
+  "old":2.0,
+  "old_cls":"POS",
+  "new":2,
+  "new_cls":"POS",
+  "own_domain_url":false,
+  "urls":"https:\/\/en.wikipedia.org\/wiki\/BNP_Paribas; https:\/\/group.bnpparibas\/en\/group; https:\/\/www.globaldata.com\/company-profile\/bnp-paribas-sa\/"
+ },
+ {
+  "company":"BNP PARIBAS REAL ESTATE ADVISORY ITALY S.P.A.",
+  "signal":"onboarding_training_need",
+  "old":3.0,
+  "old_cls":"POS",
+  "new":2,
+  "new_cls":"POS",
+  "own_domain_url":false,
+  "urls":"https:\/\/www.bnpparibas.ca\/en\/career-development\/; https:\/\/group.bnpparibas\/en\/careers\/job-offer\/learning-development-intern-8-12-months; https:\/\/usa.bnpparibas\/en\/homepage\/join-us\/our-opportunities\/students-graduates\/"
+ },
+ {
+  "company":"BNP PARIBAS REAL ESTATE ADVISORY ITALY S.P.A.",
+  "signal":"employer_branding",
+  "old":2.0,
+  "old_cls":"POS",
+  "new":0,
+  "new_cls":"none",
+  "own_domain_url":false,
+  "urls":"https:\/\/www.glassdoor.it\/Panoramica\/Lavorando-in-BNP-Paribas-EI_IE10342.13,24.htm; https:\/\/www.glassdoor.com\/Reviews\/BNP-Paribas-culture-Reviews-EI_IE10342.0,11_KH12,19.htm; https:\/\/www.glassdoor.it\/Recensioni\/BNP-Paribas-Recensioni-E10342.htm"
+ },
+ {
+  "company":"BNP PARIBAS REAL ESTATE ADVISORY ITALY S.P.A.",
+  "signal":"icp_keyword_match",
+  "old":3.0,
+  "old_cls":"POS",
+  "new":1,
+  "new_cls":"weak",
+  "own_domain_url":false,
+  "urls":"https:\/\/www.bnpparibas.it\/it\/jobs\/bnp-paribas-corporate-and-institutional-banking-global-markets-cross-asset-distribution-sales-internship\/; https:\/\/group.bnpparibas\/en\/careers\/job-offer\/bnp-paribas-corporate-and-institutional-banking-gm-marketing-communication-and-events-marketing-support-internship; https:\/\/it.linkedin.com\/jobs\/view\/bnp-paribas-corporate-institutional-banking-%E2%80%93-global-banking-emea-graduate-programme-corporate-coverage-at-bnp-paribas-cib-4366742886"
+ },
+ {
+  "company":"STELLANTIS FINANCIAL SERVICES ITALIA S.P.A.",
+  "signal":"international_profile",
+  "old":2.0,
+  "old_cls":"POS",
+  "new":1,
+  "new_cls":"weak",
+  "own_domain_url":true,
+  "urls":"https:\/\/www.stellantis-financial-services.it\/node\/39; https:\/\/www.stellantis.com\/; https:\/\/it.linkedin.com\/company\/stellantis-financial-services-uk-germany-austria"
+ },
+ {
+  "company":"STELLANTIS FINANCIAL SERVICES ITALIA S.P.A.",
+  "signal":"company_size_complexity",
+  "old":2.0,
+  "old_cls":"POS",
+  "new":2,
+  "new_cls":"POS",
+  "own_domain_url":true,
+  "urls":"https:\/\/www.linkedin.com\/company\/stellantis-financial-services-us; https:\/\/www.stellantis.com\/en\/investors\/reporting\/financial-reports; https:\/\/www.stellantis-financial-services.it\/chi-siamo"
+ },
+ {
+  "company":"STELLANTIS FINANCIAL SERVICES ITALIA S.P.A.",
+  "signal":"onboarding_training_need",
+  "old":2.0,
+  "old_cls":"POS",
+  "new":2,
+  "new_cls":"POS",
+  "own_domain_url":true,
+  "urls":"https:\/\/www.stellantis-financial-services.it\/people-careers; https:\/\/www.stellantis.com\/en\/careers; https:\/\/www.stellantis-financial-services.it\/node\/39"
+ },
+ {
+  "company":"STELLANTIS FINANCIAL SERVICES ITALIA S.P.A.",
+  "signal":"employer_branding",
+  "old":null,
+  "old_cls":"none",
+  "new":0,
+  "new_cls":"none",
+  "own_domain_url":false,
+  "urls":"https:\/\/www.glassdoor.com\/Overview\/Working-at-Stellantis-Financial-Services-EI_IE4719.11,40.htm; https:\/\/www.glassdoor.it\/Stipendio\/Stellantis-Financial-Services-Stipendi-E4719.htm; https:\/\/www.glassdoor.com\/Reviews\/Stellantis-Financial-Services-Reviews-E4719.htm"
+ },
+ {
+  "company":"STELLANTIS FINANCIAL SERVICES ITALIA S.P.A.",
+  "signal":"icp_keyword_match",
+  "old":1.0,
+  "old_cls":"weak",
+  "new":0,
+  "new_cls":"none",
+  "own_domain_url":true,
+  "urls":"https:\/\/www.stellantis-financial-services.it\/contatti; https:\/\/it.linkedin.com\/company\/stellantis-financial-services-uk-germany-austria; https:\/\/www.stellantis-financial-services.it\/people-careers"
+ },
+ {
+  "company":"HEIDELBERG MATERIALS ITALIA CALCESTRUZZI S.P.A. IN FORMA ABBREVIATA HM ITALIA CALCESTRUZZI S.P.A.",
+  "signal":"international_profile",
+  "old":2.0,
+  "old_cls":"POS",
+  "new":2,
+  "new_cls":"POS",
+  "own_domain_url":true,
+  "urls":"https:\/\/www.heidelbergmaterials.com\/en\/company\/group-areas-and-countries; https:\/\/www.heidelbergmaterials.com\/en\/company\/group-areas-and-countries\/europe; https:\/\/en.wikipedia.org\/wiki\/Heidelberg_Materials"
+ },
+ {
+  "company":"HEIDELBERG MATERIALS ITALIA CALCESTRUZZI S.P.A. IN FORMA ABBREVIATA HM ITALIA CALCESTRUZZI S.P.A.",
+  "signal":"company_size_complexity",
+  "old":2.0,
+  "old_cls":"POS",
+  "new":2,
+  "new_cls":"POS",
+  "own_domain_url":true,
+  "urls":"https:\/\/www.heidelbergmaterials.com\/en\/company; https:\/\/www.zoominfo.com\/c\/heidelberg-materials-ag\/566143302; https:\/\/pitchbook.com\/profiles\/company\/41707-81"
+ },
+ {
+  "company":"HEIDELBERG MATERIALS ITALIA CALCESTRUZZI S.P.A. IN FORMA ABBREVIATA HM ITALIA CALCESTRUZZI S.P.A.",
+  "signal":"onboarding_training_need",
+  "old":2.0,
+  "old_cls":"POS",
+  "new":2,
+  "new_cls":"POS",
+  "own_domain_url":true,
+  "urls":"https:\/\/career.heidelbergmaterials.com\/; https:\/\/be.linkedin.com\/jobs\/view\/learning-development-officer-at-heidelberg-materials-benelux-4363029731; https:\/\/www.instagram.com\/p\/DaATYCXASs_\/"
+ },
+ {
+  "company":"HEIDELBERG MATERIALS ITALIA CALCESTRUZZI S.P.A. IN FORMA ABBREVIATA HM ITALIA CALCESTRUZZI S.P.A.",
+  "signal":"employer_branding",
+  "old":1.0,
+  "old_cls":"weak",
+  "new":0,
+  "new_cls":"none",
+  "own_domain_url":false,
+  "urls":"https:\/\/www.glassdoor.it\/Recensioni\/Recensione-dipendente-Heidelberg-Materials-E16618-RVW100660623.htm; https:\/\/www.glassdoor.com\/Overview\/Working-at-Heidelberg-Materials-EI_IE16618.11,31.htm; https:\/\/www.glassdoor.it\/Recensioni\/Heidelberg-Materials-Recensioni-E16618.htm"
+ },
+ {
+  "company":"HEIDELBERG MATERIALS ITALIA CALCESTRUZZI S.P.A. IN FORMA ABBREVIATA HM ITALIA CALCESTRUZZI S.P.A.",
+  "signal":"icp_keyword_match",
+  "old":2.0,
+  "old_cls":"POS",
+  "new":0,
+  "new_cls":"none",
+  "own_domain_url":true,
+  "urls":"https:\/\/career.heidelbergmaterials.com\/jobcategory\/digital; https:\/\/www.hmt-global.com\/en\/career; https:\/\/www.heidelbergmaterials.com\/en\/media\/49413"
+ },
+ {
+  "company":"C.M.R. GROUP S.P.A.",
+  "signal":"international_profile",
+  "old":3.0,
+  "old_cls":"POS",
+  "new":2,
+  "new_cls":"POS",
+  "own_domain_url":true,
+  "urls":"https:\/\/www.cmr.it\/the-group\/?lang=en; https:\/\/ba.linkedin.com\/company\/cmrgroup?trk=ppro_cprof; https:\/\/www.cmr-group.com\/en\/about-us"
+ },
+ {
+  "company":"C.M.R. GROUP S.P.A.",
+  "signal":"company_size_complexity",
+  "old":1.0,
+  "old_cls":"weak",
+  "new":2,
+  "new_cls":"POS",
+  "own_domain_url":true,
+  "urls":"https:\/\/www.zoominfo.com\/c\/cmr-group\/16795875; https:\/\/www.cmr.co.in\/about\/; https:\/\/rocketreach.co\/cmr-group-profile_b5df7112f42e486c"
+ },
+ {
+  "company":"C.M.R. GROUP S.P.A.",
+  "signal":"onboarding_training_need",
+  "old":3.0,
+  "old_cls":"POS",
+  "new":2,
+  "new_cls":"POS",
+  "own_domain_url":true,
+  "urls":"https:\/\/www.cmrinstitute.org\/careers\/; https:\/\/www.eujobs.co\/career-guides\/cmr-surgical-career-guide; https:\/\/cmr.edu.in\/careers\/"
+ },
+ {
+  "company":"C.M.R. GROUP S.P.A.",
+  "signal":"employer_branding",
+  "old":1.0,
+  "old_cls":"weak",
+  "new":1,
+  "new_cls":"weak",
+  "own_domain_url":false,
+  "urls":"https:\/\/www.instagram.com\/reel\/DTx7R92D4kX\/; https:\/\/www.glassdoor.it\/Recensioni\/Recensione-dipendente-CMR-Group-E1128377-RVW76101269.htm; https:\/\/hrtechfeed.com\/glassdoor-names-best-places-to-work-winners\/"
+ },
+ {
+  "company":"C.M.R. GROUP S.P.A.",
+  "signal":"icp_keyword_match",
+  "old":3.0,
+  "old_cls":"POS",
+  "new":2,
+  "new_cls":"POS",
+  "own_domain_url":true,
+  "urls":"https:\/\/www.salesforce.com\/eu\/service\/customer-service-incident-management\/customer-service-training\/; https:\/\/www.cmrinstitute.org\/market-access-sales-training-gives-reps-an-edge-now-and-post-pandemic\/; https:\/\/mercuri.cz\/international-sales-training\/"
+ },
+ {
+  "company":"KONICA MINOLTA BUSINESS SOLUTIONS ITALIA S.P.A.",
+  "signal":"international_profile",
+  "old":3.0,
+  "old_cls":"POS",
+  "new":2,
+  "new_cls":"POS",
+  "own_domain_url":true,
+  "urls":"https:\/\/www.konicaminolta.eu\/eu-en\/konica-minolta-global-business-services; https:\/\/www.konicaminolta.com\/global-en\/corporate\/groupglobal.html; https:\/\/en.wikipedia.org\/wiki\/Konica_Minolta"
+ },
+ {
+  "company":"KONICA MINOLTA BUSINESS SOLUTIONS ITALIA S.P.A.",
+  "signal":"company_size_complexity",
+  "old":2.0,
+  "old_cls":"POS",
+  "new":2,
+  "new_cls":"POS",
+  "own_domain_url":true,
+  "urls":"https:\/\/www.konicaminolta.com\/global-en\/corporate\/outline.html; https:\/\/www.zoominfo.com\/c\/konica-minolta-inc\/564937487; https:\/\/www.ibisworld.com\/united-states\/company\/konica-minolta-holdings-inc\/9735\/"
+ },
+ {
+  "company":"KONICA MINOLTA BUSINESS SOLUTIONS ITALIA S.P.A.",
+  "signal":"onboarding_training_need",
+  "old":3.0,
+  "old_cls":"POS",
+  "new":2,
+  "new_cls":"POS",
+  "own_domain_url":true,
+  "urls":"https:\/\/www.konicaminolta.eu\/eu-en\/career\/explore-us-as-an-employer\/your-personal-development; https:\/\/careers.konicaminoltaus.com\/people-and-culture; https:\/\/www.konicaminolta.co.uk\/en-gb\/blog\/early-career-apprenticeships"
+ },
+ {
+  "company":"KONICA MINOLTA BUSINESS SOLUTIONS ITALIA S.P.A.",
+  "signal":"employer_branding",
+  "old":1.0,
+  "old_cls":"weak",
+  "new":0,
+  "new_cls":"none",
+  "own_domain_url":false,
+  "urls":"https:\/\/www.glassdoor.com\/Overview\/Working-at-Konica-Minolta-Business-Solutions-EI_IE27336.11,44.htm; https:\/\/www.glassdoor.com\/Reviews\/Konica-Minolta-Business-Solutions-Reviews-E27336.htm; https:\/\/www.glassdoor.it\/Recensioni\/Konica-Minolta-Recensioni-E7184.htm"
+ },
+ {
+  "company":"KONICA MINOLTA BUSINESS SOLUTIONS ITALIA S.P.A.",
+  "signal":"icp_keyword_match",
+  "old":3.0,
+  "old_cls":"POS",
+  "new":2,
+  "new_cls":"POS",
+  "own_domain_url":true,
+  "urls":"https:\/\/www.konicaminolta.co.uk\/en-gb\/about-konica-minolta\/customer-support\/customer-training; https:\/\/www.konicaminolta.eu\/eu-en\/career\/transform-konica-minolta-as-a-student-young-professional-or-professional\/trainee-programmes; https:\/\/www.konicaminolta.it\/it-it\/servizi-ufficio\/itraining"
+ },
+ {
+  "company":"JD SPORTS FASHION S.R.L.",
+  "signal":"international_profile",
+  "old":3.0,
+  "old_cls":"POS",
+  "new":2,
+  "new_cls":"POS",
+  "own_domain_url":true,
+  "urls":"https:\/\/www.global.jdsports.com\/; https:\/\/en.wikipedia.org\/wiki\/JD_Sports; https:\/\/www.jdplc.com\/"
+ },
+ {
+  "company":"JD SPORTS FASHION S.R.L.",
+  "signal":"company_size_complexity",
+  "old":2.0,
+  "old_cls":"POS",
+  "new":2,
+  "new_cls":"POS",
+  "own_domain_url":false,
+  "urls":"https:\/\/www.globaldata.com\/company-profile\/jd-sports-fashion-plc\/; https:\/\/en.wikipedia.org\/wiki\/JD_Sports; https:\/\/www.worldfootwear.com\/news\/jd-sports-fashion-plc-company-profile\/494.html"
+ },
+ {
+  "company":"JD SPORTS FASHION S.R.L.",
+  "signal":"onboarding_training_need",
+  "old":3.0,
+  "old_cls":"POS",
+  "new":2,
+  "new_cls":"POS",
+  "own_domain_url":true,
+  "urls":"https:\/\/www.jdsports.com\/jd-careers; https:\/\/www.linkedin.com\/posts\/jd-sports-fashion-plc_jdxsummeracademy-activity-7350817492333699075-R45N; https:\/\/www.facebook.com\/wollondillymacarthurjobservices\/posts\/learning-development-specialist-leppington-nswemployer-jd-sports-job-description\/1208883147807762\/"
+ },
+ {
+  "company":"JD SPORTS FASHION S.R.L.",
+  "signal":"employer_branding",
+  "old":1.0,
+  "old_cls":"weak",
+  "new":0,
+  "new_cls":"none",
+  "own_domain_url":false,
+  "urls":"https:\/\/www.glassdoor.com.hk\/Reviews\/JD-Sports-Reviews-E10658644.htm; https:\/\/www.glassdoor.com\/Overview\/Working-at-JD-Group-EI_IE13180.11,19.htm; https:\/\/pmc.ncbi.nlm.nih.gov\/articles\/PMC11329993\/"
+ },
+ {
+  "company":"JD SPORTS FASHION S.R.L.",
+  "signal":"icp_keyword_match",
+  "old":3.0,
+  "old_cls":"POS",
+  "new":0,
+  "new_cls":"none",
+  "own_domain_url":true,
+  "urls":"https:\/\/www.global.jdsports.com\/customer-service\/contact\/; https:\/\/www.linkedin.com\/company\/jd-sports-sea; https:\/\/www.jdplc.com\/investor-relations\/business-model\/default.aspx"
+ },
+ {
+  "company":"4U ITALIA S.R.L.",
+  "signal":"international_profile",
+  "old":3.0,
+  "old_cls":"POS",
+  "new":0,
+  "new_cls":"none",
+  "own_domain_url":true,
+  "urls":"https:\/\/www.4uitalia.it\/; https:\/\/www.4uitalia.it\/contatti\/; https:\/\/it.linkedin.com\/company\/4uitalia"
+ },
+ {
+  "company":"4U ITALIA S.R.L.",
+  "signal":"company_size_complexity",
+  "old":2.0,
+  "old_cls":"POS",
+  "new":0,
+  "new_cls":"none",
+  "own_domain_url":true,
+  "urls":"https:\/\/www.4uitalia.it\/; https:\/\/www.4uitalia.it\/contatti\/; https:\/\/it.linkedin.com\/company\/4uitalia"
+ },
+ {
+  "company":"4U ITALIA S.R.L.",
+  "signal":"onboarding_training_need",
+  "old":2.0,
+  "old_cls":"POS",
+  "new":2,
+  "new_cls":"POS",
+  "own_domain_url":true,
+  "urls":"https:\/\/www.4uitalia.it\/lavora-con-noi\/; https:\/\/www.4uitalia.it\/; https:\/\/www.glassdoor.com\/Job\/italy-learning-development-jobs-SRCH_IL.0,5_IN120_KO6,26.htm"
+ },
+ {
+  "company":"4U ITALIA S.R.L.",
+  "signal":"employer_branding",
+  "old":1.0,
+  "old_cls":"weak",
+  "new":0,
+  "new_cls":"none",
+  "own_domain_url":false,
+  "urls":"https:\/\/www.glassdoor.it\/Panoramica\/Lavorando-in-Glassdoor-EI_IE100431.13,22.htm; https:\/\/www.glassdoor.it\/Panoramica\/Lavorando-in-4U-Italia-EI_IE3264500.13,22.htm; https:\/\/www.glassdoor.it\/Recensioni\/index.htm"
+ },
+ {
+  "company":"4U ITALIA S.R.L.",
+  "signal":"icp_keyword_match",
+  "old":2.0,
+  "old_cls":"POS",
+  "new":2,
+  "new_cls":"POS",
+  "own_domain_url":true,
+  "urls":"https:\/\/www.4uitalia.it\/; https:\/\/www.4uitalia.it\/registrati\/; https:\/\/www.4uitalia.it\/lavora-con-noi\/"
+ }
+]
