@@ -532,7 +532,7 @@ _COMPANY_TYPE_MAP: dict[str, str] = {
 _SECTOR_RESULT_KEYS = (
     "detected_industry", "detected_sub_industry", "detected_company_type",
     "sector_confidence", "sector_reason", "sector_evidence_url",
-    "sector_evidence_quote", "sector_source_title",
+    "sector_evidence_quote", "sector_source_title", "sector_source",
 )
 
 
@@ -650,4 +650,5 @@ def extract_sector_industry(evidence_items: list[LeadEvidence]) -> dict:
     out["sector_evidence_url"] = ev.source_url
     out["sector_evidence_quote"] = ev.source_snippet
     out["sector_source_title"] = ev.source_title
+    out["sector_source"] = "keyword_match"
     return out

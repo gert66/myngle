@@ -13,7 +13,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from lead_output_schema import LeadInput, LeadPrioritizationResult
+from lead_output_schema import LeadEvidence, LeadInput, LeadPrioritizationResult
 from lead_prioritizer_core import prioritize_single_lead
 
 
@@ -976,3 +976,149 @@ class TestPrioritizeSingleLeadFirecrawlWiring:
                 hosted_lead, serper_api_key="s", anthropic_api_key="a",
                 firecrawl_api_key="fc-key")
         m.assert_not_called()
+
+
+# ---------------------------------------------------------------------------
+# Industry/sector derived by the HQ interpreter from the same material
+# (primarily own-domain crawled content) — a free side product of the HQ
+# call. See lead_prioritizer_core.py for the sector-detection fallback that
+# consumes ai_hq_industry/ai_hq_sub_industry.
+# ---------------------------------------------------------------------------
+
+class TestHqDerivedIndustry:
+    _lead = LeadInput(company_name="AEG Power Solutions", domain="aegps.com",
+                      input_country="Germany")
+    _crawled = [{
+        "url": "https://www.aegps.com/about",
+        "text": "AEG Power Solutions designs and manufactures power electronics "
+                "and UPS systems for industrial and utility customers.",
+        "source_kind": "own_domain", "retrieval_method": "firecrawl",
+    }]
+
+    def _interpret(self, ai_json_str, crawled_pages=None):
+        mock_ctx, client = _mock_anthropic_capture(ai_json_str)
+        with mock_ctx:
+            result = interpret_hq_with_ai(
+                lead_input=self._lead, domain_root="aegps",
+                query="aegps headquarters", serper_payload={"organic": []},
+                anthropic_api_key="fake",
+                crawled_pages=crawled_pages if crawled_pages is not None else self._crawled,
+            )
+        return result, client
+
+    def test_industry_and_sub_industry_populated(self):
+        ai = _ai_json(classification="domestic", confidence="High",
+                      industry="Power electronics", sub_industry="UPS systems")
+        result, _ = self._interpret(ai)
+        assert result.ai_hq_industry == "Power electronics"
+        assert result.ai_hq_sub_industry == "UPS systems"
+
+    def test_blank_industry_becomes_none(self):
+        ai = _ai_json(classification="unclear", confidence="Low",
+                      industry="", sub_industry="")
+        result, _ = self._interpret(ai)
+        assert result.ai_hq_industry is None
+        assert result.ai_hq_sub_industry is None
+
+    def test_industry_populated_even_when_classification_unclear(self):
+        # Industry/sector is independent of the HQ classification succeeding.
+        ai = _ai_json(classification="unclear", confidence="Low",
+                      industry="Power electronics", sub_industry="")
+        result, _ = self._interpret(ai)
+        assert result.ai_hq_classification == "unclear"
+        assert result.ai_hq_industry == "Power electronics"
+
+    def test_prompt_asks_for_industry_and_known_categories(self):
+        ai = _ai_json(classification="domestic", confidence="High",
+                      industry="Power electronics")
+        _, client = self._interpret(ai)
+        msg = _user_message_sent(client)
+        assert '"industry"' in msg
+        assert '"sub_industry"' in msg
+        # Style-guidance vocabulary from the deterministic sector detector.
+        assert "Chemicals" in msg or "Manufacturing" in msg
+
+    def test_regex_fallback_recovers_industry(self):
+        # Malformed JSON (unterminated "reason") -- core fields incl. industry
+        # must still be recoverable via the regex fallback.
+        from lead_hq_ai_interpreter import _parse_ai_response
+        broken = (
+            '{"classification": "domestic", "confidence": "High", '
+            '"industry": "Power electronics", "sub_industry": "UPS systems", '
+            '"reason": "unterminated'
+        )
+        parsed = _parse_ai_response(broken)
+        assert parsed.get("industry") == "Power electronics"
+        assert parsed.get("sub_industry") == "UPS systems"
+
+
+class TestSectorFallbackToOwnDomainAi:
+    """lead_prioritizer_core: when the deterministic keyword sector detector
+    finds nothing, fall back to the HQ interpreter's AI-derived industry --
+    but ONLY when a genuine own-domain crawl backs it."""
+
+    _lead = LeadInput(company_name="AEG Power Solutions", domain="aegps.com",
+                      input_country="Germany")
+    _ai = _ai_json(classification="domestic", confidence="High",
+                   industry="Power electronics", sub_industry="UPS systems")
+    _fc_used = {
+        "pages": [{"url": "https://www.aegps.com/about", "text": "...",
+                  "source_kind": "own_domain", "retrieval_method": "firecrawl"}],
+        "pages_crawled": [], "used": True,
+    }
+    _fc_not_used = {"pages": [], "pages_crawled": [], "used": False}
+
+    def _run(self, fc_return, extra_kwargs=None):
+        crawl_patch = patch(
+            "lead_prioritizer_core.collect_own_domain_hq_pages",
+            return_value=fc_return)
+        with _mock_serper(_EMPTY_SERPER), _mock_anthropic(self._ai), crawl_patch:
+            result = prioritize_single_lead(
+                self._lead, serper_api_key="s", anthropic_api_key="a",
+                firecrawl_api_key="fc-key",
+                collect_non_hq_evidence=True, extract_non_hq_signals_flag=True,
+                **(extra_kwargs or {}),
+            )
+        return result
+
+    def test_fallback_fires_when_keyword_detector_found_nothing(self):
+        result = self._run(self._fc_used)
+        assert result.detected_industry == "Power electronics"
+        assert result.detected_sub_industry == "UPS systems"
+        assert result.sector_source == "own_domain_ai"
+        assert result.sector_confidence == "Medium"
+        assert result.sector_evidence_url == "https://www.aegps.com/about"
+
+    def test_fallback_does_not_fire_without_genuine_own_domain_crawl(self):
+        # AI still returns an industry guess (Serper-only), but with no own-
+        # domain crawl this must NOT be trusted as a sector source.
+        result = self._run(self._fc_not_used)
+        assert result.detected_industry is None
+        assert result.sector_source is None
+
+    def test_keyword_match_always_wins_over_ai_fallback(self):
+        # sector_industry evidence with a clean keyword hit must never be
+        # overwritten by the AI-derived fallback, even when a crawl happened.
+        with patch(
+            "lead_prioritizer_core.collect_own_domain_hq_pages",
+            return_value=self._fc_used,
+        ), _mock_serper(_EMPTY_SERPER), _mock_anthropic(self._ai), patch(
+            "lead_prioritizer_core.collect_non_hq_enrichment_evidence",
+            return_value=[
+                LeadEvidence(
+                    signal_name="sector_industry",
+                    source_url="https://www.aegps.com/products",
+                    source_title="AEG Power Solutions",
+                    source_snippet="Supplier of industrial equipment and "
+                                   "machinery for utility customers.",
+                    source_type="organic",
+                ),
+            ],
+        ):
+            result = prioritize_single_lead(
+                self._lead, serper_api_key="s", anthropic_api_key="a",
+                firecrawl_api_key="fc-key",
+                collect_non_hq_evidence=True, extract_non_hq_signals_flag=True,
+            )
+        assert result.sector_source == "keyword_match"
+        assert result.detected_industry == "Industrial equipment and machinery"

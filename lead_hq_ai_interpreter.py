@@ -135,7 +135,8 @@ def call_serper_for_hq(
 _SYSTEM_PROMPT = (
     "You are a corporate structure analyst. "
     "Given the company's own website content plus search-engine results, "
-    "determine where its ultimate parent group headquarters is located. "
+    "determine where its ultimate parent group headquarters is located, and "
+    "identify the company's industry/sector from the same material. "
     "Treat the company's own website content as the primary, most-authoritative "
     "source; use the search-engine results only as secondary corroboration. "
     "Reply ONLY with a valid JSON object — no prose, no markdown fences."
@@ -170,6 +171,15 @@ Classify and return JSON with these exact keys:
 - "evidence_urls": ALL URLs (from the primary or secondary material above) that support your answer, best first (empty list if none)
 - "evidence_quote": short verbatim quote supporting your answer (max 200 chars, empty if none)
 - "reason": one short sentence explaining your classification
+- "industry": the company's industry/sector, as a short, concise category
+  label (e.g. "Power electronics", "Industrial software") derived from what
+  the material actually says the company makes/does. Reuse one of these
+  existing categories when it genuinely fits, for labeling consistency:
+  {known_industries}
+  Otherwise, use your own concise, standard category label. Empty string
+  only when the material gives no basis at all to judge this.
+- "sub_industry": a more specific sub-category when the material supports one
+  (e.g. "Resins" under "Chemicals"), empty string otherwise.
 
 Rules:
 - Use "foreign_parent" when the ultimate controlling group/parent HQ is in a
@@ -184,7 +194,28 @@ Rules:
 - Never invent information not present in the supplied material (neither the
   own-website content nor the search results). Prefer the own-website content
   when the two sources disagree.
+- "industry"/"sub_industry" are independent of the HQ classification above:
+  give your best answer for them even when the HQ classification itself is
+  "unclear", as long as the material describes what the company does.
 """
+
+
+def _known_industry_categories() -> str:
+    """Comma-separated industry categories the deterministic sector detector
+    already knows (``lead_non_hq_signal_extractor._SECTOR_KEYWORD_MAP``),
+    shown to the AI purely as style guidance for consistent labeling — never
+    a hard enum. Function-level import avoids a module-level dependency
+    between the two files; returns "" (silently) if that module is
+    unavailable for any reason, so prompt-building can never fail on this."""
+    try:
+        from lead_non_hq_signal_extractor import _SECTOR_KEYWORD_MAP
+        seen: list[str] = []
+        for industry, _sub in _SECTOR_KEYWORD_MAP.values():
+            if industry not in seen:
+                seen.append(industry)
+        return ", ".join(seen)
+    except Exception:
+        return ""
 
 
 def _format_own_site_pages(crawled_pages) -> str:
@@ -243,6 +274,7 @@ def _build_user_message(
         kg_text=kg_text,
         ab_text=ab_text,
         organic_text=organic_text,
+        known_industries=_known_industry_categories() or "(none available)",
     )
 
 
@@ -345,6 +377,8 @@ def _regex_extract_core_fields(raw: str) -> dict:
         "evidence_url":      _str_field("evidence_url"),
         "evidence_quote":    _str_field("evidence_quote"),
         "reason":            _str_field("reason"),
+        "industry":          _str_field("industry"),
+        "sub_industry":      _str_field("sub_industry"),
     }
 
 
@@ -699,6 +733,8 @@ def interpret_hq_with_ai(
     ev_url     = (ai_data.get("evidence_url") or "").strip()
     ev_quote   = (ai_data.get("evidence_quote") or "").strip()[:200]
     ai_reason  = (ai_data.get("reason") or "").strip()
+    ai_industry     = (ai_data.get("industry") or "").strip()
+    ai_sub_industry = (ai_data.get("sub_industry") or "").strip()
 
     # Mechanical validation: only URLs actually present in the supplied
     # material — the Serper payload OR the crawled own-domain pages — are ever
@@ -729,6 +765,8 @@ def interpret_hq_with_ai(
         hq_evidence_quote=ev_quote or None,
         parser_source="ai_first",
         ai_hq_raw_json=(raw_text or "")[:2000],
+        ai_hq_industry=ai_industry or None,
+        ai_hq_sub_industry=ai_sub_industry or None,
     )
 
     # ── Post-AI scoring (only deterministic step) ────────────────────────────

@@ -43,6 +43,13 @@ class HQDetectionResult:
     ai_parent_company: Optional[str] = None
     ai_parent_hq_country: Optional[str] = None
     ai_parent_hq_city: Optional[str] = None
+    # Industry/sector the HQ interpreter derived from the same material
+    # (primarily the company's own crawled-domain content) — a free side
+    # product of the HQ call, at no extra API cost. Audit/app metadata only;
+    # never feeds scoring. See lead_prioritizer_core.py for how this backs up
+    # the deterministic keyword-based sector detector when it finds nothing.
+    ai_hq_industry: Optional[str] = None
+    ai_hq_sub_industry: Optional[str] = None
     ai_call_attempted: Optional[str] = None      # "Yes" | "No"
     ai_call_success: Optional[str] = None        # "Yes" | "No"
     ai_hq_error: Optional[str] = None
@@ -171,6 +178,11 @@ class LeadPrioritizationResult:
     ai_call_success: Optional[str] = None
     ai_hq_error: Optional[str] = None
     ai_hq_raw_json: Optional[str] = None
+    # Industry/sector the HQ interpreter derived from the same material as
+    # its HQ classification (see HQDetectionResult.ai_hq_industry) — feeds the
+    # sector fallback below, never scoring.
+    ai_hq_industry: Optional[str] = None
+    ai_hq_sub_industry: Optional[str] = None
     # Provider/usage audit (experimental multi-provider comparison; in-memory
     # only — deliberately NOT in _RESULT_FLAT_FIELDS, so Excel / Lovable
     # exports are unchanged)
@@ -229,6 +241,12 @@ class LeadPrioritizationResult:
     sector_evidence_url: Optional[str] = None
     sector_evidence_quote: Optional[str] = None
     sector_source_title: Optional[str] = None
+    # Which path produced detected_industry/detected_sub_industry:
+    # "keyword_match" (deterministic Serper-snippet keyword match, wins when
+    # present) or "own_domain_ai" (fallback: the HQ interpreter's AI-derived
+    # industry from genuinely crawled own-domain content, used only when the
+    # keyword match found nothing at all). None when neither found anything.
+    sector_source: Optional[str] = None
     # App-facing text (placeholders)
     evidence_summary_app: Optional[str] = None
     key_source_links_app: Optional[str] = None

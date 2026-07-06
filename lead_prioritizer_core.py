@@ -295,6 +295,32 @@ def prioritize_single_lead(
     # audit/app only — feeds no score, C4, C5, HQ, or foreign-HQ filtering).
     sector_summary = extract_sector_industry(evidence_items)
 
+    # Fallback: when the deterministic keyword detector above found nothing
+    # at all (no Serper-snippet keyword hit — e.g. AEG Power Solutions, SDX),
+    # reuse the industry the HQ interpreter already derived from the SAME
+    # material at no extra API cost — but ONLY when that material genuinely
+    # included the company's own crawled-domain content (`crawled_pages`
+    # non-empty here means Firecrawl actually fetched the company's own
+    # site; see collect_own_domain_hq_pages above). A Serper-only AI guess
+    # (no own-domain crawl) is deliberately NOT used as a sector source —
+    # the point of this fallback is to lean on the same primary, most-
+    # authoritative source the HQ classification already trusts, not to
+    # add a second, weaker AI guess on top of thin secondary snippets.
+    # A keyword match always wins when present (never overwritten here).
+    if not sector_summary["detected_industry"] and hq.ai_hq_industry and crawled_pages:
+        sector_summary = dict(sector_summary)
+        sector_summary["detected_industry"] = hq.ai_hq_industry
+        sector_summary["detected_sub_industry"] = hq.ai_hq_sub_industry or None
+        sector_summary["sector_confidence"] = "Medium"
+        sector_summary["sector_reason"] = (
+            "Derived by AI from the company's own crawled website content "
+            "during HQ interpretation (own-domain source); no sector keyword "
+            "matched in the separate Serper sector-search evidence."
+        )
+        sector_summary["sector_evidence_url"] = crawled_pages[0].get("url")
+        sector_summary["sector_source_title"] = "Company website (AI-derived)"
+        sector_summary["sector_source"] = "own_domain_ai"
+
     # ── Step 4: deterministic app/evidence summary fields (no live calls) ─────
     # Built only from signals/evidence already present; never collects or
     # extracts implicitly.
@@ -361,6 +387,8 @@ def prioritize_single_lead(
         ai_call_success=hq.ai_call_success,
         ai_hq_error=hq.ai_hq_error,
         ai_hq_raw_json=hq.ai_hq_raw_json,
+        ai_hq_industry=hq.ai_hq_industry,
+        ai_hq_sub_industry=hq.ai_hq_sub_industry,
         # Provider/usage audit (in-memory only — not exported)
         ai_hq_provider=hq.ai_hq_provider,
         ai_hq_input_tokens=hq.ai_hq_input_tokens,
@@ -406,6 +434,7 @@ def prioritize_single_lead(
         sector_evidence_url=sector_summary["sector_evidence_url"],
         sector_evidence_quote=sector_summary["sector_evidence_quote"],
         sector_source_title=sector_summary["sector_source_title"],
+        sector_source=sector_summary["sector_source"],
         evidence_summary_app=app_summary["evidence_summary_app"],
         key_source_links_app=app_summary["key_source_links_app"],
         advanced_notes_app=app_summary["advanced_notes_app"],

@@ -239,7 +239,10 @@ _RESULT_FLAT_FIELDS = [
     # sector / industry detection (audit & app metadata — never scoring)
     "detected_industry", "detected_sub_industry", "detected_company_type",
     "sector_confidence", "sector_reason", "sector_evidence_url",
-    "sector_evidence_quote", "sector_source_title",
+    "sector_evidence_quote", "sector_source_title", "sector_source",
+    # Raw AI-derived industry from the HQ interpretation step (own-domain
+    # content) — the source of the "own_domain_ai" sector fallback above.
+    "ai_hq_industry", "ai_hq_sub_industry",
     # score / tier
     "final_commercial_fit_score", "commercial_tier", "icp_similarity_score",
     "lean_model_prob", "lr_z_score", "scoring_profile", "scoring_notes",
