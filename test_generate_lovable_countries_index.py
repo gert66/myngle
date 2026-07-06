@@ -47,14 +47,14 @@ class TestBuildCountriesManifest:
         by_id = {entry["id"]: entry for entry in manifest["countries"]}
         assert by_id["japan"]["enabled"] is False
         assert by_id["south-korea"]["enabled"] is False
-        assert by_id["switzerland"]["enabled"] is False
         assert by_id["test"]["enabled"] is False
 
     def test_existing_countries_stay_enabled(self):
         manifest = build_countries_manifest(DEFAULT_GCS_BUCKET)
         by_id = {entry["id"]: entry for entry in manifest["countries"]}
         for country_id in (
-            "australia", "brazil", "italy", "netherlands", "new-zealand", "uruguay",
+            "australia", "brazil", "italy", "netherlands", "new-zealand",
+            "switzerland", "uruguay",
         ):
             assert by_id[country_id]["enabled"] is True
 
