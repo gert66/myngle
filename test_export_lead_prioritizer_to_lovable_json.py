@@ -19,6 +19,7 @@ from export_lead_prioritizer_to_lovable_json import (
     export_batch_output_tables_to_lovable_json,
     export_workbook_to_lovable_json,
     is_technical_reason,
+    main as export_cli_main,
     parse_key_source_links,
     sanitize_caller_facing_evidence,
     normalize_content_language,
@@ -927,6 +928,125 @@ def test_netherlands_export_produces_standard_structure(tmp_path):
 
     detail = detail_for(out_dir, "Acme Brasil")
     assert detail["export_country"] == "Netherlands"
+
+
+# ---------------------------------------------------------------------------
+# "Test" bucket export-override (Onderdeel B): export_country is purely a
+# display-label override at export time. The country actually used for
+# enrichment/localization during the run (input_country on each row) is
+# preserved verbatim in original_input_country and never touched.
+# ---------------------------------------------------------------------------
+
+def test_country_test_override_only_changes_display_fields(tmp_path):
+    enriched = [enriched_row(input_country="Italy", commercial_fit_score_app=77,
+                             sig_foreign_hq_score_for_next_scoring=3)]
+    italy_src = tmp_path / "italy"
+    test_src = tmp_path / "test"
+    italy_src.mkdir()
+    test_src.mkdir()
+    _, out_dir_italy = run_export(italy_src, enriched, export_country="Italy")
+    _, out_dir_test = run_export(test_src, enriched, export_country="Test")
+
+    item_italy = load_list(out_dir_italy)[0]
+    item_test = load_list(out_dir_test)[0]
+
+    assert item_test["country"] == "Test"
+    assert item_test["export_country"] == "Test"
+    assert item_test["display_country_app"] == "Test"
+    # The real enrichment-time country is preserved regardless of the label.
+    assert item_test["original_input_country"] == "Italy"
+    assert item_italy["original_input_country"] == "Italy"
+
+    # Everything else (score, signals-derived fields) is untouched by the
+    # bucket-label override.
+    for key in ("commercial_fit_score", "commercial_tier",
+                "foreign_hq_detected_for_export", "company_name", "domain"):
+        assert item_test[key] == item_italy[key]
+
+
+def test_country_mismatch_warning_present_for_test_bucket(tmp_path):
+    enriched = [enriched_row(input_country="Italy")]
+    manifest, _ = run_export(tmp_path, enriched, export_country="Test")
+    warning_text = " ".join(manifest["warnings"])
+    assert "LET OP" in warning_text
+    assert "'Test'" in warning_text
+    assert "Italy" in warning_text
+
+
+def test_country_mismatch_warning_absent_when_matching(tmp_path):
+    enriched = [enriched_row(input_country="Italy")]
+    manifest, _ = run_export(tmp_path, enriched, export_country="Italy")
+    warning_text = " ".join(manifest["warnings"])
+    assert "LET OP" not in warning_text
+
+
+def test_country_mismatch_warning_lists_every_distinct_source_country(tmp_path):
+    enriched = [
+        enriched_row(source_index=1, company_name="A", input_country="Italy"),
+        enriched_row(source_index=2, company_name="B", input_country="Netherlands"),
+    ]
+    manifest, _ = run_export(tmp_path, enriched, export_country="Test")
+    warning_text = " ".join(manifest["warnings"])
+    assert "Italy" in warning_text
+    assert "Netherlands" in warning_text
+
+
+def test_cli_prints_mismatch_warning_for_test_bucket(tmp_path, capsys):
+    xlsx = tmp_path / "workbook.xlsx"
+    write_workbook(xlsx, [enriched_row(input_country="Italy")])
+    out_dir = tmp_path / "out"
+    export_cli_main([
+        "--input-xlsx", str(xlsx), "--output-dir", str(out_dir),
+        "--country", "Test", "--cold-callers", "Jantje",
+        "--no-foreign-hq-only",
+    ])
+    captured = capsys.readouterr()
+    assert "WARNING: LET OP" in captured.out
+    assert "Italy" in captured.out
+
+
+def test_cli_prints_no_mismatch_warning_for_matching_country(tmp_path, capsys):
+    xlsx = tmp_path / "workbook.xlsx"
+    write_workbook(xlsx, [enriched_row(input_country="Italy")])
+    out_dir = tmp_path / "out"
+    export_cli_main([
+        "--input-xlsx", str(xlsx), "--output-dir", str(out_dir),
+        "--country", "Italy", "--cold-callers", "Jantje",
+        "--no-foreign-hq-only",
+    ])
+    captured = capsys.readouterr()
+    assert "LET OP" not in captured.out
+
+
+def test_test_bucket_output_path_never_collides_with_existing_country_export(tmp_path):
+    # Simulate the Streamlit app's per-country output-folder convention
+    # (lovable_json_exports/<country>/...) and prove a "Test" export can
+    # never land in, or overwrite, an existing country's folder.
+    from lead_prioritizer_batch_app import default_auto_lovable_base_folder
+
+    assert Path(default_auto_lovable_base_folder("Italy")) == Path("lovable_json_exports/Italy")
+    assert Path(default_auto_lovable_base_folder("Test")) == Path("lovable_json_exports/Test")
+
+    base = tmp_path / "lovable_json_exports"
+    italy_src = base / "Italy"
+    test_src = base / "Test"
+    italy_src.mkdir(parents=True)
+    test_src.mkdir(parents=True)
+
+    enriched = [enriched_row(input_country="Italy")]
+    _, italy_out_dir = run_export(italy_src, enriched, export_country="Italy")
+    assert italy_out_dir != test_src  # sanity: distinct base directories
+    italy_manifest_before = (italy_out_dir / "export_manifest.json").read_text(encoding="utf-8")
+
+    _, test_out_dir = run_export(test_src, enriched, export_country="Test")
+
+    assert italy_out_dir != test_out_dir
+    # The pre-existing Italy export is completely untouched by the Test export.
+    assert (italy_out_dir / "export_manifest.json").read_text(encoding="utf-8") == \
+        italy_manifest_before
+    assert (test_out_dir / "export_manifest.json").exists()
+    assert load_list(test_out_dir)[0]["country"] == "Test"
+    assert load_list(italy_out_dir)[0]["country"] == "Italy"
 
 
 def test_ui_payload_and_array_fields(tmp_path):

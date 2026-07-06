@@ -2616,6 +2616,31 @@ def _rows_by_source_index(df: pd.DataFrame) -> dict:
     return grouped
 
 
+def _export_country_mismatch_warning(
+    export_country: str, enriched: pd.DataFrame,
+) -> "str | None":
+    """Loud (non-blocking) signal for a comparison/test export: when
+    ``export_country`` (the bucket label under which this run will be
+    written/shown) does not match the country the rows were actually
+    enriched against (``input_country``, e.g. used for real query/gl-hl
+    localization during the run), print a warning so nobody mistakes a
+    "Test" bucket export for a production update of the real country's
+    bucket. Never a hard block -- comparison runs are the whole point."""
+    if enriched.empty or "input_country" not in enriched.columns:
+        return None
+    source_countries = sorted({
+        c for c in (clean_str(v) for v in enriched["input_country"]) if c
+    })
+    if not source_countries or export_country in source_countries:
+        return None
+    label = ", ".join(source_countries)
+    return (
+        f"LET OP: export-bucket-label {export_country!r} wijkt af van de "
+        f"brondata-landen ({label}) — dit is een vergelijkings-/testexport, "
+        f"geen productie-update van de {label}-bucket."
+    )
+
+
 def _run_metadata_from_summary(run_summary: pd.DataFrame) -> dict:
     if run_summary.empty:
         return {}
@@ -2766,6 +2791,10 @@ def export_workbook_to_lovable_json(
     warnings: list[str] = []
     enriched, evidence, signals, run_summary, deep_dive, sheets_found = _read_workbook(
         input_xlsx, warnings)
+
+    mismatch_warning = _export_country_mismatch_warning(export_country, enriched)
+    if mismatch_warning:
+        warnings.append(mismatch_warning)
 
     evidence_by_index = _rows_by_source_index(evidence)
     signals_by_index = _rows_by_source_index(signals)
