@@ -1222,9 +1222,35 @@ def build_commercial_fit_drivers(
             continue
         signal_name = signal.get("signal_name")
         score = signal.get("score")
-        evidence = _clean_driver_evidence(signal, employee_range, own_domains, company_name)
-        if signal_name in _BUCKETED_SIGNAL_NAMES and (not (score and score > 0) or evidence is None):
+
+        if signal_name in _WEAK_VISIBLE_SIGNAL_NAMES:
+            # Three-tier visibility for the five non-HQ signals (uniform,
+            # employer_branding included). Replaces the old all-or-nothing
+            # `continue` that hid every sub-threshold signal.
+            evidence = _clean_driver_evidence(
+                signal, employee_range, own_domains, company_name)
+            sources, scope = _driver_sources_and_scope(signal, own_domains)
+            if evidence and score and score > 0:
+                driver = {
+                    "label": _natural_label(label),
+                    "strength": _strength_for_score(score),
+                    "evidence": evidence,
+                }
+                _apply_driver_sources(driver, sources, scope)
+            elif _WEAK_TIER_ENABLED and score and score > 0 and sources:
+                driver = {
+                    "label": _natural_label(label),
+                    "strength": "Weak",
+                    "note": _WEAK_TIER_NOTE,
+                }
+                _apply_driver_sources(driver, sources, scope)
+            else:
+                continue  # hidden: no positive score, or nothing to link
+            drivers.append(driver)
             continue
+
+        # foreign_hq / custom signals: unchanged legacy behaviour.
+        evidence = _clean_driver_evidence(signal, employee_range, own_domains, company_name)
         driver = {
             "label": _natural_label(label),
             "strength": _strength_for_score(score),
@@ -1314,6 +1340,71 @@ _REJECTED_NOTES: "dict[str, str]" = {
         "was not used."
     ),
 }
+
+
+# ---------------------------------------------------------------------------
+# Driver visibility tiers (three visible + one hidden) — see
+# VISIBILITY_TIERS_NOTES.md. Two INDEPENDENT axes per driver card:
+#   1. confidence (`strength`): Strong / Moderate / Weak  (+ legacy
+#      "Rejected"/"Not evidenced" only when there is truly nothing to link).
+#   2. source (`source_scope`): "own_domain" vs "external".
+#
+# Confidence axis, from the v3 signal score (2.0 positive / 1.0 weak / 0.0
+# none) and evidence quality:
+#   Strong   : score >= 2 AND clean, domain-relevant curated evidence.
+#   Moderate : score >= 1 AND clean curated evidence (a scored signal is no
+#              longer suppressed to "Rejected" by the evidence check — fix (a)).
+#   Weak     : score  > 0 with >= 1 usable evidence_url but no clean curated
+#              evidence — shown with the link + a "Weak" badge (fix (b)).
+#              Uniform for all five non-HQ signals, employer_branding included;
+#              the link may be a hosted platform (Glassdoor/LinkedIn/...).
+#   hidden   : score <= 0, or no usable evidence_url at all — nothing to show.
+#
+# To revert to the old all-or-nothing behaviour, set _WEAK_TIER_ENABLED = False
+# (weak signals then disappear from the Italy path and show as
+# "Rejected"/"Not evidenced" in the fixed non-Italy path, exactly as before).
+_WEAK_TIER_ENABLED = True
+_DRIVER_STRONG_MIN_SCORE = 2.0
+_DRIVER_MODERATE_MIN_SCORE = 1.0
+# The five non-HQ signals eligible for a Weak-with-link card (no per-signal
+# exception — same keys used for the fixed driver labels above).
+_WEAK_VISIBLE_SIGNAL_NAMES = frozenset(_CURATED_SIGNAL_LABELS.keys())
+_WEAK_TIER_NOTE = (
+    "Evidence was found but is not strong or company-specific enough to confirm "
+    "this signal — shown for manual review with its source link."
+)
+
+
+def _driver_sources_and_scope(
+    signal: dict, own_domains: "set[str] | None",
+) -> "tuple[list, str | None]":
+    """``(evidence_sources, source_scope)`` for a driver card.
+
+    ``evidence_sources`` is the same ``build_evidence_sources`` list used for
+    Strong/Moderate cards (hosted careers-platform URLs like Workday are still
+    dropped; Glassdoor/LinkedIn survive). ``source_scope`` is ``"own_domain"``
+    when at least one shown source sits on the lead's own registrable domain,
+    otherwise ``"external"``; ``None`` when there are no sources at all."""
+    urls = signal.get("evidence_urls") or (
+        [signal["evidence_url"]] if signal.get("evidence_url") else [])
+    sources = build_evidence_sources(
+        urls, own_domains=own_domains, primary_title=signal.get("evidence_title"))
+    if not sources:
+        return [], None
+    own = own_domains or set()
+    scope = "own_domain" if any(s["domain"] in own for s in sources) else "external"
+    return sources, scope
+
+
+def _apply_driver_sources(driver: dict, sources: list, scope: "str | None") -> None:
+    """Attach evidence_source_url/evidence_source_domain/evidence_sources and
+    the source_scope axis to a driver, when present."""
+    if sources:
+        driver["evidence_source_url"] = sources[0]["url"]
+        driver["evidence_source_domain"] = sources[0]["domain"]
+        driver["evidence_sources"] = sources
+    if scope:
+        driver["source_scope"] = scope
 
 
 def build_curated_display_signals(
@@ -1579,16 +1670,25 @@ def build_fixed_commercial_fit_drivers(
             continue
 
         result = classify_curated_evidence(signal, employee_range, own_domains, company_name)
+        sources, scope = _driver_sources_and_scope(signal, own_domains)
         if result["evidence"]:
+            # Strong (score >= 2) or Moderate (score >= 1) with clean evidence.
             driver = {
                 "id": driver_id, "label": label,
                 "strength": _strength_for_score(score),
                 "evidence": result["evidence"], "note": "",
             }
-            evidence_urls = signal.get("evidence_urls") or (
-                [signal["evidence_url"]] if signal.get("evidence_url") else []
-            )
-            _attach_evidence_sources(driver, evidence_urls, signal.get("evidence_title"))
+            _apply_driver_sources(driver, sources, scope)
+            drivers.append(driver)
+        elif _WEAK_TIER_ENABLED and signal_name in _WEAK_VISIBLE_SIGNAL_NAMES and sources:
+            # Fix (a)+(b): a scored signal whose evidence text did not pass the
+            # cleanliness check is shown as Weak-with-link (was "Rejected"),
+            # never silently hidden, so the account manager can judge it.
+            driver = {
+                "id": driver_id, "label": label, "strength": "Weak",
+                "evidence": "", "note": _WEAK_TIER_NOTE,
+            }
+            _apply_driver_sources(driver, sources, scope)
             drivers.append(driver)
         elif result["rejected_reason"]:
             drivers.append({

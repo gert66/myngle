@@ -2449,12 +2449,18 @@ def test_shimano_workday_hosted_case(tmp_path):
     assert "Shimano Inc." in ui["parent_hq_summary"]
     assert "Japan" in ui["parent_hq_summary"]
 
-    # Generic Glassdoor list-page text is not positive employer-branding evidence.
+    # Generic Glassdoor list-page text is not positive employer-branding
+    # evidence, but is no longer hidden: it shows as a Weak driver with its
+    # external source link (account manager judges) — never as clean evidence
+    # and never promoted into positive caller-facing text (asserted below).
     drivers_by_label = {d["label"]: d for d in ui["commercial_fit_drivers"]}
     eb_driver = drivers_by_label["Employer branding or employee satisfaction"]
-    assert eb_driver["strength"] not in ("Strong", "Moderate", "Weak")
+    assert eb_driver["strength"] == "Weak"
     assert eb_driver["evidence"] == ""
     assert eb_driver["note"]
+    assert eb_driver["source_scope"] == "external"
+    assert eb_driver["evidence_source_url"] == \
+        "https://www.glassdoor.com/Best-Places-to-Work-LST_KQ0,25.htm"
 
     visible_text = " ".join([
         ui["why_relevant"] or "", " ".join(ui["what_is_hot"]),
@@ -2531,8 +2537,17 @@ def test_generic_third_party_directory_text_requires_company_mention(tmp_path):
                           export_country="Netherlands", foreign_hq_only=False)
     detail_a = detail_for(out_a, "IGM Resins")
     drivers_a = {d["label"]: d for d in detail_a["ui_payload"]["commercial_fit_drivers"]}
-    assert drivers_a["Employer branding or employee satisfaction"]["strength"] not in (
-        "Strong", "Moderate", "Weak")
+    # Generic directory text that does not mention the company is no longer
+    # hidden: it shows as a Weak driver (external source) for manual review,
+    # but is never promoted into positive caller-facing text.
+    eb_a = drivers_a["Employer branding or employee satisfaction"]
+    assert eb_a["strength"] == "Weak"
+    assert eb_a["source_scope"] == "external"
+    joined_a = " ".join([
+        detail_a["ui_payload"]["why_relevant"] or "",
+        " ".join(detail_a["ui_payload"]["what_is_hot"]),
+    ])
+    assert "workplace culture rankings" not in joined_a
 
     signals_with_mention = [
         {"source_index": 1, "signal_name": "employer_branding", "signal_score": 2,
@@ -2544,8 +2559,9 @@ def test_generic_third_party_directory_text_requires_company_mention(tmp_path):
                           export_country="Netherlands", foreign_hq_only=False)
     detail_b = detail_for(out_b, "IGM Resins")
     drivers_b = {d["label"]: d for d in detail_b["ui_payload"]["commercial_fit_drivers"]}
+    # Company-mentioning directory evidence is still promotable to a positive claim.
     assert drivers_b["Employer branding or employee satisfaction"]["strength"] in (
-        "Strong", "Moderate", "Weak")
+        "Strong", "Moderate")
 
 
 # ---------------------------------------------------------------------------
@@ -3913,3 +3929,119 @@ class TestContentLanguageItalian:
             if s["label"] == FOREIGN_HQ_SIGNAL_LABEL)
         assert foreign_row["evidence"] == (
             "Confirmed foreign parent: Foreign Group, HQ Germany.")
+
+
+# ---------------------------------------------------------------------------
+# Three-tier driver visibility: Strong / Moderate / Weak + hidden, plus the
+# independent own_domain vs external source axis — see VISIBILITY_TIERS_NOTES.md.
+# ---------------------------------------------------------------------------
+
+_RAW_DUMP_EVIDENCE = "___THE NETHERLANDS\n___Austria\n___China\n___Brazil"
+
+
+def _drivers_by_label(out_dir, company="Acme Brasil"):
+    return {d["label"]: d
+            for d in detail_for(out_dir, company)["ui_payload"]["commercial_fit_drivers"]}
+
+
+def test_weak_tier_shown_with_own_domain_link(tmp_path):
+    # score 1 whose evidence text fails the cleanliness check, but the URL is
+    # on the company's own domain -> Weak card with link and own_domain scope
+    # (previously "Rejected"/omitted).
+    signals = [
+        {"source_index": 1, "signal_name": "icp_keyword_match", "signal_score": 1,
+         "evidence_quote": _RAW_DUMP_EVIDENCE,
+         "evidence_url": "https://acme.com/careers"},
+    ]
+    _, out_dir = run_export(tmp_path, [enriched_row(domain="acme.com")], signals=signals,
+                            export_country="Brazil", foreign_hq_only=False)
+    card = _drivers_by_label(out_dir)["Explicit learning and development"]
+    assert card["strength"] == "Weak"
+    assert card["source_scope"] == "own_domain"
+    assert card["evidence_source_url"] == "https://acme.com/careers"
+    assert card["evidence"] == ""
+    assert card["note"]
+
+
+def test_weak_tier_external_source_badge(tmp_path):
+    # employer_branding is included (no exception); a hosted Glassdoor link
+    # still shows as Weak, flagged external.
+    signals = [
+        {"source_index": 1, "signal_name": "employer_branding", "signal_score": 1,
+         "evidence_quote": _RAW_DUMP_EVIDENCE,
+         "evidence_url": "https://www.glassdoor.com/Reviews/Acme.htm"},
+    ]
+    _, out_dir = run_export(tmp_path, [enriched_row(domain="acme.com")], signals=signals,
+                            export_country="Brazil", foreign_hq_only=False)
+    card = _drivers_by_label(out_dir)["Employer branding or employee satisfaction"]
+    assert card["strength"] == "Weak"
+    assert card["source_scope"] == "external"
+    assert card["evidence_source_url"] == "https://www.glassdoor.com/Reviews/Acme.htm"
+
+
+def test_score_zero_stays_hidden_not_weak(tmp_path):
+    signals = [
+        {"source_index": 1, "signal_name": "icp_keyword_match", "signal_score": 0,
+         "evidence_quote": "Some unrelated text.", "evidence_url": "https://acme.com/x"},
+    ]
+    _, out_dir = run_export(tmp_path, [enriched_row(domain="acme.com")], signals=signals,
+                            export_country="Brazil", foreign_hq_only=False)
+    assert _drivers_by_label(out_dir)["Explicit learning and development"]["strength"] \
+        == "Not evidenced"
+
+
+def test_weak_needs_a_url_else_not_promoted(tmp_path):
+    # score 1, rejected evidence, but NO evidence_url -> nothing to link ->
+    # stays Rejected/Not evidenced, never a Weak card out of thin air.
+    signals = [
+        {"source_index": 1, "signal_name": "icp_keyword_match", "signal_score": 1,
+         "evidence_quote": _RAW_DUMP_EVIDENCE},
+    ]
+    _, out_dir = run_export(tmp_path, [enriched_row(domain="acme.com")], signals=signals,
+                            export_country="Brazil", foreign_hq_only=False)
+    assert _drivers_by_label(out_dir)["Explicit learning and development"]["strength"] \
+        in ("Rejected", "Not evidenced")
+
+
+def test_confidence_and_source_axes_are_independent(tmp_path):
+    # Strong (clean own-domain evidence) still reports source_scope separately.
+    signals = [
+        {"source_index": 1, "signal_name": "international_profile", "signal_score": 2,
+         "evidence_quote": "Acme Brasil operates internationally across many countries and export markets.",
+         "evidence_url": "https://acme.com/about"},
+    ]
+    _, out_dir = run_export(tmp_path, [enriched_row(domain="acme.com")], signals=signals,
+                            export_country="Brazil", foreign_hq_only=False)
+    card = _drivers_by_label(out_dir)["International business context"]
+    assert card["strength"] == "Strong"
+    assert card["source_scope"] == "own_domain"
+
+
+def test_italy_weak_signal_now_visible_with_link(tmp_path):
+    # Italy path previously omitted every sub-threshold bucketed signal; it now
+    # shows as Weak with its link.
+    signals = [
+        {"source_index": 1, "signal_name": "international_profile", "signal_score": 1,
+         "evidence_quote": _RAW_DUMP_EVIDENCE,
+         "evidence_url": "https://acme.com/about"},
+    ]
+    _, out_dir = run_export(tmp_path, [enriched_row(domain="acme.com")], signals=signals,
+                            export_country="Italy", content_language="Italian",
+                            foreign_hq_only=False)
+    drivers = detail_for(out_dir, "Acme Brasil")["ui_payload"]["commercial_fit_drivers"]
+    intl = [d for d in drivers if "nternational" in d["label"]]
+    assert intl, "international driver should be present, not omitted"
+    assert intl[0]["strength"] == "Weak"
+    assert intl[0]["evidence_source_url"] == "https://acme.com/about"
+
+
+def test_italy_score_zero_still_omitted(tmp_path):
+    signals = [
+        {"source_index": 1, "signal_name": "international_profile", "signal_score": 0,
+         "evidence_quote": "x", "evidence_url": "https://acme.com/about"},
+    ]
+    _, out_dir = run_export(tmp_path, [enriched_row(domain="acme.com")], signals=signals,
+                            export_country="Italy", content_language="Italian",
+                            foreign_hq_only=False)
+    drivers = detail_for(out_dir, "Acme Brasil")["ui_payload"]["commercial_fit_drivers"]
+    assert not any("nternational business" in d["label"] for d in drivers)
