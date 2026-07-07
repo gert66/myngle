@@ -79,11 +79,17 @@ class TestMissingSourceUrl:
 # ---------------------------------------------------------------------------
 
 class TestBlockedSocialSource:
-    def test_linkedin_is_blocked(self):
-        assert _is_blocked_public_source("https://www.linkedin.com/company/acme")
+    def test_linkedin_is_not_blocked(self):
+        # Deliberately removed from _BLOCKED_SOURCE_DOMAINS in a later commit
+        # ("Remove 'linkedin.com' from blocked source domains") -- documented
+        # here so the exception is visible, not silently untested.
+        assert not _is_blocked_public_source("https://www.linkedin.com/company/acme")
 
     def test_facebook_is_blocked(self):
         assert _is_blocked_public_source("https://facebook.com/acme")
+
+    def test_glassdoor_is_blocked(self):
+        assert _is_blocked_public_source("https://www.glassdoor.com/acme")
 
     def test_hosted_ats_platform_is_blocked(self):
         # Reuses the existing hosted-careers-platform guard from the rest
@@ -93,11 +99,11 @@ class TestBlockedSocialSource:
     def test_ordinary_public_source_is_not_blocked(self):
         assert not _is_blocked_public_source("https://kvk.nl/zoeken")
 
-    def test_linkedin_source_returns_no_evidence_and_makes_no_call(self):
+    def test_glassdoor_source_returns_no_evidence_and_makes_no_call(self):
         with patch("deep_dive_runner.requests.post") as post:
             out = collect_public_source_signal_evidence(
                 "Acme BV", "acme.com", "vacancies",
-                "https://www.linkedin.com/company/acme", "fc-key")
+                "https://www.glassdoor.com/acme", "fc-key")
         assert out == []
         post.assert_not_called()
 
