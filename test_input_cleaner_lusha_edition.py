@@ -450,6 +450,58 @@ class TestSortAndBatchAppColumns:
 # Output filename / path-mode read-write
 # ---------------------------------------------------------------------------
 
+class TestCleanPathInput:
+    def test_strips_surrounding_double_quotes(self):
+        raw = '"C:\\Users\\gert\\Switzerland.xlsx"'
+        assert m._clean_path_input(raw) == "C:\\Users\\gert\\Switzerland.xlsx"
+
+    def test_strips_surrounding_single_quotes(self):
+        raw = "'C:\\Users\\gert\\Switzerland.xlsx'"
+        assert m._clean_path_input(raw) == "C:\\Users\\gert\\Switzerland.xlsx"
+
+    def test_strips_surrounding_whitespace(self):
+        assert m._clean_path_input("   C:\\data\\Switzerland.xlsx   ") == \
+            "C:\\data\\Switzerland.xlsx"
+
+    def test_strips_whitespace_and_quotes_together(self):
+        raw = '   "C:\\data\\Switzerland.xlsx"   '
+        assert m._clean_path_input(raw) == "C:\\data\\Switzerland.xlsx"
+
+    def test_strips_nested_quotes(self):
+        raw = '\'"C:\\data\\Switzerland.xlsx"\''
+        assert m._clean_path_input(raw) == "C:\\data\\Switzerland.xlsx"
+
+    def test_forward_slashes_untouched(self):
+        assert m._clean_path_input("/home/user/Switzerland.xlsx") == \
+            "/home/user/Switzerland.xlsx"
+
+    def test_blank_and_none_return_empty_string(self):
+        assert m._clean_path_input("") == ""
+        assert m._clean_path_input("   ") == ""
+        assert m._clean_path_input(None) == ""
+
+
+class TestResolveInputMode:
+    def test_path_wins_when_only_path_filled(self):
+        assert m.resolve_input_mode("C:\\data\\Switzerland.xlsx", False) == "path"
+
+    def test_upload_wins_when_only_upload_present(self):
+        assert m.resolve_input_mode("", True) == "upload"
+
+    def test_path_wins_when_both_filled(self):
+        assert m.resolve_input_mode("C:\\data\\Switzerland.xlsx", True) == "path"
+
+    def test_quoted_path_still_wins_over_upload(self):
+        assert m.resolve_input_mode('"C:\\data\\Switzerland.xlsx"', True) == "path"
+
+    def test_none_when_neither_filled(self):
+        assert m.resolve_input_mode("", False) == "none"
+        assert m.resolve_input_mode("   ", False) == "none"
+
+    def test_whitespace_only_path_does_not_win_over_upload(self):
+        assert m.resolve_input_mode("   ", True) == "upload"
+
+
 class TestOutputFilename:
     def test_xlsx_source_gets_cleaned_suffix(self):
         assert m.output_filename_for("Switzerland.xlsx") == "Switzerland_cleaned.xlsx"
@@ -508,6 +560,32 @@ class TestLoadDataframeFromPath:
         df, err = m.load_dataframe_from_path(src)
         assert df is None
         assert "niet ondersteund" in err.lower()
+
+    def test_quoted_and_spaced_raw_input_is_cleaned_before_loading(self, tmp_path):
+        src = tmp_path / "Switzerland.xlsx"
+        pd.DataFrame({
+            "Company Name": ["Acme AG"],
+            "Company Domain": ["acme.ch"],
+        }).to_excel(src, index=False)
+
+        raw_input = f'   "{src}"   '  # simulates Windows "Copy as path"
+        cleaned = m._clean_path_input(raw_input)
+        assert cleaned == str(src)
+
+        df, err = m.load_dataframe_from_path(cleaned)
+        assert err == ""
+        assert df is not None
+        assert list(df["Company Name"]) == ["Acme AG"]
+
+    def test_error_message_shows_the_cleaned_path_not_the_raw_quoted_one(self, tmp_path):
+        missing = tmp_path / "does_not_exist.xlsx"
+        raw_input = f'  "{missing}"  '
+        cleaned = m._clean_path_input(raw_input)
+
+        df, err = m.load_dataframe_from_path(cleaned)
+        assert df is None
+        assert str(missing) in err
+        assert '"' not in err
 
     def test_directory_path_returns_clear_error_no_crash(self, tmp_path):
         df, err = m.load_dataframe_from_path(tmp_path)

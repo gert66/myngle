@@ -688,6 +688,29 @@ def write_output_next_to_source(source_path: "Path | str", excel_bytes: bytes) -
     return out_path, overwritten
 
 
+def _clean_path_input(raw: str) -> str:
+    """Strips surrounding whitespace and matching quote characters from a
+    pasted file path. Windows Explorer's "Copy as path" wraps the result in
+    double quotes (``"C:\\...\\Switzerland.xlsx"``); this also tolerates
+    single quotes and repeated/nested quoting. Never raises."""
+    s = str(raw or "").strip()
+    while len(s) >= 2 and s[0] in ("'", '"') and s[-1] == s[0]:
+        s = s[1:-1].strip()
+    return s
+
+
+def resolve_input_mode(manual_path_raw: str, uploaded_present: bool) -> str:
+    """Decides which input source wins: ``"path"``, ``"upload"``, or
+    ``"none"``. The path field always wins when filled, even if a browser
+    upload is also present — pure decision logic kept separate from
+    Streamlit I/O so the priority rule is independently testable."""
+    if _clean_path_input(manual_path_raw):
+        return "path"
+    if uploaded_present:
+        return "upload"
+    return "none"
+
+
 def load_dataframe_from_path(path: "Path | str") -> "tuple[pd.DataFrame | None, str]":
     """Reads a Lusha export directly from a local filesystem path. Returns
     ``(dataframe_or_None, error_message)`` — ``error_message`` is ``""`` on
@@ -769,44 +792,58 @@ def main():
             if manual_key.strip():
                 anthropic_key = manual_key.strip()
 
-    uploaded = st.file_uploader(
-        "Upload Lusha company export (CSV or Excel .xlsx)",
-        type=["csv", "xlsx"], key="lusha_upload",
-    )
     manual_path_raw = st.text_input(
-        "Of: volledig pad naar het Lusha-bestand op deze computer",
+        "Volledig pad naar het Lusha-bestand op deze computer",
         value="", key="lusha_path",
         placeholder=r"C:\Users\...\Switzerland.xlsx",
-        help="Een browser-upload onthult het oorspronkelijke bestandspad "
-             "niet. Vul hier een geldig pad in om het bestand rechtstreeks "
-             "van schijf te lezen — het resultaat wordt dan automatisch "
-             "weggeschreven naast dit bestand. Heeft voorrang boven de "
-             "upload hierboven wanneer beide zijn ingevuld.")
+    )
+    st.caption(
+        "Tip: Shift + rechtermuisklik op het bestand in Verkenner → "
+        "'Als pad kopiëren', en plak het hier. Het resultaat "
+        "(`<naam>_cleaned.xlsx`) wordt dan automatisch naast het "
+        "bronbestand weggeschreven.")
+
+    with st.expander("Of: upload via de browser", expanded=False):
+        uploaded = st.file_uploader(
+            "Upload Lusha company export (CSV or Excel .xlsx)",
+            type=["csv", "xlsx"], key="lusha_upload",
+        )
+        st.caption(
+            "Bij een browser-upload is het oorspronkelijke bestandspad "
+            "onbekend, dus automatisch wegschrijven naast de bron is niet "
+            "mogelijk — alleen de downloadknop (naar de Downloads-map) is "
+            "dan beschikbaar.")
 
     df = None
     source_name = ""
     source_path: "Path | None" = None
-    manual_path = manual_path_raw.strip().strip('"').strip("'")
+    manual_path = _clean_path_input(manual_path_raw)
+    input_mode = resolve_input_mode(manual_path_raw, uploaded is not None)
 
-    if manual_path:
+    if input_mode == "path":
+        if uploaded is not None:
+            st.info(
+                "Zowel een pad als een browser-upload zijn ingevuld — het "
+                "pad heeft voorrang; de upload wordt genegeerd.")
         source_path = Path(manual_path)
         df, path_error = load_dataframe_from_path(source_path)
         if path_error:
             st.error(path_error)
             return
         source_name = source_path.name
-    elif uploaded is not None:
+    elif input_mode == "upload":
         df = _load_file(uploaded)
         if df is None:
             return
         source_name = uploaded.name
     else:
         st.info(
-            "Upload a Lusha company export, or paste a full file path. "
-            "Expected columns include **Company Name**, **Company Domain**, "
-            "Company Description, Company Number of Employees, "
-            "Company Revenue, Company Main Industry, Company Sub Industry, "
-            "Company Country, Company Intent Topics, Company linkedin URL.")
+            "Vul een volledig bestandspad in, of upload een Lusha company "
+            "export via de browser. Expected columns include **Company "
+            "Name**, **Company Domain**, Company Description, Company "
+            "Number of Employees, Company Revenue, Company Main Industry, "
+            "Company Sub Industry, Company Country, Company Intent Topics, "
+            "Company linkedin URL.")
         return
 
     st.success(f"Loaded {len(df)} rows, {len(df.columns)} columns from "
