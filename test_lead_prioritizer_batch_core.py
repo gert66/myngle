@@ -1658,6 +1658,140 @@ class TestForeignHQOnlyMode:
 
 
 # ---------------------------------------------------------------------------
+# BatchRunConfig.gate_full_enrichment_on_foreign_hq: opt-in gating INSIDE the
+# regular run_batch_dataframe path, sharing _run_gated_full_enrichment with
+# run_batch_foreign_hq_only. The extraction itself is regression-tested by
+# every existing TestForeignHQOnlyMode / TestConfirmedForeignHQGate /
+# TestNonEnglishForeignHqOnlyMode* / TestExistingForeignHQOnlyModeUnaffected
+# test above still passing unchanged (run_batch_foreign_hq_only now calls the
+# shared helper internally instead of duplicating the loop).
+# ---------------------------------------------------------------------------
+
+class TestGatedFullEnrichmentInRunBatchDataframe:
+    _df = pd.DataFrame({
+        "company": ["Confirmed Foreign Co", "Local Domestic Co"],
+        "domain": ["confirmed.com.br", "local.com.br"],
+    })
+
+    def _cfg(self, **overrides):
+        base = dict(
+            company_name_column="company", domain_column="domain",
+            run_mode="full", row_limit=2, default_input_country="Brazil",
+        )
+        base.update(overrides)
+        return BatchRunConfig(**base)
+
+    def test_default_is_off(self):
+        assert BatchRunConfig(
+            company_name_column="company", domain_column="domain",
+        ).gate_full_enrichment_on_foreign_hq is False
+
+    def test_gate_off_is_byte_identical_to_pre_existing_behavior(self):
+        # HARD RULE: gate off (the default) must be 100% the existing
+        # per-row path -- no enrichment_skipped/gated_* columns anywhere,
+        # every row enriched directly regardless of HQ score.
+        fake = _fake_prioritize_for_foreign_hq(
+            {"Confirmed Foreign Co": 3.0, "Local Domestic Co": 0.0})
+        cfg = self._cfg(gate_full_enrichment_on_foreign_hq=False)
+        with patch("lead_prioritizer_batch_core.prioritize_single_lead", side_effect=fake):
+            out = run_batch_dataframe(self._df, cfg, "S", "A")
+        assert "enrichment_skipped" not in out["enriched_leads"].columns
+        assert "gated_full_enrichment_attempted_count" not in out["run_summary"].columns
+        assert "gated_full_enrichment_skipped_count" not in out["run_summary"].columns
+        assert "gated_estimated_serper_calls_saved" not in out["run_summary"].columns
+        rows = out["enriched_leads"].set_index("company_name")
+        assert rows.loc["Local Domestic Co", "final_commercial_fit_score"] == 99.0
+        assert rows.loc["Confirmed Foreign Co", "final_commercial_fit_score"] == 99.0
+
+    def test_gate_on_skips_non_confirmed_rows(self):
+        fake = _fake_prioritize_for_foreign_hq(
+            {"Confirmed Foreign Co": 3.0, "Local Domestic Co": 0.0})
+        cfg = self._cfg(gate_full_enrichment_on_foreign_hq=True)
+        with patch("lead_prioritizer_batch_core.prioritize_single_lead", side_effect=fake):
+            out = run_batch_dataframe(self._df, cfg, "S", "A")
+        rows = out["enriched_leads"].set_index("company_name")
+        assert rows.loc["Local Domestic Co", "enrichment_skipped"] == True  # noqa: E712
+        assert rows.loc["Local Domestic Co", "enrichment_skip_reason"] == "Not confirmed foreign HQ"
+        assert pd.isna(rows.loc["Local Domestic Co", "final_commercial_fit_score"])
+
+    def test_gate_on_enriches_confirmed_rows(self):
+        fake = _fake_prioritize_for_foreign_hq(
+            {"Confirmed Foreign Co": 3.0, "Local Domestic Co": 0.0})
+        cfg = self._cfg(gate_full_enrichment_on_foreign_hq=True)
+        with patch("lead_prioritizer_batch_core.prioritize_single_lead", side_effect=fake):
+            out = run_batch_dataframe(self._df, cfg, "S", "A")
+        rows = out["enriched_leads"].set_index("company_name")
+        assert rows.loc["Confirmed Foreign Co", "enrichment_skipped"] == False  # noqa: E712
+        assert rows.loc["Confirmed Foreign Co", "enrichment_skip_reason"] == ""
+        assert rows.loc["Confirmed Foreign Co", "final_commercial_fit_score"] == 99.0
+
+    def test_gate_on_run_summary_counts(self):
+        fake = _fake_prioritize_for_foreign_hq(
+            {"Confirmed Foreign Co": 3.0, "Local Domestic Co": 0.0})
+        cfg = self._cfg(gate_full_enrichment_on_foreign_hq=True)
+        with patch("lead_prioritizer_batch_core.prioritize_single_lead", side_effect=fake):
+            out = run_batch_dataframe(self._df, cfg, "S", "A")
+        summary = out["run_summary"].iloc[0].to_dict()
+        assert summary["gated_full_enrichment_attempted_count"] == 1
+        assert summary["gated_full_enrichment_skipped_count"] == 1
+        # skipped_rows * 4 -- the 4 extra non-HQ Serper calls a full v2
+        # enrichment would otherwise have made per row.
+        assert summary["gated_estimated_serper_calls_saved"] == 4
+
+    def test_gate_on_output_shape_matches_run_batch_dataframe_contract(self):
+        # deep_dive key is always present, matching run_batch_dataframe's own
+        # contract (unlike run_batch_foreign_hq_only, which omits it).
+        fake = _fake_prioritize_for_foreign_hq(
+            {"Confirmed Foreign Co": 3.0, "Local Domestic Co": 0.0})
+        cfg = self._cfg(gate_full_enrichment_on_foreign_hq=True)
+        with patch("lead_prioritizer_batch_core.prioritize_single_lead", side_effect=fake):
+            out = run_batch_dataframe(self._df, cfg, "S", "A")
+        assert set(out.keys()) == {"enriched_leads", "evidence", "signals", "deep_dive", "run_summary"}
+        assert len(out["deep_dive"]) == 0  # deep_dive off by default
+
+    def test_no_infinite_recursion_when_gate_on(self):
+        # Regression guard: Phase 1's internal hq_only sub-call must force
+        # gate_full_enrichment_on_foreign_hq=False, or run_batch_dataframe
+        # would re-enter its own gated branch forever.
+        fake = _fake_prioritize_for_foreign_hq(
+            {"Confirmed Foreign Co": 3.0, "Local Domestic Co": 0.0})
+        cfg = self._cfg(gate_full_enrichment_on_foreign_hq=True)
+        with patch("lead_prioritizer_batch_core.prioritize_single_lead", side_effect=fake):
+            out = run_batch_dataframe(self._df, cfg, "S", "A")
+        assert len(out["enriched_leads"]) == 2
+
+    def test_gate_on_reuses_full_ai_kwargs_not_a_stripped_down_call(self):
+        # Unlike run_batch_foreign_hq_only's minimal run_full_v2_pipeline=True
+        # call, the gated run_batch_dataframe path must pass the SAME
+        # ai_kwargs/flags an ungated call would build for every row (e.g.
+        # compose_caller_content_flag), so nothing already supported is
+        # silently dropped just because gating is on.
+        seen_kwargs = {}
+
+        def _fake(lead_input, **kwargs):
+            if kwargs.get("run_full_v2_pipeline"):
+                seen_kwargs.update(kwargs)
+                return _sample_result(
+                    company_name=lead_input.company_name, domain=lead_input.domain,
+                    input_country=lead_input.input_country or "Brazil",
+                    sig_foreign_hq_score_for_next_scoring=3.0,
+                    final_commercial_fit_score=99.0,
+                )
+            return _sample_result(
+                company_name=lead_input.company_name, domain=lead_input.domain,
+                input_country=lead_input.input_country or "Brazil",
+                sig_foreign_hq_score_for_next_scoring=3.0,
+                final_commercial_fit_score=None, evidence_items=[], signals=[],
+            )
+
+        cfg = self._cfg(gate_full_enrichment_on_foreign_hq=True,
+                        compose_caller_content=True)
+        with patch("lead_prioritizer_batch_core.prioritize_single_lead", side_effect=_fake):
+            run_batch_dataframe(self._df, cfg, "S", "A")
+        assert seen_kwargs.get("compose_caller_content_flag") is True
+
+
+# ---------------------------------------------------------------------------
 # Parallel chunk processing
 # ---------------------------------------------------------------------------
 
@@ -1884,6 +2018,37 @@ class TestParallelBatch:
         assert len(saved) == 3
         assert sorted(rep["chunk_index"] for rep, _ in saved) == [1, 2, 3]
         assert all("enriched_leads" in tab for _, tab in saved)
+
+
+class TestGateFullEnrichmentOnForeignHqParallelConsistency:
+    """Step 3: gate_full_enrichment_on_foreign_hq needs no extra plumbing in
+    run_batch_dataframe_parallel / run_single_batch_unit for the regular run
+    modes -- both just pass the same BatchRunConfig through to
+    run_batch_dataframe, which branches on the flag internally."""
+
+    _df = pd.DataFrame({
+        "company": ["Confirmed Foreign Co", "Local Domestic Co"],
+        "domain": ["confirmed.com.br", "local.com.br"],
+    })
+    _cfg = BatchRunConfig(
+        company_name_column="company", domain_column="domain",
+        run_mode="full", row_limit=2, default_input_country="Brazil",
+        gate_full_enrichment_on_foreign_hq=True,
+    )
+
+    def test_parallel_path_applies_the_same_gate_as_sequential(self):
+        fake = _fake_prioritize_for_foreign_hq(
+            {"Confirmed Foreign Co": 3.0, "Local Domestic Co": 0.0})
+        with patch("lead_prioritizer_batch_core.prioritize_single_lead", side_effect=fake):
+            seq = run_batch_dataframe(self._df, self._cfg, "S", "A")
+            par = run_batch_dataframe_parallel(self._df, self._cfg, "S", "A", workers=1)
+        seq_rows = seq["enriched_leads"].set_index("company_name")
+        par_rows = par["enriched_leads"].set_index("company_name")
+        for name in ("Confirmed Foreign Co", "Local Domestic Co"):
+            assert par_rows.loc[name, "enrichment_skipped"] == \
+                seq_rows.loc[name, "enrichment_skipped"]
+            assert par_rows.loc[name, "enrichment_skip_reason"] == \
+                seq_rows.loc[name, "enrichment_skip_reason"]
 
 
 # ---------------------------------------------------------------------------

@@ -83,6 +83,17 @@ NON_ENGLISH_FOREIGN_HQ_ONLY_PHASE_LABELS = {
     3: "Full enrichment for confirmed non-English foreign-HQ leads",
 }
 
+# Phase labels for the opt-in foreign-HQ gate INSIDE the regular
+# run_batch_dataframe (BatchRunConfig.gate_full_enrichment_on_foreign_hq).
+# Phase 2 never actually fires on this path (C5 is not wired into it yet —
+# see _run_batch_dataframe_gated); kept as a 3-entry dict purely for a
+# consistent shape with the other phase-based progress payloads above.
+GATED_FULL_ENRICHMENT_PHASE_LABELS = {
+    1: "HQ screening",
+    2: "C5 adjudication (not used in this path yet)",
+    3: "Full enrichment for confirmed foreign-HQ leads",
+}
+
 
 @dataclass
 class BatchRunConfig:
@@ -146,6 +157,18 @@ class BatchRunConfig:
     public_source_base_url: str = ""
     public_source_label: str = ""
     public_source_max_pages: int = 3
+    # Opt-in foreign-HQ gating inside the REGULAR run_batch_dataframe path —
+    # explicit opt-in, off by default, and INDEPENDENT of every flag above.
+    # Reuses the exact two-phase pattern already proven in
+    # run_batch_foreign_hq_only (cheap HQ-only screening for every row, full
+    # v2 enrichment only for rows confirmed foreign-HQ; skipped rows are kept
+    # with enrichment_skipped=True + foreign_hq_skip_reason) via the shared
+    # _run_gated_full_enrichment helper, but without switching run_mode to a
+    # separate dedicated mode. Default False means run_batch_dataframe's
+    # existing behavior is completely unchanged for every current caller. C5
+    # is not supported in this gated path yet (run_batch_dataframe has never
+    # supported C5) — see _run_batch_dataframe_gated.
+    gate_full_enrichment_on_foreign_hq: bool = False
 
 
 # ---------------------------------------------------------------------------
@@ -493,7 +516,27 @@ def run_batch_dataframe(
     ``None`` for backward compatibility (the CLI and existing callers are
     unaffected).  If the callback raises, the exception is swallowed so it can
     never break enrichment.
+
+    ``config.gate_full_enrichment_on_foreign_hq`` (default ``False``) is an
+    explicit opt-in that reuses the two-phase gating pattern already proven in
+    ``run_batch_foreign_hq_only`` (shared via ``_run_gated_full_enrichment``)
+    INSIDE this regular batch path, instead of requiring a separate dedicated
+    mode: cheap HQ-only screening runs for every row first (1 Serper call per
+    company), and the full per-row v2 pipeline then runs ONLY for rows
+    confirmed foreign-HQ (see ``is_confirmed_foreign_hq_for_full_enrichment``).
+    Skipped rows are kept in the output with ``enrichment_skipped=True`` and a
+    ``foreign_hq_skip_reason``, exactly like ``run_batch_foreign_hq_only``. C5
+    is not wired into this path yet (``run_batch_dataframe`` has never
+    supported C5) — a documented limitation (see
+    ``_run_batch_dataframe_gated``), not a silent gap. Default ``False`` means
+    every existing caller's behavior is completely unchanged.
     """
+    if config.gate_full_enrichment_on_foreign_hq:
+        return _run_batch_dataframe_gated(
+            df, config, serper_api_key, anthropic_api_key,
+            progress_callback, openai_api_key, firecrawl_api_key,
+        )
+
     flags = resolve_pipeline_flags(config.run_mode)
     # Step 3 AI caller-content composition is independent of run_mode — an
     # explicit opt-in on top of whatever the mode already enables.
@@ -992,7 +1035,12 @@ def _run_hq_and_c5_screening(
             progress_callback, phase_labels, 2,
             payload.get("c5_processed"), payload.get("c5_selected"), payload)
 
-    hq_config = replace(config, run_mode="hq_only")
+    # gate_full_enrichment_on_foreign_hq is forced off for this Phase-1 sub-
+    # call regardless of the caller's config: Phase 1 is always a plain
+    # hq_only pass, and a caller whose own config has the gate on (the new
+    # run_batch_dataframe opt-in path routes back through here) must never
+    # have run_batch_dataframe re-enter its own gated branch recursively.
+    hq_config = replace(config, run_mode="hq_only", gate_full_enrichment_on_foreign_hq=False)
     hq_tables = run_batch_dataframe(
         df, hq_config, serper_api_key, anthropic_api_key,
         progress_callback=_phase1_cb if progress_callback is not None else None,
@@ -1062,6 +1110,271 @@ def foreign_hq_skip_reason(row: dict, c5_enabled: bool) -> str:
     return "Not confirmed foreign HQ"
 
 
+def _run_gated_full_enrichment(
+    rows: list[dict],
+    config: "BatchRunConfig",
+    serper_api_key: str,
+    anthropic_api_key: str,
+    *,
+    c5_enabled: bool,
+    prioritize_kwargs: dict,
+    phase_labels: dict,
+    progress_callback: Optional[Callable[[dict], None]] = None,
+    openai_api_key: str = "",
+    firecrawl_api_key: str = "",
+    run_deep_dive_step: bool = False,
+) -> dict:
+    """Phase 3 of the foreign-HQ gating pattern: per-row eligibility check,
+    then full enrichment for eligible rows / a skip marker for the rest.
+
+    Extracted from ``run_batch_foreign_hq_only`` so that mode and the opt-in
+    ``BatchRunConfig.gate_full_enrichment_on_foreign_hq`` gate inside the
+    regular ``run_batch_dataframe`` share ONE implementation of "cheap HQ
+    screening for everyone (already done by the caller via
+    ``_run_hq_and_c5_screening`` before this runs), expensive full
+    enrichment only for confirmed-foreign-HQ rows, skip the rest with a
+    reason" — no duplicated eligibility/skip/progress logic between the two
+    callers.
+
+    ``rows`` is the Enriched-Leads dict list AFTER Phase 1 (HQ screening) and
+    optional Phase 2 (C5) have already run — this function only performs the
+    eligibility check and Phase 3 itself; it never re-runs HQ/C4/C5.
+
+    ``prioritize_kwargs`` is merged into every eligible row's
+    ``prioritize_single_lead(...)`` call, on top of the base
+    ``LeadInput``/``serper_api_key``/``anthropic_api_key``/
+    ``default_input_country``. This is what lets each caller control exactly
+    which optional v2 steps run for confirmed rows without the helper
+    hardcoding one caller's flag set: ``run_batch_foreign_hq_only`` passes
+    only ``{"run_full_v2_pipeline": True}`` (matching its existing, tested,
+    minimal behavior exactly), while the new gated ``run_batch_dataframe``
+    path passes its full per-row ``ai_kwargs``/``flags`` dict so nothing that
+    path already supports (compose_caller_content, rich_icp_context, AI
+    signal scoring, Public Source Signal Enrichment, ...) is silently dropped
+    just because gating was turned on.
+
+    ``run_deep_dive_step`` (default ``False``) additionally runs Deep Dive
+    after scoring for eligible rows that clear ``should_run_deep_dive``. Kept
+    as an explicit parameter — never read from ``config.deep_dive`` directly
+    — so ``run_batch_foreign_hq_only``, which has never supported Deep Dive,
+    keeps behaving exactly as before regardless of what a caller's config
+    happens to contain.
+
+    Returns a dict with ``out_rows``, ``evidence_rows``, ``signal_rows``,
+    ``deep_dive_rows`` (lists of dicts) and ``attempted``/``skipped``/
+    ``confirmed``/``total_confirmed``/``p3_success``/``p3_error`` (ints) —
+    callers build their own ``enriched_leads``/``run_summary`` DataFrames
+    from these, since the exact run_summary column names differ between
+    ``run_batch_foreign_hq_only`` (its established, tested contract) and the
+    new gated path (see ``_run_batch_dataframe_gated``).
+    """
+    out_rows: list[dict] = []
+    evidence_rows: list[dict] = []
+    signal_rows: list[dict] = []
+    deep_dive_rows: list[dict] = []
+    attempted = skipped = confirmed = 0
+    p3_success = p3_error = 0
+
+    # Eligibility precomputed so progress can report a fixed phase-3 total.
+    confirmed_flags = [
+        is_confirmed_foreign_hq_for_full_enrichment(r, c5_enabled=c5_enabled)
+        for r in rows
+    ]
+    total_confirmed = sum(confirmed_flags)
+
+    for row, is_confirmed in zip(rows, confirmed_flags):
+        if not is_confirmed:
+            out_row = dict(row)
+            out_row["enrichment_skipped"] = True
+            out_row["enrichment_skip_reason"] = foreign_hq_skip_reason(row, c5_enabled)
+            out_row["full_enrichment_gate_reason"] = ""
+            out_rows.append(out_row)
+            skipped += 1
+            continue
+
+        confirmed += 1
+        attempted += 1
+        if _c5_score(row.get("sig_foreign_hq_score_for_next_scoring")) == 3.0:
+            gate_reason = "Confirmed foreign HQ (final HQ score 3)"
+        else:
+            gate_reason = "Confirmed by C5 foreign-parent adjudication"
+        company = str(row.get(config.company_name_column, "") or "").strip()
+        domain = str(row.get(config.domain_column, "") or "").strip() or None
+        country = None
+        if config.input_country_column:
+            country = str(row.get(config.input_country_column, "") or "").strip() or None
+        source_index = row.get("source_index")
+
+        result = None
+        try:
+            result = prioritize_single_lead(
+                LeadInput(company_name=company, domain=domain, input_country=country),
+                serper_api_key=serper_api_key,
+                anthropic_api_key=anthropic_api_key,
+                default_input_country=config.default_input_country,
+                **prioritize_kwargs,
+            )
+            out_row = flatten_result_for_excel(
+                result, row, source_index, True, "", config.include_raw_ai_json,
+            )
+            evidence_rows.extend(flatten_evidence_for_excel(result, source_index))
+            signal_rows.extend(flatten_signals_for_excel(result, source_index))
+            p3_success += 1
+        except Exception as exc:  # per-row isolation, matching run_batch_dataframe
+            out_row = dict(row)
+            out_row["run_success"] = False
+            out_row["run_error"] = f"{type(exc).__name__}: {str(exc)[:300]}"
+            p3_error += 1
+
+        # ── Deep Dive (opt-in, mirrors run_batch_dataframe's own placement:
+        # AFTER scoring, never feeds back into evidence_items/signals/scoring).
+        if run_deep_dive_step and result is not None:
+            should_run, trigger_reason = should_run_deep_dive(result, config)
+            if should_run:
+                dd_result = run_deep_dive(
+                    company_name=result.company_name or company,
+                    domain=domain,
+                    country=result.input_country,
+                    parent_company=result.ai_parent_company,
+                    parent_domain=None,
+                    trigger_reason=trigger_reason,
+                    serper_api_key=serper_api_key,
+                    anthropic_api_key=anthropic_api_key,
+                    firecrawl_api_key=firecrawl_api_key,
+                    max_pages=config.deep_dive_max_pages,
+                    verify_quotes=config.verify_quotes,
+                    auto_correct_quotes=config.auto_correct_quotes,
+                )
+                deep_dive_rows.extend(flatten_deep_dive_for_excel(dd_result, source_index))
+
+        out_row["enrichment_skipped"] = False
+        out_row["enrichment_skip_reason"] = ""
+        out_row["full_enrichment_gate_reason"] = gate_reason
+        out_rows.append(out_row)
+
+        _emit_batch_phase_progress(progress_callback, phase_labels, 3,
+                                   attempted, total_confirmed, {
+            "success_count": p3_success,
+            "error_count": p3_error,
+            "current_company_name": company,
+            # legacy keys kept for compatibility with earlier payload shape
+            "foreign_hq_full_processed": attempted,
+            "foreign_hq_full_selected": total_confirmed,
+        })
+
+    return {
+        "out_rows": out_rows,
+        "evidence_rows": evidence_rows,
+        "signal_rows": signal_rows,
+        "deep_dive_rows": deep_dive_rows,
+        "attempted": attempted,
+        "skipped": skipped,
+        "confirmed": confirmed,
+        "total_confirmed": total_confirmed,
+        "p3_success": p3_success,
+        "p3_error": p3_error,
+    }
+
+
+def _run_batch_dataframe_gated(
+    df: pd.DataFrame,
+    config: BatchRunConfig,
+    serper_api_key: str,
+    anthropic_api_key: str,
+    progress_callback: Optional[Callable[[dict], None]],
+    openai_api_key: str,
+    firecrawl_api_key: str,
+) -> dict:
+    """``run_batch_dataframe``'s opt-in path when
+    ``config.gate_full_enrichment_on_foreign_hq`` is True: cheap HQ-only
+    screening for every row (Phase 1, 1 Serper call per company, via
+    ``_run_hq_and_c5_screening`` with C5 disabled), then the full per-row v2
+    pipeline — using the SAME ``ai_kwargs``/``flags`` the default
+    ``run_batch_dataframe`` path would build for every row — ONLY for rows
+    confirmed foreign-HQ (Phase 3, via the shared ``_run_gated_full_enrichment``,
+    also used by ``run_batch_foreign_hq_only``). Rows that are not confirmed
+    are kept in the output with ``enrichment_skipped=True`` and a
+    ``foreign_hq_skip_reason``.
+
+    KNOWN LIMITATION: C5 is not wired into this path yet — ``run_batch_dataframe``
+    itself has never supported C5 (only the dedicated foreign-HQ-only modes
+    do), so Phase 1 always runs with ``c5_enabled=False`` here. Adding C5
+    support to this opt-in path would be a reasonable future extension
+    (following the exact pattern ``run_batch_foreign_hq_only`` already uses),
+    not something this task adds. Deep Dive, by contrast, mirrors the
+    default path's own behavior exactly — it runs for eligible rows whenever
+    ``config.deep_dive`` is set, same as an ungated ``run_batch_dataframe`` call.
+
+    Returns the same dict shape as ``run_batch_dataframe`` (``enriched_leads``,
+    ``evidence``, ``signals``, ``deep_dive``, ``run_summary``) — ``run_summary``
+    additionally carries ``gated_full_enrichment_attempted_count`` /
+    ``gated_full_enrichment_skipped_count`` /
+    ``gated_estimated_serper_calls_saved`` (``skipped * 4``, matching the four
+    extra non-HQ Serper calls a full v2 enrichment would otherwise have made).
+    """
+    rows, _c5_counts = _run_hq_and_c5_screening(
+        df, config, serper_api_key, anthropic_api_key,
+        c5_enabled=False, c5_scoring_behavior="", c5_scope="",
+        c5_model_used="", c5_model_tier="",
+        phase_labels=GATED_FULL_ENRICHMENT_PHASE_LABELS,
+        progress_callback=progress_callback,
+    )
+
+    # Exactly the same ai_kwargs/flags construction as the default
+    # run_batch_dataframe path below, so an eligible (confirmed foreign-HQ)
+    # row gets identical treatment to what every row would get with gating off.
+    flags = resolve_pipeline_flags(config.run_mode)
+    flags["compose_caller_content_flag"] = config.compose_caller_content
+    flags["compose_icp_context"] = config.rich_icp_context
+    flags["ai_signal_scoring"] = config.ai_signal_scoring
+    flags["legacy_enrichment_mode"] = config.legacy_enrichment_mode
+    ai_kwargs: dict = {
+        "ai_provider": config.ai_provider,
+        "openai_api_key": openai_api_key,
+        "firecrawl_api_key": firecrawl_api_key,
+        "public_source_signal_enrichment": config.public_source_signal_enrichment,
+        "public_source_signal_query": config.public_source_signal_query,
+        "public_source_base_url": config.public_source_base_url,
+        "public_source_label": config.public_source_label,
+        "public_source_max_pages": config.public_source_max_pages,
+    }
+    if config.ai_model:
+        ai_kwargs["ai_model"] = config.ai_model
+
+    gated = _run_gated_full_enrichment(
+        rows, config, serper_api_key, anthropic_api_key,
+        c5_enabled=False,
+        prioritize_kwargs={**ai_kwargs, **flags},
+        phase_labels=GATED_FULL_ENRICHMENT_PHASE_LABELS,
+        progress_callback=progress_callback,
+        openai_api_key=openai_api_key,
+        firecrawl_api_key=firecrawl_api_key,
+        run_deep_dive_step=config.deep_dive,
+    )
+
+    out_rows = gated["out_rows"]
+    success_count = sum(1 for r in out_rows if r.get("run_success", True))
+    error_count = len(out_rows) - success_count
+
+    run_summary = build_run_summary_dataframe(
+        config, total_input_rows=len(df), selected_rows=len(rows),
+        processed_rows=len(rows), success_count=success_count, error_count=error_count,
+    )
+    # Gating audit counts (Step 4) — only present when gating is on; the
+    # default (ungated) run_summary shape is completely unaffected.
+    run_summary["gated_full_enrichment_attempted_count"] = gated["attempted"]
+    run_summary["gated_full_enrichment_skipped_count"] = gated["skipped"]
+    run_summary["gated_estimated_serper_calls_saved"] = gated["skipped"] * 4
+
+    return {
+        "enriched_leads": pd.DataFrame(out_rows),
+        "evidence": pd.DataFrame(gated["evidence_rows"]),
+        "signals": pd.DataFrame(gated["signal_rows"]),
+        "deep_dive": pd.DataFrame(gated["deep_dive_rows"]),
+        "run_summary": run_summary,
+    }
+
+
 def run_batch_foreign_hq_only(
     df: pd.DataFrame,
     config: BatchRunConfig,
@@ -1096,6 +1409,15 @@ def run_batch_foreign_hq_only(
     Returns the same dict shape as ``run_batch_dataframe``: ``enriched_leads``,
     ``evidence``, ``signals``, ``run_summary`` (extended with the mode's own
     counts and, always, the C5 settings/counts columns).
+
+    Phase 3 (the eligibility check + full-enrichment-or-skip loop below) is
+    implemented by the shared ``_run_gated_full_enrichment`` helper — also
+    used by the opt-in ``BatchRunConfig.gate_full_enrichment_on_foreign_hq``
+    gate inside the regular ``run_batch_dataframe`` — so the two callers can
+    never drift apart on eligibility/skip-reason/progress behavior. This
+    function passes ``prioritize_kwargs={"run_full_v2_pipeline": True}`` and
+    ``run_deep_dive_step=False``, matching its pre-refactor behavior exactly
+    (Deep Dive has never been supported in this mode).
     """
     rows, c5_counts = _run_hq_and_c5_screening(
         df, config, serper_api_key, anthropic_api_key,
@@ -1104,76 +1426,20 @@ def run_batch_foreign_hq_only(
         phase_labels=FOREIGN_HQ_ONLY_PHASE_LABELS, progress_callback=progress_callback,
     )
 
-    out_rows: list[dict] = []
-    evidence_rows: list[dict] = []
-    signal_rows: list[dict] = []
-    attempted = skipped = confirmed = 0
-    p3_success = p3_error = 0
-
-    # Eligibility precomputed so progress can report a fixed phase-3 total.
-    confirmed_flags = [
-        is_confirmed_foreign_hq_for_full_enrichment(r, c5_enabled=c5_enabled)
-        for r in rows
-    ]
-    total_confirmed = sum(confirmed_flags)
-
-    for row, is_confirmed in zip(rows, confirmed_flags):
-        if not is_confirmed:
-            out_row = dict(row)
-            out_row["enrichment_skipped"] = True
-            out_row["enrichment_skip_reason"] = foreign_hq_skip_reason(row, c5_enabled)
-            out_row["full_enrichment_gate_reason"] = ""
-            out_rows.append(out_row)
-            skipped += 1
-            continue
-
-        confirmed += 1
-        attempted += 1
-        if _c5_score(row.get("sig_foreign_hq_score_for_next_scoring")) == 3.0:
-            gate_reason = "Confirmed foreign HQ (final HQ score 3)"
-        else:
-            gate_reason = "Confirmed by C5 foreign-parent adjudication"
-        company = str(row.get(config.company_name_column, "") or "").strip()
-        domain = str(row.get(config.domain_column, "") or "").strip() or None
-        country = None
-        if config.input_country_column:
-            country = str(row.get(config.input_country_column, "") or "").strip() or None
-        source_index = row.get("source_index")
-
-        try:
-            result = prioritize_single_lead(
-                LeadInput(company_name=company, domain=domain, input_country=country),
-                serper_api_key=serper_api_key,
-                anthropic_api_key=anthropic_api_key,
-                default_input_country=config.default_input_country,
-                run_full_v2_pipeline=True,
-            )
-            out_row = flatten_result_for_excel(
-                result, row, source_index, True, "", config.include_raw_ai_json,
-            )
-            evidence_rows.extend(flatten_evidence_for_excel(result, source_index))
-            signal_rows.extend(flatten_signals_for_excel(result, source_index))
-            p3_success += 1
-        except Exception as exc:  # per-row isolation, matching run_batch_dataframe
-            out_row = dict(row)
-            out_row["run_success"] = False
-            out_row["run_error"] = f"{type(exc).__name__}: {str(exc)[:300]}"
-            p3_error += 1
-
-        out_row["enrichment_skipped"] = False
-        out_row["enrichment_skip_reason"] = ""
-        out_row["full_enrichment_gate_reason"] = gate_reason
-        out_rows.append(out_row)
-
-        _emit_batch_phase_progress(progress_callback, FOREIGN_HQ_ONLY_PHASE_LABELS, 3,
-                                   attempted, total_confirmed, {
-            "success_count": p3_success,
-            "error_count": p3_error,
-            "current_company_name": company,
-            # legacy keys kept for compatibility with earlier payload shape
-            "foreign_hq_full_processed": attempted,
-            "foreign_hq_full_selected": total_confirmed,
-        })
+    gated = _run_gated_full_enrichment(
+        rows, config, serper_api_key, anthropic_api_key,
+        c5_enabled=c5_enabled,
+        prioritize_kwargs={"run_full_v2_pipeline": True},
+        phase_labels=FOREIGN_HQ_ONLY_PHASE_LABELS,
+        progress_callback=progress_callback,
+        run_deep_dive_step=False,
+    )
+    out_rows = gated["out_rows"]
+    evidence_rows = gated["evidence_rows"]
+    signal_rows = gated["signal_rows"]
+    attempted = gated["attempted"]
+    skipped = gated["skipped"]
+    confirmed = gated["confirmed"]
 
     success_count = sum(1 for r in out_rows if r.get("run_success", True))
     error_count = len(out_rows) - success_count
@@ -1791,6 +2057,21 @@ def run_single_batch_unit(
     every other mode runs ``run_batch_dataframe`` plus the same optional C5
     post-step and Run Summary extension the Streamlit app performs
     sequentially. Used by the parallel runner for each chunk.
+
+    ``config.gate_full_enrichment_on_foreign_hq`` needs NO extra plumbing
+    here: ``run_batch_dataframe`` itself branches on that flag (see
+    ``_run_batch_dataframe_gated``), so every existing caller — including
+    this parallel path — picks up the opt-in gate automatically for the
+    regular run modes, by just passing the same ``config`` through unchanged.
+
+    KNOWN LIMITATION / TODO: combining ``gate_full_enrichment_on_foreign_hq``
+    with ``c5_enabled=True`` at THIS level has not been considered — the C5
+    post-step below would run as a blanket pass over ``tables["enriched_leads"]``,
+    which then contains a mix of fully-enriched (confirmed foreign-HQ) and
+    gate-skipped rows. Untested combination; do not assume it behaves the same
+    as C5 running only against fully-enriched rows. Scoping that properly
+    (e.g. skipping gate-skipped rows in the C5 post-step) is a reasonable
+    future extension, not part of this task.
     """
     if config.run_mode == FOREIGN_HQ_ONLY_MODE:
         return run_batch_foreign_hq_only(

@@ -1141,6 +1141,19 @@ def main() -> None:  # pragma: no cover - exercised only under `streamlit run`
                  "vergelijken. Vult legacy_score/legacy_tier/legacy_icp_*-kolommen; "
                  "verandert final_commercial_fit_score of signals nooit "
                  "(default: uit).")
+        gate_full_enrichment_on_foreign_hq = st.checkbox(
+            "Alleen volledig verrijken bij bevestigde buitenlandse HQ (opt-in)",
+            value=False,
+            help="Bespaart Serper-calls door bedrijven zonder bevestigde "
+                 "buitenlandse HQ niet volledig te verrijken: eerst een "
+                 "goedkope HQ-screening voor alle rijen (1 Serper-call per "
+                 "bedrijf), daarna volledige verrijking (4 extra Serper-calls) "
+                 "alleen voor rijen met een bevestigde buitenlandse HQ. "
+                 "Overgeslagen rijen blijven in de output staan met "
+                 "enrichment_skipped=True en een reden. Hergebruikt hetzelfde "
+                 "gating-principe als de aparte 'Full enrichment, confirmed "
+                 "foreign-HQ only'-modus. C5 wordt in deze opt-in (nog) niet "
+                 "ondersteund (default: uit).")
         deep_dive = st.checkbox(
             "Deep dive voor top-leads (opt-in)", value=True,
             help="Runs a deeper, source-backed evidence collection AFTER "
@@ -1454,6 +1467,7 @@ def main() -> None:  # pragma: no cover - exercised only under `streamlit run`
             rich_icp_context=rich_icp_context,
             ai_signal_scoring=ai_signal_scoring,
             legacy_enrichment_mode=legacy_enrichment_mode,
+            gate_full_enrichment_on_foreign_hq=gate_full_enrichment_on_foreign_hq,
             deep_dive=deep_dive,
             deep_dive_min_score=deep_dive_min_score,
             deep_dive_on_foreign_hq=deep_dive_on_foreign_hq,
