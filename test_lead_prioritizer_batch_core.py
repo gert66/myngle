@@ -420,6 +420,63 @@ class TestRunBatch:
         cfg = BatchRunConfig(company_name_column="company", domain_column="domain")
         assert cfg.legacy_enrichment_mode is False
 
+    def test_public_source_signal_enrichment_defaults(self):
+        cfg = BatchRunConfig(company_name_column="company", domain_column="domain")
+        assert cfg.public_source_signal_enrichment is False
+        assert cfg.public_source_signal_query == "vacancies"
+        assert cfg.public_source_base_url == ""
+        assert cfg.public_source_label == ""
+        assert cfg.public_source_max_pages == 3
+
+    @pytest.mark.parametrize("public_source_signal_enrichment", [False, True])
+    def test_public_source_signal_enrichment_passthrough_independent_of_other_flags(
+        self, public_source_signal_enrichment,
+    ):
+        seen = {}
+
+        def _fake(lead_input, **kwargs):
+            seen.update(kwargs)
+            return _sample_result(company_name=lead_input.company_name)
+
+        cfg = BatchRunConfig(
+            company_name_column="company", domain_column="domain",
+            run_mode="full", row_limit=1,
+            public_source_signal_enrichment=public_source_signal_enrichment,
+            public_source_signal_query="internships",
+            public_source_base_url="https://example-registry.test/search",
+            public_source_label="Example registry",
+            public_source_max_pages=5,
+        )
+        with patch("lead_prioritizer_batch_core.prioritize_single_lead", side_effect=_fake):
+            run_batch_dataframe(self._df, cfg, "SERP", "ANTH", firecrawl_api_key="fc-key")
+
+        assert seen.get("public_source_signal_enrichment") is public_source_signal_enrichment
+        assert seen.get("public_source_signal_query") == "internships"
+        assert seen.get("public_source_base_url") == "https://example-registry.test/search"
+        assert seen.get("public_source_label") == "Example registry"
+        assert seen.get("public_source_max_pages") == 5
+        assert seen.get("firecrawl_api_key") == "fc-key"
+        # Independent of every other opt-in flag.
+        assert seen.get("legacy_enrichment_mode") is False
+        assert seen.get("compose_icp_context") is False
+        assert seen.get("ai_signal_scoring") is False
+
+    def test_public_source_signal_enrichment_off_still_passes_defaults(self):
+        # Off by default: missing Firecrawl key / base URL blocks only the
+        # feature itself (inside the collector), never a normal run.
+        seen = {}
+
+        def _fake(lead_input, **kwargs):
+            seen.update(kwargs)
+            return _sample_result(company_name=lead_input.company_name)
+
+        cfg = BatchRunConfig(company_name_column="company", domain_column="domain",
+                             run_mode="full", row_limit=1)
+        with patch("lead_prioritizer_batch_core.prioritize_single_lead", side_effect=_fake):
+            run_batch_dataframe(self._df, cfg, "SERP", "ANTH")
+        assert seen.get("public_source_signal_enrichment") is False
+        assert seen.get("public_source_base_url") == ""
+
     def test_continue_on_error(self):
         calls = {"n": 0}
 

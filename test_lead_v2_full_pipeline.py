@@ -575,3 +575,134 @@ class TestLegacyEnrichmentModeFlag:
         assert r.icp_buying_signals == "rich icp signals"
         assert r.legacy_icp_lead_score == "Medium"
         assert r.legacy_score == 6.0
+
+
+# ---------------------------------------------------------------------------
+# Public Source Signal Enrichment: opt-in, evidence-only. Runs strictly after
+# non-HQ evidence collection and before signal extraction; must never
+# directly move final_commercial_fit_score or any sig_* signal score, since
+# its evidence carries signal_name="public_source_signal" -- not one of the
+# five scored non-HQ signal names.
+# ---------------------------------------------------------------------------
+
+_PUBLIC_SOURCE_EVIDENCE = [
+    LeadEvidence(
+        signal_name="public_source_signal",
+        query_used="Acme | signal: vacancies | source: https://kvk.nl/zoeken",
+        source_url="https://kvk.nl/zoeken",
+        source_title="KvK register",
+        source_snippet="Acme currently has 5 open vacancies.",
+        source_type="public_source",
+        parser_source="firecrawl_public_source",
+        confidence="Medium",
+        notes="source_label=KvK register; retrieval_status=ok",
+    ),
+]
+
+
+class TestPublicSourceSignalEnrichmentFlag:
+    def test_off_by_default_no_evidence_added_and_not_called(self):
+        with patch("lead_prioritizer_core.collect_public_source_signal_evidence") as coll:
+            r = _run(collect_non_hq_evidence=True)
+        coll.assert_not_called()
+        assert list(r.evidence_items or []) == list(_NON_HQ_EVIDENCE)
+
+    def test_full_preset_does_not_enable_it(self):
+        with patch("lead_prioritizer_core.collect_public_source_signal_evidence") as coll:
+            _run(run_full_v2_pipeline=True)
+        coll.assert_not_called()
+
+    def test_enabled_appends_evidence_after_non_hq_evidence(self):
+        with patch("lead_prioritizer_core.collect_public_source_signal_evidence",
+                   return_value=list(_PUBLIC_SOURCE_EVIDENCE)) as coll:
+            r = _run(collect_non_hq_evidence=True,
+                     public_source_signal_enrichment=True,
+                     public_source_base_url="https://kvk.nl/zoeken")
+        coll.assert_called_once()
+        items = list(r.evidence_items or [])
+        assert items == list(_NON_HQ_EVIDENCE) + list(_PUBLIC_SOURCE_EVIDENCE)
+
+    def test_passes_config_through_to_collector(self):
+        with patch("lead_prioritizer_core.collect_public_source_signal_evidence",
+                   return_value=[]) as coll:
+            _run(public_source_signal_enrichment=True,
+                 public_source_signal_query="internships",
+                 public_source_base_url="https://example-registry.test/search",
+                 public_source_label="Example registry",
+                 public_source_max_pages=5,
+                 firecrawl_api_key="fc-key")
+        _, kwargs = coll.call_args
+        assert kwargs["signal_query"] == "internships"
+        assert kwargs["source_base_url"] == "https://example-registry.test/search"
+        assert kwargs["source_label"] == "Example registry"
+        assert kwargs["max_pages"] == 5
+        assert kwargs["firecrawl_api_key"] == "fc-key"
+
+    def test_flag_alone_marks_partial_v2(self):
+        with patch("lead_prioritizer_core.collect_public_source_signal_evidence",
+                   return_value=[]):
+            r = _run(public_source_signal_enrichment=True,
+                     public_source_base_url="https://kvk.nl/zoeken")
+        assert r.v2_pipeline_mode == "partial_v2"
+
+    def test_no_evidence_when_collector_returns_empty(self):
+        with patch("lead_prioritizer_core.collect_public_source_signal_evidence",
+                   return_value=[]):
+            r = _run(collect_non_hq_evidence=True,
+                     public_source_signal_enrichment=True,
+                     public_source_base_url="https://kvk.nl/zoeken")
+        assert list(r.evidence_items or []) == list(_NON_HQ_EVIDENCE)
+
+
+class TestPublicSourceSignalEnrichmentScoreInvariance:
+    """Adding public-source evidence must never move final_commercial_fit_score
+    or any of the five scored non-HQ sig_* fields -- only evidence_items grows;
+    signals stay identical since "public_source_signal" matches none of the
+    five scored signal names."""
+
+    _SCORE_FIELDS = (
+        "final_commercial_fit_score", "commercial_tier", "icp_similarity_score",
+        "lean_model_prob", "lr_z_score", "scoring_profile",
+        "sig_foreign_hq_score_for_next_scoring",
+        "sig_international_profile_score", "sig_onboarding_training_need_score",
+        "sig_company_size_complexity_score", "sig_icp_keyword_match_score",
+        "sig_employer_branding_score",
+    )
+
+    def test_score_and_signals_identical_only_evidence_grows(self):
+        r_without = _run(
+            run_full_v2_pipeline=True,
+        )
+        with patch("lead_prioritizer_core.collect_public_source_signal_evidence",
+                   return_value=list(_PUBLIC_SOURCE_EVIDENCE)):
+            r_with = _run(
+                run_full_v2_pipeline=True,
+                public_source_signal_enrichment=True,
+                public_source_base_url="https://kvk.nl/zoeken",
+            )
+
+        for f in self._SCORE_FIELDS:
+            assert getattr(r_without, f) == getattr(r_with, f), f
+
+        assert [
+            (s.signal_name, s.signal_score) for s in (r_without.signals or [])
+        ] == [
+            (s.signal_name, s.signal_score) for s in (r_with.signals or [])
+        ]
+
+        assert list(r_with.evidence_items or []) == \
+            list(r_without.evidence_items or []) + list(_PUBLIC_SOURCE_EVIDENCE)
+
+    def test_collector_failure_path_also_leaves_scoring_untouched(self):
+        # collect_public_source_signal_evidence never raises in practice, but
+        # confirm returning [] (its documented "nothing useful" contract)
+        # leaves scoring byte-identical too.
+        r_without = _run(run_full_v2_pipeline=True)
+        with patch("lead_prioritizer_core.collect_public_source_signal_evidence",
+                   return_value=[]):
+            r_with = _run(run_full_v2_pipeline=True,
+                          public_source_signal_enrichment=True,
+                          public_source_base_url="https://kvk.nl/zoeken")
+        for f in self._SCORE_FIELDS:
+            assert getattr(r_without, f) == getattr(r_with, f), f
+        assert list(r_with.evidence_items or []) == list(r_without.evidence_items or [])

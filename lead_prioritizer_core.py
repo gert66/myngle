@@ -36,6 +36,7 @@ from lead_icp_context_composer import (
     compose_icp_context as run_icp_context_composition,
 )
 from lead_legacy_enrichment import run_legacy_enrichment
+from lead_public_source_signal_enrichment import collect_public_source_signal_evidence
 
 _DEFAULT_AI_MODEL = "claude-haiku-4-5-20251001"
 
@@ -75,6 +76,11 @@ def prioritize_single_lead(
     compose_caller_content_flag: bool = False,
     compose_icp_context: bool = False,
     legacy_enrichment_mode: bool = False,
+    public_source_signal_enrichment: bool = False,
+    public_source_signal_query: str = "vacancies",
+    public_source_base_url: str = "",
+    public_source_label: str = "",
+    public_source_max_pages: int = 3,
     run_full_v2_pipeline: bool = False,
 ) -> LeadPrioritizationResult:
     """Orchestrate HQ detection and scoring for a single lead.
@@ -174,6 +180,23 @@ def prioritize_single_lead(
     **not** part of the ``run_full_v2_pipeline`` preset: it must be turned on
     explicitly.
 
+    ``public_source_signal_enrichment`` (default ``False``) is an explicit
+    opt-in, evidence-only step: it retrieves public company-level evidence
+    for ``public_source_signal_query`` (default ``"vacancies"``) from a
+    single user-configured public source (``public_source_base_url``) via
+    Firecrawl (``lead_public_source_signal_enrichment.
+    collect_public_source_signal_evidence``), and appends the result to
+    ``evidence_items``. Runs strictly AFTER regular non-HQ evidence collection
+    and BEFORE signal extraction, so the existing deterministic extractor and
+    app-summary logic see it naturally. It can never directly move
+    ``final_commercial_fit_score`` or create a score: its
+    ``signal_name`` (``"public_source_signal"``) is deliberately not one of
+    the five scored non-HQ signal names, so ``extract_non_hq_signals`` and
+    ``extract_sector_industry`` both ignore it. A missing ``firecrawl_api_key``
+    or ``public_source_base_url`` yields no evidence, never an error.
+    Deliberately **not** part of the ``run_full_v2_pipeline`` preset: it must
+    be turned on explicitly.
+
     ``run_full_v2_pipeline`` (default ``False``) is an explicit opt-in preset
     that turns on all optional v2 steps (2–6) for a single-lead end-to-end run.
     It does not add batch processing, change legacy ranking, or alter the
@@ -201,6 +224,7 @@ def prioritize_single_lead(
         build_app_summary_fields_flag, calculate_commercial_score_flag,
         build_caller_app_fields_flag, compose_caller_content_flag,
         compose_icp_context, legacy_enrichment_mode,
+        public_source_signal_enrichment,
     )):
         v2_pipeline_mode = "partial_v2"
     else:
@@ -263,6 +287,26 @@ def prioritize_single_lead(
             serper_api_key=serper_api_key,
             country=effective_country,
         )
+
+    # ── Public Source Signal Enrichment (opt-in, evidence-only) ───────────────
+    # Adds LeadEvidence items from a single user-configured public source for
+    # a user-configured signal query, via Firecrawl. Off by default. Runs
+    # strictly AFTER regular non-HQ evidence collection and BEFORE signal
+    # extraction, so the existing deterministic extractor / app-summary logic
+    # picks it up naturally. Its signal_name ("public_source_signal") is not
+    # one of the five scored non-HQ signal names, so extract_non_hq_signals /
+    # extract_sector_industry both ignore it — this can never directly move
+    # final_commercial_fit_score or create a score.
+    if public_source_signal_enrichment:
+        evidence_items.extend(collect_public_source_signal_evidence(
+            company_name=input_row.company_name,
+            domain=input_row.domain,
+            signal_query=public_source_signal_query,
+            source_base_url=public_source_base_url,
+            firecrawl_api_key=firecrawl_api_key,
+            source_label=public_source_label,
+            max_pages=public_source_max_pages,
+        ))
 
     # ── Step 3: non-HQ signal extraction (no live Serper calls) ───────────────
     # Deterministic by default. ``ai_signal_scoring`` is a separate, explicit

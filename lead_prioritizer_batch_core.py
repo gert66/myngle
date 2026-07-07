@@ -136,6 +136,16 @@ class BatchRunConfig:
     # on. Both are independent of deep_dive_on_foreign_hq / min_score.
     verify_quotes: bool = True
     auto_correct_quotes: bool = True
+    # Public Source Signal Enrichment — explicit opt-in, off by default, and
+    # INDEPENDENT of every flag above. Adds LeadEvidence items retrieved via
+    # Firecrawl from a single user-configured public source for a user-
+    # configured signal query; never touches final_commercial_fit_score or
+    # creates a score directly. See lead_public_source_signal_enrichment.py.
+    public_source_signal_enrichment: bool = False
+    public_source_signal_query: str = "vacancies"
+    public_source_base_url: str = ""
+    public_source_label: str = ""
+    public_source_max_pages: int = 3
 
 
 # ---------------------------------------------------------------------------
@@ -506,6 +516,14 @@ def run_batch_dataframe(
         # lead_hq_firecrawl_source.py). Empty key → Serper-only HQ, exactly as
         # before. Runs for every HQ detection regardless of run_mode.
         "firecrawl_api_key": firecrawl_api_key,
+        # Public Source Signal Enrichment — independent opt-in (see
+        # BatchRunConfig above); off by default, a missing Firecrawl key
+        # blocks only this feature (yields no evidence), never the run.
+        "public_source_signal_enrichment": config.public_source_signal_enrichment,
+        "public_source_signal_query": config.public_source_signal_query,
+        "public_source_base_url": config.public_source_base_url,
+        "public_source_label": config.public_source_label,
+        "public_source_max_pages": config.public_source_max_pages,
     }
     if config.ai_model:
         ai_kwargs["ai_model"] = config.ai_model

@@ -20,6 +20,7 @@ from __future__ import annotations
 import json
 import os
 import re
+from dataclasses import asdict
 from pathlib import Path
 from typing import Optional
 
@@ -45,6 +46,11 @@ from lead_hq_ai_interpreter import (
     SUPPORTED_OPENAI_MODELS,
     DEFAULT_DEEPSEEK_MODEL,
     SUPPORTED_DEEPSEEK_MODELS,
+    _host_from as _pubsrc_host_from,
+)
+from lead_public_source_signal_enrichment import (
+    collect_public_source_signal_evidence,
+    _build_candidate_urls as _pubsrc_build_candidate_urls,
 )
 from compare_ai_providers_lead_prioritizer import (
     run_comparison,
@@ -983,6 +989,123 @@ def main() -> None:  # pragma: no cover - exercised only under `streamlit run`
             "disabled until both are present."
         )
 
+    # ── Test Public Source Signal Enrichment (standalone, no file needed) ─────
+    # Works independently of the file uploader below — reachable without
+    # uploading a batch workbook. Calls the exact same collector function the
+    # batch pipeline uses; never touches batch session state, Excel output,
+    # autosave, or any scoring field.
+    with st.expander("Test Public Source Signal Enrichment", expanded=False):
+        st.caption(
+            "Use this small test panel to check one company against one "
+            "configured public source before running a full batch. Enter a "
+            "company name, optional domain, the signal to look for, and the "
+            "public source base URL. The app will retrieve public "
+            "company-level evidence from the configured source only and "
+            "show the result below. This test does not affect scoring and "
+            "does not write to the batch output."
+        )
+        pubsrc_test_company = st.text_input(
+            "Test company name", value="", key="pubsrc_test_company")
+        pubsrc_test_domain = st.text_input(
+            "Test company domain (optional)", value="", key="pubsrc_test_domain")
+        pubsrc_test_signal_query = st.text_input(
+            "Public source signal to look for", value="vacancies",
+            key="pubsrc_test_signal_query")
+        pubsrc_test_base_url = st.text_input(
+            "Public source base URL", value="", key="pubsrc_test_base_url")
+        pubsrc_test_label = st.text_input(
+            "Public source label (optional)", value="", key="pubsrc_test_label")
+        pubsrc_test_max_pages = st.number_input(
+            "Max pages to retrieve", min_value=1, max_value=10, value=3,
+            step=1, key="pubsrc_test_max_pages")
+
+        if st.button("Test Public Source Signal Enrichment", key="pubsrc_test_run_button"):
+            if not firecrawl_key:
+                st.warning(
+                    f"{_FIRECRAWL_KEY_NAME} is missing. Set it in "
+                    ".streamlit/secrets.toml or the environment to run this test."
+                )
+            elif not pubsrc_test_base_url.strip():
+                st.warning("Public source base URL is required to run this test.")
+            else:
+                st.markdown("**Input summary**")
+                st.json({
+                    "company_name": pubsrc_test_company,
+                    "domain": pubsrc_test_domain or None,
+                    "signal_query": pubsrc_test_signal_query,
+                    "source_base_url": pubsrc_test_base_url,
+                    "source_label": pubsrc_test_label or None,
+                    "max_pages": int(pubsrc_test_max_pages),
+                })
+
+                st.markdown("**Retrieval plan**")
+                _pubsrc_plan_host = _pubsrc_host_from(pubsrc_test_base_url) or "(unresolved)"
+                _pubsrc_plan_candidates = _pubsrc_build_candidate_urls(
+                    pubsrc_test_base_url, pubsrc_test_company, int(pubsrc_test_max_pages))
+                st.write(f"Configured source domain: `{_pubsrc_plan_host}`")
+                st.write("Candidate URL(s) to be retrieved (configured public source only):")
+                for _pubsrc_url in _pubsrc_plan_candidates:
+                    st.write(f"- {_pubsrc_url}")
+
+                pubsrc_error_detail = ""
+                try:
+                    pubsrc_evidence = collect_public_source_signal_evidence(
+                        company_name=pubsrc_test_company,
+                        domain=pubsrc_test_domain or None,
+                        signal_query=pubsrc_test_signal_query,
+                        source_base_url=pubsrc_test_base_url,
+                        firecrawl_api_key=firecrawl_key,
+                        source_label=pubsrc_test_label,
+                        max_pages=int(pubsrc_test_max_pages),
+                    )
+                    pubsrc_status = "success" if pubsrc_evidence else "no_evidence_found"
+                except Exception as exc:  # collector never raises; safety net only
+                    pubsrc_evidence = []
+                    pubsrc_status = "error"
+                    pubsrc_error_detail = str(exc)
+
+                st.markdown("**Evidence**")
+                if pubsrc_evidence:
+                    st.dataframe(
+                        [{
+                            "signal_name": e.signal_name,
+                            "query_used": e.query_used,
+                            "source_url": e.source_url,
+                            "source_title": e.source_title,
+                            "source_snippet": e.source_snippet,
+                            "source_type": e.source_type,
+                            "parser_source": e.parser_source,
+                            "confidence": e.confidence,
+                            "notes": e.notes,
+                        } for e in pubsrc_evidence],
+                        use_container_width=True,
+                    )
+                else:
+                    st.caption("No evidence rows to show.")
+
+                with st.expander("Raw LeadEvidence JSON"):
+                    st.json([asdict(e) for e in pubsrc_evidence])
+
+                if pubsrc_status == "success":
+                    st.success(f"success — {len(pubsrc_evidence)} evidence item(s) found.")
+                elif pubsrc_status == "no_evidence_found":
+                    st.info(
+                        "no_evidence_found — no useful match at the configured "
+                        "public source. This also covers a blocked source "
+                        "(e.g. a social platform) or a Firecrawl outage — the "
+                        "collector intentionally treats both the same as "
+                        "'no evidence' rather than a scary error, matching the "
+                        "pipeline's existing Firecrawl fallback behavior."
+                    )
+                else:
+                    st.error(
+                        "error — the test panel hit an unexpected problem "
+                        "without breaking the app."
+                    )
+                    if pubsrc_error_detail:
+                        st.caption(f"Detail (test only): {pubsrc_error_detail}")
+    st.divider()
+
     # ── Upload ────────────────────────────────────────────────────────────────
     uploaded = st.file_uploader("Upload an .xlsx file", type=["xlsx"])
     if not uploaded:
@@ -1169,6 +1292,44 @@ def main() -> None:  # pragma: no cover - exercised only under `streamlit run`
             auto_correct_quotes = False
     else:
         deep_dive_on_foreign_hq = True
+
+    # ── Public Source Signal Enrichment (opt-in, evidence-only) ───────────────
+    st.subheader("Public Source Signal Enrichment")
+    public_source_signal_enrichment = st.checkbox(
+        "Run Public Source Signal Enrichment", value=False,
+        help="Optional evidence-only block. It retrieves public "
+             "company-level evidence from a configured public source and "
+             "adds it to the Evidence sheet. It does not directly change "
+             "scoring.")
+    public_source_signal_query = "vacancies"
+    public_source_base_url = ""
+    public_source_label = ""
+    public_source_max_pages = 3
+    public_source_error = ""
+    if public_source_signal_enrichment:
+        public_source_signal_query = st.text_input(
+            "Public source signal to look for", value="vacancies",
+            key="public_source_signal_query")
+        public_source_base_url = st.text_input(
+            "Public source base URL", value="", key="public_source_base_url")
+        public_source_label = st.text_input(
+            "Public source label", value="", key="public_source_label")
+        public_source_max_pages = int(st.number_input(
+            "Max pages to retrieve", min_value=1, max_value=10, value=3,
+            step=1, key="public_source_max_pages"))
+        if not firecrawl_key:
+            public_source_error = (
+                f"{_FIRECRAWL_KEY_NAME} is missing. Set it in "
+                ".streamlit/secrets.toml or the environment to use Public "
+                "Source Signal Enrichment, or turn the checkbox off."
+            )
+        elif not public_source_base_url.strip():
+            public_source_error = (
+                "Public source base URL is required when Public Source "
+                "Signal Enrichment is enabled."
+            )
+        if public_source_error:
+            st.error(public_source_error)
 
     # ── Autosave (output workbook to disk when the run completes) ─────────────
     autosave_enabled = st.checkbox(
@@ -1374,7 +1535,8 @@ def main() -> None:  # pragma: no cover - exercised only under `streamlit run`
 
     run_disabled = (not keys_ok) or (not big_run_ok) or selected_count == 0 \
         or bool(c5_block_reason) or bool(default_country_error) \
-        or bool(ai_provider_error) or bool(auto_export_error)
+        or bool(ai_provider_error) or bool(auto_export_error) \
+        or bool(public_source_error)
 
     # ── Run ─────────────────────────────────────────────────────────────────
     st.caption(RUN_BUTTON_NOTE_TEXT)
@@ -1401,6 +1563,11 @@ def main() -> None:  # pragma: no cover - exercised only under `streamlit run`
             deep_dive_on_foreign_hq=deep_dive_on_foreign_hq,
             verify_quotes=verify_quotes,
             auto_correct_quotes=auto_correct_quotes,
+            public_source_signal_enrichment=public_source_signal_enrichment,
+            public_source_signal_query=public_source_signal_query,
+            public_source_base_url=public_source_base_url,
+            public_source_label=public_source_label,
+            public_source_max_pages=public_source_max_pages,
             # "compare" / "compare_triple" run their own dedicated path below;
             # the config itself stays anthropic unless OpenAI-only was
             # explicitly selected.
