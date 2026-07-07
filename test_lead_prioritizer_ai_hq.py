@@ -1352,7 +1352,7 @@ class TestCallSerperForHqCache:
         mock_urlopen.assert_called_once()
         assert result == {"organic": ["live"]}
         cached = enrichment_cache.get_cached(
-            index, "serper", "acme.com", "hq", ttl_days=90)
+            index, "serper", "acme.com", "hq", ttl_days=120)
         assert cached == {"organic": ["live"]}
 
     def test_force_refresh_ignores_fresh_cache_entry(self):

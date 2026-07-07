@@ -63,12 +63,11 @@ from lovable_gcs_upload import resolve_gcs_upload_tool, upload_file
 # ---------------------------------------------------------------------------
 # TTL configuration — the ONE place to update per-source-type freshness.
 # ---------------------------------------------------------------------------
-# Serper TTL varies by signal type: HQ/ownership facts change rarely (90
-# days), the other non-HQ signal searches (careers, size, sector, ...) are
-# somewhat more time-sensitive (30 days default).
+# All Serper cache entries share one 120-day TTL, matching Firecrawl below —
+# no per-signal differentiation.
 SERPER_TTL_DAYS: dict[str, int] = {
-    "hq": 90,
-    "_default": 30,
+    "hq": 120,
+    "_default": 120,
 }
 
 # Firecrawl scrapes of a company's own domain change rarely — a longer TTL

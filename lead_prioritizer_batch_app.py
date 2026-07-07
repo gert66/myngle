@@ -1163,11 +1163,11 @@ def main() -> None:  # pragma: no cover - exercised only under `streamlit run`
                  "cache-resultaat zien en dezelfde bedrijven/pagina's niet "
                  "onnodig opnieuw opzoeken of scrapen. De index wordt eenmalig "
                  "gedownload bij de start van de run, tussentijds elke ~50 "
-                 "leads en aan het einde teruggeschreven. Serper-HQ-lookups "
-                 "blijven 90 dagen geldig, overige Serper-signalen 30 dagen, "
-                 "Firecrawl-pagina's 120 dagen. Puur een snelheids-optimalisatie "
-                 "— bij een download-/uploadfout valt de run automatisch terug "
-                 "op live opzoeken zonder de run te breken (default: aan).")
+                 "leads en aan het einde teruggeschreven. Alle cache-entries "
+                 "(Serper en Firecrawl) blijven 120 dagen geldig. Puur een "
+                 "snelheids-optimalisatie — bij een download-/uploadfout "
+                 "valt de run automatisch terug op live opzoeken zonder de "
+                 "run te breken (default: aan).")
         enrichment_cache_bucket = st.text_input(
             "GCS bucket voor enrichment-cache", value=DEFAULT_GCS_BUCKET,
             disabled=not use_enrichment_cache,

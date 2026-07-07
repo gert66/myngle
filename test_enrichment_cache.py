@@ -110,10 +110,10 @@ class TestGetPutCached:
         ec.put_cached(None, "serper", "acme.com", "hq", response={})
 
     def test_serper_ttl_days_helper(self):
-        assert ec.serper_ttl_days("hq") == 90
-        assert ec.serper_ttl_days("international_profile") == 30
-        assert ec.serper_ttl_days("unknown_signal") == 30
-        assert ec.serper_ttl_days("HQ") == 90
+        assert ec.serper_ttl_days("hq") == 120
+        assert ec.serper_ttl_days("international_profile") == 120
+        assert ec.serper_ttl_days("unknown_signal") == 120
+        assert ec.serper_ttl_days("HQ") == 120
 
     def test_firecrawl_ttl_constant(self):
         assert ec.FIRECRAWL_TTL_DAYS == 120
