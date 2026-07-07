@@ -317,6 +317,10 @@ def prioritize_single_lead(
     # deterministic extractor so a row is never left without signals.
     signals = []
     signal_scoring_mode = "deterministic"
+    # Usage/cost audit for the AI signal-scoring call -- populated only when
+    # ai_signal_scoring was actually attempted, whether or not it succeeded
+    # (tokens are spent either way). Blank fields when never attempted.
+    non_hq_ai_audit: dict = {}
     if extract_non_hq_signals_flag:
         if ai_signal_scoring:
             ai_scoring_result = score_signals_with_ai(
@@ -326,6 +330,14 @@ def prioritize_single_lead(
                 anthropic_api_key=anthropic_api_key,
                 ai_model=ai_model,
             )
+            if ai_scoring_result.call_attempted:
+                non_hq_ai_audit = dict(
+                    non_hq_ai_model=ai_scoring_result.model,
+                    non_hq_ai_input_tokens=ai_scoring_result.input_tokens,
+                    non_hq_ai_output_tokens=ai_scoring_result.output_tokens,
+                    non_hq_ai_total_tokens=ai_scoring_result.total_tokens,
+                    non_hq_ai_estimated_cost_usd=ai_scoring_result.estimated_cost_usd,
+                )
             if ai_scoring_result.call_success:
                 signals = ai_scoring_result.signals
                 signal_scoring_mode = "ai"
@@ -472,6 +484,7 @@ def prioritize_single_lead(
         employer_branding_evidence_quote=non_hq_summary["employer_branding_evidence_quote"],
         signal_extractor_version=non_hq_summary["signal_extractor_version"],
         signal_scoring_mode=signal_scoring_mode,
+        **non_hq_ai_audit,
         # Sector / industry metadata (audit & app only — never scoring)
         detected_industry=sector_summary["detected_industry"],
         detected_sub_industry=sector_summary["detected_sub_industry"],

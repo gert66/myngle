@@ -39,6 +39,7 @@ try:
 except ImportError:  # pragma: no cover
     _anthropic_lib = None  # type: ignore[assignment]
 
+from lead_hq_ai_interpreter import estimate_ai_cost_usd, _usage_field
 from lead_non_hq_signal_extractor import SUPPORTED_SIGNALS, _usable_evidence_for_signal
 from lead_output_schema import LeadEvidence, LeadSignal
 
@@ -61,6 +62,14 @@ class AiSignalScoringResult:
     call_success: bool = False
     error: str = ""
     raw_json: Optional[str] = None
+    # Usage/cost audit (populated whenever the API call itself went through,
+    # i.e. even when JSON parsing later failed -- the tokens were still spent).
+    # estimated_cost_usd stays None when MODEL_PRICING_USD_PER_MTOK does not
+    # know the model, mirroring ai_hq_estimated_cost_usd -- never a guess.
+    input_tokens: Optional[int] = None
+    output_tokens: Optional[int] = None
+    total_tokens: Optional[int] = None
+    estimated_cost_usd: Optional[float] = None
 
 
 # ---------------------------------------------------------------------------
@@ -100,36 +109,50 @@ _SYSTEM_PROMPT = (
     "Reply ONLY with a valid JSON object -- no prose, no markdown fences."
 )
 
-_USER_TEMPLATE = """\
-Company: {company_name}
-Country: {country}
+# ---------------------------------------------------------------------------
+# Prompt caching (ephemeral, Anthropic prompt-cache) -- CACHE GOTCHA:
+# _OUTPUT_SCHEMA_INSTRUCTIONS below is sent as the single ``cache_control``
+# block alongside _SYSTEM_PROMPT (see score_signals_with_ai). It MUST stay
+# byte-identical across every call -- no company name, country, evidence, or
+# any other per-lead text may ever be added to it, or the cache is
+# invalidated on every single call, turning a discount into pure overhead.
+# All per-lead content (company_name, country, evidence_block) lives
+# exclusively in _USER_TEMPLATE below, which is sent as the separate,
+# never-cached user message.
+# ---------------------------------------------------------------------------
 
-For each signal below, judge the supplied evidence items and return a
+_OUTPUT_SCHEMA_INSTRUCTIONS = """\
+For each signal you are given, judge the supplied evidence items and return a
 verdict. Evidence items already passed basic quality filters -- judge only
 what they say, do not invent additional facts or evidence.
 
-{evidence_block}
-
 Return JSON with exactly these top-level keys (one entry per signal name
-listed above, using the exact signal name as the key):
-{{
-  "<signal_name>": {{
+supplied in the user message, using the exact signal name as the key):
+{
+  "<signal_name>": {
     "verdict": "positive_evidence" | "weak_evidence" | "no_positive_match",
     "reason": "short reason (1 sentence)",
     "supporting_evidence_ids": ["<evidence_id>", "..."]
-  }},
+  },
   ...
-}}
+}
 
 Rules:
 - "positive_evidence": strong, clear, semantically unambiguous support.
 - "weak_evidence": some support but thin, indirect, or hedged.
 - "no_positive_match": no real support in the supplied evidence.
 - supporting_evidence_ids must only contain evidence_id values copied
-  verbatim from the list above for that same signal -- never invent one.
+  verbatim from the evidence list for that same signal -- never invent one.
 - A verdict other than "no_positive_match" must be backed by at least one
   supporting_evidence_id.
 - If in doubt between two verdicts, pick the lower one.
+"""
+
+_USER_TEMPLATE = """\
+Company: {company_name}
+Country: {country}
+
+{evidence_block}
 """
 
 
@@ -177,7 +200,43 @@ def _extract_json_object(text: str) -> str:
     return s
 
 
-def _parse_response(raw: str) -> dict:
+def _regex_extract_signal_entry(raw: str, signal_name: str) -> dict:
+    """Recover one signal's verdict object with regex when the whole response
+    does not parse as valid JSON.
+
+    Unlike the flat-field regex in ``lead_hq_ai_interpreter._regex_extract_core_fields``,
+    each signal entry here is itself a small, non-nested JSON object (verdict,
+    reason, supporting_evidence_ids -- no nested braces), so a simple
+    non-greedy ``{...}`` match anchored on the signal name is enough to
+    isolate it and parse it independently. A malformed/truncated entry for a
+    DIFFERENT signal (or a stray trailing comma at the very end of the
+    response) must not discard verdicts that are individually still intact.
+    """
+    m = re.search(
+        rf'"{re.escape(signal_name)}"\s*:\s*(\{{[^{{}}]*\}})',
+        raw, flags=re.IGNORECASE | re.DOTALL,
+    )
+    if not m:
+        return {}
+    try:
+        obj = json.loads(m.group(1))
+        return obj if isinstance(obj, dict) else {}
+    except Exception:
+        return {}
+
+
+def _parse_response(raw: str, signal_names: Optional[list[str]] = None) -> dict:
+    """Extract the per-signal verdict dict from the AI response text.
+
+    Tries strict JSON parsing of the whole object first. If that fails,
+    recovers whichever individual ``signal_names`` entries are still
+    syntactically intact on their own via ``_regex_extract_signal_entry`` --
+    a broken entry for one signal (e.g. an unescaped quote in its "reason",
+    or a truncated response cutting off the last entry) must not discard
+    otherwise-usable verdicts for the other signals. Signals that cannot be
+    recovered at all are simply absent from the returned dict; the caller
+    defaults those to "no_positive_match" (see ``_build_signal_from_verdict``).
+    """
     raw = str(raw or "")
     for cand in (raw, _extract_json_object(raw)):
         if not cand:
@@ -188,7 +247,15 @@ def _parse_response(raw: str) -> dict:
             continue
         if isinstance(obj, dict):
             return obj
-    return {}
+
+    if not signal_names:
+        return {}
+    recovered: dict = {}
+    for name in signal_names:
+        entry = _regex_extract_signal_entry(raw, name)
+        if entry:
+            recovered[name] = entry
+    return recovered
 
 
 def extract_anthropic_text(response) -> str:
@@ -341,7 +408,17 @@ def score_signals_with_ai(
         response = client.messages.create(
             model=ai_model,
             max_tokens=1024,
-            system=_SYSTEM_PROMPT,
+            # Static instructions + output schema are sent as the sole
+            # cache_control block (see the CACHE GOTCHA note above
+            # _OUTPUT_SCHEMA_INSTRUCTIONS) -- identical on every call, so
+            # Anthropic caches it after the first lead. Per-lead content
+            # (company, country, evidence) is the separate, never-cached
+            # user message below.
+            system=[{
+                "type": "text",
+                "text": _SYSTEM_PROMPT + "\n\n" + _OUTPUT_SCHEMA_INSTRUCTIONS,
+                "cache_control": {"type": "ephemeral"},
+            }],
             messages=[{"role": "user", "content": prompt}],
         )
         import usage_tracker
@@ -353,12 +430,28 @@ def score_signals_with_ai(
             error=f"ai_signal_scoring_call_failed: {str(exc)[:200]}",
         )
 
-    data = _parse_response(raw_text)
+    # Usage/cost audit -- populated whenever the call itself succeeded, even
+    # if JSON parsing fails below (tokens were still spent). Cache write/read
+    # tokens are counted as regular input tokens for this estimate: a
+    # simplification (no cache discount/premium applied) that is conservative
+    # enough for opt-in cost/ROI comparisons -- see MODEL_PRICING_USD_PER_MTOK.
+    usage_obj = getattr(response, "usage", None)
+    _in = _usage_field(usage_obj, "input_tokens") or 0
+    _cache_write = _usage_field(usage_obj, "cache_creation_input_tokens") or 0
+    _cache_read = _usage_field(usage_obj, "cache_read_input_tokens") or 0
+    input_tokens = _in + _cache_write + _cache_read
+    output_tokens = _usage_field(usage_obj, "output_tokens")
+    total_tokens = (input_tokens + output_tokens) if output_tokens is not None else None
+    estimated_cost_usd = estimate_ai_cost_usd(ai_model, input_tokens, output_tokens)
+
+    data = _parse_response(raw_text, list(by_signal.keys()))
     if not data:
         return AiSignalScoringResult(
             model=ai_model, call_attempted=True, call_success=False,
             error="ai_signal_scoring_parse_failed",
             raw_json=(raw_text or "")[:2000],
+            input_tokens=input_tokens, output_tokens=output_tokens,
+            total_tokens=total_tokens, estimated_cost_usd=estimated_cost_usd,
         )
 
     signals = [
@@ -373,4 +466,6 @@ def score_signals_with_ai(
         call_success=True,
         error="",
         raw_json=(raw_text or "")[:2000],
+        input_tokens=input_tokens, output_tokens=output_tokens,
+        total_tokens=total_tokens, estimated_cost_usd=estimated_cost_usd,
     )

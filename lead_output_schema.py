@@ -248,6 +248,15 @@ class LeadPrioritizationResult:
     # actually produced `signals`, so AI- and keyword-scored datasets are
     # never silently mixed.
     signal_scoring_mode: Optional[str] = "deterministic"
+    # AI signal-scoring usage/cost audit (populated only when ai_signal_scoring
+    # was actually attempted -- see lead_ai_signal_scorer.py). Blank when the
+    # call was never attempted, or when MODEL_PRICING_USD_PER_MTOK does not
+    # know the model -- never a guessed cost, mirrors ai_hq_estimated_cost_usd.
+    non_hq_ai_model: Optional[str] = None
+    non_hq_ai_input_tokens: Optional[int] = None
+    non_hq_ai_output_tokens: Optional[int] = None
+    non_hq_ai_total_tokens: Optional[int] = None
+    non_hq_ai_estimated_cost_usd: Optional[float] = None
     # ── Sector / industry detection (audit & app metadata — NEVER scoring) ─────
     detected_industry: Optional[str] = None
     detected_sub_industry: Optional[str] = None

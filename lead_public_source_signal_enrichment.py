@@ -47,7 +47,7 @@ from lead_output_schema import LeadEvidence
 # quote verification, relevance scoring, ...) planned for a later iteration —
 # see the module docstring.
 _BLOCKED_SOURCE_DOMAINS = frozenset({
-    "linkedin.com", "facebook.com", "instagram.com", "twitter.com", "x.com",
+    "facebook.com", "instagram.com", "twitter.com", "x.com",
     "tiktok.com", "glassdoor.com", "indeed.com",
 })
 
