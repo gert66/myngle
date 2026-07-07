@@ -34,7 +34,7 @@ no useful match.
 
 **First-prototype guardrail (explicitly scoped-in despite "no guardrails yet"):** a minimal,
 named block list (`_BLOCKED_SOURCE_DOMAINS`) rejects social/professional-network platforms
-(LinkedIn, Facebook, Instagram, Twitter/X, TikTok, Glassdoor, Indeed) plus the existing hosted-ATS
+(Facebook, Instagram, Twitter/X, TikTok, Glassdoor, Indeed) plus the existing hosted-ATS
 list (Workday, Greenhouse, ...) as a `source_base_url` — required by acceptance test #3. Nothing
 else is guarded yet (no domain-match-to-company check, no quote verification) — deferred to a
 later iteration as instructed.
