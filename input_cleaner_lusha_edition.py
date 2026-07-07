@@ -19,7 +19,7 @@ import io
 import json
 import re
 from dataclasses import dataclass
-from datetime import datetime
+from pathlib import Path
 
 import pandas as pd
 import streamlit as st
@@ -654,6 +654,65 @@ def _load_file(uploaded) -> "pd.DataFrame | None":
         return None
 
 
+# ---------------------------------------------------------------------------
+# Path-mode input/output — reading a Lusha export directly from a local
+# filesystem path (a browser upload never reveals the original file path),
+# and writing the cleaned result back next to it. Kept as plain, Streamlit-
+# free functions so they're independently testable.
+# ---------------------------------------------------------------------------
+
+_SUPPORTED_PATH_EXTENSIONS = (".xlsx", ".xls", ".csv")
+
+
+def output_filename_for(source_name: str) -> str:
+    """<source-stem>_cleaned.xlsx — e.g. Switzerland.xlsx -> Switzerland_cleaned.xlsx.
+    Works for any source extension (.xlsx/.xls/.csv); the output is always .xlsx."""
+    stem = Path(str(source_name or "")).stem
+    return f"{stem}_cleaned.xlsx"
+
+
+def output_path_for(source_path: "Path | str") -> Path:
+    """Full output path: same directory as the source file, filename per
+    ``output_filename_for()``."""
+    return Path(source_path).with_name(output_filename_for(Path(source_path).name))
+
+
+def write_output_next_to_source(source_path: "Path | str", excel_bytes: bytes) -> "tuple[Path, bool]":
+    """Writes ``excel_bytes`` to ``output_path_for(source_path)``. Returns
+    ``(output_path, overwritten)`` — ``overwritten`` is True when a file
+    already existed at that path before writing. Can raise (a real
+    filesystem error, e.g. permissions); callers wrap this in a try/except."""
+    out_path = output_path_for(source_path)
+    overwritten = out_path.exists()
+    out_path.write_bytes(excel_bytes)
+    return out_path, overwritten
+
+
+def load_dataframe_from_path(path: "Path | str") -> "tuple[pd.DataFrame | None, str]":
+    """Reads a Lusha export directly from a local filesystem path. Returns
+    ``(dataframe_or_None, error_message)`` — ``error_message`` is ``""`` on
+    success. Never raises."""
+    p = Path(path)
+    if not p.exists():
+        return None, f"Pad bestaat niet: {p}"
+    if not p.is_file():
+        return None, f"Pad is geen bestand: {p}"
+    ext = p.suffix.lower()
+    if ext not in _SUPPORTED_PATH_EXTENSIONS:
+        return None, (
+            f"Bestandstype niet ondersteund ({ext or '(geen extensie)'}) — "
+            "verwacht .xlsx, .xls of .csv."
+        )
+    try:
+        if ext == ".csv":
+            df = pd.read_csv(p, dtype=str).fillna("")
+        else:
+            df = pd.read_excel(p, dtype=str).fillna("")
+        return df, ""
+    except Exception as exc:
+        return None, f"Kon bestand niet lezen: {exc}"
+
+
 def _sidebar_exclusion_config() -> IndustryExclusionConfig:
     st.sidebar.subheader("Industrie-uitsluitingen")
     exclude_government = st.sidebar.checkbox(
@@ -714,20 +773,44 @@ def main():
         "Upload Lusha company export (CSV or Excel .xlsx)",
         type=["csv", "xlsx"], key="lusha_upload",
     )
-    if uploaded is None:
+    manual_path_raw = st.text_input(
+        "Of: volledig pad naar het Lusha-bestand op deze computer",
+        value="", key="lusha_path",
+        placeholder=r"C:\Users\...\Switzerland.xlsx",
+        help="Een browser-upload onthult het oorspronkelijke bestandspad "
+             "niet. Vul hier een geldig pad in om het bestand rechtstreeks "
+             "van schijf te lezen — het resultaat wordt dan automatisch "
+             "weggeschreven naast dit bestand. Heeft voorrang boven de "
+             "upload hierboven wanneer beide zijn ingevuld.")
+
+    df = None
+    source_name = ""
+    source_path: "Path | None" = None
+    manual_path = manual_path_raw.strip().strip('"').strip("'")
+
+    if manual_path:
+        source_path = Path(manual_path)
+        df, path_error = load_dataframe_from_path(source_path)
+        if path_error:
+            st.error(path_error)
+            return
+        source_name = source_path.name
+    elif uploaded is not None:
+        df = _load_file(uploaded)
+        if df is None:
+            return
+        source_name = uploaded.name
+    else:
         st.info(
-            "Upload a Lusha company export. Expected columns include "
-            "**Company Name**, **Company Domain**, Company Description, "
-            "Company Number of Employees, Company Revenue, "
-            "Company Main Industry, Company Sub Industry, Company Country, "
-            "Company Intent Topics, Company linkedin URL.")
+            "Upload a Lusha company export, or paste a full file path. "
+            "Expected columns include **Company Name**, **Company Domain**, "
+            "Company Description, Company Number of Employees, "
+            "Company Revenue, Company Main Industry, Company Sub Industry, "
+            "Company Country, Company Intent Topics, Company linkedin URL.")
         return
 
-    df = _load_file(uploaded)
-    if df is None:
-        return
-
-    st.success(f"Loaded {len(df)} rows, {len(df.columns)} columns.")
+    st.success(f"Loaded {len(df)} rows, {len(df.columns)} columns from "
+               f"**{source_name}**.")
 
     mapping = detect_lusha_columns(df)
     missing = missing_required_lusha_columns(mapping)
@@ -837,10 +920,21 @@ def main():
     with st.expander(f"Uitgesloten rijen ({len(excluded_df)})", expanded=False):
         st.dataframe(excluded_df, use_container_width=True)
 
-    # ── Download ──────────────────────────────────────────────────────────
+    # ── Download / write to disk ──────────────────────────────────────────
     excel_bytes = build_excel(selected_df, hot_df, excluded_df, funnel)
-    source_stem = re.sub(r"[^A-Za-z0-9_\-]+", "_", uploaded.name.rsplit(".", 1)[0])
-    file_name = f"input_cleaner_lusha_{source_stem}_{datetime.now():%Y%m%d}.xlsx"
+    file_name = output_filename_for(source_name)
+
+    if source_path is not None:
+        try:
+            written_path, overwritten = write_output_next_to_source(source_path, excel_bytes)
+            if overwritten:
+                st.success(
+                    f"Resultaat weggeschreven naar `{written_path}` "
+                    "(bestaand bestand overschreven).")
+            else:
+                st.success(f"Resultaat weggeschreven naar `{written_path}`.")
+        except Exception as exc:
+            st.error(f"Kon resultaat niet wegschrijven naar schijf: {exc}")
 
     st.download_button(
         "⬇ Download cleaned Excel",
@@ -849,6 +943,13 @@ def main():
         mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         use_container_width=True,
     )
+    if source_path is None:
+        st.caption(
+            "Bestand geüpload via de browser — het originele bestandspad is "
+            "onbekend, dus automatisch wegschrijven naast de bron is niet "
+            "mogelijk. Gebruik de downloadknop hierboven, of vul het "
+            "volledige pad naar het bestand in om het resultaat automatisch "
+            "naast het inputbestand weg te schrijven.")
 
 
 if __name__ == "__main__":

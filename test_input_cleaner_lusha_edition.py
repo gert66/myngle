@@ -3,13 +3,15 @@
 No network / live keys: the Anthropic prescreen call is mocked. Covers
 column mapping, deduplication, industry exclusion rules (incl. the
 Education/Higher-Education exception and the blank-Main-Industry
-never-excluded rule), the intent hot-list override, and defensive JSON
-parsing of the Haiku prescreen response.
+never-excluded rule), the intent hot-list override, defensive JSON parsing
+of the Haiku prescreen response, and the output filename/path-mode
+read-write helpers.
 """
 
 from __future__ import annotations
 
 import json
+from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import pandas as pd
@@ -442,3 +444,109 @@ class TestSortAndBatchAppColumns:
         # Original Lusha columns are preserved, not replaced.
         assert "Company Domain" in out.columns
         assert "Company Country" in out.columns
+
+
+# ---------------------------------------------------------------------------
+# Output filename / path-mode read-write
+# ---------------------------------------------------------------------------
+
+class TestOutputFilename:
+    def test_xlsx_source_gets_cleaned_suffix(self):
+        assert m.output_filename_for("Switzerland.xlsx") == "Switzerland_cleaned.xlsx"
+
+    def test_csv_source_gets_cleaned_xlsx_suffix(self):
+        assert m.output_filename_for("Switzerland.csv") == "Switzerland_cleaned.xlsx"
+
+    def test_xls_source_gets_cleaned_xlsx_suffix(self):
+        assert m.output_filename_for("Switzerland.xls") == "Switzerland_cleaned.xlsx"
+
+    def test_name_with_spaces_preserved(self):
+        assert m.output_filename_for("United Kingdom export.xlsx") == \
+            "United Kingdom export_cleaned.xlsx"
+
+    def test_output_path_for_keeps_source_directory(self):
+        source = Path(r"C:\Users\gert\Data\Switzerland.xlsx")
+        out = m.output_path_for(source)
+        assert out.name == "Switzerland_cleaned.xlsx"
+        assert out.parent == source.parent
+
+
+class TestLoadDataframeFromPath:
+    def test_existing_xlsx_path_loads_dataframe(self, tmp_path):
+        src = tmp_path / "Switzerland.xlsx"
+        pd.DataFrame({
+            "Company Name": ["Acme AG"],
+            "Company Domain": ["acme.ch"],
+        }).to_excel(src, index=False)
+
+        df, err = m.load_dataframe_from_path(src)
+        assert err == ""
+        assert df is not None
+        assert list(df["Company Name"]) == ["Acme AG"]
+
+    def test_existing_csv_path_loads_dataframe(self, tmp_path):
+        src = tmp_path / "Switzerland.csv"
+        pd.DataFrame({
+            "Company Name": ["Acme AG"],
+            "Company Domain": ["acme.ch"],
+        }).to_csv(src, index=False)
+
+        df, err = m.load_dataframe_from_path(src)
+        assert err == ""
+        assert df is not None
+        assert list(df["Company Name"]) == ["Acme AG"]
+
+    def test_nonexistent_path_returns_clear_error_no_crash(self, tmp_path):
+        missing = tmp_path / "does_not_exist.xlsx"
+        df, err = m.load_dataframe_from_path(missing)
+        assert df is None
+        assert "bestaat niet" in err.lower()
+
+    def test_unsupported_extension_returns_clear_error(self, tmp_path):
+        src = tmp_path / "Switzerland.txt"
+        src.write_text("not a spreadsheet")
+        df, err = m.load_dataframe_from_path(src)
+        assert df is None
+        assert "niet ondersteund" in err.lower()
+
+    def test_directory_path_returns_clear_error_no_crash(self, tmp_path):
+        df, err = m.load_dataframe_from_path(tmp_path)
+        assert df is None
+        assert "geen bestand" in err.lower()
+
+
+class TestWriteOutputNextToSource:
+    def test_writes_cleaned_file_next_to_source(self, tmp_path):
+        src = tmp_path / "Switzerland.xlsx"
+        src.write_bytes(b"fake original bytes")
+
+        out_path, overwritten = m.write_output_next_to_source(src, b"fake excel bytes")
+
+        assert out_path == tmp_path / "Switzerland_cleaned.xlsx"
+        assert out_path.exists()
+        assert out_path.read_bytes() == b"fake excel bytes"
+        assert overwritten is False
+
+    def test_overwrites_existing_cleaned_file_and_reports_it(self, tmp_path):
+        src = tmp_path / "Switzerland.xlsx"
+        src.write_bytes(b"fake original bytes")
+        existing_output = tmp_path / "Switzerland_cleaned.xlsx"
+        existing_output.write_bytes(b"stale old output")
+
+        out_path, overwritten = m.write_output_next_to_source(src, b"fresh excel bytes")
+
+        assert out_path == existing_output
+        assert overwritten is True
+        assert out_path.read_bytes() == b"fresh excel bytes"
+
+    def test_writes_into_directory_with_spaces(self, tmp_path):
+        sub_dir = tmp_path / "United Kingdom Data"
+        sub_dir.mkdir()
+        src = sub_dir / "UK Export.xlsx"
+        src.write_bytes(b"x")
+
+        out_path, overwritten = m.write_output_next_to_source(src, b"y")
+
+        assert out_path == sub_dir / "UK Export_cleaned.xlsx"
+        assert overwritten is False
+        assert out_path.read_bytes() == b"y"
