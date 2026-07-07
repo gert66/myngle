@@ -55,6 +55,8 @@ def collect_own_domain_hq_pages(
     *,
     max_pages: int = _DEFAULT_MAX_HQ_PAGES,
     candidate_paths: "tuple[str, ...] | None" = None,
+    cache_index: Optional[dict] = None,
+    force_refresh: bool = False,
 ) -> dict:
     """Crawl the company's own domain for HQ classification material.
 
@@ -68,6 +70,12 @@ def collect_own_domain_hq_pages(
     or a hard failure) — the caller MUST ignore ``pages`` entirely and fall back
     to Serper-only, since a bad/exhausted key fails consistently and partial
     results would be misleading. Never raises.
+
+    ``cache_index``/``force_refresh`` (default ``None``/``False``) are passed
+    straight through to ``_firecrawl_scrape_page`` (see ``enrichment_cache.py``)
+    — this function has no caching logic of its own. ``None`` (the default)
+    means every page hits Firecrawl live, exactly as before this parameter
+    existed.
     """
     paths = candidate_paths or _HQ_CANDIDATE_PAGE_PATHS
     domain = (domain or "").strip()
@@ -84,7 +92,10 @@ def collect_own_domain_hq_pages(
         if len(pages) >= max_pages:
             break
         url = base + path
-        result = _firecrawl_scrape_page(url, firecrawl_api_key)
+        result = _firecrawl_scrape_page(
+            url, firecrawl_api_key,
+            cache_index=cache_index, force_refresh=force_refresh,
+        )
         pages_crawled.append({"url": url, "status": result["status"]})
         if result["hard_failure"]:
             # Bad/exhausted key or network outage: abandon Firecrawl entirely.

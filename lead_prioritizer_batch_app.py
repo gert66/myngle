@@ -1154,6 +1154,28 @@ def main() -> None:  # pragma: no cover - exercised only under `streamlit run`
                  "gating-principe als de aparte 'Full enrichment, confirmed "
                  "foreign-HQ only'-modus. C5 wordt in deze opt-in (nog) niet "
                  "ondersteund (default: uit).")
+        use_enrichment_cache = st.checkbox(
+            "Gebruik gedeelde enrichment-cache (GCS, per land)", value=False,
+            help="Slaat Serper- en Firecrawl-resultaten op in één gedeeld "
+                 "indexbestand per land in GCS (gcloud/gsutil, geen nieuwe "
+                 "dependency), zodat runs vanaf verschillende machines "
+                 "(bijv. thuis-laptop en werk-desktop) hetzelfde "
+                 "cache-resultaat zien en dezelfde bedrijven/pagina's niet "
+                 "onnodig opnieuw opzoeken of scrapen. De index wordt eenmalig "
+                 "gedownload bij de start van de run, tussentijds elke ~50 "
+                 "leads en aan het einde teruggeschreven. Serper-HQ-lookups "
+                 "blijven 90 dagen geldig, overige Serper-signalen 30 dagen, "
+                 "Firecrawl-pagina's 120 dagen. Puur een snelheids-optimalisatie "
+                 "— bij een download-/uploadfout valt de run automatisch terug "
+                 "op live opzoeken zonder de run te breken (default: uit).")
+        enrichment_cache_bucket = DEFAULT_GCS_BUCKET
+        if use_enrichment_cache:
+            enrichment_cache_bucket = st.text_input(
+                "GCS bucket voor enrichment-cache", value=DEFAULT_GCS_BUCKET,
+                help="Zelfde bucket-conventie als de bestaande GCS-upload "
+                     "(gcloud/gsutil). De cache-indexbestanden komen terecht "
+                     "onder _enrichment_cache/<land>_cache_index.json in deze "
+                     "bucket.")
         deep_dive = st.checkbox(
             "Deep dive voor top-leads (opt-in)", value=True,
             help="Runs a deeper, source-backed evidence collection AFTER "
@@ -1468,6 +1490,8 @@ def main() -> None:  # pragma: no cover - exercised only under `streamlit run`
             ai_signal_scoring=ai_signal_scoring,
             legacy_enrichment_mode=legacy_enrichment_mode,
             gate_full_enrichment_on_foreign_hq=gate_full_enrichment_on_foreign_hq,
+            use_enrichment_cache=use_enrichment_cache,
+            enrichment_cache_bucket=enrichment_cache_bucket,
             deep_dive=deep_dive,
             deep_dive_min_score=deep_dive_min_score,
             deep_dive_on_foreign_hq=deep_dive_on_foreign_hq,

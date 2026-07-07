@@ -1299,3 +1299,74 @@ class TestSectorFallbackToOwnDomainAi:
             )
         assert result.sector_source == "keyword_match"
         assert result.detected_industry == "Industrial equipment and machinery"
+
+
+# ---------------------------------------------------------------------------
+# call_serper_for_hq: shared GCS enrichment cache (opt-in cache_index param).
+# ---------------------------------------------------------------------------
+
+class TestCallSerperForHqCache:
+    def _mock_urlopen(self, payload: dict):
+        response = MagicMock()
+        response.read.return_value = json.dumps(payload).encode()
+        response.__enter__ = MagicMock(return_value=response)
+        response.__exit__ = MagicMock(return_value=False)
+        return patch("urllib.request.urlopen", return_value=response)
+
+    def test_default_none_cache_index_always_calls_serper_live(self):
+        from lead_hq_ai_interpreter import call_serper_for_hq
+
+        with self._mock_urlopen({"organic": [{"title": "x"}]}) as mock_urlopen:
+            result = call_serper_for_hq(
+                domain_root="acme.com", query="acme headquarters", serper_api_key="k",
+            )
+        mock_urlopen.assert_called_once()
+        assert result == {"organic": [{"title": "x"}]}
+
+    def test_cache_hit_skips_network_call(self):
+        from lead_hq_ai_interpreter import call_serper_for_hq
+        import enrichment_cache
+
+        index: dict = {}
+        enrichment_cache.put_cached(
+            index, "serper", "acme.com", "hq", response={"organic": ["cached"]})
+
+        with self._mock_urlopen({"organic": ["live"]}) as mock_urlopen:
+            result = call_serper_for_hq(
+                domain_root="acme.com", query="acme headquarters", serper_api_key="k",
+                cache_index=index,
+            )
+        mock_urlopen.assert_not_called()
+        assert result == {"organic": ["cached"]}
+
+    def test_cache_miss_calls_live_and_populates_cache(self):
+        from lead_hq_ai_interpreter import call_serper_for_hq
+        import enrichment_cache
+
+        index: dict = {}
+        with self._mock_urlopen({"organic": ["live"]}) as mock_urlopen:
+            result = call_serper_for_hq(
+                domain_root="acme.com", query="acme headquarters", serper_api_key="k",
+                cache_index=index,
+            )
+        mock_urlopen.assert_called_once()
+        assert result == {"organic": ["live"]}
+        cached = enrichment_cache.get_cached(
+            index, "serper", "acme.com", "hq", ttl_days=90)
+        assert cached == {"organic": ["live"]}
+
+    def test_force_refresh_ignores_fresh_cache_entry(self):
+        from lead_hq_ai_interpreter import call_serper_for_hq
+        import enrichment_cache
+
+        index: dict = {}
+        enrichment_cache.put_cached(
+            index, "serper", "acme.com", "hq", response={"organic": ["cached"]})
+
+        with self._mock_urlopen({"organic": ["live"]}) as mock_urlopen:
+            result = call_serper_for_hq(
+                domain_root="acme.com", query="acme headquarters", serper_api_key="k",
+                cache_index=index, force_refresh=True,
+            )
+        mock_urlopen.assert_called_once()
+        assert result == {"organic": ["live"]}

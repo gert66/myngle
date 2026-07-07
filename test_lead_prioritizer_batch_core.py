@@ -579,6 +579,161 @@ class TestRunBatch:
 
 
 # ---------------------------------------------------------------------------
+# Shared GCS enrichment cache (opt-in) — BatchRunConfig.use_enrichment_cache.
+# Regression: default (off) must never load/save a cache index or pass a
+# cache_index other than None. When on: one index download per distinct
+# country actually present, correct per-row index for a mixed-country
+# dataset, and the run_summary cache hit/miss delta columns.
+# ---------------------------------------------------------------------------
+
+class TestEnrichmentCacheWiring:
+    _df = pd.DataFrame({
+        "company": ["Acme", "Beta"],
+        "domain": ["acme.com", "beta.com"],
+    })
+
+    def test_default_off_never_loads_or_passes_cache_index(self):
+        seen = {}
+
+        def _fake(lead_input, **kwargs):
+            seen.update(kwargs)
+            return _sample_result(company_name=lead_input.company_name)
+
+        cfg = BatchRunConfig(company_name_column="company", domain_column="domain",
+                             run_mode="full", row_limit=1)
+        with patch("lead_prioritizer_batch_core.prioritize_single_lead", side_effect=_fake), \
+             patch("enrichment_cache.load_cache_index") as mock_load, \
+             patch("enrichment_cache.save_cache_index") as mock_save:
+            run_batch_dataframe(self._df, cfg, "SERP", "ANTH")
+        assert seen.get("cache_index") is None
+        mock_load.assert_not_called()
+        mock_save.assert_not_called()
+
+    def test_default_off_run_summary_has_no_cache_columns(self):
+        cfg = BatchRunConfig(company_name_column="company", domain_column="domain",
+                             run_mode="full", row_limit=1)
+        with patch("lead_prioritizer_batch_core.prioritize_single_lead",
+                   side_effect=lambda li, **k: _sample_result(company_name=li.company_name)):
+            out = run_batch_dataframe(self._df, cfg, "SERP", "ANTH")
+        for col in ("serper_cache_hits", "serper_cache_misses",
+                    "firecrawl_cache_hits", "firecrawl_cache_misses"):
+            assert col not in out["run_summary"].columns
+
+    def test_enabled_downloads_once_per_distinct_country_and_saves_at_end(self):
+        loads = []
+
+        def _fake_load(bucket, country_slug):
+            loads.append((bucket, country_slug))
+            return {}
+
+        cfg = BatchRunConfig(company_name_column="company", domain_column="domain",
+                             run_mode="full", row_limit=0,
+                             use_enrichment_cache=True,
+                             enrichment_cache_bucket="test-bucket")
+        with patch("lead_prioritizer_batch_core.prioritize_single_lead",
+                   side_effect=lambda li, **k: _sample_result(company_name=li.company_name)), \
+             patch("enrichment_cache.load_cache_index", side_effect=_fake_load), \
+             patch("enrichment_cache.save_cache_index") as mock_save:
+            run_batch_dataframe(self._df, cfg, "SERP", "ANTH")
+        # Both rows default to the same country (config.default_input_country),
+        # so exactly one distinct-country download, not one per row.
+        assert loads == [("test-bucket", "italy")]
+        assert mock_save.call_count >= 1
+
+    def test_enabled_passes_loaded_index_object_to_prioritize_single_lead(self):
+        sentinel_index = {"serper|acme.com|hq": {"fetched_at": "x", "response": {}}}
+        seen = {}
+
+        def _fake(lead_input, **kwargs):
+            seen.update(kwargs)
+            return _sample_result(company_name=lead_input.company_name)
+
+        cfg = BatchRunConfig(company_name_column="company", domain_column="domain",
+                             run_mode="full", row_limit=1,
+                             use_enrichment_cache=True,
+                             enrichment_cache_bucket="test-bucket")
+        with patch("lead_prioritizer_batch_core.prioritize_single_lead", side_effect=_fake), \
+             patch("enrichment_cache.load_cache_index", return_value=sentinel_index), \
+             patch("enrichment_cache.save_cache_index"):
+            run_batch_dataframe(self._df, cfg, "SERP", "ANTH")
+        assert seen.get("cache_index") is sentinel_index
+
+    def test_mixed_country_dataset_uses_correct_per_row_index(self):
+        df = pd.DataFrame({
+            "company": ["Acme IT", "Beta NL"],
+            "domain": ["acme.it", "beta.nl"],
+            "country": ["Italy", "Netherlands"],
+        })
+        indexes_by_slug = {
+            "italy": {"marker": "italy-index"},
+            "netherlands": {"marker": "netherlands-index"},
+        }
+        seen_per_company = {}
+
+        def _fake(lead_input, **kwargs):
+            seen_per_company[lead_input.company_name] = kwargs.get("cache_index")
+            return _sample_result(company_name=lead_input.company_name)
+
+        cfg = BatchRunConfig(company_name_column="company", domain_column="domain",
+                             input_country_column="country",
+                             run_mode="full", row_limit=0,
+                             use_enrichment_cache=True,
+                             enrichment_cache_bucket="test-bucket")
+        with patch("lead_prioritizer_batch_core.prioritize_single_lead", side_effect=_fake), \
+             patch("enrichment_cache.load_cache_index",
+                   side_effect=lambda bucket, slug: indexes_by_slug[slug]), \
+             patch("enrichment_cache.save_cache_index"):
+            run_batch_dataframe(df, cfg, "SERP", "ANTH")
+
+        assert seen_per_company["Acme IT"] is indexes_by_slug["italy"]
+        assert seen_per_company["Beta NL"] is indexes_by_slug["netherlands"]
+
+    def test_enabled_run_summary_reports_cache_hit_miss_delta(self):
+        import usage_tracker
+
+        def _fake(lead_input, **kwargs):
+            usage_tracker.record_cache_hit("serper")
+            usage_tracker.record_cache_miss("serper")
+            usage_tracker.record_cache_hit("firecrawl")
+            return _sample_result(company_name=lead_input.company_name)
+
+        cfg = BatchRunConfig(company_name_column="company", domain_column="domain",
+                             run_mode="full", row_limit=0,
+                             use_enrichment_cache=True,
+                             enrichment_cache_bucket="test-bucket")
+        with patch("lead_prioritizer_batch_core.prioritize_single_lead", side_effect=_fake), \
+             patch("enrichment_cache.load_cache_index", return_value={}), \
+             patch("enrichment_cache.save_cache_index"):
+            out = run_batch_dataframe(self._df, cfg, "SERP", "ANTH")
+        summary = out["run_summary"].iloc[0]
+        assert summary["serper_cache_hits"] == 2   # one per row (Acme, Beta)
+        assert summary["serper_cache_misses"] == 2
+        assert summary["firecrawl_cache_hits"] == 2
+        assert summary["firecrawl_cache_misses"] == 0
+
+    def test_failing_download_falls_back_to_none_index_without_crash(self):
+        seen = {}
+
+        def _fake(lead_input, **kwargs):
+            seen.update(kwargs)
+            return _sample_result(company_name=lead_input.company_name)
+
+        cfg = BatchRunConfig(company_name_column="company", domain_column="domain",
+                             run_mode="full", row_limit=1,
+                             use_enrichment_cache=True,
+                             enrichment_cache_bucket="test-bucket")
+        # A failing download degrades to {} (enrichment_cache.load_cache_index's
+        # own contract) -- confirm the batch run still completes successfully
+        # with an (empty-but-not-None) cache_index rather than crashing.
+        with patch("lead_prioritizer_batch_core.prioritize_single_lead", side_effect=_fake), \
+             patch("enrichment_cache.load_cache_index", return_value={}), \
+             patch("enrichment_cache.save_cache_index"):
+            out = run_batch_dataframe(self._df, cfg, "SERP", "ANTH")
+        assert seen.get("cache_index") == {}
+        assert out["enriched_leads"].shape[0] == 1
+
+
+# ---------------------------------------------------------------------------
 # Deep Dive (Step B, opt-in) — trigger gate, per-row wiring, Excel output,
 # and score-invariance (never fed back into scoring).
 # ---------------------------------------------------------------------------
@@ -1655,6 +1810,83 @@ class TestForeignHQOnlyMode:
             out = run_batch_foreign_hq_only(self._df, self._cfg, "S", "A",
                                             progress_callback=_boom)
         assert len(out["enriched_leads"]) == 2
+
+
+class TestForeignHqOnlyEnrichmentCacheWiring:
+    """run_batch_foreign_hq_only's Phase 1 (hq_only run_batch_dataframe) and
+    Phase 3 (_run_gated_full_enrichment) each run their own independent
+    cache load/save cycle; the combined run_summary counts must cover BOTH
+    phases, not just Phase 3."""
+
+    _df = pd.DataFrame({
+        "company": ["Confirmed Foreign Co", "Local Domestic Co"],
+        "domain": ["confirmed.com.br", "local.com.br"],
+    })
+    _cfg = BatchRunConfig(
+        company_name_column="company", domain_column="domain",
+        run_mode=FOREIGN_HQ_ONLY_MODE, row_limit=2,
+        default_input_country="Brazil",
+        use_enrichment_cache=True, enrichment_cache_bucket="test-bucket",
+    )
+
+    def test_default_off_never_touches_cache(self):
+        cfg = BatchRunConfig(
+            company_name_column="company", domain_column="domain",
+            run_mode=FOREIGN_HQ_ONLY_MODE, row_limit=2,
+            default_input_country="Brazil",
+        )
+        fake = _fake_prioritize_for_foreign_hq(
+            {"Confirmed Foreign Co": 3.0, "Local Domestic Co": 0.0})
+        with patch("lead_prioritizer_batch_core.prioritize_single_lead", side_effect=fake), \
+             patch("enrichment_cache.load_cache_index") as mock_load, \
+             patch("enrichment_cache.save_cache_index") as mock_save:
+            out = run_batch_foreign_hq_only(self._df, cfg, "S", "A")
+        mock_load.assert_not_called()
+        mock_save.assert_not_called()
+        for col in ("serper_cache_hits", "serper_cache_misses",
+                    "firecrawl_cache_hits", "firecrawl_cache_misses"):
+            assert col not in out["run_summary"].columns
+
+    def test_enabled_downloads_and_saves_for_both_phases(self):
+        fake = _fake_prioritize_for_foreign_hq(
+            {"Confirmed Foreign Co": 3.0, "Local Domestic Co": 0.0})
+        with patch("lead_prioritizer_batch_core.prioritize_single_lead", side_effect=fake), \
+             patch("enrichment_cache.load_cache_index", return_value={}) as mock_load, \
+             patch("enrichment_cache.save_cache_index") as mock_save:
+            out = run_batch_foreign_hq_only(self._df, self._cfg, "S", "A")
+        # At least once for Phase 1 (hq_only run_batch_dataframe) and once
+        # for Phase 3 (_run_gated_full_enrichment) — both run independently.
+        assert mock_load.call_count >= 2
+        assert mock_save.call_count >= 2
+        assert len(out["enriched_leads"]) == 2
+
+    def test_enabled_run_summary_reports_combined_hit_miss_delta(self):
+        import usage_tracker
+
+        def _fake(lead_input, **kwargs):
+            usage_tracker.record_cache_miss("serper")
+            score = 3.0 if lead_input.company_name == "Confirmed Foreign Co" else 0.0
+            if kwargs.get("run_full_v2_pipeline"):
+                return _sample_result(
+                    company_name=lead_input.company_name, domain=lead_input.domain,
+                    input_country=lead_input.input_country or "Brazil",
+                    sig_foreign_hq_score_for_next_scoring=score,
+                    final_commercial_fit_score=99.0,
+                )
+            return _sample_result(
+                company_name=lead_input.company_name, domain=lead_input.domain,
+                input_country=lead_input.input_country or "Brazil",
+                sig_foreign_hq_score_for_next_scoring=score,
+                final_commercial_fit_score=None, evidence_items=[], signals=[],
+            )
+
+        with patch("lead_prioritizer_batch_core.prioritize_single_lead", side_effect=_fake), \
+             patch("enrichment_cache.load_cache_index", return_value={}), \
+             patch("enrichment_cache.save_cache_index"):
+            out = run_batch_foreign_hq_only(self._df, self._cfg, "S", "A")
+        summary = out["run_summary"].iloc[0]
+        # 2 rows in Phase 1 (hq_only) + 1 eligible row in Phase 3 (full) = 3.
+        assert summary["serper_cache_misses"] == 3
 
 
 # ---------------------------------------------------------------------------

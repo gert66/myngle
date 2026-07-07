@@ -10,6 +10,7 @@ Implements AI-first HQ detection for a single lead:
 from __future__ import annotations
 
 import json
+from typing import Optional
 
 from lead_output_schema import LeadInput, LeadPrioritizationResult, HQDetectionResult
 from hq_simple_detector import build_simple_hq_query, is_hosted_careers_platform_domain
@@ -81,6 +82,8 @@ def prioritize_single_lead(
     public_source_base_url: str = "",
     public_source_label: str = "",
     public_source_max_pages: int = 3,
+    cache_index: Optional[dict] = None,
+    force_refresh: bool = False,
     run_full_v2_pipeline: bool = False,
 ) -> LeadPrioritizationResult:
     """Orchestrate HQ detection and scoring for a single lead.
@@ -197,6 +200,19 @@ def prioritize_single_lead(
     Deliberately **not** part of the ``run_full_v2_pipeline`` preset: it must
     be turned on explicitly.
 
+    ``cache_index`` (default ``None``) is an optional in-memory, GCS-backed
+    shared enrichment cache (see ``enrichment_cache.py``) for ONE country —
+    the caller (batch orchestration) downloads it once at the start of a run
+    and is responsible for persisting it back to GCS afterward. When
+    ``None`` — the default — every Serper/Firecrawl call this function makes
+    (HQ, own-domain Firecrawl crawl, non-HQ evidence collection, Public
+    Source Signal Enrichment) hits the network live, exactly as before this
+    parameter existed. ``force_refresh`` (default ``False``) bypasses any
+    cached entry for this lead's calls without needing to clear the whole
+    index. Rich ICP context's own Serper queries are NOT wired into this
+    cache in this iteration (out of scope; see enrichment-cache delivery
+    notes) — only the four call families listed above are.
+
     ``run_full_v2_pipeline`` (default ``False``) is an explicit opt-in preset
     that turns on all optional v2 steps (2–6) for a single-lead end-to-end run.
     It does not add batch processing, change legacy ranking, or alter the
@@ -239,6 +255,8 @@ def prioritize_single_lead(
         domain_root=domain_root,
         query=query,
         serper_api_key=serper_api_key,
+        cache_index=cache_index,
+        force_refresh=force_refresh,
     )
 
     # ── PRIMARY HQ source: crawl the company's own domain via Firecrawl ────────
@@ -252,7 +270,10 @@ def prioritize_single_lead(
     # behavior — never an error, mirroring the Deep Dive precedent.
     crawled_pages: list = []
     if firecrawl_api_key and input_row.domain and not domain_is_hosted_platform:
-        fc = collect_own_domain_hq_pages(input_row.domain, firecrawl_api_key)
+        fc = collect_own_domain_hq_pages(
+            input_row.domain, firecrawl_api_key,
+            cache_index=cache_index, force_refresh=force_refresh,
+        )
         if fc["used"]:
             crawled_pages = fc["pages"]
 
@@ -286,6 +307,8 @@ def prioritize_single_lead(
             domain=input_row.domain,
             serper_api_key=serper_api_key,
             country=effective_country,
+            cache_index=cache_index,
+            force_refresh=force_refresh,
         )
 
     # ── Public Source Signal Enrichment (opt-in, evidence-only) ───────────────
@@ -306,6 +329,8 @@ def prioritize_single_lead(
             firecrawl_api_key=firecrawl_api_key,
             source_label=public_source_label,
             max_pages=public_source_max_pages,
+            cache_index=cache_index,
+            force_refresh=force_refresh,
         ))
 
     # ── Step 3: non-HQ signal extraction (no live Serper calls) ───────────────

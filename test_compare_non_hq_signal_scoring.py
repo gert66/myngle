@@ -36,7 +36,7 @@ def _serper_payload_for(signal_name: str) -> dict:
     }
 
 
-def _fake_call_serper_for_enrichment(query, serper_api_key, gl=None, hl=None, usage_kind="non_hq"):
+def _fake_call_serper_for_enrichment(query, serper_api_key, gl=None, hl=None, usage_kind="non_hq", **kwargs):
     # query text encodes no signal name directly; infer from keyword presence
     # in the query itself (mirrors build_non_hq_enrichment_queries wording).
     if "international offices" in query:

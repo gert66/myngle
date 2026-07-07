@@ -74,16 +74,44 @@ _CANDIDATE_PAGE_PATHS: tuple[str, ...] = (
 )
 
 
-def _firecrawl_scrape_page(url: str, firecrawl_api_key: str, timeout: int = 15) -> dict:
+def _firecrawl_scrape_page(
+    url: str,
+    firecrawl_api_key: str,
+    timeout: int = 15,
+    cache_index: Optional[dict] = None,
+    force_refresh: bool = False,
+) -> dict:
     """POST one Firecrawl scrape request. Never raises.
 
     Returns ``{"ok": bool, "text": str, "status": str, "hard_failure": bool}``.
     ``hard_failure=True`` means Firecrawl itself is unusable right now
     (network error, or a key/quota problem) — the caller should abandon
     Firecrawl entirely and fall back, rather than just skipping this page.
+
+    ``cache_index`` (default ``None``) is an optional in-memory, GCS-backed
+    shared cache index (see ``enrichment_cache.py``), keyed on the full
+    ``url``. When ``None`` — the default — behavior is completely unchanged:
+    every call hits Firecrawl live. When provided, a fresh-enough cached
+    ``ok`` result is returned without a network call; a miss still scrapes
+    live. Only a successful (``ok=True``) result is ever cached — a 404 or
+    error is never cached, so a transient failure is simply retried on the
+    next run rather than "stuck" for the whole TTL.
     """
+    import usage_tracker
+
+    if cache_index is not None:
+        import enrichment_cache
+        cached = enrichment_cache.get_cached(
+            cache_index, "firecrawl", url,
+            ttl_days=enrichment_cache.FIRECRAWL_TTL_DAYS,
+            force_refresh=force_refresh,
+        )
+        if cached is not None:
+            usage_tracker.record_cache_hit("firecrawl")
+            return cached
+        usage_tracker.record_cache_miss("firecrawl")
+
     try:
-        import usage_tracker
         usage_tracker.record_firecrawl_call()
         resp = requests.post(
             _FC_API_URL,
@@ -102,7 +130,11 @@ def _firecrawl_scrape_page(url: str, firecrawl_api_key: str, timeout: int = 15) 
             return {"ok": False, "text": "", "status": "invalid_json", "hard_failure": False}
         page_data = body.get("data") or {}
         text = (page_data.get("markdown") or "")[:_FC_MAX_CHARS]
-        return {"ok": bool(text.strip()), "text": text, "status": "ok", "hard_failure": False}
+        result = {"ok": bool(text.strip()), "text": text, "status": "ok", "hard_failure": False}
+        if cache_index is not None and result["ok"]:
+            enrichment_cache.put_cached(
+                cache_index, "firecrawl", url, response=result)
+        return result
     if resp.status_code == 404:
         return {"ok": False, "text": "", "status": "404", "hard_failure": False}
     if resp.status_code in _FC_KEY_FAILURE_CODES:

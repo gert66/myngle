@@ -140,6 +140,8 @@ def call_serper_for_hq(
     domain_root: str,
     query: str,
     serper_api_key: str,
+    cache_index: Optional[dict] = None,
+    force_refresh: bool = False,
 ) -> dict:
     """Fire a single Serper search and return the raw JSON payload.
 
@@ -147,12 +149,34 @@ def call_serper_for_hq(
     function does not construct queries itself.
 
     Returns an empty dict on any error so callers can treat it defensively.
+
+    ``cache_index`` (default ``None``) is an optional in-memory, GCS-backed
+    shared cache index (see ``enrichment_cache.py``), keyed on
+    ``domain_root`` + signal type ``"hq"``. When ``None`` — the default —
+    behavior is completely unchanged from before this parameter existed:
+    every call hits Serper live. When provided, a fresh-enough cached
+    response is returned without a network call; a miss still calls Serper
+    live and stores the raw JSON payload back into ``cache_index`` (the
+    caller is responsible for eventually persisting ``cache_index`` to GCS
+    via ``enrichment_cache.save_cache_index``).
     """
     import urllib.request
     import usage_tracker
 
     if not serper_api_key or not query:
         return {}
+
+    if cache_index is not None:
+        import enrichment_cache
+        cached = enrichment_cache.get_cached(
+            cache_index, "serper", domain_root, "hq",
+            ttl_days=enrichment_cache.serper_ttl_days("hq"),
+            force_refresh=force_refresh,
+        )
+        if cached is not None:
+            usage_tracker.record_cache_hit("serper")
+            return cached
+        usage_tracker.record_cache_miss("serper")
 
     usage_tracker.record_serper_call("hq")
     payload_bytes = json.dumps({"q": query, "num": 10}).encode()
@@ -167,9 +191,14 @@ def call_serper_for_hq(
     )
     try:
         with urllib.request.urlopen(req, timeout=15) as resp:
-            return json.loads(resp.read().decode())
+            result = json.loads(resp.read().decode())
     except Exception:
         return {}
+
+    if cache_index is not None and result:
+        enrichment_cache.put_cached(
+            cache_index, "serper", domain_root, "hq", response=result)
+    return result
 
 
 # ---------------------------------------------------------------------------

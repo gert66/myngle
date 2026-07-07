@@ -169,6 +169,19 @@ class BatchRunConfig:
     # is not supported in this gated path yet (run_batch_dataframe has never
     # supported C5) — see _run_batch_dataframe_gated.
     gate_full_enrichment_on_foreign_hq: bool = False
+    # Shared, GCS-backed Serper/Firecrawl cache — explicit opt-in, off by
+    # default, and INDEPENDENT of every flag above. When enabled, a batch run
+    # downloads one cache index per country present in the dataset ONCE at
+    # the start (see enrichment_cache.py), consults it in-memory for every
+    # Serper/Firecrawl call made by prioritize_single_lead (HQ, own-domain
+    # Firecrawl crawl, non-HQ evidence collection, Public Source Signal
+    # Enrichment), and uploads the updated index back at the end (and
+    # periodically during a long run). Lets runs from different machines
+    # share results and avoid redundant lookups/scrapes. Default False means
+    # every existing caller's behavior — and its exact Serper/Firecrawl call
+    # volume — is completely unchanged.
+    use_enrichment_cache: bool = False
+    enrichment_cache_bucket: str = ""
 
 
 # ---------------------------------------------------------------------------
@@ -477,6 +490,114 @@ def build_run_summary_dataframe(
 
 
 # ---------------------------------------------------------------------------
+# Shared enrichment cache orchestration (opt-in, GCS-backed) — see
+# enrichment_cache.py for the actual index format / download-upload
+# mechanics. Everything here is pure glue: resolve which country a row
+# belongs to, load/save one index per distinct country actually present in
+# the batch (never assuming a batch is single-country), and read the
+# before/after usage_tracker delta for the run_summary hit/miss columns.
+# ---------------------------------------------------------------------------
+
+def _effective_country_for_row(original: dict, config: "BatchRunConfig") -> str:
+    """Mirrors ``prioritize_single_lead``'s own effective-country resolution
+    (the row's own ``input_country_column`` value, else
+    ``config.default_input_country``) — used ONLY to pick which per-country
+    cache index a row should use, so cache-index selection can never
+    disagree with what ``prioritize_single_lead`` itself computes for that
+    same row."""
+    country = None
+    if config.input_country_column:
+        country = str(original.get(config.input_country_column, "") or "").strip() or None
+    return (country or "").strip() or config.default_input_country
+
+
+def _load_country_cache_indexes(rows: list, config: "BatchRunConfig") -> dict:
+    """One cache index per DISTINCT effective country actually present among
+    ``rows`` (a list of row dicts) — one GCS download per country, never per
+    row, and never assuming the whole batch is a single country just because
+    ``config.default_input_country`` names one: a dataset whose
+    ``input_country`` column varies per row gets one index per country group.
+
+    Callers are expected to only invoke this when
+    ``config.use_enrichment_cache`` is True (checked at each call site, not
+    guarded here), so a caller iterating a DataFrame never pays a wasted
+    row-to-dict pass when caching is off.
+    """
+    import enrichment_cache
+    from lovable_gcs_upload import country_folder_slug
+    slugs = {country_folder_slug(_effective_country_for_row(r, config)) for r in rows}
+    return {
+        slug: enrichment_cache.load_cache_index(config.enrichment_cache_bucket, slug)
+        for slug in slugs
+    }
+
+
+def _cache_index_for_row(
+    original: dict, config: "BatchRunConfig", country_indexes: dict,
+) -> Optional[dict]:
+    """The correct per-country cache index for one row, or ``None`` when
+    caching is off / that country's index was not loaded for some reason
+    (defensive — a lookup miss here must never be able to break a row; it
+    just means that one row runs live instead of cache-checked)."""
+    if not country_indexes:
+        return None
+    from lovable_gcs_upload import country_folder_slug
+    slug = country_folder_slug(_effective_country_for_row(original, config))
+    return country_indexes.get(slug)
+
+
+def _save_country_cache_indexes(config: "BatchRunConfig", country_indexes: dict) -> None:
+    """Upload every loaded country's index back to GCS. No-op when caching is
+    off or nothing was loaded. Never raises — ``enrichment_cache.
+    save_cache_index`` already returns a result dict rather than raising; a
+    failed upload only means this run's cache updates are lost, never that
+    the batch run itself fails."""
+    if not config.use_enrichment_cache or not country_indexes:
+        return
+    import enrichment_cache
+    for slug, idx in country_indexes.items():
+        enrichment_cache.save_cache_index(config.enrichment_cache_bucket, slug, idx)
+
+
+def _cache_usage_counts_snapshot() -> dict:
+    """Current cumulative cache hit/miss counts from ``usage_tracker``, or an
+    all-zero dict if ``usage_tracker`` is unavailable for any reason
+    (defensive — this must never break a batch run)."""
+    try:
+        import usage_tracker
+        snap = usage_tracker.snapshot()
+        return {
+            "serper_hits": snap["cache_hits"].get("serper", 0),
+            "serper_misses": snap["cache_misses"].get("serper", 0),
+            "firecrawl_hits": snap["cache_hits"].get("firecrawl", 0),
+            "firecrawl_misses": snap["cache_misses"].get("firecrawl", 0),
+        }
+    except Exception:
+        return {"serper_hits": 0, "serper_misses": 0, "firecrawl_hits": 0, "firecrawl_misses": 0}
+
+
+def _apply_cache_run_summary_counts(
+    run_summary: pd.DataFrame, cache_usage_before: Optional[dict],
+) -> pd.DataFrame:
+    """Add ``serper_cache_hits``/``serper_cache_misses``/
+    ``firecrawl_cache_hits``/``firecrawl_cache_misses`` columns, computed as
+    the ``usage_tracker`` delta since ``cache_usage_before`` was snapshotted
+    at the start of this run. A no-op — ``run_summary`` returned completely
+    unchanged — when ``cache_usage_before`` is ``None`` (caching was off for
+    this run), so the default run_summary shape never gains these columns.
+    """
+    if cache_usage_before is None:
+        return run_summary
+    after = _cache_usage_counts_snapshot()
+    run_summary["serper_cache_hits"] = after["serper_hits"] - cache_usage_before["serper_hits"]
+    run_summary["serper_cache_misses"] = after["serper_misses"] - cache_usage_before["serper_misses"]
+    run_summary["firecrawl_cache_hits"] = after["firecrawl_hits"] - cache_usage_before["firecrawl_hits"]
+    run_summary["firecrawl_cache_misses"] = (
+        after["firecrawl_misses"] - cache_usage_before["firecrawl_misses"])
+    return run_summary
+
+
+# ---------------------------------------------------------------------------
 # Batch runner
 # ---------------------------------------------------------------------------
 
@@ -573,6 +694,22 @@ def run_batch_dataframe(
     selected = select_batch_rows(df, config)
     selected_rows = len(selected)
 
+    # ── Shared enrichment cache (opt-in, GCS-backed) — see enrichment_cache.py.
+    # Loaded ONCE per distinct country present in the selected rows (never
+    # once per row, and never assuming the whole batch is one country) so a
+    # mixed-country dataset (input_country varies per row) still gets the
+    # right per-row index. Zero cost on the default path: nothing here runs
+    # at all unless config.use_enrichment_cache is explicitly True.
+    country_cache_indexes: dict = {}
+    _cache_usage_before: Optional[dict] = None
+    _cache_save_interval: Optional[int] = None
+    if config.use_enrichment_cache:
+        import enrichment_cache
+        country_cache_indexes = _load_country_cache_indexes(
+            [r.to_dict() for _, r in selected.iterrows()], config)
+        _cache_usage_before = _cache_usage_counts_snapshot()
+        _cache_save_interval = enrichment_cache.INTERMEDIATE_SAVE_INTERVAL
+
     enriched_rows: list[dict] = []
     evidence_rows: list[dict] = []
     signal_rows: list[dict] = []
@@ -587,6 +724,8 @@ def run_batch_dataframe(
         if config.input_country_column:
             country = str(original.get(config.input_country_column, "") or "").strip() or None
 
+        cache_index = _cache_index_for_row(original, config, country_cache_indexes)
+
         processed += 1
         run_success = True
         run_error = ""
@@ -597,6 +736,7 @@ def run_batch_dataframe(
                 serper_api_key=serper_api_key,
                 anthropic_api_key=anthropic_api_key,
                 default_input_country=config.default_input_country,
+                cache_index=cache_index,
                 **ai_kwargs,
                 **flags,
             )
@@ -656,22 +796,35 @@ def run_batch_dataframe(
             except Exception:
                 pass  # a broken callback must never break enrichment
 
+        # Periodic safety-net upload during a long run (crash protection) —
+        # only when caching is on; a failed intermediate save is silently
+        # retried at the next checkpoint / the final save below.
+        if _cache_save_interval and processed % _cache_save_interval == 0:
+            _save_country_cache_indexes(config, country_cache_indexes)
+
         if not run_success and not config.continue_on_error:
             break
+
+    # Final save — always runs when caching is on, even if the loop ended
+    # early or the last periodic checkpoint already covered most of it.
+    _save_country_cache_indexes(config, country_cache_indexes)
+
+    run_summary = build_run_summary_dataframe(
+        config,
+        total_input_rows=len(df),
+        selected_rows=len(selected),
+        processed_rows=processed,
+        success_count=success,
+        error_count=error,
+    )
+    run_summary = _apply_cache_run_summary_counts(run_summary, _cache_usage_before)
 
     return {
         "enriched_leads": pd.DataFrame(enriched_rows),
         "evidence": pd.DataFrame(evidence_rows),
         "signals": pd.DataFrame(signal_rows),
         "deep_dive": pd.DataFrame(deep_dive_rows),
-        "run_summary": build_run_summary_dataframe(
-            config,
-            total_input_rows=len(df),
-            selected_rows=len(selected),
-            processed_rows=processed,
-            success_count=success,
-            error_count=error,
-        ),
+        "run_summary": run_summary,
     }
 
 
@@ -1167,6 +1320,14 @@ def _run_gated_full_enrichment(
     from these, since the exact run_summary column names differ between
     ``run_batch_foreign_hq_only`` (its established, tested contract) and the
     new gated path (see ``_run_batch_dataframe_gated``).
+
+    When ``config.use_enrichment_cache`` is True, this function runs its own
+    independent per-country cache load/use/save cycle (see the module-level
+    cache helpers) and additionally returns ``cache_usage_before`` — the
+    ``usage_tracker`` cache-count snapshot taken before this phase started —
+    so callers can compute their own hit/miss delta via
+    ``_apply_cache_run_summary_counts``. ``cache_usage_before`` is ``None``
+    when caching is off, matching that helper's no-op contract.
     """
     out_rows: list[dict] = []
     evidence_rows: list[dict] = []
@@ -1174,6 +1335,23 @@ def _run_gated_full_enrichment(
     deep_dive_rows: list[dict] = []
     attempted = skipped = confirmed = 0
     p3_success = p3_error = 0
+
+    # ── Shared enrichment cache (opt-in, GCS-backed) — its own independent
+    # load/save cycle, separate from Phase 1's (inside _run_hq_and_c5_screening
+    # -> run_batch_dataframe(hq_config, ...), which already handles the HQ-
+    # only queries' caching). This is safe because Phase 1 always completes
+    # fully — including its own final upload — BEFORE this Phase-3 loop
+    # starts (strictly sequential, never concurrent), so a fresh download
+    # here always sees Phase 1's just-uploaded entries; there is no
+    # lost-write race between the two phases' cache saves.
+    country_cache_indexes: dict = {}
+    _cache_usage_before: Optional[dict] = None
+    _cache_save_interval: Optional[int] = None
+    if config.use_enrichment_cache:
+        import enrichment_cache
+        country_cache_indexes = _load_country_cache_indexes(rows, config)
+        _cache_usage_before = _cache_usage_counts_snapshot()
+        _cache_save_interval = enrichment_cache.INTERMEDIATE_SAVE_INTERVAL
 
     # Eligibility precomputed so progress can report a fixed phase-3 total.
     confirmed_flags = [
@@ -1204,6 +1382,7 @@ def _run_gated_full_enrichment(
         if config.input_country_column:
             country = str(row.get(config.input_country_column, "") or "").strip() or None
         source_index = row.get("source_index")
+        cache_index = _cache_index_for_row(row, config, country_cache_indexes)
 
         result = None
         try:
@@ -1212,6 +1391,7 @@ def _run_gated_full_enrichment(
                 serper_api_key=serper_api_key,
                 anthropic_api_key=anthropic_api_key,
                 default_input_country=config.default_input_country,
+                cache_index=cache_index,
                 **prioritize_kwargs,
             )
             out_row = flatten_result_for_excel(
@@ -1262,6 +1442,12 @@ def _run_gated_full_enrichment(
             "foreign_hq_full_selected": total_confirmed,
         })
 
+        if _cache_save_interval and attempted % _cache_save_interval == 0:
+            _save_country_cache_indexes(config, country_cache_indexes)
+
+    if config.use_enrichment_cache:
+        _save_country_cache_indexes(config, country_cache_indexes)
+
     return {
         "out_rows": out_rows,
         "evidence_rows": evidence_rows,
@@ -1273,6 +1459,7 @@ def _run_gated_full_enrichment(
         "total_confirmed": total_confirmed,
         "p3_success": p3_success,
         "p3_error": p3_error,
+        "cache_usage_before": _cache_usage_before,
     }
 
 
@@ -1365,6 +1552,7 @@ def _run_batch_dataframe_gated(
     run_summary["gated_full_enrichment_attempted_count"] = gated["attempted"]
     run_summary["gated_full_enrichment_skipped_count"] = gated["skipped"]
     run_summary["gated_estimated_serper_calls_saved"] = gated["skipped"] * 4
+    run_summary = _apply_cache_run_summary_counts(run_summary, gated.get("cache_usage_before"))
 
     return {
         "enriched_leads": pd.DataFrame(out_rows),
@@ -1419,6 +1607,13 @@ def run_batch_foreign_hq_only(
     ``run_deep_dive_step=False``, matching its pre-refactor behavior exactly
     (Deep Dive has never been supported in this mode).
     """
+    # Snapshotted BEFORE Phase 1 so the eventual run_summary counts cover
+    # BOTH phases' cache usage (Phase 1's own run_batch_dataframe(hq_config)
+    # call already does its own independent cache load/use/save cycle, whose
+    # hit/miss counts would otherwise be silently dropped here since only
+    # `rows` is kept from Phase 1's return value, not its run_summary).
+    _cache_usage_before = _cache_usage_counts_snapshot() if config.use_enrichment_cache else None
+
     rows, c5_counts = _run_hq_and_c5_screening(
         df, config, serper_api_key, anthropic_api_key,
         c5_enabled=c5_enabled, c5_scoring_behavior=c5_scoring_behavior,
@@ -1461,6 +1656,7 @@ def run_batch_foreign_hq_only(
         c5_model_used=c5_model_used if c5_enabled else "",
         counts=c5_counts,
     )
+    run_summary = _apply_cache_run_summary_counts(run_summary, _cache_usage_before)
 
     return {
         "enriched_leads": pd.DataFrame(out_rows),

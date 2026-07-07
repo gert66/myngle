@@ -237,7 +237,7 @@ class TestGlHlLocalization:
     def test_collect_non_hq_enrichment_evidence_passes_gl_hl_for_known_country(self):
         calls = []
 
-        def _fake_call(query, serper_api_key, gl=None, hl=None):
+        def _fake_call(query, serper_api_key, gl=None, hl=None, **kwargs):
             calls.append((gl, hl))
             return {}
 
@@ -252,7 +252,7 @@ class TestGlHlLocalization:
     def test_collect_non_hq_enrichment_evidence_unknown_country_passes_none(self):
         calls = []
 
-        def _fake_call(query, serper_api_key, gl=None, hl=None):
+        def _fake_call(query, serper_api_key, gl=None, hl=None, **kwargs):
             calls.append((gl, hl))
             return {}
 

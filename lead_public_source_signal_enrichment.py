@@ -118,6 +118,8 @@ def collect_public_source_signal_evidence(
     firecrawl_api_key: str,
     source_label: str = "",
     max_pages: int = 3,
+    cache_index: Optional[dict] = None,
+    force_refresh: bool = False,
 ) -> list[LeadEvidence]:
     """Retrieve public company-level evidence for ``signal_query`` from the
     single configured public source (``source_base_url``), via Firecrawl only.
@@ -133,6 +135,12 @@ def collect_public_source_signal_evidence(
     abandons the whole attempt (mirrors the existing Firecrawl fallback
     contract in ``lead_hq_firecrawl_source.py`` / ``deep_dive_runner.py``) —
     it never breaks the row.
+
+    ``cache_index``/``force_refresh`` (default ``None``/``False``) are passed
+    straight through to ``_firecrawl_scrape_page`` (see ``enrichment_cache.py``)
+    — this function has no caching logic of its own. ``None`` (the default)
+    means every candidate page hits Firecrawl live, exactly as before this
+    parameter existed.
     """
     try:
         company_name = (company_name or "").strip()
@@ -155,7 +163,10 @@ def collect_public_source_signal_evidence(
         evidence: list[LeadEvidence] = []
 
         for url in candidates:
-            result = _firecrawl_scrape_page(url, firecrawl_api_key)
+            result = _firecrawl_scrape_page(
+                url, firecrawl_api_key,
+                cache_index=cache_index, force_refresh=force_refresh,
+            )
             if result["hard_failure"]:
                 # Bad/exhausted key or network outage — abandon entirely,
                 # matching the existing Firecrawl fallback contract. Whatever
