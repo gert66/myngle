@@ -1,0 +1,4 @@
+# Generated enrichment data (reproducible via analyze_combined.py + the CLI) — not committed.
+*.xlsx
+batch2.log
+new_signals.json

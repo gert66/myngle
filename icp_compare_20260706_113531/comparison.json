@@ -1,0 +1,314 @@
+{
+ "SIDEL S.P.A.": {
+  "international_profile": {
+   "old_primary_label": "International business context",
+   "old_primary_score": 3.0,
+   "old_best_score": 3.0,
+   "old_class": "POS",
+   "new_score": 2,
+   "new_class": "POS",
+   "new_evidence_urls": "https://sidelitalia.it/; https://www.sidel.com/en; https://en.wikipedia.org/wiki/Sidel",
+   "new_reason": "2 distinct keyword match(es) in evidence: countries, offices"
+  },
+  "company_size_complexity": {
+   "old_primary_label": "Possible onboarding need",
+   "old_primary_score": 2.0,
+   "old_best_score": 2.0,
+   "old_class": "POS",
+   "new_score": 2,
+   "new_class": "POS",
+   "new_evidence_urls": "https://sidelitalia.it/; https://prospeo.io/c/sidel-revenue; https://ca.linkedin.com/company/sidel",
+   "new_reason": "2 distinct keyword match(es) in evidence: employees, revenue"
+  },
+  "onboarding_training_need": {
+   "old_primary_label": "Onboarding or employee development signal",
+   "old_primary_score": 2.0,
+   "old_best_score": 3.0,
+   "old_class": "POS",
+   "new_score": 2,
+   "new_class": "POS",
+   "new_evidence_urls": "https://www.linkedin.com/company/sidel-academy/; https://www.sidel.com/en/sustainability/people/training-development/; https://sidelitalia.it/",
+   "new_reason": "5 distinct keyword match(es) in evidence: training, academy, learning, development, formazione"
+  },
+  "employer_branding": {
+   "old_primary_label": "Employer branding signal",
+   "old_primary_score": 1.0,
+   "old_best_score": 1.0,
+   "old_class": "weak",
+   "new_score": 0,
+   "new_class": "none",
+   "new_evidence_urls": "https://www.glassdoor.com/Reviews/Sidel-fantastic-culture-Reviews-EI_IE10347.0,5_KH6,23.htm; https://www.glassdoor.it/Panoramica/Lavorando-in-Glassdoor-EI_IE100431.13,22.htm; https://www.glassdoor.com/Reviews/Sidel-people-Reviews-EI_IE10347.0,5_KH6,12.htm",
+   "new_reason": "No positive keywords matched in available evidence."
+  },
+  "icp_keyword_match": {
+   "old_primary_label": "Learning and development signal",
+   "old_primary_score": 3.0,
+   "old_best_score": 3.0,
+   "old_class": "POS",
+   "new_score": 1,
+   "new_class": "weak",
+   "new_evidence_urls": "https://www.theknowledgeacademy.com/it/courses/personal-development-training/exceptional-customer-service-training/; https://jobdetails.nestle.com/job/Linda-a-Velha-Customer-Service-Specialist-Italian-Speaker-2799-554/1396948433/; https://www.sidel.com/en/about/careers/vacancies/",
+   "new_reason": "1 distinct keyword match(es) in evidence: customer service"
+  }
+ },
+ "NORDCOM S.P.A.": {
+  "international_profile": {
+   "old_primary_label": "International business context",
+   "old_primary_score": null,
+   "old_best_score": null,
+   "old_class": "none",
+   "new_score": 2,
+   "new_class": "POS",
+   "new_evidence_urls": "https://www.nord.com/en/nord-group/about-us/global-partner-and-manufacturer/global-partner.jsp; https://www.electricmotorengineering.com/nord-drivesystem-strengthens-its-global-network/; https://www.ucima.it/public/files/Brochure_Nord_Motoriduttori_inglese.pdf",
+   "new_reason": "5 distinct keyword match(es) in evidence: international, global, countries, subsidiaries, presence"
+  },
+  "company_size_complexity": {
+   "old_primary_label": "Possible onboarding need",
+   "old_primary_score": 3.0,
+   "old_best_score": 3.0,
+   "old_class": "POS",
+   "new_score": 2,
+   "new_class": "POS",
+   "new_evidence_urls": "https://www.zoominfo.com/c/nord-drivesystems/86771433; https://www.emis.com/php/company-profile/CZ/Nord_-_Pohaneci_Technika_SRO_en_1426504.html; https://www.nord-com.it/en/",
+   "new_reason": "2 distinct keyword match(es) in evidence: employees, revenue"
+  },
+  "onboarding_training_need": {
+   "old_primary_label": "Onboarding or employee development signal",
+   "old_primary_score": 3.0,
+   "old_best_score": 3.0,
+   "old_class": "POS",
+   "new_score": 2,
+   "new_class": "POS",
+   "new_evidence_urls": "https://www.nord.com/us/jobs/training-development/training_and_development_us_employment.jsp; https://www.tuev-nord.de/en/services/education-and-training/; https://www.nord-com.it/en/lavora-con-noi-en/",
+   "new_reason": "5 distinct keyword match(es) in evidence: training, onboarding, academy, development, people"
+  },
+  "employer_branding": {
+   "old_primary_label": "Employer branding signal",
+   "old_primary_score": 1.0,
+   "old_best_score": 1.0,
+   "old_class": "weak",
+   "new_score": 1,
+   "new_class": "weak",
+   "new_evidence_urls": "https://www.glassdoor.it/Updates/Glassdoor-Company-Updates-E100431.htm; https://www.glassdoor.com/Award/Best-Places-to-Work-LST_KQ0,19.htm; https://www.linkedin.com/pulse/insiders-advice-becoming-glassdoor-best-place-work-marc-cowlin",
+   "new_reason": "1 distinct keyword match(es) in evidence: best places to work"
+  },
+  "icp_keyword_match": {
+   "old_primary_label": "Learning and development signal",
+   "old_primary_score": 3.0,
+   "old_best_score": 3.0,
+   "old_class": "POS",
+   "new_score": 2,
+   "new_class": "POS",
+   "new_evidence_urls": "https://www.nord.com/us/company/current-events/news-archives/articles/news_220866.jsp; https://gearsolutions.com/news/nord-offers-continuous-learning-opportunities-to-better-serve-customers/; https://www.nord-com.it/en/direzione-commerciale-en/",
+   "new_reason": "3 distinct keyword match(es) in evidence: sales, support, learning"
+  }
+ },
+ "COMET SPA": {
+  "international_profile": {
+   "old_primary_label": "International business context",
+   "old_primary_score": 3.0,
+   "old_best_score": 3.0,
+   "old_class": "POS",
+   "new_score": 2,
+   "new_class": "POS",
+   "new_evidence_urls": "https://comet.tech/; https://www.iversen-trading.dk/wp-content/uploads/2014/07/Comet-Profilbrochure.pdf; https://www.cometfans.com/en/history/organizations-and-headquarters/",
+   "new_reason": "6 distinct keyword match(es) in evidence: international, worldwide, countries, locations, presence, group"
+  },
+  "company_size_complexity": {
+   "old_primary_label": "Possible onboarding need",
+   "old_primary_score": 2.0,
+   "old_best_score": 2.0,
+   "old_class": "POS",
+   "new_score": 2,
+   "new_class": "POS",
+   "new_evidence_urls": "https://www.globaldata.com/company-profile/comet-holding-ag/; https://www.zoominfo.com/c/comet-group/344480797; https://comet.tech/",
+   "new_reason": "4 distinct keyword match(es) in evidence: revenue, group, company profile, global"
+  },
+  "onboarding_training_need": {
+   "old_primary_label": "Onboarding or employee development signal",
+   "old_primary_score": 1.0,
+   "old_best_score": 2.0,
+   "old_class": "POS",
+   "new_score": 2,
+   "new_class": "POS",
+   "new_evidence_urls": "https://www.cometanalysis.com/services; https://www.comet.com/site/about-us/careers/; https://comet.tech/en/careers",
+   "new_reason": "6 distinct keyword match(es) in evidence: careers, training, learning, development, people, team"
+  },
+  "employer_branding": {
+   "old_primary_label": "Employer branding signal",
+   "old_primary_score": 1.0,
+   "old_best_score": 1.0,
+   "old_class": "weak",
+   "new_score": 1,
+   "new_class": "weak",
+   "new_evidence_urls": "https://www.glassdoor.it/Recensioni/Recensione-dipendente-Comet-E915403-RVW89097010.htm; https://www.glassdoor.com/Award/Best-Places-to-Work-LST_KQ0,19.htm; https://www.glassdoor.it/Panoramica/Lavorando-in-Glassdoor-EI_IE100431.13,22.htm",
+   "new_reason": "1 distinct keyword match(es) in evidence: best places to work"
+  },
+  "icp_keyword_match": {
+   "old_primary_label": "Learning and development signal",
+   "old_primary_score": 2.0,
+   "old_best_score": 2.0,
+   "old_class": "POS",
+   "new_score": 2,
+   "new_class": "POS",
+   "new_evidence_urls": "https://www.richardson.com/en-gb/sales-training-programs/customer-service-professionals/customer-service; https://www.traninger.com/leistungen/international-training/customer-communication-training-for-international-sales-and-service-teams/; https://www.catalystglobal.net/sales-excellence-programs",
+   "new_reason": "3 distinct keyword match(es) in evidence: sales, customer service, international teams"
+  }
+ },
+ "SOLGAR ITALIA MULTINUTRIENT S.P.A.": {
+  "international_profile": {
+   "old_primary_label": "International business context",
+   "old_primary_score": 3.0,
+   "old_best_score": 3.0,
+   "old_class": "POS",
+   "new_score": 2,
+   "new_class": "POS",
+   "new_evidence_urls": "https://www.sec.gov/Archives/edgar/data/70793/000110465905043495/a05-16005_3ex99d4.htm; https://www.nestlehealthscience.com/brands/solgar; https://www.highperformr.ai/company/solgar",
+   "new_reason": "4 distinct keyword match(es) in evidence: international, global, countries, offices"
+  },
+  "company_size_complexity": {
+   "old_primary_label": "Possible onboarding need",
+   "old_primary_score": 1.0,
+   "old_best_score": 1.0,
+   "old_class": "weak",
+   "new_score": 2,
+   "new_class": "POS",
+   "new_evidence_urls": "https://pitchbook.com/profiles/company/161535-61; https://www.dnb.com/business-directory/company-profiles.solgar_inc.0e6bf47030ae93a091fc26480737652e.html; https://www.owler.com/company/solgar",
+   "new_reason": "3 distinct keyword match(es) in evidence: employees, revenue, company profile"
+  },
+  "onboarding_training_need": {
+   "old_primary_label": "Onboarding or employee development signal",
+   "old_primary_score": 1.0,
+   "old_best_score": 1.0,
+   "old_class": "weak",
+   "new_score": 2,
+   "new_class": "POS",
+   "new_evidence_urls": "https://www.employbridge.com/job-search/online-career-development-training; https://www.pgcareers.com/cr/en/leadership-development; https://jobs.natwestgroup.com/pages/learning-and-development",
+   "new_reason": "6 distinct keyword match(es) in evidence: training, academy, learning, development, talent, people"
+  },
+  "employer_branding": {
+   "old_primary_label": "Employer branding signal",
+   "old_primary_score": null,
+   "old_best_score": null,
+   "old_class": "none",
+   "new_score": 1,
+   "new_class": "weak",
+   "new_evidence_urls": "https://www.01net.it/glassdoor-reveals-best-places-to-work-2026-winners/; https://www.instagram.com/reel/DTx7R92D4kX/; https://www.glassdoor.it/Updates/Glassdoor-Company-Updates-E100431.htm",
+   "new_reason": "1 distinct keyword match(es) in evidence: best places to work"
+  },
+  "icp_keyword_match": {
+   "old_primary_label": "Learning and development signal",
+   "old_primary_score": 1.0,
+   "old_best_score": 2.0,
+   "old_class": "POS",
+   "new_score": 1,
+   "new_class": "weak",
+   "new_evidence_urls": "https://solgari.com/; https://www.solgar.it/lavora-con-noi; https://solgari.com/about-old/microsoft-teams-contact-center/",
+   "new_reason": "1 distinct keyword match(es) in evidence: support"
+  }
+ },
+ "CARTIERE MODESTO CARDELLA SPA": {
+  "international_profile": {
+   "old_primary_label": "International business context",
+   "old_primary_score": 2.0,
+   "old_best_score": 2.0,
+   "old_class": "POS",
+   "new_score": 0,
+   "new_class": "none",
+   "new_evidence_urls": "https://www.cartierecardella.it/azienda/; https://www.cartierecardella.it/contatti/; https://it.linkedin.com/company/cartiere-modesto-cardella",
+   "new_reason": "No positive keywords matched in available evidence."
+  },
+  "company_size_complexity": {
+   "old_primary_label": "Possible onboarding need",
+   "old_primary_score": 1.0,
+   "old_best_score": 1.0,
+   "old_class": "weak",
+   "new_score": 1,
+   "new_class": "weak",
+   "new_evidence_urls": "https://www.cartierecardella.it/en/company/; https://www.zoominfo.com/c/cartiere-modesto-cardella-spa/475537776; https://www.cartierecardella.it/en/contacts/",
+   "new_reason": "1 distinct keyword match(es) in evidence: revenue"
+  },
+  "onboarding_training_need": {
+   "old_primary_label": "Onboarding or employee development signal",
+   "old_primary_score": 1.0,
+   "old_best_score": 1.0,
+   "old_class": "weak",
+   "new_score": 1,
+   "new_class": "weak",
+   "new_evidence_urls": "https://www.cartierecardella.it/contatti/; https://www.cartierecardella.it/en/company/; https://it.linkedin.com/company/cartiere-modesto-cardella",
+   "new_reason": "1 distinct keyword match(es) in evidence: development"
+  },
+  "employer_branding": {
+   "old_primary_label": "Employer branding signal",
+   "old_primary_score": null,
+   "old_best_score": null,
+   "old_class": "none",
+   "new_score": 1,
+   "new_class": "weak",
+   "new_evidence_urls": "https://www.glassdoor.it/Recensioni/Cartier-work-life-balance-Recensioni-EI_IE9207.0,7_KH8,25.htm; https://www.glassdoor.it/Panoramica/Lavorando-in-Great-Place-To-Work-EI_IE259956.13,32.htm; https://www.glassdoor.it/Panoramica/Lavorando-in-Cartiere-Carrara-EI_IE1375431.13,29.htm",
+   "new_reason": "1 distinct keyword match(es) in evidence: great place to work"
+  },
+  "icp_keyword_match": {
+   "old_primary_label": "Learning and development signal",
+   "old_primary_score": null,
+   "old_best_score": 2.0,
+   "old_class": "POS",
+   "new_score": 0,
+   "new_class": "none",
+   "new_evidence_urls": "https://www.cartierecardella.it/contatti/; https://www.cartierecardella.it/; https://www.cartierecardella.it/azienda/",
+   "new_reason": "No positive keywords matched in available evidence."
+  }
+ },
+ "INTERNATIONAL SCHOOL OF EUROPE S.P.A.": {
+  "international_profile": {
+   "old_primary_label": "International business context",
+   "old_primary_score": 3.0,
+   "old_best_score": 3.0,
+   "old_class": "POS",
+   "new_score": 2,
+   "new_class": "POS",
+   "new_evidence_urls": "https://www.internationalschoolofeurope.it/en; https://www.linkedin.com/company/international-school-of-europe-srl; https://www.inspirededu.com/news/international-school-europe-join-inspired",
+   "new_reason": "3 distinct keyword match(es) in evidence: international, global, group"
+  },
+  "company_size_complexity": {
+   "old_primary_label": "Possible onboarding need",
+   "old_primary_score": null,
+   "old_best_score": null,
+   "old_class": "none",
+   "new_score": 2,
+   "new_class": "POS",
+   "new_evidence_urls": "https://www.zoominfo.com/c/international-school-of-europe/372849563; https://pitchbook.com/profiles/company/99821-98; https://rocketreach.co/international-school-of-europe-profile_b5eb3ba4f42e7bd0",
+   "new_reason": "3 distinct keyword match(es) in evidence: employees, revenue, company profile"
+  },
+  "onboarding_training_need": {
+   "old_primary_label": "Onboarding or employee development signal",
+   "old_primary_score": null,
+   "old_best_score": null,
+   "old_class": "none",
+   "new_score": 0,
+   "new_class": "none",
+   "new_evidence_urls": "https://www.internationalschoolofeurope.it/en; https://www.linkedin.com/company/international-school-of-europe-srl; https://www.iscomo.com/",
+   "new_reason": "No positive keywords matched in available evidence."
+  },
+  "employer_branding": {
+   "old_primary_label": "Employer branding signal",
+   "old_primary_score": null,
+   "old_best_score": null,
+   "old_class": "none",
+   "new_score": 0,
+   "new_class": "none",
+   "new_evidence_urls": "https://www.glassdoor.it/Recensioni/Recensione-dipendente-INTERNATIONAL-SCHOOL-OF-EUROPE-E5116450-RVW91167558.htm; https://www.glassdoor.com/Overview/Working-at-international-School-of-Europe-EI_IE455785.11,41.htm; https://www.glassdoor.it/Stipendio/international-School-of-Europe-Stipendi-E455785.htm",
+   "new_reason": "No positive keywords matched in available evidence."
+  },
+  "icp_keyword_match": {
+   "old_primary_label": "Learning and development signal",
+   "old_primary_score": null,
+   "old_best_score": 2.0,
+   "old_class": "POS",
+   "new_score": 1,
+   "new_class": "weak",
+   "new_evidence_urls": "https://www.internationalschoolofeurope.it/en; https://www.linkedin.com/company/international-school-of-europe-srl; https://it.indeed.com/q-international-school-offerte-lavoro.html",
+   "new_reason": "1 distinct keyword match(es) in evidence: support"
+  }
+ }
+}

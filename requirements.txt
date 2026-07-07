@@ -1,0 +1,17 @@
+anthropic
+openai
+streamlit>=1.31
+pandas
+requests
+beautifulsoup4
+openpyxl
+lxml
+numpy
+matplotlib
+plotly
+scikit-learn
+seaborn
+firecrawl-py
+fastapi
+uvicorn[standard]
+python-dotenv
