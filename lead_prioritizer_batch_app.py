@@ -1143,7 +1143,7 @@ def main() -> None:  # pragma: no cover - exercised only under `streamlit run`
                  "(default: uit).")
         gate_full_enrichment_on_foreign_hq = st.checkbox(
             "Alleen volledig verrijken bij bevestigde buitenlandse HQ (opt-in)",
-            value=False,
+            value=True,
             help="Bespaart Serper-calls door bedrijven zonder bevestigde "
                  "buitenlandse HQ niet volledig te verrijken: eerst een "
                  "goedkope HQ-screening voor alle rijen (1 Serper-call per "
@@ -1153,9 +1153,9 @@ def main() -> None:  # pragma: no cover - exercised only under `streamlit run`
                  "enrichment_skipped=True en een reden. Hergebruikt hetzelfde "
                  "gating-principe als de aparte 'Full enrichment, confirmed "
                  "foreign-HQ only'-modus. C5 wordt in deze opt-in (nog) niet "
-                 "ondersteund (default: uit).")
+                 "ondersteund (default: aan).")
         use_enrichment_cache = st.checkbox(
-            "Gebruik gedeelde enrichment-cache (GCS, per land)", value=False,
+            "Gebruik gedeelde enrichment-cache (GCS, per land)", value=True,
             help="Slaat Serper- en Firecrawl-resultaten op in één gedeeld "
                  "indexbestand per land in GCS (gcloud/gsutil, geen nieuwe "
                  "dependency), zodat runs vanaf verschillende machines "
@@ -1167,15 +1167,15 @@ def main() -> None:  # pragma: no cover - exercised only under `streamlit run`
                  "blijven 90 dagen geldig, overige Serper-signalen 30 dagen, "
                  "Firecrawl-pagina's 120 dagen. Puur een snelheids-optimalisatie "
                  "— bij een download-/uploadfout valt de run automatisch terug "
-                 "op live opzoeken zonder de run te breken (default: uit).")
-        enrichment_cache_bucket = DEFAULT_GCS_BUCKET
-        if use_enrichment_cache:
-            enrichment_cache_bucket = st.text_input(
-                "GCS bucket voor enrichment-cache", value=DEFAULT_GCS_BUCKET,
-                help="Zelfde bucket-conventie als de bestaande GCS-upload "
-                     "(gcloud/gsutil). De cache-indexbestanden komen terecht "
-                     "onder _enrichment_cache/<land>_cache_index.json in deze "
-                     "bucket.")
+                 "op live opzoeken zonder de run te breken (default: aan).")
+        enrichment_cache_bucket = st.text_input(
+            "GCS bucket voor enrichment-cache", value=DEFAULT_GCS_BUCKET,
+            disabled=not use_enrichment_cache,
+            help="Zelfde bucket-conventie als de bestaande GCS-upload "
+                 "(gcloud/gsutil). De cache-indexbestanden komen terecht "
+                 "onder _enrichment_cache/<land>_cache_index.json in deze "
+                 "bucket. Alleen relevant als de cache-checkbox hierboven "
+                 "aan staat.")
         deep_dive = st.checkbox(
             "Deep dive voor top-leads (opt-in)", value=True,
             help="Runs a deeper, source-backed evidence collection AFTER "
