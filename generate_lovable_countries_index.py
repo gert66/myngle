@@ -43,7 +43,7 @@ MANIFEST_COUNTRY_LABELS = [
 ]
 
 # Countries present in the manifest but not yet ready for Lovable to show.
-DISABLED_COUNTRY_LABELS = {"Japan", "South Korea", "Switzerland", "Test"}
+DISABLED_COUNTRY_LABELS = {"Japan", "South Korea", "Test"}
 
 
 def _manifest_id(label: str) -> str:

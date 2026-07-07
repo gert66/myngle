@@ -87,6 +87,50 @@ def estimate_ai_cost_usd(model, input_tokens, output_tokens):
         return None
 
 
+# Anthropic prompt-caching price multipliers (applied to the model's normal
+# input price) for the default 5-minute-TTL ephemeral cache used by
+# _call_anthropic_hq — NOT the 1-hour cache, which is priced differently and
+# is not used here. See https://www.anthropic.com/pricing.
+_CACHE_WRITE_PRICE_MULTIPLIER = 1.25
+_CACHE_READ_PRICE_MULTIPLIER = 0.1
+
+
+def estimate_ai_cost_usd_with_cache(
+    model, input_tokens, output_tokens,
+    cache_creation_input_tokens=None, cache_read_input_tokens=None,
+):
+    """Cache-aware estimated USD cost for one call, or None when pricing/base
+    tokens are unknown.
+
+    Kept as a separate function (rather than changing ``estimate_ai_cost_usd``'s
+    signature) so existing callers of the plain per-token estimate are
+    unaffected. ``input_tokens``/``output_tokens`` are billed at the normal
+    per-model rate exactly like ``estimate_ai_cost_usd``; on top of that,
+    ``cache_creation_input_tokens`` (a cache write) is billed at
+    ``_CACHE_WRITE_PRICE_MULTIPLIER`` times the input price and
+    ``cache_read_input_tokens`` (a cache hit) at
+    ``_CACHE_READ_PRICE_MULTIPLIER`` times the input price. Missing cache
+    fields (older SDK / no caching used) are treated as zero, so this
+    reduces to ``estimate_ai_cost_usd``'s result when no caching occurred.
+    """
+    pricing = MODEL_PRICING_USD_PER_MTOK.get(str(model or ""))
+    if pricing is None or input_tokens is None or output_tokens is None:
+        return None
+    try:
+        in_price, out_price = pricing
+        cache_creation = float(cache_creation_input_tokens or 0)
+        cache_read = float(cache_read_input_tokens or 0)
+        total = (
+            float(input_tokens) * in_price
+            + float(output_tokens) * out_price
+            + cache_creation * in_price * _CACHE_WRITE_PRICE_MULTIPLIER
+            + cache_read * in_price * _CACHE_READ_PRICE_MULTIPLIER
+        )
+        return round(total / 1_000_000, 6)
+    except (TypeError, ValueError):
+        return None
+
+
 # ---------------------------------------------------------------------------
 # Serper helper
 # ---------------------------------------------------------------------------
@@ -142,7 +186,29 @@ _SYSTEM_PROMPT = (
     "Reply ONLY with a valid JSON object — no prose, no markdown fences."
 )
 
-_USER_TEMPLATE = """\
+
+def _known_industry_categories() -> str:
+    """Comma-separated industry categories the deterministic sector detector
+    already knows (``lead_non_hq_signal_extractor._SECTOR_KEYWORD_MAP``),
+    shown to the AI purely as style guidance for consistent labeling — never
+    a hard enum. Function-level import avoids a module-level dependency
+    between the two files; returns "" (silently) if that module is
+    unavailable for any reason, so prompt-building can never fail on this."""
+    try:
+        from lead_non_hq_signal_extractor import _SECTOR_KEYWORD_MAP
+        seen: list[str] = []
+        for industry, _sub in _SECTOR_KEYWORD_MAP.values():
+            if industry not in seen:
+                seen.append(industry)
+        return ", ".join(seen)
+    except Exception:
+        return ""
+
+
+# Per-lead part of the user message: domain_root, input_country, query, and
+# the Serper/own-site text all differ between leads, so this is formatted
+# fresh for every call (see _build_user_message). Never cached.
+_USER_TEMPLATE_PER_LEAD = """\
 Company domain root: {domain_root}
 Input country (where the local entity operates): {input_country}
 
@@ -160,7 +226,19 @@ Answer Box:
 
 Top organic results (title + snippet):
 {organic_text}
+"""
 
+# IMPORTANT — prompt-cache boundary. Together with ``_SYSTEM_PROMPT``, this
+# text forms the single ``cache_control``-marked system block sent on every
+# Anthropic HQ call (see ``_call_anthropic_hq``). For Anthropic's prompt
+# cache to ever hit, this string MUST be byte-for-byte identical across every
+# call: never insert a date, run ID, lead-specific value, or per-country text
+# here — even one differing character anywhere in this block turns what
+# should be a cheap cache read into a fresh (more expensive) cache write for
+# that call. ``known_industries`` is resolved exactly once, below, precisely
+# because it is a fixed, process-wide constant derived from a static keyword
+# map — never a per-lead or per-country value.
+_USER_TEMPLATE_STATIC_INSTRUCTIONS = """\
 Classify and return JSON with these exact keys:
 - "classification": one of "foreign_parent", "domestic", "regional_branch_only", "unclear"
 - "confidence": one of "High", "Medium", "Low"
@@ -197,25 +275,7 @@ Rules:
 - "industry"/"sub_industry" are independent of the HQ classification above:
   give your best answer for them even when the HQ classification itself is
   "unclear", as long as the material describes what the company does.
-"""
-
-
-def _known_industry_categories() -> str:
-    """Comma-separated industry categories the deterministic sector detector
-    already knows (``lead_non_hq_signal_extractor._SECTOR_KEYWORD_MAP``),
-    shown to the AI purely as style guidance for consistent labeling — never
-    a hard enum. Function-level import avoids a module-level dependency
-    between the two files; returns "" (silently) if that module is
-    unavailable for any reason, so prompt-building can never fail on this."""
-    try:
-        from lead_non_hq_signal_extractor import _SECTOR_KEYWORD_MAP
-        seen: list[str] = []
-        for industry, _sub in _SECTOR_KEYWORD_MAP.values():
-            if industry not in seen:
-                seen.append(industry)
-        return ", ".join(seen)
-    except Exception:
-        return ""
+""".format(known_industries=_known_industry_categories() or "(none available)")
 
 
 def _format_own_site_pages(crawled_pages) -> str:
@@ -266,7 +326,7 @@ def _build_user_message(
         organic_lines.append(f"  [{i}] {t}\n      {s}\n      URL: {url}")
     organic_text = "\n".join(organic_lines) if organic_lines else "  (none)"
 
-    return _USER_TEMPLATE.format(
+    return _USER_TEMPLATE_PER_LEAD.format(
         domain_root=domain_root,
         input_country=input_country or "(unknown)",
         query=query,
@@ -274,7 +334,6 @@ def _build_user_message(
         kg_text=kg_text,
         ab_text=ab_text,
         organic_text=organic_text,
-        known_industries=_known_industry_categories() or "(none available)",
     )
 
 
@@ -545,14 +604,28 @@ def _usage_field(usage_obj, *names):
 
 
 def _call_anthropic_hq(api_key: str, model: str, user_msg: str) -> tuple[str, dict]:
-    """One Anthropic HQ call. Returns ``(raw_text, usage)``; raises on failure."""
+    """One Anthropic HQ call. Returns ``(raw_text, usage)``; raises on failure.
+
+    ``system`` is sent as a single ``cache_control``-marked block
+    (``_SYSTEM_PROMPT`` + ``_USER_TEMPLATE_STATIC_INSTRUCTIONS``, which never
+    vary between calls) so Anthropic's prompt cache can serve this fixed
+    instruction block on every subsequent lead instead of reprocessing (and
+    re-billing at the full input price) it every time. ``messages`` carries
+    only the per-lead part built by ``_build_user_message``.
+    """
     if _anthropic_lib is None:
         raise ImportError("anthropic package not installed")
     client = _anthropic_lib.Anthropic(api_key=api_key)
     response = client.messages.create(
         model=model,
         max_tokens=512,
-        system=_SYSTEM_PROMPT,
+        system=[
+            {
+                "type": "text",
+                "text": _SYSTEM_PROMPT + "\n\n" + _USER_TEMPLATE_STATIC_INSTRUCTIONS,
+                "cache_control": {"type": "ephemeral"},
+            }
+        ],
         messages=[{"role": "user", "content": user_msg}],
     )
     raw_text = response.content[0].text if response.content else ""
@@ -561,12 +634,19 @@ def _call_anthropic_hq(api_key: str, model: str, user_msg: str) -> tuple[str, di
     usage_obj = getattr(response, "usage", None)
     input_tokens = _usage_field(usage_obj, "input_tokens")
     output_tokens = _usage_field(usage_obj, "output_tokens")
+    # Only populated when the response actually used prompt caching (older
+    # SDKs / non-caching responses simply lack these attributes) — the same
+    # defensive multi-name lookup as the fields above, never guessed.
+    cache_creation_input_tokens = _usage_field(usage_obj, "cache_creation_input_tokens")
+    cache_read_input_tokens = _usage_field(usage_obj, "cache_read_input_tokens")
     total = (input_tokens + output_tokens
              if input_tokens is not None and output_tokens is not None else None)
     return raw_text, {
         "input_tokens": input_tokens,
         "output_tokens": output_tokens,
         "total_tokens": total,
+        "cache_creation_input_tokens": cache_creation_input_tokens,
+        "cache_read_input_tokens": cache_read_input_tokens,
     }
 
 
@@ -721,6 +801,19 @@ def interpret_hq_with_ai(
         ai_hq_total_tokens=usage.get("total_tokens"),
         ai_hq_estimated_cost_usd=estimate_ai_cost_usd(
             model, usage.get("input_tokens"), usage.get("output_tokens")),
+        # Only ever populated for the Anthropic path (see _call_anthropic_hq);
+        # None for OpenAI/DeepSeek, whose usage dicts don't carry these keys.
+        ai_hq_cache_creation_tokens=usage.get("cache_creation_input_tokens"),
+        ai_hq_cache_read_tokens=usage.get("cache_read_input_tokens"),
+        # Cache-aware estimate, kept alongside (not replacing) the plain
+        # ai_hq_estimated_cost_usd above so the two can be compared during
+        # validation. Reduces to the same value as the plain estimate when no
+        # caching occurred (cache fields absent/None).
+        ai_hq_estimated_cost_usd_with_cache=estimate_ai_cost_usd_with_cache(
+            model, usage.get("input_tokens"), usage.get("output_tokens"),
+            cache_creation_input_tokens=usage.get("cache_creation_input_tokens"),
+            cache_read_input_tokens=usage.get("cache_read_input_tokens"),
+        ),
     )
 
     ai_data = _parse_ai_response(raw_text)
