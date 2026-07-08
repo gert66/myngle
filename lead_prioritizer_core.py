@@ -307,6 +307,8 @@ def prioritize_single_lead(
         openai_api_key=openai_api_key,
         deepseek_api_key=deepseek_api_key,
         crawled_pages=crawled_pages,
+        lusha_description=input_row.lusha_description,
+        lusha_specialties=input_row.lusha_specialties,
     )
 
     # ── Step 2: non-HQ evidence collection (evidence only, no scores) ─────────

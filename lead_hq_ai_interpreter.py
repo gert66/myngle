@@ -275,6 +275,34 @@ Top organic results (title + snippet):
 {organic_text}
 """
 
+# ADDITIONAL CONTEXT block — appended (never baked into the template above)
+# ONLY when the own-domain Firecrawl content is thin/absent (Lusha
+# enrichment plan, Stap 5 scope correction). Rich own-domain content
+# already gives the classifier enough to work with; adding generic Lusha
+# marketing text on top of that was observed to occasionally tip a
+# genuinely ambiguous case's classification (e.g. a dual-HQ multinational)
+# without ever changing the actual score (C4 already catches that), so it
+# is now withheld entirely for well-evidenced companies -- not even a
+# "(none)" placeholder, to keep the prompt (and cost) identical to before
+# Stap 5 for every row where it isn't needed.
+_LUSHA_CONTEXT_BLOCK_TEMPLATE = """
+ADDITIONAL CONTEXT — company's own self-description (structured company
+data, not the live website; lower authority than the primary and
+secondary sources above — use this only to fill gaps when those are thin
+or silent, never to override them):
+{lusha_context_text}
+"""
+
+# A company's own-domain Firecrawl content counts as "thin" when the
+# combined stripped text across all crawled pages is under this many
+# characters (or no pages were crawled at all). Validated against real
+# data: a company with genuinely no usable own-site content measures 0
+# chars (e.g. "5265 studio"/5265.it), while every well-evidenced company
+# checked measured 5,400+ chars (Sika, TE Connectivity) up to 15,000
+# (dsm.com, Nestle) -- a wide gap with no borderline cases near 400, so
+# this threshold cleanly separates "nothing useful" from "already enough".
+_OWN_SITE_CONTENT_THIN_THRESHOLD_CHARS = 400
+
 # IMPORTANT — prompt-cache boundary. Together with ``_SYSTEM_PROMPT``, this
 # text forms the single ``cache_control``-marked system block sent on every
 # Anthropic HQ call (see ``_call_anthropic_hq``). For Anthropic's prompt
@@ -343,6 +371,53 @@ def _format_own_site_pages(crawled_pages) -> str:
     return "\n".join(lines)
 
 
+def _own_site_content_is_thin(crawled_pages) -> bool:
+    """True when the company's own-domain Firecrawl content gives the
+    classifier little/nothing to work with — no pages at all, or a
+    combined (stripped, pre-truncation) text length under
+    ``_OWN_SITE_CONTENT_THIN_THRESHOLD_CHARS`` across every crawled page.
+    Used to gate whether the Lusha ADDITIONAL CONTEXT section is even
+    considered (see ``_build_user_message``) — a well-evidenced company
+    never needs it.
+    """
+    pages = [p for p in (crawled_pages or []) if (p.get("text") or "").strip()]
+    if not pages:
+        return True
+    combined_len = sum(len((p.get("text") or "").strip()) for p in pages)
+    return combined_len < _OWN_SITE_CONTENT_THIN_THRESHOLD_CHARS
+
+
+# Lusha enrichment plan, Stap 5 — truncation lengths for the free,
+# already-in-hand Lusha Company Description / Company Specialties text
+# added to the per-lead ADDITIONAL CONTEXT section. Sized relative to the
+# other per-lead budgets already in this file (own-site pages: 1500
+# chars/page; KG/answer-box text: ~400 chars; an organic snippet: 200
+# chars): a description is normally a few sentences of free-form prose
+# (needs more room than a single search snippet, but far less than a full
+# crawled page), a specialties field is just a short comma-separated
+# keyword list (a few words are enough to be useful).
+_LUSHA_DESCRIPTION_MAX_CHARS = 800
+_LUSHA_SPECIALTIES_MAX_CHARS = 300
+
+
+def _format_lusha_context(description, specialties) -> str:
+    """Render the Lusha Description/Specialties ADDITIONAL CONTEXT section.
+
+    Returns ``"  (none)"`` when both are blank — same convention as the
+    other per-lead sections (``kg_text``/``ab_text``/``organic_text``) —
+    so a non-Lusha caller (or a Lusha row with both fields blank) produces
+    an identical section to what a caller passing nothing at all would.
+    """
+    desc = (description or "").strip()[:_LUSHA_DESCRIPTION_MAX_CHARS]
+    spec = (specialties or "").strip()[:_LUSHA_SPECIALTIES_MAX_CHARS]
+    lines = []
+    if desc:
+        lines.append(f"  Description: {desc}")
+    if spec:
+        lines.append(f"  Specialties: {spec}")
+    return "\n".join(lines) if lines else "  (none)"
+
+
 def _build_user_message(
     *,
     domain_root: str,
@@ -350,6 +425,8 @@ def _build_user_message(
     query: str,
     serper_payload: dict,
     crawled_pages=None,
+    lusha_description=None,
+    lusha_specialties=None,
 ) -> str:
     own_site_text = _format_own_site_pages(crawled_pages)
 
@@ -373,7 +450,7 @@ def _build_user_message(
         organic_lines.append(f"  [{i}] {t}\n      {s}\n      URL: {url}")
     organic_text = "\n".join(organic_lines) if organic_lines else "  (none)"
 
-    return _USER_TEMPLATE_PER_LEAD.format(
+    message = _USER_TEMPLATE_PER_LEAD.format(
         domain_root=domain_root,
         input_country=input_country or "(unknown)",
         query=query,
@@ -382,6 +459,17 @@ def _build_user_message(
         ab_text=ab_text,
         organic_text=organic_text,
     )
+
+    # ADDITIONAL CONTEXT (Lusha Description/Specialties) is appended ONLY
+    # when the own-domain content above is thin/absent (Stap 5 scope
+    # correction) — a well-evidenced company's prompt is byte-for-byte
+    # identical to before this feature existed, no extra tokens, no extra
+    # risk of a generic marketing blurb tipping an already-clear case.
+    if _own_site_content_is_thin(crawled_pages):
+        lusha_context_text = _format_lusha_context(lusha_description, lusha_specialties)
+        message += _LUSHA_CONTEXT_BLOCK_TEMPLATE.format(lusha_context_text=lusha_context_text)
+
+    return message
 
 
 def _known_urls_from_serper_payload(serper_payload: dict) -> list:
@@ -735,6 +823,8 @@ def interpret_hq_with_ai(
     openai_api_key: str = "",
     deepseek_api_key: str = "",
     crawled_pages=None,
+    lusha_description=None,
+    lusha_specialties=None,
 ) -> "HQDetectionResult":
     """Interpret HQ from a Serper payload using Anthropic (Haiku by default).
 
@@ -744,6 +834,15 @@ def interpret_hq_with_ai(
     existing behavior. Usage/cost audit fields (``ai_hq_provider`` /
     ``ai_hq_*_tokens`` / ``ai_hq_estimated_cost_usd``) are populated when the
     provider reports usage; they stay blank rather than guessed.
+
+    ``lusha_description``/``lusha_specialties`` (default ``None`` — Lusha
+    enrichment plan, Stap 5) are optional, already-in-hand Lusha Company
+    Description/Specialties text added to the per-lead user message as a
+    lower-authority ADDITIONAL CONTEXT section (see
+    ``_format_lusha_context``) — free, no extra API call. Omitting them
+    (every existing caller) produces byte-for-byte the same prompt as
+    before this parameter existed. Never touches the cached system prompt
+    or the JSON parser/post-AI scoring rules.
 
     Returns an ``HQDetectionResult`` with AI audit fields populated.
     The only deterministic post-AI step is a normalised country comparison.
@@ -788,6 +887,8 @@ def interpret_hq_with_ai(
             query=query,
             serper_payload=serper_payload,
             crawled_pages=crawled_pages,
+            lusha_description=lusha_description,
+            lusha_specialties=lusha_specialties,
         )
         if provider == "openai":
             raw_text, usage = _call_openai_hq(provider_api_key, model, user_msg)

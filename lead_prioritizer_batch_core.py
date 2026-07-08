@@ -265,6 +265,11 @@ _RESULT_FLAT_FIELDS = [
     "ai_hq_model", "ai_hq_classification", "ai_hq_confidence",
     "ai_parent_company", "ai_parent_hq_country", "ai_parent_hq_city",
     "ai_call_attempted", "ai_call_success", "ai_hq_error",
+    # HQ-call usage/cost audit (pre-existing on LeadPrioritizationResult;
+    # was missing from this export list -- found while comparing
+    # ai_hq_input_tokens before/after the Lusha enrichment plan's Stap 5).
+    "ai_hq_input_tokens", "ai_hq_output_tokens", "ai_hq_total_tokens",
+    "ai_hq_estimated_cost_usd",
     # non-HQ signal scores / reasons / evidence
     "sig_international_profile_score", "sig_onboarding_training_need_score",
     "sig_company_size_complexity_score", "sig_icp_keyword_match_score",

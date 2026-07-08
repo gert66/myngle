@@ -167,6 +167,21 @@ class TestFlatten:
         assert row["lusha_employees"] == "201-500"
         assert row["lusha_revenue"] == "$50M - $100M"
 
+    def test_flattens_ai_hq_usage_audit_fields(self):
+        # Regression: found while comparing ai_hq_input_tokens before/after
+        # the Lusha enrichment plan's Stap 5 -- these pre-existing fields
+        # were on LeadPrioritizationResult but missing from
+        # _RESULT_FLAT_FIELDS, so they never reached the Excel export.
+        row = flatten_result_for_excel(
+            _sample_result(
+                ai_hq_input_tokens=2500, ai_hq_output_tokens=260,
+                ai_hq_total_tokens=2760, ai_hq_estimated_cost_usd=0.0038,
+            ), {"c": "Acme", "d": "acme.com"}, source_index=1, run_success=True, run_error="")
+        assert row["ai_hq_input_tokens"] == 2500
+        assert row["ai_hq_output_tokens"] == 260
+        assert row["ai_hq_total_tokens"] == 2760
+        assert row["ai_hq_estimated_cost_usd"] == 0.0038
+
     def test_flattens_rich_icp_context_fields(self):
         row = flatten_result_for_excel(
             _sample_result(

@@ -778,6 +778,27 @@ class TestAnthropicPromptCaching:
         second = m._SYSTEM_PROMPT + "\n\n" + m._USER_TEMPLATE_STATIC_INSTRUCTIONS
         assert first == second
 
+    def test_cache_boundary_hash_is_pinned(self):
+        # Hard regression test for the prompt-cache boundary (Lusha
+        # enrichment plan, Stap 5): _SYSTEM_PROMPT +
+        # _USER_TEMPLATE_STATIC_INSTRUCTIONS is the ONE block sent with
+        # cache_control=ephemeral on every HQ call. Pinning its SHA256 (not
+        # just comparing it to itself, as the test above does) means any
+        # FUTURE accidental edit to either constant -- even a single
+        # character, e.g. from a change meant only for the per-lead
+        # template -- fails this test immediately instead of silently
+        # turning every cheap cache read into an expensive cache write.
+        # Recorded before Stap 5's change (which only touches
+        # _USER_TEMPLATE_PER_LEAD, never these two) and confirmed
+        # unchanged after it.
+        import hashlib
+        import lead_hq_ai_interpreter as m
+        combined = m._SYSTEM_PROMPT + "\n\n" + m._USER_TEMPLATE_STATIC_INSTRUCTIONS
+        assert len(combined) == 3361
+        assert hashlib.sha256(combined.encode("utf-8")).hexdigest() == (
+            "0f85a295e5abaea39235204b5fb79b3ac65c06f6b90a62a6224d3fc2355665c4"
+        )
+
     def test_cache_creation_and_read_tokens_propagated(self):
         ai = _ai_json(classification="domestic", confidence="High",
                       parent_hq_country="Italy")
@@ -1787,3 +1808,247 @@ class TestCompanySizeComplexityPriorityChain:
             )
         assert result.company_size_complexity_source == "lusha"
         assert result.sig_international_profile_score == 2.0
+
+
+# ---------------------------------------------------------------------------
+# _build_user_message: ADDITIONAL CONTEXT section for Lusha Description/
+# Specialties (Lusha enrichment plan, Stap 5). Per-lead template only --
+# the cached system+static block is covered by
+# TestAnthropicPromptCaching.test_cache_boundary_hash_is_pinned above.
+# ---------------------------------------------------------------------------
+
+class TestBuildUserMessageLushaContext:
+    """NOTE (Stap 5 scope correction): none of these tests pass
+    ``crawled_pages``, so ``crawled_pages=None`` -> own-site content counts
+    as thin -> the ADDITIONAL CONTEXT section is always considered here.
+    ``TestOwnSiteContentThinGating`` below covers the rich-vs-thin gate
+    itself (section present vs. entirely absent)."""
+
+    def _build(self, **kwargs):
+        from lead_hq_ai_interpreter import _build_user_message
+        return _build_user_message(
+            domain_root="acme", input_country="Italy", query="acme headquarters",
+            serper_payload=_EMPTY_SERPER, **kwargs,
+        )
+
+    def test_no_lusha_fields_matches_pre_stap5_output_exactly(self):
+        # Every existing caller (no lusha_description/lusha_specialties
+        # passed at all) must get byte-for-byte the same prompt as before
+        # this parameter existed -- confirmed against a message built
+        # without the new kwargs, and separately that the section reads
+        # "(none)", identical to every other empty per-lead section.
+        msg_omitted = self._build()
+        msg_explicit_none = self._build(lusha_description=None, lusha_specialties=None)
+        assert msg_omitted == msg_explicit_none
+        assert "ADDITIONAL CONTEXT" in msg_omitted
+        assert "  (none)" in msg_omitted
+
+    def test_blank_strings_also_render_as_none(self):
+        msg = self._build(lusha_description="", lusha_specialties="   ")
+        assert "ADDITIONAL CONTEXT" in msg
+        section = msg.split("ADDITIONAL CONTEXT")[1]
+        assert "(none)" in section
+
+    def test_description_only(self):
+        msg = self._build(lusha_description="A global manufacturer of industrial machinery.")
+        assert "Description: A global manufacturer of industrial machinery." in msg
+        assert "Specialties:" not in msg
+
+    def test_specialties_only(self):
+        msg = self._build(lusha_specialties="machinery, engineering, exports")
+        assert "Specialties: machinery, engineering, exports" in msg
+        assert "Description:" not in msg
+
+    def test_both_description_and_specialties(self):
+        msg = self._build(
+            lusha_description="A global manufacturer of industrial machinery.",
+            lusha_specialties="machinery, engineering",
+        )
+        assert "Description: A global manufacturer of industrial machinery." in msg
+        assert "Specialties: machinery, engineering" in msg
+
+    def test_description_truncated_at_800_chars(self):
+        long_desc = "x" * 2000
+        msg = self._build(lusha_description=long_desc)
+        section = msg.split("ADDITIONAL CONTEXT")[1]
+        desc_line = next(l for l in section.splitlines() if l.strip().startswith("Description:"))
+        rendered = desc_line.split("Description:", 1)[1].strip()
+        assert len(rendered) == 800
+
+    def test_specialties_truncated_at_300_chars(self):
+        long_spec = "y" * 1000
+        msg = self._build(lusha_specialties=long_spec)
+        section = msg.split("ADDITIONAL CONTEXT")[1]
+        spec_line = next(l for l in section.splitlines() if l.strip().startswith("Specialties:"))
+        rendered = spec_line.split("Specialties:", 1)[1].strip()
+        assert len(rendered) == 300
+
+    def test_labelled_as_lower_authority_than_primary_and_secondary(self):
+        msg = self._build(lusha_description="Some description.")
+        assert "PRIMARY SOURCE" in msg
+        assert "SECONDARY SOURCE" in msg
+        assert "ADDITIONAL CONTEXT" in msg
+        # Ordering: additional context comes after both existing sources,
+        # never renamed/reprioritised ahead of them.
+        assert msg.index("PRIMARY SOURCE") < msg.index("SECONDARY SOURCE") < msg.index("ADDITIONAL CONTEXT")
+        assert "lower authority" in msg[msg.index("ADDITIONAL CONTEXT"):]
+
+    def test_interpret_hq_with_ai_omitted_lusha_params_matches_existing_behavior(self):
+        # End-to-end: interpret_hq_with_ai without the new kwargs (every
+        # existing caller) sends the identical user message as before.
+        ai = _ai_json(classification="unclear")
+        captured = {}
+        mock_msg = MagicMock()
+        mock_msg.content = [MagicMock(text=ai)]
+        mock_client = MagicMock()
+        mock_client.messages.create.return_value = mock_msg
+        mock_lib = MagicMock()
+        mock_lib.Anthropic.return_value = mock_client
+
+        def _capture_create(**kwargs):
+            captured.update(kwargs)
+            return mock_msg
+
+        mock_client.messages.create.side_effect = _capture_create
+
+        with patch("lead_hq_ai_interpreter._anthropic_lib", mock_lib):
+            interpret_hq_with_ai(
+                lead_input=LeadInput(company_name="Acme", domain="acme.com", input_country="Italy"),
+                domain_root="acme", query="acme headquarters",
+                serper_payload=_EMPTY_SERPER, anthropic_api_key="fake",
+            )
+        user_content = captured["messages"][0]["content"]
+        assert "ADDITIONAL CONTEXT" in user_content
+        assert "  (none)" in user_content
+
+    def test_interpret_hq_with_ai_passes_lusha_fields_into_user_message(self):
+        ai = _ai_json(classification="unclear")
+        captured = {}
+        mock_msg = MagicMock()
+        mock_msg.content = [MagicMock(text=ai)]
+        mock_client = MagicMock()
+
+        def _capture_create(**kwargs):
+            captured.update(kwargs)
+            return mock_msg
+
+        mock_client.messages.create.side_effect = _capture_create
+        mock_lib = MagicMock()
+        mock_lib.Anthropic.return_value = mock_client
+
+        with patch("lead_hq_ai_interpreter._anthropic_lib", mock_lib):
+            interpret_hq_with_ai(
+                lead_input=LeadInput(company_name="Acme", domain="acme.com", input_country="Italy"),
+                domain_root="acme", query="acme headquarters",
+                serper_payload=_EMPTY_SERPER, anthropic_api_key="fake",
+                lusha_description="A global manufacturer of industrial machinery.",
+                lusha_specialties="machinery, engineering",
+            )
+        user_content = captured["messages"][0]["content"]
+        assert "Description: A global manufacturer of industrial machinery." in user_content
+        assert "Specialties: machinery, engineering" in user_content
+
+
+# ---------------------------------------------------------------------------
+# _own_site_content_is_thin / thin-vs-rich gating (Lusha enrichment plan,
+# Stap 5 scope correction): the ADDITIONAL CONTEXT section is only
+# considered when the own-domain Firecrawl content is thin/absent. A
+# well-evidenced company gets byte-for-byte the pre-Stap-5 prompt -- the
+# section is entirely omitted, not even rendered as "(none)".
+# ---------------------------------------------------------------------------
+
+def _page(text: str, url: str = "https://acme.com/about") -> dict:
+    return {"url": url, "text": text, "source_kind": "own_domain", "retrieval_method": "firecrawl"}
+
+
+class TestOwnSiteContentThinGating:
+    def test_no_crawled_pages_counts_as_thin(self):
+        from lead_hq_ai_interpreter import _own_site_content_is_thin
+        assert _own_site_content_is_thin(None) is True
+        assert _own_site_content_is_thin([]) is True
+
+    def test_pages_with_only_blank_text_count_as_thin(self):
+        from lead_hq_ai_interpreter import _own_site_content_is_thin
+        assert _own_site_content_is_thin([_page("   ")]) is True
+
+    def test_combined_length_under_threshold_is_thin(self):
+        from lead_hq_ai_interpreter import _own_site_content_is_thin
+        assert _own_site_content_is_thin([_page("x" * 399)]) is True
+
+    def test_combined_length_at_or_above_threshold_is_not_thin(self):
+        from lead_hq_ai_interpreter import _own_site_content_is_thin
+        assert _own_site_content_is_thin([_page("x" * 400)]) is False
+        assert _own_site_content_is_thin([_page("x" * 200), _page("y" * 200, "https://acme.com/x")]) is False
+
+    def test_rich_own_site_content_omits_lusha_section_entirely(self):
+        from lead_hq_ai_interpreter import _build_user_message
+        rich_pages = [_page("x" * 5000)]
+        msg = _build_user_message(
+            domain_root="acme", input_country="Italy", query="acme headquarters",
+            serper_payload=_EMPTY_SERPER, crawled_pages=rich_pages,
+            lusha_description="A global manufacturer of industrial machinery.",
+            lusha_specialties="machinery, engineering",
+        )
+        assert "ADDITIONAL CONTEXT" not in msg
+        assert "A global manufacturer" not in msg
+        assert "machinery, engineering" not in msg
+
+    def test_thin_own_site_content_includes_lusha_section(self):
+        from lead_hq_ai_interpreter import _build_user_message
+        thin_pages = [_page("x" * 50)]
+        msg = _build_user_message(
+            domain_root="acme", input_country="Italy", query="acme headquarters",
+            serper_payload=_EMPTY_SERPER, crawled_pages=thin_pages,
+            lusha_description="A global manufacturer of industrial machinery.",
+            lusha_specialties="machinery, engineering",
+        )
+        assert "ADDITIONAL CONTEXT" in msg
+        assert "Description: A global manufacturer of industrial machinery." in msg
+        assert "Specialties: machinery, engineering" in msg
+
+    def test_rich_own_site_with_no_lusha_data_matches_pre_stap5_output(self):
+        # Rich content + no Lusha data at all: message must be identical
+        # whether or not the (empty) lusha_* kwargs are passed.
+        from lead_hq_ai_interpreter import _build_user_message
+        rich_pages = [_page("x" * 5000)]
+        msg_with_kwargs = _build_user_message(
+            domain_root="acme", input_country="Italy", query="acme headquarters",
+            serper_payload=_EMPTY_SERPER, crawled_pages=rich_pages,
+            lusha_description=None, lusha_specialties=None,
+        )
+        msg_without_kwargs = _build_user_message(
+            domain_root="acme", input_country="Italy", query="acme headquarters",
+            serper_payload=_EMPTY_SERPER, crawled_pages=rich_pages,
+        )
+        assert msg_with_kwargs == msg_without_kwargs
+        assert "ADDITIONAL CONTEXT" not in msg_with_kwargs
+
+    def test_threshold_boundary_via_interpret_hq_with_ai(self):
+        # End-to-end: rich crawled_pages -> no ADDITIONAL CONTEXT reaches
+        # the actual Anthropic call's user message.
+        ai = _ai_json(classification="unclear")
+        captured = {}
+        mock_msg = MagicMock()
+        mock_msg.content = [MagicMock(text=ai)]
+        mock_client = MagicMock()
+
+        def _capture_create(**kwargs):
+            captured.update(kwargs)
+            return mock_msg
+
+        mock_client.messages.create.side_effect = _capture_create
+        mock_lib = MagicMock()
+        mock_lib.Anthropic.return_value = mock_client
+
+        with patch("lead_hq_ai_interpreter._anthropic_lib", mock_lib):
+            interpret_hq_with_ai(
+                lead_input=LeadInput(company_name="Acme", domain="acme.com", input_country="Italy"),
+                domain_root="acme", query="acme headquarters",
+                serper_payload=_EMPTY_SERPER, anthropic_api_key="fake",
+                crawled_pages=[_page("x" * 5000)],
+                lusha_description="A global manufacturer of industrial machinery.",
+                lusha_specialties="machinery, engineering",
+            )
+        user_content = captured["messages"][0]["content"]
+        assert "ADDITIONAL CONTEXT" not in user_content
+        assert "A global manufacturer" not in user_content
