@@ -479,13 +479,14 @@ class TestCountryListAlphabeticalAndComplete:
         assert SUPPORTED_DEFAULT_INPUT_COUNTRIES == sorted(SUPPORTED_DEFAULT_INPUT_COUNTRIES)
 
     def test_includes_required_countries(self):
-        for country in ("Australia", "Brazil", "Italy", "New Zealand", "Uruguay"):
+        for country in ("Australia", "Brazil", "Germany", "Italy", "New Zealand",
+                        "Spain", "Uruguay"):
             assert country in SUPPORTED_DEFAULT_INPUT_COUNTRIES
 
     def test_exact_list(self):
         assert SUPPORTED_DEFAULT_INPUT_COUNTRIES == [
-            "Australia", "Brazil", "Italy", "Japan", "Netherlands", "New Zealand",
-            "South Korea", "Switzerland", "Test", "Uruguay",
+            "Australia", "Brazil", "Germany", "Italy", "Japan", "Netherlands",
+            "New Zealand", "South Korea", "Spain", "Switzerland", "Test", "Uruguay",
         ]
 
     def test_placeholder_is_first_in_dropdown_options(self):

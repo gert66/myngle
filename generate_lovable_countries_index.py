@@ -38,8 +38,8 @@ from lovable_gcs_upload import (
 # by test_generate_lovable_countries_index.py) without importing that module,
 # which pulls in the full enrichment stack and is slow to import.
 MANIFEST_COUNTRY_LABELS = [
-    "Australia", "Brazil", "Italy", "Japan", "Netherlands", "New Zealand",
-    "South Korea", "Switzerland", "Test", "Uruguay",
+    "Australia", "Brazil", "Germany", "Italy", "Japan", "Netherlands",
+    "New Zealand", "South Korea", "Spain", "Switzerland", "Test", "Uruguay",
 ]
 
 # Countries present in the manifest but not yet ready for Lovable to show.
