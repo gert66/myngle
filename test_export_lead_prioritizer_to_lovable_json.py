@@ -4423,3 +4423,71 @@ class TestConfirmedDomesticDriverCard(object):
             d for d in detail["ui_payload"]["commercial_fit_drivers"]
             if d["id"] == "foreign_ownership_or_group_structure")
         assert driver["strength"] == "Strong"
+
+
+# ---------------------------------------------------------------------------
+# scoring_inputs — stable contract for offline re-scoring
+# ---------------------------------------------------------------------------
+
+class TestScoringInputsExport:
+
+    def test_scoring_inputs_present_with_expected_keys(self, tmp_path):
+        from commercial_fit_scoring import LEAN_COEFFICIENTS
+        enriched = [enriched_row(
+            sig_explicit_lnd_score=2, sig_intl_footprint_score=3,
+            employee_range="1001-5000",
+        )]
+        _, out_dir = run_export(tmp_path, enriched)
+        detail = detail_for(out_dir, "Acme Brasil")
+
+        assert detail["scoring_inputs"]["schema_version"] == 1
+        assert set(detail["scoring_inputs"]["signals"]) == set(LEAN_COEFFICIENTS)
+        assert detail["scoring_inputs"]["signals"]["sig_explicit_lnd_score"] == 2.0
+        assert detail["scoring_inputs"]["signals"]["sig_intl_footprint_score"] == 3.0
+        assert detail["scoring_inputs"]["employee_range"] == "1001-5000"
+
+    def test_scoring_inputs_missing_signal_stays_none_not_dropped(self, tmp_path):
+        # A signal never enriched for this row (not in enriched_row at all)
+        # must appear as an explicit None key, not be silently dropped or
+        # coerced to 0.0 — score_company()'s own _is_missing() check needs to
+        # see "missing" as missing (it defaults to 0 *and* records a "based
+        # on incomplete data" note), not as a genuine zero score.
+        enriched = [enriched_row()]
+        _, out_dir = run_export(tmp_path, enriched)
+        detail = detail_for(out_dir, "Acme Brasil")
+        assert "sig_rapid_growth_score" in detail["scoring_inputs"]["signals"]
+        assert detail["scoring_inputs"]["signals"]["sig_rapid_growth_score"] is None
+
+    def test_scoring_inputs_round_trip_reproduces_pipeline_score(self, tmp_path):
+        """The whole point of this field: read it back out of the exported
+        JSON, feed it straight into score_company(), and get the same
+        commercial_fit_score the pipeline computed — no re-enrichment."""
+        from commercial_fit_scoring import score_company
+
+        row = enriched_row(
+            sig_foreign_hq_score=3, sig_explicit_lnd_score=2,
+            sig_intl_footprint_score=3, sig_employer_branding_score=1,
+            sig_lnd_onboarding_score=2, ti_onboarding_score=1,
+            sig_rapid_growth_score=0, employee_range="1001-5000",
+        )
+        expected = score_company(row)
+
+        enriched = [row]
+        _, out_dir = run_export(tmp_path, enriched)
+        detail = detail_for(out_dir, "Acme Brasil")
+
+        rehydrated_row = dict(detail["scoring_inputs"]["signals"])
+        rehydrated_row["employee_range"] = detail["scoring_inputs"]["employee_range"]
+        recomputed = score_company(rehydrated_row)
+
+        assert recomputed["final_commercial_fit_score"] == \
+            expected["final_commercial_fit_score"]
+        assert recomputed["commercial_tier"] == expected["commercial_tier"]
+
+    def test_scoring_inputs_survives_dutch_localization(self, tmp_path):
+        # localize_detail_record_for_dutch must not strip a non-display field.
+        enriched = [enriched_row(sig_explicit_lnd_score=2)]
+        _, out_dir = run_export(tmp_path, enriched, content_language="Dutch")
+        detail = detail_for(out_dir, "Acme Brasil")
+        assert "scoring_inputs" in detail
+        assert detail["scoring_inputs"]["signals"]["sig_explicit_lnd_score"] == 2.0
