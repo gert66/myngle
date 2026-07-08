@@ -36,8 +36,6 @@ from cloud_job_runner import (
     _gcs_client,
 )
 
-STATUS_SUFFIXES = ("_done.json", "_failed.json")
-
 DEFAULT_FINAL_OUTPUT_NAME = "lead_prioritizer_final.xlsx"
 
 
