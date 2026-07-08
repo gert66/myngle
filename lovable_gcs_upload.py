@@ -34,6 +34,8 @@ _COUNTRY_FOLDER_SLUGS = {
     "japan": "japan",
     "south korea": "south-korea",
     "switzerland": "switzerland",
+    "germany": "germany",
+    "spain": "spain",
     "test": "test",
 }
 
