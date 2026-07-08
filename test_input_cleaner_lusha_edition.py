@@ -70,6 +70,43 @@ class TestColumnMapping:
         assert mapping["intent_topics"] is None
         assert mapping["linkedin_url"] is None
 
+    def test_detects_full_firmographic_export_with_extra_columns(self):
+        """Country-level "full export" variant (e.g. Spain.xlsx, Switzerland.xlsx)
+        adds firmographic columns (Company Year Founded, Total Funding Amount,
+        Company SIC/NAIC, Company Continent/State/City, Company Country ISO,
+        Company Intent Level, Topic Count Trend, ...) around the same core
+        Lusha headers. These extra columns are simply ignored by
+        ``detect_lusha_columns`` — the canonical fields are still detected and
+        no required column is reported missing."""
+        df = pd.DataFrame(columns=[
+            "Company Name", "Company Domain", "Company Description",
+            "Company Year Founded", "Company Website",
+            "Company Number of Employees", "Company Revenue",
+            "Company linkedin URL", "Total Funding Amount",
+            "Total Number of Rounds", "Last Round/Event Amount",
+            "Last Round/Event Type", "Last Round/Event Date",
+            "IPO Status", "IPO Date", "Company Main Industry",
+            "Company Sub Industry", "Company Technologies",
+            "Company SIC (Standard Industrial Classification)",
+            "Company NAIC (North American Industry Classification)",
+            "Company Specialties", "Company Continent", "Company Country",
+            "Company State", "Company City", "Company Country ISO",
+            "Company Number of Intent Topics", "Company Intent Topics",
+            "Company Intent Level", "Topic Count Trend",
+        ])
+        mapping = m.detect_lusha_columns(df)
+        assert mapping["name"] == "Company Name"
+        assert mapping["domain"] == "Company Domain"
+        assert mapping["description"] == "Company Description"
+        assert mapping["employees"] == "Company Number of Employees"
+        assert mapping["revenue"] == "Company Revenue"
+        assert mapping["main_industry"] == "Company Main Industry"
+        assert mapping["sub_industry"] == "Company Sub Industry"
+        assert mapping["country"] == "Company Country"
+        assert mapping["intent_topics"] == "Company Intent Topics"
+        assert mapping["linkedin_url"] == "Company linkedin URL"
+        assert m.missing_required_lusha_columns(mapping) == []
+
 
 # ---------------------------------------------------------------------------
 # Step 1 — deduplication
