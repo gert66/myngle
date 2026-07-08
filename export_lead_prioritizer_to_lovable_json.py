@@ -16,6 +16,14 @@ are joined on ``source_index``, and "Run Summary" carries run metadata.
 This module is export/packaging only: it makes no API calls, performs no
 enrichment, and does not change scoring, C4, C5, or HQ detection logic.
 
+Each company-details record includes a ``scoring_inputs`` block (raw sig_*/
+ti_* signal values + employee_range) as a stable, versioned contract for
+offline re-scoring: a separate tool can read it and call
+``commercial_fit_scoring.score_company(row, params=...)`` with new weights
+to recompute ``commercial_fit_score`` without re-running enrichment. This is
+distinct from ``debug.lead_prioritizer_row`` (best-effort, may drop fields)
+and ``visible_icp_signal_scores`` (human-readable UI labels only).
+
 CLI:
     python export_lead_prioritizer_to_lovable_json.py \
         --input-xlsx lead_prioritizer_output.xlsx \
@@ -36,6 +44,7 @@ from urllib.parse import urlparse
 
 import pandas as pd
 
+from commercial_fit_scoring import LEAN_COEFFICIENTS
 from hq_simple_detector import (
     _HOSTED_CAREERS_PLATFORM_DOMAINS,
     is_hosted_careers_platform_domain,
@@ -2302,6 +2311,39 @@ def _build_url_context(evidence_rows: list[dict], signal_rows: list[dict]) -> "d
     return context
 
 
+def _build_scoring_inputs(row: dict) -> dict:
+    """Stable, explicitly-named raw signal + size inputs for offline re-scoring.
+
+    Unlike ``debug.lead_prioritizer_row`` (a best-effort catch-all that is
+    allowed to drop or rename fields over time) and
+    ``build_visible_icp_signal_scores`` (human-readable UI labels, no sig_*
+    names by design), this field is a deliberate, versioned contract: a
+    re-scoring tool can read ``scoring_inputs`` from company-details JSON,
+    call ``commercial_fit_scoring.score_company(row, params=...)`` with new
+    weights/coefficients/K, and get the same result the pipeline would have
+    produced — without re-running enrichment.
+
+    Only the exact fields ``score_company`` reads are included, keyed off
+    ``LEAN_COEFFICIENTS`` so this list can never silently drift out of sync
+    with the scoring engine itself.
+
+    A signal that was never enriched for this row is kept as an explicit
+    ``None`` (via ``to_float``), not coerced to 0.0 — ``score_company``'s own
+    ``_is_missing`` check treats "missing" and "genuine zero" differently
+    (missing adds a "based on incomplete data" note); flattening that here
+    would silently change what a re-score run reports.
+    """
+    signals = {
+        field: to_float(row.get(field))
+        for field in LEAN_COEFFICIENTS
+    }
+    return {
+        "schema_version": 1,
+        "signals": signals,
+        "employee_range": clean_str(row.get("employee_range")),
+    }
+
+
 def _build_detail_record(
     row: dict,
     list_item: dict,
@@ -2365,6 +2407,7 @@ def _build_detail_record(
         "domain_is_hosted_platform": to_bool(row.get("domain_is_hosted_platform")),
         "composed_by_ai": to_bool(row.get("composed_by_ai")),
         "composed_content_note": clean_str(row.get("composed_content_note")),
+        "scoring_inputs": _build_scoring_inputs(row),
         "debug": {
             "lead_prioritizer_row": _build_debug_row(row, warnings),
             "evidence_rows_count": len(evidence_rows),
