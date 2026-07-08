@@ -19,14 +19,16 @@ from lead_non_hq_signal_extractor import SUPPORTED_SIGNALS
 
 def _serper_payload_for(signal_name: str) -> dict:
     """A payload whose organic snippet gives >=2 keyword hits for the
-    deterministic extractor -- so both paths have real evidence to judge."""
+    deterministic extractor -- so both paths have real evidence to judge.
+
+    Only the 4 signals that still get a live Serper query (Stap 4:
+    ``company_size_complexity`` and ``sector_industry`` are Lusha-only and
+    never reach ``build_non_hq_enrichment_queries``) are covered here."""
     texts = {
         "international_profile": "International offices in 11 countries worldwide.",
         "onboarding_training_need": "Careers, training and onboarding academy for new employees.",
-        "company_size_complexity": "Employees, revenue and locations across our company profile.",
         "icp_keyword_match": "Corporate training for global teams, sales and customer service.",
         "employer_branding": "Employer branding, employee satisfaction and great place to work.",
-        "sector_industry": "A technology company providing software services.",
     }
     text = texts.get(signal_name, "")
     return {
@@ -43,13 +45,9 @@ def _fake_call_serper_for_enrichment(query, serper_api_key, gl=None, hl=None, us
         return _serper_payload_for("international_profile")
     if "careers training onboarding" in query:
         return _serper_payload_for("onboarding_training_need")
-    if "employees revenue locations" in query:
-        return _serper_payload_for("company_size_complexity")
     if "corporate training sales" in query:
         return _serper_payload_for("icp_keyword_match")
-    if "employer branding" in query:
-        return _serper_payload_for("employer_branding")
-    return _serper_payload_for("sector_industry")
+    return _serper_payload_for("employer_branding")
 
 
 def _mock_anthropic_json(text: str):
@@ -67,7 +65,6 @@ def _mock_anthropic_json(text: str):
 _AI_RESPONSE_ALL_POSITIVE = (
     '{"international_profile": {"verdict": "positive_evidence", "reason": "clear", "supporting_evidence_ids": ["international_profile:organic:1"]}, '
     '"onboarding_training_need": {"verdict": "positive_evidence", "reason": "clear", "supporting_evidence_ids": ["onboarding_training_need:organic:1"]}, '
-    '"company_size_complexity": {"verdict": "weak_evidence", "reason": "thin", "supporting_evidence_ids": ["company_size_complexity:organic:1"]}, '
     '"icp_keyword_match": {"verdict": "positive_evidence", "reason": "clear", "supporting_evidence_ids": ["icp_keyword_match:organic:1"]}, '
     '"employer_branding": {"verdict": "no_positive_match", "reason": "no support", "supporting_evidence_ids": []}}'
 )
@@ -119,6 +116,23 @@ class TestRunComparison:
             )
         assert (cost_df["ai_input_tokens"] == 500).all()
         assert cost_df["ai_estimated_cost_usd"].notna().all()
+
+    def test_company_size_complexity_stays_empty_no_live_serper_query(self):
+        """Stap 3/4: company_size_complexity is Lusha-only and gets no Serper
+        query anymore, so both scoring paths must come out empty for it --
+        not "fixed", this is the expected comparison-tooling behavior."""
+        with patch("lead_non_hq_enrichment.call_serper_for_enrichment",
+                   side_effect=_fake_call_serper_for_enrichment), \
+             _mock_anthropic_json(_AI_RESPONSE_ALL_POSITIVE):
+            signal_df, _ = run_comparison(
+                _sample_df().head(1), company_column="company_name", domain_column="domain",
+                default_input_country="Netherlands",
+                serper_api_key="fake", anthropic_api_key="fake",
+            )
+        row = signal_df[signal_df["signal_name"] == "company_size_complexity"].iloc[0]
+        assert pd.isna(row["keyword_score"])
+        assert pd.isna(row["ai_score"])
+        assert row["agreement"] == ""
 
     def test_ai_failure_leaves_ai_columns_blank_but_keyword_scores_intact(self):
         with patch("lead_non_hq_enrichment.call_serper_for_enrichment",

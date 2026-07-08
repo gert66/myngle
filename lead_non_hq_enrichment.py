@@ -295,7 +295,7 @@ def collect_non_hq_enrichment_evidence(
     ``cache_index`` (default ``None``) is an optional in-memory, GCS-backed
     shared cache index (see ``enrichment_cache.py``); when ``None`` — the
     default — every query hits Serper live, exactly as before this parameter
-    existed. When provided, each of the (up to 6) queries is cached/looked up
+    existed. When provided, each of the (up to 4) queries is cached/looked up
     independently, keyed on ``domain`` + that query's own ``signal_name``.
     """
     gl, hl = gl_hl_for_country(country)

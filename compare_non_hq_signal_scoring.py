@@ -10,8 +10,10 @@ be validated before turning ``ai_signal_scoring=True`` on more broadly.
 Comparison-only tooling: it changes no scoring, C4, C5, HQ, Serper, Excel, or
 Lovable export behavior, and it never runs unless invoked explicitly. Each row
 costs one round of non-HQ Serper queries (via ``collect_non_hq_enrichment_evidence``,
-already fixed at up to 6 queries) plus one Anthropic call -- keep --row-limit
-small.
+fixed at up to 4 queries -- ``company_size_complexity`` and ``sector_industry``
+are Lusha-only since Stap 3/4 and get no live Serper evidence, see
+``lead_non_hq_enrichment.build_non_hq_enrichment_queries``) plus one Anthropic
+call -- keep --row-limit small.
 
 Usage:
     python compare_non_hq_signal_scoring.py \
@@ -69,7 +71,13 @@ def build_lead_comparison_rows(
     ai_result,
 ) -> list[dict]:
     """One row per supported signal for this lead (long format -- easy to
-    pivot/aggregate per signal across a whole sample)."""
+    pivot/aggregate per signal across a whole sample).
+
+    ``SUPPORTED_SIGNALS`` still has 5 entries (``company_size_complexity`` is
+    kept in the schema on purpose, Stap 4) but only 4 receive live Serper
+    evidence -- ``company_size_complexity`` rows correctly come out with
+    ``keyword_score``/``ai_score`` both ``None`` and ``agreement`` blank,
+    which is expected, not a bug."""
     kw_by_name = _signals_by_name(keyword_signals)
     ai_by_name = _signals_by_name(ai_result.signals if ai_result.call_success else [])
 
