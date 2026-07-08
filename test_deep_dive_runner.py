@@ -100,7 +100,7 @@ class TestFirecrawlScrapePage:
             result = _firecrawl_scrape_page("https://acme.com/nope", "fc-key")
         assert result == {"ok": False, "text": "", "status": "404", "hard_failure": False}
 
-    @pytest.mark.parametrize("code", [401, 402, 403, 429])
+    @pytest.mark.parametrize("code", [401, 402, 403])
     def test_key_failure_codes_are_hard_failures(self, code):
         resp = Mock(status_code=code)
         with patch("deep_dive_runner.requests.post", return_value=resp):
@@ -120,6 +120,51 @@ class TestFirecrawlScrapePage:
             result = _firecrawl_scrape_page("https://acme.com", "fc-key")
         assert result["hard_failure"] is True
         assert "boom" in result["status"]
+
+
+class TestFirecrawlScrapePage429Retry:
+    """A 429 is expected under concurrent load (unlike 401/402/403, a bad-key/
+    quota problem) — it gets retried with backoff before being classified as
+    a hard failure, same as before this behavior existed."""
+
+    def test_retries_then_succeeds(self):
+        resp_429 = Mock(status_code=429)
+        resp_429.headers.get.return_value = None
+        resp_ok = Mock(status_code=200)
+        resp_ok.json.return_value = {"data": {"markdown": "# About Acme"}}
+
+        with patch("deep_dive_runner.requests.post",
+                    side_effect=[resp_429, resp_ok]) as mock_post, \
+                patch("deep_dive_runner.time.sleep") as mock_sleep:
+            result = _firecrawl_scrape_page("https://acme.com/about", "fc-key")
+
+        assert result["ok"] is True
+        assert mock_post.call_count == 2
+        mock_sleep.assert_called_once()
+
+    def test_exhausts_retries_then_hard_failure(self):
+        resp_429 = Mock(status_code=429)
+        resp_429.headers.get.return_value = None
+
+        with patch("deep_dive_runner.requests.post", return_value=resp_429) as mock_post, \
+                patch("deep_dive_runner.time.sleep"):
+            result = _firecrawl_scrape_page(
+                "https://acme.com", "fc-key", max_429_retries=2)
+
+        assert result == {"ok": False, "text": "", "status": "http_429", "hard_failure": True}
+        assert mock_post.call_count == 3  # initial attempt + 2 retries
+
+    def test_honors_retry_after_header(self):
+        resp_429 = Mock(status_code=429)
+        resp_429.headers.get.return_value = "3"
+        resp_ok = Mock(status_code=200)
+        resp_ok.json.return_value = {"data": {"markdown": "# About Acme"}}
+
+        with patch("deep_dive_runner.requests.post", side_effect=[resp_429, resp_ok]), \
+                patch("deep_dive_runner.time.sleep") as mock_sleep:
+            _firecrawl_scrape_page("https://acme.com/about", "fc-key")
+
+        mock_sleep.assert_called_once_with(3.0)
 
 
 class TestFirecrawlScrapePageCache:
