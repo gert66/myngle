@@ -2311,6 +2311,26 @@ def _build_url_context(evidence_rows: list[dict], signal_rows: list[dict]) -> "d
     return context
 
 
+# Maps each LEAN_COEFFICIENTS scoring-field name to the actual "Enriched
+# Leads" column name the v2 pipeline writes it under. Mirrors
+# lead_v2_scoring_adapter.py's build_score_company_input_from_v2_result
+# verbatim — keep these two in sync (checked by
+# test_export_lead_prioritizer_to_lovable_json.py). Fields not listed here
+# (ti_onboarding_score, sig_rapid_growth_score) already use their
+# LEAN_COEFFICIENTS name directly as the real column name — v2 currently
+# hardcodes both to 0.0 rather than sourcing them from any row field at
+# scoring time, so no rename applies; legacy (enrich_clients_claude.py) rows
+# may still populate them for real under that same name.
+_SCORING_INPUT_FIELD_SOURCES: dict[str, str] = {
+    "sig_foreign_hq_score": "sig_foreign_hq_score_for_next_scoring",
+    "sig_intl_footprint_score": "sig_international_profile_score",
+    "sig_lnd_onboarding_score": "sig_onboarding_training_need_score",
+    "sig_explicit_lnd_score": "sig_icp_keyword_match_score",
+    # sig_employer_branding_score, ti_onboarding_score, sig_rapid_growth_score:
+    # same name in both places, no entry needed.
+}
+
+
 def _build_scoring_inputs(row: dict) -> dict:
     """Stable, explicitly-named raw signal + size inputs for offline re-scoring.
 
@@ -2327,16 +2347,31 @@ def _build_scoring_inputs(row: dict) -> dict:
     ``LEAN_COEFFICIENTS`` so this list can never silently drift out of sync
     with the scoring engine itself.
 
+    IMPORTANT — v2 field-name mismatch: the "Enriched Leads" row does NOT
+    carry most of these under their ``LEAN_COEFFICIENTS`` name. The v2
+    pipeline writes its own field names (``lead_output_schema.py``), and
+    ``lead_v2_scoring_adapter.py``'s ``build_score_company_input_from_v2_result``
+    is the (rarely-invoked, single-lead-only) place that renames them for
+    scoring. ``_SCORING_INPUT_FIELD_SOURCES`` below mirrors that same
+    rename, verbatim, so a row built entirely from v2 evidence still
+    produces correct (non-null) scoring_inputs. For each field we first try
+    the v2-native source column; if that's absent we fall back to the
+    ``LEAN_COEFFICIENTS`` name directly, since some legacy
+    (``enrich_clients_claude.py``) rows already use that name as-is.
+
     A signal that was never enriched for this row is kept as an explicit
     ``None`` (via ``to_float``), not coerced to 0.0 — ``score_company``'s own
     ``_is_missing`` check treats "missing" and "genuine zero" differently
     (missing adds a "based on incomplete data" note); flattening that here
     would silently change what a re-score run reports.
     """
-    signals = {
-        field: to_float(row.get(field))
-        for field in LEAN_COEFFICIENTS
-    }
+    signals = {}
+    for field in LEAN_COEFFICIENTS:
+        source_field = _SCORING_INPUT_FIELD_SOURCES.get(field, field)
+        value = to_float(row.get(source_field))
+        if value is None and source_field != field:
+            value = to_float(row.get(field))
+        signals[field] = value
     return {
         "schema_version": 1,
         "signals": signals,
