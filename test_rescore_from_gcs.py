@@ -18,6 +18,7 @@ from rescore_from_gcs import (
     CURRENT_MANIFEST_FILENAME,
     LIST_FILENAME,
     build_rescore_manifest,
+    build_rescored_run,
     default_rescore_run_folder,
     download_current_run,
     download_file,
@@ -32,8 +33,11 @@ from rescore_from_gcs import (
     rescore_details_bucket,
     rescore_list_items,
     resolve_gcs_tool,
+    skipped_company_ids,
     tier_distribution,
     upload_file,
+    upload_rescored_run,
+    write_rescored_run,
 )
 
 
@@ -151,6 +155,28 @@ class TestRescoreDetailsBucket:
         assert rescored is not bucket
         assert all("rescore_audit" in d for d in rescored.values())
 
+    def test_company_without_scoring_inputs_is_skipped_not_fatal(self):
+        # A current run that predates the scoring_inputs export (or a single
+        # company that was never re-exported) must not abort the whole
+        # country's re-score — it should be left unchanged and reported.
+        legacy_detail = {
+            "company_id": "legacy-co",
+            "commercial_fit_score": 4.2,
+            "commercial_tier": "🥉 Cool",
+        }
+        bucket = {
+            "legacy-co": legacy_detail,
+            "c2": fixture_detail("c2", sig_foreign_hq_score=3),
+        }
+        rescored = rescore_details_bucket(bucket, params={}, now_iso="2026-07-08T00:00:00Z")
+
+        assert rescored["legacy-co"]["commercial_fit_score"] == 4.2
+        assert rescored["legacy-co"]["commercial_tier"] == "🥉 Cool"
+        assert rescored["legacy-co"]["rescore_audit"]["skipped"] is True
+        assert "scoring_inputs" in rescored["legacy-co"]["rescore_audit"]["skip_reason"]
+        assert rescored["c2"]["rescore_audit"].get("skipped") is not True
+        assert skipped_company_ids(rescored) == ["legacy-co"]
+
 
 class TestRescoreListItems:
     def test_mirrors_new_score_and_tier_onto_matching_list_item(self):
@@ -198,10 +224,37 @@ class TestBuildRescoreManifest:
         assert manifest["country_folder"] == "brazil"
         assert manifest["run_folder"] == "2026-07-08_rescore"
         assert manifest["companies_rescored"] == 1
+        assert manifest["companies_skipped"] == 0
+        assert manifest["skipped_company_ids"] == []
         assert manifest["tier_distribution_before"] == {"Cool": 1}
         assert manifest["tier_distribution_after"] == {"Hot": 1}
         assert manifest["promoted_to_current"] is False
         assert manifest["source_current_manifest"]["generated_at"] == "2026-01-01T00:00:00Z"
+
+    def test_skipped_companies_counted_separately_from_rescored(self):
+        original = {"c1": {"commercial_tier": "Cool"}, "c2": {"commercial_tier": "Cool"}}
+        rescored = {
+            "c1": {"commercial_tier": "Hot", "rescore_audit": {}},
+            "c2": {"commercial_tier": "Cool", "rescore_audit": {"skipped": True}},
+        }
+        manifest = build_rescore_manifest(
+            country_folder="brazil", source_current_manifest=None, params={},
+            run_folder="run1", original_details_by_id=original,
+            rescored_details_by_id=rescored, generated_at="2026-07-08T00:00:00Z",
+        )
+        assert manifest["companies_rescored"] == 1
+        assert manifest["companies_skipped"] == 1
+        assert manifest["skipped_company_ids"] == ["c2"]
+
+
+class TestSkippedCompanyIds:
+    def test_finds_only_skipped_entries(self):
+        details = {
+            "c1": {"rescore_audit": {"skipped": True}},
+            "c2": {"rescore_audit": {"skipped": False}},
+            "c3": {},
+        }
+        assert skipped_company_ids(details) == ["c1"]
 
 
 class TestDefaultRescoreRunFolder:
@@ -328,7 +381,7 @@ class TestUploadFile:
 # download_current_run / rescore_country — end-to-end with mocked subprocess
 # ---------------------------------------------------------------------------
 
-def _write_fixture_current_run(country_dir: Path) -> dict:
+def _write_fixture_current_run(country_dir: Path, *, include_legacy_company: bool = False) -> dict:
     """Write a small fixture 'current' run (manifest + list + one details
     bucket) to a local directory, mimicking what would live in
     gs://bucket/<country>/current/. Returns the parsed detail records by id."""
@@ -336,6 +389,14 @@ def _write_fixture_current_run(country_dir: Path) -> dict:
     detail_a = fixture_detail("company-a", sig_foreign_hq_score=3, sig_explicit_lnd_score=3)
     detail_b = fixture_detail("company-b", sig_foreign_hq_score=0, sig_explicit_lnd_score=0)
     bucket = {"company-a": detail_a, "company-b": detail_b}
+    if include_legacy_company:
+        # Mimics a company exported before the scoring_inputs contract
+        # existed — no scoring_inputs block at all.
+        bucket["legacy-co"] = {
+            "company_id": "legacy-co",
+            "commercial_fit_score": 4.2,
+            "commercial_tier": "🥉 Cool",
+        }
 
     list_items = [
         {
@@ -415,6 +476,76 @@ class TestDownloadCurrentRun:
                 download_current_run("bucket-a", "brazil", tmp_path / "work")
 
 
+class TestBuildRescoredRunPureCore:
+    """build_rescored_run/write_rescored_run/upload_rescored_run — the
+    no-download/no-upload core reused by an interactive UI that recomputes
+    on every parameter tweak without re-hitting GCS."""
+
+    def _fixture_current(self) -> dict:
+        bucket = {
+            "company-a": fixture_detail("company-a", sig_foreign_hq_score=3),
+            "company-b": fixture_detail("company-b", sig_foreign_hq_score=0),
+        }
+        list_items = [
+            {"company_id": cid, "commercial_fit_score": d["commercial_fit_score"],
+             "commercial_tier": d["commercial_tier"]}
+            for cid, d in bucket.items()
+        ]
+        return {
+            "manifest": {"generated_at": "2026-07-01T00:00:00Z"},
+            "list_items": list_items,
+            "detail_files": {"company-details-000.json": bucket},
+        }
+
+    def test_build_rescored_run_shape(self):
+        current = self._fixture_current()
+        rescored_run = build_rescored_run(
+            current, params={}, country_folder="brazil",
+            run_folder="2026-07-08_rescore", now_iso="2026-07-08T00:00:00Z")
+
+        assert set(rescored_run) == {"list_items", "detail_files", "manifest"}
+        assert len(rescored_run["list_items"]) == 2
+        assert "company-details-000.json" in rescored_run["detail_files"]
+        assert rescored_run["manifest"]["companies_rescored"] == 2
+        assert rescored_run["manifest"]["run_folder"] == "2026-07-08_rescore"
+
+    def test_recomputing_with_different_params_does_not_touch_original_current(self):
+        current = self._fixture_current()
+        original_snapshot = json.loads(json.dumps(current))
+        build_rescored_run(
+            current, params={"intercept": -99.0}, country_folder="brazil",
+            run_folder="run1", now_iso="2026-07-08T00:00:00Z")
+        assert current == original_snapshot
+
+    def test_write_then_upload_round_trip(self, tmp_path):
+        current = self._fixture_current()
+        rescored_run = build_rescored_run(
+            current, params={}, country_folder="brazil",
+            run_folder="2026-07-08_rescore", now_iso="2026-07-08T00:00:00Z")
+
+        out_dir = write_rescored_run(rescored_run, tmp_path / "out")
+        assert (out_dir / LIST_FILENAME).exists()
+        assert (out_dir / "company-details-000.json").exists()
+        assert (out_dir / CURRENT_MANIFEST_FILENAME).exists()
+
+        mock_proc = MagicMock(returncode=0, stdout="", stderr="")
+        with patch("rescore_from_gcs.resolve_gcs_tool", return_value=["gcloud", "storage"]), \
+             patch("rescore_from_gcs.subprocess.run", return_value=mock_proc):
+            results = upload_rescored_run(out_dir, "bucket-a", "brazil", "2026-07-08_rescore")
+
+        assert len(results) == 3
+        assert all(r["success"] for r in results)
+        assert all(
+            r["destination"].startswith("gs://bucket-a/brazil/runs/2026-07-08_rescore/")
+            for r in results)
+
+    def test_upload_rescored_run_raises_without_gcs_tool(self, tmp_path):
+        (tmp_path / LIST_FILENAME).write_text("[]")
+        with patch("rescore_from_gcs.resolve_gcs_tool", return_value=None):
+            with pytest.raises(RuntimeError, match="gcloud"):
+                upload_rescored_run(tmp_path, "bucket-a", "brazil", "run1")
+
+
 class TestRescoreCountry:
     def test_end_to_end_writes_to_new_run_folder_never_current(self, tmp_path):
         remote_root = tmp_path / "remote"
@@ -440,6 +571,34 @@ class TestRescoreCountry:
         original_bucket = json.loads((current_dir / "company-details-000.json").read_text())
         assert original_bucket["company-a"]["commercial_fit_score"] == \
             fixture_detail("company-a", sig_foreign_hq_score=3, sig_explicit_lnd_score=3)["commercial_fit_score"]
+
+    def test_company_without_scoring_inputs_is_skipped_and_reported_not_fatal(self, tmp_path):
+        # Real-world scenario: the current run predates the scoring_inputs
+        # export for at least one company. The whole country must still
+        # re-score successfully, with the legacy company carried over
+        # unchanged and called out in the manifest.
+        remote_root = tmp_path / "remote"
+        _write_fixture_current_run(remote_root / "brazil" / "current", include_legacy_company=True)
+
+        with patch("rescore_from_gcs.resolve_gcs_tool", return_value=["gcloud", "storage"]), \
+             patch("rescore_from_gcs.subprocess.run", side_effect=_fake_gcs_tool_for_local_dir(remote_root)):
+            manifest = rescore_country(
+                "bucket-a", "brazil", params={},
+                run_folder="2026-07-08_rescore",
+                now=datetime(2026, 7, 8, tzinfo=timezone.utc),
+            )
+
+        assert manifest["companies_rescored"] == 2
+        assert manifest["companies_skipped"] == 1
+        assert manifest["skipped_company_ids"] == ["legacy-co"]
+        assert all(r["success"] for r in manifest["upload_results"])
+
+        new_bucket = json.loads(
+            (remote_root / "brazil" / "runs" / "2026-07-08_rescore" / "company-details-000.json")
+            .read_text())
+        assert new_bucket["legacy-co"]["commercial_fit_score"] == 4.2
+        assert new_bucket["legacy-co"]["commercial_tier"] == "🥉 Cool"
+        assert new_bucket["legacy-co"]["rescore_audit"]["skipped"] is True
 
     def test_same_params_reproduce_current_scores_in_new_run(self, tmp_path):
         remote_root = tmp_path / "remote"
