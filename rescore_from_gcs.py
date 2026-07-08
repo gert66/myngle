@@ -117,11 +117,40 @@ def rescore_detail_record(detail: dict, params: dict, *, now_iso: str) -> dict:
 
 def rescore_details_bucket(bucket: dict, params: dict, *, now_iso: str) -> dict:
     """Re-score every ``company_id -> detail`` record in one
-    ``company-details-*.json`` bucket file. Returns a NEW dict."""
-    return {
-        company_id: rescore_detail_record(detail, params, now_iso=now_iso)
-        for company_id, detail in bucket.items()
-    }
+    ``company-details-*.json`` bucket file. Returns a NEW dict.
+
+    A company whose detail record has no ``scoring_inputs`` block (e.g. the
+    ``current`` run predates the ``scoring_inputs`` export, or that one
+    company was never re-exported) is left UNCHANGED — its existing
+    ``commercial_fit_score``/``commercial_tier`` carry over as-is — rather
+    than aborting the whole country's re-score. Its ``rescore_audit`` still
+    records ``skipped: True`` and why, so the new run's own JSON shows which
+    companies were not actually re-scored (see ``skipped_company_ids`` in
+    ``build_rescore_manifest``).
+    """
+    result = {}
+    for company_id, detail in bucket.items():
+        try:
+            result[company_id] = rescore_detail_record(detail, params, now_iso=now_iso)
+        except ValueError as exc:
+            skipped = dict(detail)
+            skipped["rescore_audit"] = {
+                "schema_version": RESCORE_SCHEMA_VERSION,
+                "rescored_at": now_iso,
+                "skipped": True,
+                "skip_reason": str(exc),
+            }
+            result[company_id] = skipped
+    return result
+
+
+def skipped_company_ids(details_by_id: dict) -> list[str]:
+    """``company_id``s left unchanged by ``rescore_details_bucket`` because
+    their detail record had no ``scoring_inputs`` block."""
+    return [
+        cid for cid, detail in details_by_id.items()
+        if (detail.get("rescore_audit") or {}).get("skipped")
+    ]
 
 
 def rescore_list_items(list_items: list[dict], rescored_by_id: dict) -> list[dict]:
@@ -164,7 +193,12 @@ def build_rescore_manifest(
     """Manifest for the new run folder — analogous to
     ``export_lead_prioritizer_to_lovable_json``'s ``export_manifest.json``,
     but for a re-score: records the params used and a before/after tier
-    distribution instead of re-running enrichment counts."""
+    distribution instead of re-running enrichment counts.
+
+    Companies with no ``scoring_inputs`` block are counted separately under
+    ``companies_skipped``/``skipped_company_ids`` — they are carried over
+    unchanged rather than re-scored (see ``rescore_details_bucket``)."""
+    skipped_ids = skipped_company_ids(rescored_details_by_id)
     return {
         "schema_version": RESCORE_SCHEMA_VERSION,
         "generated_at": generated_at,
@@ -172,7 +206,9 @@ def build_rescore_manifest(
         "run_folder": run_folder,
         "source_current_manifest": source_current_manifest,
         "params": params or {},
-        "companies_rescored": len(rescored_details_by_id),
+        "companies_rescored": len(rescored_details_by_id) - len(skipped_ids),
+        "companies_skipped": len(skipped_ids),
+        "skipped_company_ids": skipped_ids,
         "tier_distribution_before": tier_distribution(original_details_by_id),
         "tier_distribution_after": tier_distribution(rescored_details_by_id),
         "promoted_to_current": False,
@@ -570,10 +606,16 @@ def main() -> None:
         n_failed = sum(1 for r in manifest.get("upload_results", []) if not r.get("success"))
         status = "OK" if not args.dry_run and n_failed == 0 else (
             "DRY RUN" if args.dry_run else f"{n_failed} upload(s) FAILED")
+        skipped_note = (
+            f", {manifest['companies_skipped']} skipped (no scoring_inputs)"
+            if manifest.get("companies_skipped") else ""
+        )
         print(
             f"  {status:<24} {country_folder}: "
-            f"{manifest['companies_rescored']} companies rescored -> "
+            f"{manifest['companies_rescored']} companies rescored{skipped_note} -> "
             f"gs://{args.bucket}/{country_folder}/runs/{run_folder}/")
+        if manifest.get("skipped_company_ids"):
+            print(f"    skipped: {', '.join(manifest['skipped_company_ids'])}")
         if n_failed:
             exit_code = 1
 
