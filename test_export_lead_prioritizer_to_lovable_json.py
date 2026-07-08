@@ -19,6 +19,7 @@ from export_lead_prioritizer_to_lovable_json import (
     classify_curated_evidence,
     export_batch_output_tables_to_lovable_json,
     export_workbook_to_lovable_json,
+    has_topical_keywords,
     is_domain_relevant_for_url,
     is_generic_or_raw_text,
     is_technical_reason,
@@ -1436,6 +1437,40 @@ def test_own_domain_labeled_official_website_no_duplicates(tmp_path):
     ]
     assert len(dorc_home_entries) == 1
     assert dorc_home_entries[0]["label"] == "Official website"
+
+
+class TestRawCountryListRecognizedAsInternationalTopic:
+    """Real-run finding (fresh live Serper call, same Adecco lead): a raw
+    list of country names -- "We're present in 12 sites across the
+    Americas: Antilles-Guyane Argentina Brazil Canada Chile Colombia
+    Ecuador Mexico Peru Puerto Rico Uruguay United States" -- never uses
+    any of the topic-vocabulary words ("countries", "international",
+    "global", ...), so has_topical_keywords rejected it as off-topic even
+    though it is obviously strong international-footprint evidence.
+    "sites" belongs in the same vocabulary bucket as the already-listed
+    "offices"/"branches"/"stores"/"locations"."""
+
+    _TEXT = (
+        "We're present in 12 sites across the Americas: Antilles-Guyane "
+        "Argentina Brazil Canada Chile Colombia Ecuador Mexico Peru "
+        "Puerto Rico Uruguay United States"
+    )
+
+    def test_has_topical_keywords_now_true(self):
+        assert has_topical_keywords(self._TEXT, "international_profile") is True
+
+    def test_classify_curated_evidence_accepts_it(self):
+        signal = {
+            "signal_name": "international_profile",
+            "evidence": self._TEXT,
+            "evidence_url": "https://careers.adeccogroup.com/en/our-locations",
+            "evidence_title": "Our Locations - Adecco Group",
+        }
+        result = classify_curated_evidence(
+            signal, employee_range=None,
+            own_domains={"adecco.com", "adeccogroup.com"}, company_name="Adecco")
+        assert result["rejected_reason"] is None
+        assert result["evidence"] == self._TEXT
 
 
 class TestTruncatedSnippetNotRejectedAsEventFragment:

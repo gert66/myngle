@@ -974,7 +974,7 @@ _SIGNAL_TOPIC_PATTERNS: "dict[str, re.Pattern]" = {
         "international", "global", "worldwide", "cross-border",
         "parent group", "parent company", "subsidiary", "subsidiaries",
         "group structure", "offices", "branches", "stores", "locations",
-        "multinational",
+        "sites", "multinational",
     )),
     "onboarding_training_need": _topic_pattern((
         "training", "academy", "lms", "learning management system",
