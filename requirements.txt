@@ -15,3 +15,6 @@ firecrawl-py
 fastapi
 uvicorn[standard]
 python-dotenv
+google-cloud-storage
+google-cloud-run
+cloudevents
