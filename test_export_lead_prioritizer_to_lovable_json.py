@@ -16,8 +16,11 @@ import pytest
 from export_lead_prioritizer_to_lovable_json import (
     FOREIGN_HQ_SIGNAL_LABEL,
     LovableExportError,
+    classify_curated_evidence,
     export_batch_output_tables_to_lovable_json,
     export_workbook_to_lovable_json,
+    is_domain_relevant_for_url,
+    is_generic_or_raw_text,
     is_technical_reason,
     main as export_cli_main,
     parse_key_source_links,
@@ -1433,6 +1436,85 @@ def test_own_domain_labeled_official_website_no_duplicates(tmp_path):
     ]
     assert len(dorc_home_entries) == 1
     assert dorc_home_entries[0]["label"] == "Official website"
+
+
+class TestTruncatedSnippetNotRejectedAsEventFragment:
+    """Real-run finding: Adecco's international_profile evidence
+    ("...active in 62 countries, with ...") was misclassified as a
+    promotional event/marketing fragment purely because it ends in "...",
+    which is how Google/Serper marks an ordinary truncated snippet, not a
+    "coming soon..." teaser."""
+
+    def test_bare_trailing_ellipsis_is_not_generic(self):
+        text = (
+            "Adecco is part of The Adecco Group and headquartered in "
+            "Zurich, Switzerland. We are a leading global workforce "
+            "solutions provider active in 62 countries, with ..."
+        )
+        assert is_generic_or_raw_text(text) is False
+
+    def test_genuine_teaser_phrase_still_rejected(self):
+        assert is_generic_or_raw_text("New office opening -- coming soon...") is True
+
+    def test_classify_curated_evidence_accepts_the_real_adecco_snippet(self):
+        signal = {
+            "signal_name": "international_profile",
+            "evidence": (
+                "Adecco is part of The Adecco Group and headquartered in "
+                "Zurich, Switzerland. We are a leading global workforce "
+                "solutions provider active in 62 countries, with ..."
+            ),
+            "evidence_url": "https://www.adecco.com/employers/who-we-are",
+            "evidence_title": "Who we are",
+        }
+        result = classify_curated_evidence(
+            signal, employee_range=None, own_domains={"adecco.com"}, company_name="Adecco")
+        assert result["rejected_reason"] is None
+        assert result["evidence"] == signal["evidence"]
+
+
+class TestExternalSourceRelevanceChecksTitleToo:
+    """Real-run finding: Clariant's Wikipedia evidence ("...the public
+    company encompasses 68 subsidiaries...") was rejected as an unrelated
+    domain because the extracted sentence never repeats "Clariant" -- even
+    though the source page is titled "Clariant - Wikipedia"."""
+
+    def test_title_alone_establishes_relevance(self):
+        assert is_domain_relevant_for_url(
+            "https://en.wikipedia.org/wiki/Clariant",
+            own_domains={"clariant.com"},
+            company_name="Clariant",
+            context_text="The public company encompasses 68 subsidiaries in 36 countries.",
+            strict_third_party=True,
+            evidence_title="Clariant - Wikipedia",
+        ) is True
+
+    def test_no_title_and_no_mention_still_rejected(self):
+        assert is_domain_relevant_for_url(
+            "https://en.wikipedia.org/wiki/Clariant",
+            own_domains={"clariant.com"},
+            company_name="Clariant",
+            context_text="The public company encompasses 68 subsidiaries in 36 countries.",
+            strict_third_party=True,
+            evidence_title=None,
+        ) is False
+
+    def test_classify_curated_evidence_accepts_the_real_clariant_snippet(self):
+        signal = {
+            "signal_name": "international_profile",
+            "evidence": (
+                "Headquartered in Muttenz, Switzerland, the public company "
+                "encompasses 68 subsidiaries in 36 countries (2023). Major "
+                "manufacturing sites are located in Europe, North America, "
+                "South America, China, and India."
+            ),
+            "evidence_url": "https://en.wikipedia.org/wiki/Clariant",
+            "evidence_title": "Clariant - Wikipedia",
+        }
+        result = classify_curated_evidence(
+            signal, employee_range=None, own_domains={"clariant.com"}, company_name="Clariant")
+        assert result["rejected_reason"] is None
+        assert result["evidence"] == signal["evidence"]
 
 
 def test_commercial_fit_drivers_not_inconsistent_with_what_is_hot(tmp_path):

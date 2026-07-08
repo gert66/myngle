@@ -725,14 +725,20 @@ _RAW_ARTIFACT_RE = re.compile(r"_{2,}")
 
 # Marketing/event fragments picked up by mistake from an unrelated page
 # section (careers/events feed) rather than genuine company evidence.
+#
+# Deliberately does NOT match a bare trailing "..." on its own: that is how
+# Google/Serper marks an ordinary truncated search snippet (extremely
+# common, and no indication at all of promotional filler) -- matching it
+# unconditionally rejected perfectly good evidence (e.g. Adecco: "...active
+# in 62 countries, with ..." got misclassified as an event/marketing
+# fragment purely because of the trailing ellipsis, real-run finding).
 _EVENT_FRAGMENT_RE = re.compile(
     r"back\s+by\s+popular\s+demand"
     r"|coming\s+soon"
     r"|register\s+now"
     r"|sign\s+up\s+now"
     r"|read\s+more"
-    r"|click\s+here"
-    r"|\.\.\.\s*$",
+    r"|click\s+here",
     re.IGNORECASE,
 )
 
@@ -887,6 +893,19 @@ def _mentions_company(text: "str | None", company_name: "str | None") -> bool:
     return any(tok.lower() in text_lower for tok in _company_name_tokens(company_name))
 
 
+def _mentions_company_in_text_or_title(
+    text: "str | None", title: "str | None", company_name: "str | None",
+) -> bool:
+    """Like ``_mentions_company``, but also accepts a page title that names
+    the company even when the extracted evidence sentence itself doesn't
+    repeat the name (e.g. a Wikipedia snippet reading "the public company"
+    instead of "Clariant" -- but titled "Clariant - Wikipedia", real-run
+    finding). A source fetched specifically for this company whose title
+    says so is not "unrelated" just because the one extracted sentence uses
+    a pronoun/generic noun instead of the name."""
+    return _mentions_company(text, company_name) or _mentions_company(title, company_name)
+
+
 def _domain_matches_company_name(host: "str | None", name: "str | None") -> bool:
     """True when a URL's domain root plausibly belongs to ``name`` (e.g.
     "samsung.com" for parent company "Samsung Electronics") — used only to
@@ -907,17 +926,22 @@ def is_domain_relevant_for_url(
     company_name: "str | None" = None,
     context_text: "str | None" = None,
     strict_third_party: bool = False,
+    evidence_title: "str | None" = None,
 ) -> bool:
     """True when a URL's domain is the lead's own site, a known independent
-    business directory, or its accompanying text actually mentions the lead
-    — false for an unrelated domain such as a different company's careers
-    page picked up by a scraper (e.g. careers.accor.com for a DORC lead).
+    business directory, or its accompanying text or title actually mentions
+    the lead — false for an unrelated domain such as a different company's
+    careers page picked up by a scraper (e.g. careers.accor.com for a DORC
+    lead).
 
     ``strict_third_party`` (default False, preserving existing behavior for
     Italy) requires even a *known* third-party directory (Glassdoor,
     ZoomInfo, ...) to actually mention the lead — a generic directory
     list-page snippet must not be auto-accepted just because the domain is
-    recognized."""
+    recognized. ``evidence_title`` (optional) is checked alongside
+    ``context_text`` — a source page titled e.g. "Clariant - Wikipedia" is
+    relevant even when the one extracted sentence uses "the public company"
+    instead of the name (real-run finding)."""
     host = hostname_of(url)
     if not host:
         return False
@@ -926,9 +950,9 @@ def is_domain_relevant_for_url(
         return True
     if domain in _KNOWN_THIRD_PARTY_DIRECTORY_DOMAINS:
         if strict_third_party:
-            return _mentions_company(context_text, company_name)
+            return _mentions_company_in_text_or_title(context_text, evidence_title, company_name)
         return True
-    if _mentions_company(context_text, company_name):
+    if _mentions_company_in_text_or_title(context_text, evidence_title, company_name):
         return True
     # Nothing to compare against (no known own domain) — don't blanket-reject.
     return not own_domains
@@ -1062,7 +1086,9 @@ def classify_curated_evidence(
             return {"evidence": None, "rejected_reason": "hosted_platform"}
         host = hostname_of(url)
         domain = _registrable_domain(host)
-        if domain in _KNOWN_THIRD_PARTY_DIRECTORY_DOMAINS and not _mentions_company(text, company_name):
+        if (domain in _KNOWN_THIRD_PARTY_DIRECTORY_DOMAINS
+                and not _mentions_company_in_text_or_title(
+                    text, signal.get("evidence_title"), company_name)):
             return {"evidence": None, "rejected_reason": "generic_directory"}
 
     if is_generic_or_raw_text(text) or is_suspicious_evidence(text, employee_range):
@@ -1076,7 +1102,8 @@ def classify_curated_evidence(
         return {"evidence": None, "rejected_reason": "generic"}
 
     if url and not is_domain_relevant_for_url(
-            url, own_domains, company_name, text, strict_third_party=True):
+            url, own_domains, company_name, text, strict_third_party=True,
+            evidence_title=signal.get("evidence_title")):
         return {"evidence": None, "rejected_reason": "unrelated_domain"}
 
     return {"evidence": text, "rejected_reason": None}
