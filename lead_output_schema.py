@@ -260,14 +260,13 @@ class LeadPrioritizationResult:
     # never silently mixed.
     signal_scoring_mode: Optional[str] = "deterministic"
     # Which source produced sig_company_size_complexity_score / its sibling
-    # fields (Lusha enrichment plan, Stap 3): "lusha" (structured Lusha
-    # Company Number of Employees / Company Revenue data, highest priority
-    # — see lead_lusha_size_signal.py), "serper_keyword_match" (the
-    # existing, unchanged deterministic Serper-evidence keyword extractor,
-    # used only when Lusha data is missing/blank/unparseable), or None when
-    # neither produced anything (exactly today's behavior). The Serper
-    # query/evidence/extraction for this signal is NEVER removed — this
-    # field only records which of the two available sources won.
+    # fields (Lusha enrichment plan, Stap 4): "lusha" (structured Lusha
+    # Company Number of Employees / Company Revenue data — see
+    # lead_lusha_size_signal.py) or None when that data is missing/blank/
+    # unparseable. There is no Serper query/fallback for this signal
+    # anymore (removed from build_non_hq_enrichment_queries) — when None,
+    # every sig_company_size_complexity_score/reason/evidence_* field
+    # simply stays None.
     company_size_complexity_source: Optional[str] = None
     # Raw Lusha size values (audit only) — always populated verbatim from
     # the input row when present, regardless of which source above won.

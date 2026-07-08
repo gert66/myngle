@@ -564,7 +564,7 @@ class TestSectorIndustry:
 class TestCoreGating:
     _lead = LeadInput(company_name="Acme", domain="acme.com", input_country="Italy")
 
-    def _run(self, collected_evidence, **flags):
+    def _run(self, collected_evidence, lead=None, **flags):
         p_serper = patch("lead_prioritizer_core.call_serper_for_hq",
                          return_value={"organic": []})
         p_ai = patch("lead_prioritizer_core.interpret_hq_with_ai",
@@ -575,7 +575,7 @@ class TestCoreGating:
                           return_value=collected_evidence)
         with p_serper, p_ai, p_collect:
             return prioritize_single_lead(
-                self._lead, serper_api_key="fake", anthropic_api_key="fake", **flags,
+                lead or self._lead, serper_api_key="fake", anthropic_api_key="fake", **flags,
             )
 
     def test_default_does_not_extract(self):
@@ -601,16 +601,35 @@ class TestCoreGating:
         assert r.signals == []
         assert r.sig_international_profile_score is None
 
-    def test_sector_fields_flow_through_result(self):
+    def test_sector_industry_evidence_no_longer_used_for_sector(self):
+        # Lusha enrichment plan, Stap 4: the live Serper sector_industry
+        # query/evidence tier is gone -- even if a caller's mocked
+        # collector still hands back sector_industry-tagged evidence (e.g.
+        # a stale integration), it is no longer consulted for sector
+        # detection at all.
         r = self._run(
             [_ev("sector_industry",
                  snippet="Acme is a retail company with stores nationwide.",
                  url="https://acme.com/about")],
             collect_non_hq_evidence=True,
         )
-        assert r.detected_industry == "Retail"
-        assert r.sector_evidence_url == "https://acme.com/about"
+        assert r.detected_industry is None
+        assert r.sector_evidence_url is None
         # Sector detection must not create signals or scores.
+        assert r.signals == []
+        assert r.final_commercial_fit_score is None
+
+    def test_lusha_text_fallback_flows_through_result(self):
+        # Replaces the old Serper-evidence tier: with no Lusha Main/Sub
+        # Industry mapping and no own-domain Firecrawl content, a keyword
+        # match on Lusha Description/Specialties is now the last resort.
+        lead = LeadInput(
+            company_name="Acme", domain="acme.com", input_country="Italy",
+            lusha_description="Acme is a retail company with stores nationwide.",
+        )
+        r = self._run([], lead=lead)
+        assert r.detected_industry == "Retail"
+        assert r.sector_source == "lusha_text_fallback"
         assert r.signals == []
         assert r.final_commercial_fit_score is None
 

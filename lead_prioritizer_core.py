@@ -382,53 +382,54 @@ def prioritize_single_lead(
         else:
             signals = extract_non_hq_signals(evidence_items, company_domain=input_row.domain)
 
-        # ── company_size_complexity: Lusha employee/revenue data takes
-        # priority over the deterministic Serper-keyword signal just
-        # computed above (Lusha enrichment plan, Stap 3). The Serper
-        # query/evidence/extraction for this ONE signal is NOT removed —
-        # it stays exactly as it is today and is used as the fallback
-        # whenever Lusha data is missing, blank, or not parseable.
+        # ── company_size_complexity: Lusha employee/revenue data is the
+        # ONLY source for this signal (Lusha enrichment plan, Stap 4 —
+        # supersedes the earlier Stap-3 "Serper stays a permanent
+        # fallback" design). There is no live Serper query for this
+        # signal anymore (removed from build_non_hq_enrichment_queries),
+        # so ``company_size_complexity_source`` is either ``"lusha"`` (a
+        # usable Lusha value was found) or ``None`` (missing/unparseable
+        # Lusha data — the score/reason/evidence fields simply stay
+        # ``None``, exactly as the schema always allowed).
         company_size_complexity_source = None
         _lusha_size = lusha_size_signal(input_row.lusha_employees, input_row.lusha_revenue)
         if _lusha_size is not None:
             signals = [s for s in signals if s.signal_name != "company_size_complexity"]
             signals.append(_lusha_size)
             company_size_complexity_source = "lusha"
-        elif any(s.signal_name == "company_size_complexity" for s in signals):
-            company_size_complexity_source = "serper_keyword_match"
     else:
         company_size_complexity_source = None
     non_hq_summary = summarize_non_hq_signals_for_result(signals)
 
     # Sector/industry metadata (deterministic, audit/app only — feeds no
     # score, C4, C5, HQ, or foreign-HQ filtering). Priority chain (Lusha
-    # enrichment plan, Stap 2):
+    # enrichment plan, Stap 2, revised Stap 4 — the live Serper
+    # sector_industry query/evidence tier is gone; there is no Serper
+    # fallback for sector anymore):
     #   1. Lusha Sub/Main Industry mapped onto our internal categories
     #      (free, no API call, highest priority when present).
-    #   2. Serper sector_industry evidence keyword match (existing).
-    #   3. Own-domain Firecrawl+AI-derived industry (existing fallback).
-    #   4. Lusha Company Description/Specialties keyword match (last resort,
-    #      free, no API call).
-    #   5. Empty, exactly as before any of this existed.
+    #   2. Own-domain Firecrawl+AI-derived industry (existing fallback).
+    #   3. Lusha Company Description/Specialties keyword match (last resort,
+    #      free, no API call, reuses extract_sector_industry's own matcher).
+    #   4. Empty, exactly as before any of this existed.
     sector_summary = sector_from_lusha_industry(
         input_row.lusha_main_industry, input_row.lusha_sub_industry)
 
     if sector_summary is None:
-        sector_summary = extract_sector_industry(evidence_items)
+        # No live Serper sector_industry query/evidence anymore (Stap 4) —
+        # start from the empty shape and try the remaining free tiers.
+        sector_summary = extract_sector_industry([])
 
-        # Fallback: when the deterministic keyword detector above found
-        # nothing at all (no Serper-snippet keyword hit — e.g. AEG Power
-        # Solutions, SDX), reuse the industry the HQ interpreter already
-        # derived from the SAME material at no extra API cost — but ONLY
-        # when that material genuinely included the company's own
-        # crawled-domain content (`crawled_pages` non-empty here means
-        # Firecrawl actually fetched the company's own site; see
-        # collect_own_domain_hq_pages above). A Serper-only AI guess (no
-        # own-domain crawl) is deliberately NOT used as a sector source —
-        # the point of this fallback is to lean on the same primary, most-
-        # authoritative source the HQ classification already trusts, not to
-        # add a second, weaker AI guess on top of thin secondary snippets.
-        # A keyword match always wins when present (never overwritten here).
+        # Fallback: reuse the industry the HQ interpreter already derived
+        # from the SAME material at no extra API cost — but ONLY when that
+        # material genuinely included the company's own crawled-domain
+        # content (`crawled_pages` non-empty here means Firecrawl actually
+        # fetched the company's own site; see collect_own_domain_hq_pages
+        # above). A Serper-only AI guess (no own-domain crawl) is
+        # deliberately NOT used as a sector source — the point of this
+        # fallback is to lean on the same primary, most-authoritative
+        # source the HQ classification already trusts, not to add a
+        # second, weaker AI guess on top of thin secondary snippets.
         if not sector_summary["detected_industry"] and hq.ai_hq_industry and crawled_pages:
             sector_summary = dict(sector_summary)
             sector_summary["detected_industry"] = hq.ai_hq_industry

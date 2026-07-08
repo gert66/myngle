@@ -37,13 +37,20 @@ def build_non_hq_enrichment_queries(
     company_name: str,
     domain: Optional[str],
 ) -> list[dict]:
-    """Return up to 6 non-HQ enrichment query specs.
+    """Return up to 4 non-HQ enrichment query specs.
 
     Each spec is ``{"signal_name": str, "query": str}``.  Queries are built from
     the domain root when a usable domain exists, else from the company name.
 
-    The ``sector_industry`` spec collects audit/app metadata evidence only — it
-    is never turned into a commercial scoring signal.
+    ``company_size_complexity`` and ``sector_industry`` are deliberately NOT
+    among these specs (Lusha enrichment plan, Stap 4): both are now covered
+    without a live Serper call — company size/complexity directly from
+    Lusha Company Number of Employees / Company Revenue (see
+    ``lead_lusha_size_signal.py``), sector from Lusha Main/Sub Industry
+    mapping, own-domain Firecrawl+AI, and a keyword match on Lusha
+    Description/Specialties text as the last resort (see
+    ``lead_lusha_sector_mapping.py``). Neither signal has a Serper fallback
+    anymore.
 
     No competitor, alternative-provider, vendor-comparison or rapid-growth
     queries are produced.
@@ -62,10 +69,6 @@ def build_non_hq_enrichment_queries(
             "query": f"{root} careers training onboarding academy learning development",
         },
         {
-            "signal_name": "company_size_complexity",
-            "query": f"{root} employees revenue locations company profile",
-        },
-        {
             "signal_name": "icp_keyword_match",
             "query": f"{root} corporate training sales customer service global teams",
         },
@@ -73,11 +76,6 @@ def build_non_hq_enrichment_queries(
             "signal_name": "employer_branding",
             "query": f"{root} employer branding employee satisfaction workplace "
                      "culture employee experience great place to work glassdoor",
-        },
-        {
-            "signal_name": "sector_industry",
-            "query": f"{root} company industry sector products services "
-                     "business activity company profile official",
         },
     ]
 
@@ -287,7 +285,9 @@ def collect_non_hq_enrichment_evidence(
     """Build query specs, call Serper per query, extract evidence.
 
     Returns one flat list of ``LeadEvidence`` across all non-HQ signals.  No
-    scores are produced.  At most 6 Serper queries are made (one per signal).
+    scores are produced.  At most 4 Serper queries are made (one per signal;
+    ``company_size_complexity`` and ``sector_industry`` have no Serper query
+    — see ``build_non_hq_enrichment_queries``).
     ``country`` (the lead's effective input country) is mapped to Serper's
     ``gl``/``hl`` params for localized results; unmapped/unknown countries
     keep today's unlocalized behavior.

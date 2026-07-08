@@ -48,37 +48,33 @@ class TestQueryBuilder:
         for spec in specs:
             assert spec["query"].startswith("some company ")
 
-    def test_at_most_six_queries(self):
+    def test_at_most_four_queries(self):
+        # company_size_complexity and sector_industry have no Serper query
+        # anymore (Lusha enrichment plan, Stap 4) -- both signals are now
+        # covered from Lusha data / Firecrawl+AI only, no live search.
         specs = build_non_hq_enrichment_queries("Acme", "acme.com")
-        assert len(specs) <= 6
+        assert len(specs) <= 4
         assert {s["signal_name"] for s in specs} == {
             "international_profile", "onboarding_training_need",
-            "company_size_complexity", "icp_keyword_match", "employer_branding",
-            "sector_industry",
+            "icp_keyword_match", "employer_branding",
         }
 
-    def test_employer_branding_is_fifth_query(self):
+    def test_employer_branding_is_fourth_and_last_query(self):
         specs = build_non_hq_enrichment_queries("Acme", "acme.com")
-        assert specs[4]["signal_name"] == "employer_branding"
-        q = specs[4]["query"].lower()
+        assert len(specs) == 4
+        assert specs[3]["signal_name"] == "employer_branding"
+        q = specs[3]["query"].lower()
         assert "employer branding" in q
         assert "employee satisfaction" in q
         assert "workplace culture" in q
         assert "great place to work" in q
         assert "glassdoor" in q
 
-    def test_sector_industry_is_sixth_query(self):
+    def test_no_company_size_complexity_or_sector_industry_queries(self):
         specs = build_non_hq_enrichment_queries("Acme", "acme.com")
-        assert len(specs) == 6
-        assert specs[5]["signal_name"] == "sector_industry"
-        q = specs[5]["query"].lower()
-        assert q.startswith("acme ")
-        assert "industry" in q
-        assert "sector" in q
-        assert "products" in q
-        assert "services" in q
-        assert "business activity" in q
-        assert "company profile" in q
+        signal_names = {s["signal_name"] for s in specs}
+        assert "company_size_complexity" not in signal_names
+        assert "sector_industry" not in signal_names
 
     def test_no_competitor_or_growth_terms(self):
         specs = build_non_hq_enrichment_queries("Acme", "acme.com")

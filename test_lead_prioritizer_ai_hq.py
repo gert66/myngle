@@ -1273,9 +1273,13 @@ class TestSectorFallbackToOwnDomainAi:
         assert result.detected_industry is None
         assert result.sector_source is None
 
-    def test_keyword_match_always_wins_over_ai_fallback(self):
-        # sector_industry evidence with a clean keyword hit must never be
-        # overwritten by the AI-derived fallback, even when a crawl happened.
+    def test_sector_industry_evidence_no_longer_consulted(self):
+        # Lusha enrichment plan, Stap 4: the live Serper sector_industry
+        # query/evidence tier is gone. Even a clean keyword hit in
+        # sector_industry-tagged evidence is no longer consulted -- the
+        # own-domain AI fallback (tier 2) wins whenever a genuine crawl
+        # happened, exactly like test_fallback_fires_when_keyword_detector_
+        # found_nothing above.
         with patch(
             "lead_prioritizer_core.collect_own_domain_hq_pages",
             return_value=self._fc_used,
@@ -1297,8 +1301,29 @@ class TestSectorFallbackToOwnDomainAi:
                 firecrawl_api_key="fc-key",
                 collect_non_hq_evidence=True, extract_non_hq_signals_flag=True,
             )
-        assert result.sector_source == "keyword_match"
-        assert result.detected_industry == "Industrial equipment and machinery"
+        assert result.sector_source == "own_domain_ai"
+        assert result.detected_industry == "Power electronics"
+
+    def test_own_domain_ai_wins_over_lusha_text_fallback(self):
+        # Tier 2 (own-domain Firecrawl+AI) must never be overwritten by the
+        # lower-priority tier 3 (Lusha Description/Specialties keyword
+        # match), even when both would independently produce a hit.
+        lead = LeadInput(
+            company_name="AEG Power Solutions", domain="aegps.com",
+            input_country="Germany",
+            lusha_description="A retail company with stores nationwide.",
+        )
+        with patch(
+            "lead_prioritizer_core.collect_own_domain_hq_pages",
+            return_value=self._fc_used,
+        ), _mock_serper(_EMPTY_SERPER), _mock_anthropic(self._ai):
+            result = prioritize_single_lead(
+                lead, serper_api_key="s", anthropic_api_key="a",
+                firecrawl_api_key="fc-key",
+                collect_non_hq_evidence=True, extract_non_hq_signals_flag=True,
+            )
+        assert result.sector_source == "own_domain_ai"
+        assert result.detected_industry == "Power electronics"
 
 
 # ---------------------------------------------------------------------------
@@ -1659,36 +1684,41 @@ class TestCompanySizeComplexityPriorityChain:
         assert result.lusha_employees == "201-500"
         assert result.lusha_revenue == "$50M - $100M"
 
-    def test_missing_lusha_data_falls_back_to_serper_signal_unchanged(self):
+    def test_missing_lusha_data_yields_no_signal(self):
+        # No Serper fallback exists anymore (Lusha enrichment plan, Stap 4,
+        # supersedes the earlier Stap-3 "permanent Serper fallback" design)
+        # -- missing Lusha data simply means no company_size_complexity
+        # signal at all; the score/reason/evidence fields stay None,
+        # exactly as the schema always allowed.
         lead = LeadInput(company_name="Acme", domain="acme.com", input_country="Italy")
         with _mock_serper(_EMPTY_SERPER), _mock_anthropic(_ai_json()), patch(
-            "lead_prioritizer_core.extract_non_hq_signals",
-            return_value=[self._serper_signal()],
+            "lead_prioritizer_core.extract_non_hq_signals", return_value=[],
         ):
             result = prioritize_single_lead(
                 lead, serper_api_key="s", anthropic_api_key="a",
                 collect_non_hq_evidence=True, extract_non_hq_signals_flag=True,
             )
-        assert result.company_size_complexity_source == "serper_keyword_match"
-        assert result.sig_company_size_complexity_score == 2.0
-        assert result.company_size_complexity_reason == "Serper keyword match."
+        assert result.company_size_complexity_source is None
+        assert result.sig_company_size_complexity_score is None
+        assert result.company_size_complexity_reason is None
         assert result.lusha_employees is None
 
-    def test_unparseable_lusha_data_falls_back_to_serper_signal(self):
+    def test_unparseable_lusha_data_yields_no_signal(self):
         lead = LeadInput(
             company_name="Acme", domain="acme.com", input_country="Italy",
             lusha_employees="garbage", lusha_revenue="also garbage",
         )
         with _mock_serper(_EMPTY_SERPER), _mock_anthropic(_ai_json()), patch(
-            "lead_prioritizer_core.extract_non_hq_signals",
-            return_value=[self._serper_signal()],
+            "lead_prioritizer_core.extract_non_hq_signals", return_value=[],
         ):
             result = prioritize_single_lead(
                 lead, serper_api_key="s", anthropic_api_key="a",
                 collect_non_hq_evidence=True, extract_non_hq_signals_flag=True,
             )
-        assert result.company_size_complexity_source == "serper_keyword_match"
-        assert result.company_size_complexity_reason == "Serper keyword match."
+        assert result.company_size_complexity_source is None
+        assert result.sig_company_size_complexity_score is None
+        # Raw (unusable) Lusha values are still preserved for audit.
+        assert result.lusha_employees == "garbage"
         # Raw (unusable) Lusha values are still preserved for audit.
         assert result.lusha_employees == "garbage"
 
