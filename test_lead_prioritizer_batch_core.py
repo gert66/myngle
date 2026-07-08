@@ -579,6 +579,94 @@ class TestRunBatch:
 
 
 # ---------------------------------------------------------------------------
+# Lusha row-field auto-detection (Lusha enrichment plan, Stap 2). No new
+# BatchRunConfig column-name setting: detected directly from a row dict's
+# own keys, case-insensitively. A row with none of these column names
+# (any non-Lusha dataset) yields all-None -- exactly "no Lusha data
+# available", the existing fallback for every LeadInput.lusha_* consumer.
+# ---------------------------------------------------------------------------
+
+class TestLushaFieldsFromRow:
+    def test_detects_exact_lusha_column_names(self):
+        row = {
+            "Company Name": "Acme AG",
+            "Company Main Industry": "Manufacturing",
+            "Company Sub Industry": "Industrial Machinery & Equipment",
+            "Company Description": "We make things.",
+            "Company Specialties": "machinery, engineering",
+        }
+        out = bc._lusha_fields_from_row(row)
+        assert out == {
+            "lusha_main_industry": "Manufacturing",
+            "lusha_sub_industry": "Industrial Machinery & Equipment",
+            "lusha_description": "We make things.",
+            "lusha_specialties": "machinery, engineering",
+        }
+
+    def test_case_and_spacing_insensitive(self):
+        row = {"company_main_industry": "Healthcare", "COMPANY SUB INDUSTRY": "Hospitals & Clinics"}
+        out = bc._lusha_fields_from_row(row)
+        assert out["lusha_main_industry"] == "Healthcare"
+        assert out["lusha_sub_industry"] == "Hospitals & Clinics"
+
+    def test_non_lusha_row_yields_all_none(self):
+        row = {"company": "Acme", "domain": "acme.com"}
+        out = bc._lusha_fields_from_row(row)
+        assert out == {
+            "lusha_main_industry": None, "lusha_sub_industry": None,
+            "lusha_description": None, "lusha_specialties": None,
+        }
+
+    def test_blank_values_treated_as_none(self):
+        row = {"Company Main Industry": "", "Company Description": "   "}
+        out = bc._lusha_fields_from_row(row)
+        assert out["lusha_main_industry"] is None
+        assert out["lusha_description"] is None
+
+    def test_nan_string_treated_as_none(self):
+        row = {"Company Main Industry": "nan"}
+        out = bc._lusha_fields_from_row(row)
+        assert out["lusha_main_industry"] is None
+
+
+class TestLushaFieldsWiredIntoLeadInput:
+    def test_run_batch_dataframe_passes_lusha_fields_to_prioritize_single_lead(self):
+        df = pd.DataFrame({
+            "company": ["Acme"],
+            "domain": ["acme.com"],
+            "Company Main Industry": ["Manufacturing"],
+            "Company Sub Industry": ["Industrial Machinery & Equipment"],
+        })
+        seen = {}
+
+        def _fake(lead_input, **kwargs):
+            seen["lusha_main_industry"] = lead_input.lusha_main_industry
+            seen["lusha_sub_industry"] = lead_input.lusha_sub_industry
+            return _sample_result(company_name=lead_input.company_name)
+
+        cfg = BatchRunConfig(company_name_column="company", domain_column="domain",
+                             run_mode="full", row_limit=1)
+        with patch("lead_prioritizer_batch_core.prioritize_single_lead", side_effect=_fake):
+            run_batch_dataframe(df, cfg, "SERP", "ANTH")
+        assert seen["lusha_main_industry"] == "Manufacturing"
+        assert seen["lusha_sub_industry"] == "Industrial Machinery & Equipment"
+
+    def test_non_lusha_dataframe_passes_none_lusha_fields(self):
+        seen = {}
+
+        def _fake(lead_input, **kwargs):
+            seen["lusha_main_industry"] = lead_input.lusha_main_industry
+            return _sample_result(company_name=lead_input.company_name)
+
+        cfg = BatchRunConfig(company_name_column="company", domain_column="domain",
+                             run_mode="full", row_limit=1)
+        with patch("lead_prioritizer_batch_core.prioritize_single_lead", side_effect=_fake):
+            run_batch_dataframe(
+                pd.DataFrame({"company": ["Acme"], "domain": ["acme.com"]}), cfg, "SERP", "ANTH")
+        assert seen["lusha_main_industry"] is None
+
+
+# ---------------------------------------------------------------------------
 # Shared GCS enrichment cache (opt-in) — BatchRunConfig.use_enrichment_cache.
 # Regression: default (off) must never load/save a cache index or pass a
 # cache_index other than None. When on: one index download per distinct

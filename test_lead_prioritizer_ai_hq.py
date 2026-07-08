@@ -1502,3 +1502,117 @@ class TestPrioritizeSingleLeadCountryLocalization:
                 serper_api_key="s", anthropic_api_key="a", firecrawl_api_key="fc-key",
             )
         assert seen.get("country") == "Italy"
+
+
+# ---------------------------------------------------------------------------
+# Sector priority chain (Lusha enrichment plan, Stap 2): Lusha mapping (tier
+# 1, highest) -> Serper evidence keyword match (existing) -> own-domain AI
+# (existing) -> Lusha Description/Specialties text (tier 3, last resort).
+# lusha_main_industry/lusha_sub_industry audit fields are always populated
+# from the input regardless of which tier (if any) won.
+# ---------------------------------------------------------------------------
+
+class TestSectorPriorityChain:
+    _lead_no_lusha = LeadInput(company_name="Acme", domain="acme.com", input_country="Italy")
+
+    def test_lusha_mapping_wins_over_serper_evidence(self):
+        lead = LeadInput(
+            company_name="Acme", domain="acme.com", input_country="Italy",
+            lusha_main_industry="Manufacturing",
+            lusha_sub_industry="Industrial Machinery & Equipment",
+        )
+        with _mock_serper(_EMPTY_SERPER), _mock_anthropic(_ai_json()), patch(
+            "lead_prioritizer_core.extract_sector_industry",
+            return_value={
+                "detected_industry": "Software", "detected_sub_industry": None,
+                "detected_company_type": None, "sector_confidence": "High",
+                "sector_reason": "should not win", "sector_evidence_url": "https://x",
+                "sector_evidence_quote": None, "sector_source_title": None,
+                "sector_source": "keyword_match",
+            },
+        ):
+            result = prioritize_single_lead(
+                lead, serper_api_key="s", anthropic_api_key="a")
+        assert result.detected_industry == "Industrial equipment and machinery"
+        assert result.sector_source == "lusha_mapped"
+
+    def test_no_lusha_mapping_falls_through_to_serper_evidence_unchanged(self):
+        with _mock_serper(_EMPTY_SERPER), _mock_anthropic(_ai_json()), patch(
+            "lead_prioritizer_core.extract_sector_industry",
+            return_value={
+                "detected_industry": "Software", "detected_sub_industry": None,
+                "detected_company_type": None, "sector_confidence": "High",
+                "sector_reason": "matched", "sector_evidence_url": "https://x",
+                "sector_evidence_quote": None, "sector_source_title": None,
+                "sector_source": "keyword_match",
+            },
+        ):
+            result = prioritize_single_lead(
+                self._lead_no_lusha, serper_api_key="s", anthropic_api_key="a")
+        assert result.detected_industry == "Software"
+        assert result.sector_source == "keyword_match"
+
+    def test_lusha_text_fallback_only_when_evidence_and_ai_tiers_empty(self):
+        empty_sector = {
+            "detected_industry": None, "detected_sub_industry": None,
+            "detected_company_type": None, "sector_confidence": None,
+            "sector_reason": None, "sector_evidence_url": None,
+            "sector_evidence_quote": None, "sector_source_title": None,
+            "sector_source": None,
+        }
+        lead = LeadInput(
+            company_name="Acme", domain="acme.com", input_country="Italy",
+            lusha_description="We manufacture industrial machinery worldwide.",
+        )
+        with _mock_serper(_EMPTY_SERPER), _mock_anthropic(_ai_json()), patch(
+            "lead_prioritizer_core.extract_sector_industry", return_value=empty_sector,
+        ):
+            result = prioritize_single_lead(lead, serper_api_key="s", anthropic_api_key="a")
+        assert result.detected_industry == "Industrial equipment and machinery"
+        assert result.sector_source == "lusha_text_fallback"
+
+    def test_no_sector_data_anywhere_stays_none_exactly_as_before(self):
+        empty_sector = {
+            "detected_industry": None, "detected_sub_industry": None,
+            "detected_company_type": None, "sector_confidence": None,
+            "sector_reason": None, "sector_evidence_url": None,
+            "sector_evidence_quote": None, "sector_source_title": None,
+            "sector_source": None,
+        }
+        with _mock_serper(_EMPTY_SERPER), _mock_anthropic(_ai_json()), patch(
+            "lead_prioritizer_core.extract_sector_industry", return_value=empty_sector,
+        ):
+            result = prioritize_single_lead(
+                self._lead_no_lusha, serper_api_key="s", anthropic_api_key="a")
+        assert result.detected_industry is None
+        assert result.sector_source is None
+
+    def test_lusha_audit_fields_always_populated_regardless_of_winning_tier(self):
+        lead = LeadInput(
+            company_name="Acme", domain="acme.com", input_country="Italy",
+            lusha_main_industry="Some Unmapped Label",
+            lusha_sub_industry="Also Unmapped",
+        )
+        empty_sector = {
+            "detected_industry": None, "detected_sub_industry": None,
+            "detected_company_type": None, "sector_confidence": None,
+            "sector_reason": None, "sector_evidence_url": None,
+            "sector_evidence_quote": None, "sector_source_title": None,
+            "sector_source": None,
+        }
+        with _mock_serper(_EMPTY_SERPER), _mock_anthropic(_ai_json()), patch(
+            "lead_prioritizer_core.extract_sector_industry", return_value=empty_sector,
+        ):
+            result = prioritize_single_lead(lead, serper_api_key="s", anthropic_api_key="a")
+        # Neither Lusha label mapped to anything -- detected_industry stays
+        # empty -- but the raw audit values are still preserved verbatim.
+        assert result.detected_industry is None
+        assert result.lusha_main_industry == "Some Unmapped Label"
+        assert result.lusha_sub_industry == "Also Unmapped"
+
+    def test_lusha_audit_fields_none_when_no_lusha_input(self):
+        with _mock_serper(_EMPTY_SERPER), _mock_anthropic(_ai_json()):
+            result = prioritize_single_lead(
+                self._lead_no_lusha, serper_api_key="s", anthropic_api_key="a")
+        assert result.lusha_main_industry is None
+        assert result.lusha_sub_industry is None

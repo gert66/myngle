@@ -598,6 +598,51 @@ def _apply_cache_run_summary_counts(
 
 
 # ---------------------------------------------------------------------------
+# Lusha row-field auto-detection (Lusha enrichment plan, Stap 2) — no new
+# BatchRunConfig column-name setting: Lusha export column names are a
+# well-known, fixed vocabulary, so these are detected directly from each
+# row dict's own keys, case-insensitively, mirroring the same approach
+# input_cleaner_lusha_edition.py uses (kept self-contained here rather than
+# imported from that Streamlit app, so the core pipeline never depends on
+# a UI module).
+# ---------------------------------------------------------------------------
+
+_LUSHA_ROW_FIELD_CANDIDATES: dict[str, tuple[str, ...]] = {
+    "lusha_main_industry": ("company main industry", "main industry"),
+    "lusha_sub_industry": ("company sub industry", "sub industry"),
+    "lusha_description": ("company description", "description"),
+    "lusha_specialties": ("company specialties", "specialties"),
+}
+
+
+def _normalize_row_col_key(col) -> str:
+    return re.sub(r"[\s_\-]+", " ", str(col).strip().lower())
+
+
+def _lusha_fields_from_row(row: dict) -> dict:
+    """Best-effort detection of Lusha Main/Sub Industry, Description, and
+    Specialties directly from ``row``'s own keys. A row from a non-Lusha
+    dataset simply has none of these column names, so every value defaults
+    to ``None`` — exactly "no Lusha data available", the existing fallback
+    behavior for every downstream consumer of ``LeadInput.lusha_*``.
+    """
+    cols_norm = {_normalize_row_col_key(k): k for k in row.keys()}
+    out: dict = {}
+    for field_name, candidates in _LUSHA_ROW_FIELD_CANDIDATES.items():
+        value = None
+        for cand in candidates:
+            norm = _normalize_row_col_key(cand)
+            if norm in cols_norm:
+                raw = row.get(cols_norm[norm])
+                s = str(raw or "").strip()
+                if s and s.lower() != "nan":
+                    value = s
+                break
+        out[field_name] = value
+    return out
+
+
+# ---------------------------------------------------------------------------
 # Batch runner
 # ---------------------------------------------------------------------------
 
@@ -732,7 +777,8 @@ def run_batch_dataframe(
         result = None
         try:
             result = prioritize_single_lead(
-                LeadInput(company_name=company, domain=domain, input_country=country),
+                LeadInput(company_name=company, domain=domain, input_country=country,
+                          **_lusha_fields_from_row(original)),
                 serper_api_key=serper_api_key,
                 anthropic_api_key=anthropic_api_key,
                 default_input_country=config.default_input_country,
@@ -1387,7 +1433,8 @@ def _run_gated_full_enrichment(
         result = None
         try:
             result = prioritize_single_lead(
-                LeadInput(company_name=company, domain=domain, input_country=country),
+                LeadInput(company_name=company, domain=domain, input_country=country,
+                          **_lusha_fields_from_row(row)),
                 serper_api_key=serper_api_key,
                 anthropic_api_key=anthropic_api_key,
                 default_input_country=config.default_input_country,
@@ -2108,7 +2155,8 @@ def run_batch_non_english_foreign_hq_only(
 
         try:
             result = prioritize_single_lead(
-                LeadInput(company_name=company, domain=domain, input_country=country),
+                LeadInput(company_name=company, domain=domain, input_country=country,
+                          **_lusha_fields_from_row(row)),
                 serper_api_key=serper_api_key,
                 anthropic_api_key=anthropic_api_key,
                 default_input_country=config.default_input_country,

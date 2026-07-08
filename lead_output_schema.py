@@ -11,6 +11,13 @@ class LeadInput:
     company_name: str
     domain: Optional[str] = None
     input_country: Optional[str] = None
+    # Optional Lusha-export fields (Lusha enrichment plan, Stap 2). Blank for
+    # any non-Lusha caller -- every downstream consumer treats these as
+    # "no Lusha data available" and falls back to its existing behavior.
+    lusha_main_industry: Optional[str] = None
+    lusha_sub_industry: Optional[str] = None
+    lusha_description: Optional[str] = None
+    lusha_specialties: Optional[str] = None
 
 
 @dataclass
@@ -267,11 +274,20 @@ class LeadPrioritizationResult:
     sector_evidence_quote: Optional[str] = None
     sector_source_title: Optional[str] = None
     # Which path produced detected_industry/detected_sub_industry:
-    # "keyword_match" (deterministic Serper-snippet keyword match, wins when
-    # present) or "own_domain_ai" (fallback: the HQ interpreter's AI-derived
-    # industry from genuinely crawled own-domain content, used only when the
-    # keyword match found nothing at all). None when neither found anything.
+    # "lusha_mapped" (Lusha Sub/Main Industry mapped onto our internal
+    # categories, highest priority — see lead_lusha_sector_mapping.py),
+    # "keyword_match" (deterministic Serper-snippet keyword match),
+    # "own_domain_ai" (the HQ interpreter's AI-derived industry from
+    # genuinely crawled own-domain content), or "lusha_text_fallback" (last
+    # resort: the same keyword matcher applied to Lusha Company
+    # Description/Specialties text). None when nothing found anything.
     sector_source: Optional[str] = None
+    # Raw Lusha industry values (audit only) — always populated verbatim
+    # from the input row when present, REGARDLESS of whether the mapping in
+    # lead_lusha_sector_mapping.py produced a hit, so the original label is
+    # never lost even when detected_industry came from a different tier.
+    lusha_main_industry: Optional[str] = None
+    lusha_sub_industry: Optional[str] = None
     # App-facing text (placeholders)
     evidence_summary_app: Optional[str] = None
     key_source_links_app: Optional[str] = None

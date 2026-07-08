@@ -24,6 +24,7 @@ from lead_non_hq_signal_extractor import (
     extract_sector_industry,
     summarize_non_hq_signals_for_result,
 )
+from lead_lusha_sector_mapping import sector_from_lusha_industry, sector_from_lusha_text
 from lead_ai_signal_scorer import score_signals_with_ai
 from lead_app_summary_builder import build_app_summary_fields
 from lead_v2_scoring_adapter import score_lead_v2_result
@@ -381,35 +382,57 @@ def prioritize_single_lead(
             signals = extract_non_hq_signals(evidence_items, company_domain=input_row.domain)
     non_hq_summary = summarize_non_hq_signals_for_result(signals)
 
-    # Sector/industry metadata from sector_industry evidence (deterministic,
-    # audit/app only — feeds no score, C4, C5, HQ, or foreign-HQ filtering).
-    sector_summary = extract_sector_industry(evidence_items)
+    # Sector/industry metadata (deterministic, audit/app only — feeds no
+    # score, C4, C5, HQ, or foreign-HQ filtering). Priority chain (Lusha
+    # enrichment plan, Stap 2):
+    #   1. Lusha Sub/Main Industry mapped onto our internal categories
+    #      (free, no API call, highest priority when present).
+    #   2. Serper sector_industry evidence keyword match (existing).
+    #   3. Own-domain Firecrawl+AI-derived industry (existing fallback).
+    #   4. Lusha Company Description/Specialties keyword match (last resort,
+    #      free, no API call).
+    #   5. Empty, exactly as before any of this existed.
+    sector_summary = sector_from_lusha_industry(
+        input_row.lusha_main_industry, input_row.lusha_sub_industry)
 
-    # Fallback: when the deterministic keyword detector above found nothing
-    # at all (no Serper-snippet keyword hit — e.g. AEG Power Solutions, SDX),
-    # reuse the industry the HQ interpreter already derived from the SAME
-    # material at no extra API cost — but ONLY when that material genuinely
-    # included the company's own crawled-domain content (`crawled_pages`
-    # non-empty here means Firecrawl actually fetched the company's own
-    # site; see collect_own_domain_hq_pages above). A Serper-only AI guess
-    # (no own-domain crawl) is deliberately NOT used as a sector source —
-    # the point of this fallback is to lean on the same primary, most-
-    # authoritative source the HQ classification already trusts, not to
-    # add a second, weaker AI guess on top of thin secondary snippets.
-    # A keyword match always wins when present (never overwritten here).
-    if not sector_summary["detected_industry"] and hq.ai_hq_industry and crawled_pages:
-        sector_summary = dict(sector_summary)
-        sector_summary["detected_industry"] = hq.ai_hq_industry
-        sector_summary["detected_sub_industry"] = hq.ai_hq_sub_industry or None
-        sector_summary["sector_confidence"] = "Medium"
-        sector_summary["sector_reason"] = (
-            "Derived by AI from the company's own crawled website content "
-            "during HQ interpretation (own-domain source); no sector keyword "
-            "matched in the separate Serper sector-search evidence."
-        )
-        sector_summary["sector_evidence_url"] = crawled_pages[0].get("url")
-        sector_summary["sector_source_title"] = "Company website (AI-derived)"
-        sector_summary["sector_source"] = "own_domain_ai"
+    if sector_summary is None:
+        sector_summary = extract_sector_industry(evidence_items)
+
+        # Fallback: when the deterministic keyword detector above found
+        # nothing at all (no Serper-snippet keyword hit — e.g. AEG Power
+        # Solutions, SDX), reuse the industry the HQ interpreter already
+        # derived from the SAME material at no extra API cost — but ONLY
+        # when that material genuinely included the company's own
+        # crawled-domain content (`crawled_pages` non-empty here means
+        # Firecrawl actually fetched the company's own site; see
+        # collect_own_domain_hq_pages above). A Serper-only AI guess (no
+        # own-domain crawl) is deliberately NOT used as a sector source —
+        # the point of this fallback is to lean on the same primary, most-
+        # authoritative source the HQ classification already trusts, not to
+        # add a second, weaker AI guess on top of thin secondary snippets.
+        # A keyword match always wins when present (never overwritten here).
+        if not sector_summary["detected_industry"] and hq.ai_hq_industry and crawled_pages:
+            sector_summary = dict(sector_summary)
+            sector_summary["detected_industry"] = hq.ai_hq_industry
+            sector_summary["detected_sub_industry"] = hq.ai_hq_sub_industry or None
+            sector_summary["sector_confidence"] = "Medium"
+            sector_summary["sector_reason"] = (
+                "Derived by AI from the company's own crawled website content "
+                "during HQ interpretation (own-domain source); no sector keyword "
+                "matched in the separate Serper sector-search evidence."
+            )
+            sector_summary["sector_evidence_url"] = crawled_pages[0].get("url")
+            sector_summary["sector_source_title"] = "Company website (AI-derived)"
+            sector_summary["sector_source"] = "own_domain_ai"
+
+        # Last resort: the same keyword matcher applied to Lusha Company
+        # Description/Specialties text — free, no API call. Never
+        # overwrites a hit from any tier above.
+        if not sector_summary["detected_industry"]:
+            text_sector = sector_from_lusha_text(
+                input_row.lusha_description, input_row.lusha_specialties)
+            if text_sector["detected_industry"]:
+                sector_summary = text_sector
 
     # ── Step 4: deterministic app/evidence summary fields (no live calls) ─────
     # Built only from signals/evidence already present; never collects or
@@ -529,6 +552,8 @@ def prioritize_single_lead(
         sector_evidence_quote=sector_summary["sector_evidence_quote"],
         sector_source_title=sector_summary["sector_source_title"],
         sector_source=sector_summary["sector_source"],
+        lusha_main_industry=input_row.lusha_main_industry,
+        lusha_sub_industry=input_row.lusha_sub_industry,
         evidence_summary_app=app_summary["evidence_summary_app"],
         key_source_links_app=app_summary["key_source_links_app"],
         advanced_notes_app=app_summary["advanced_notes_app"],
