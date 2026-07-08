@@ -4491,3 +4491,89 @@ class TestScoringInputsExport:
         detail = detail_for(out_dir, "Acme Brasil")
         assert "scoring_inputs" in detail
         assert detail["scoring_inputs"]["signals"]["sig_explicit_lnd_score"] == 2.0
+
+    # -----------------------------------------------------------------------
+    # Regression: v2 field-name mismatch (found live in the Spain export —
+    # a company with a confirmed foreign parent, score 3, visible in
+    # visible_icp_signal_scores, still showed
+    # scoring_inputs.signals.sig_foreign_hq_score = null). Root cause: the
+    # "Enriched Leads" row carries v2's own field names
+    # (sig_foreign_hq_score_for_next_scoring, sig_international_profile_score,
+    # sig_onboarding_training_need_score, sig_icp_keyword_match_score), not
+    # the LEAN_COEFFICIENTS names _build_scoring_inputs used to read
+    # directly. lead_v2_scoring_adapter.py already documents this exact
+    # rename for its own (rarely-invoked) single-lead scoring path.
+    # -----------------------------------------------------------------------
+
+    def test_scoring_inputs_reads_v2_native_foreign_hq_field(self, tmp_path):
+        # This is the exact bug: a row with only the v2-native field set
+        # (no "sig_foreign_hq_score" key at all) must NOT export as null.
+        enriched = [enriched_row(sig_foreign_hq_score_for_next_scoring=3)]
+        _, out_dir = run_export(tmp_path, enriched)
+        detail = detail_for(out_dir, "Acme Brasil")
+        assert detail["scoring_inputs"]["signals"]["sig_foreign_hq_score"] == 3.0
+
+    def test_scoring_inputs_reads_all_four_renamed_v2_fields(self, tmp_path):
+        enriched = [enriched_row(
+            sig_foreign_hq_score_for_next_scoring=3,
+            sig_international_profile_score=2,
+            sig_onboarding_training_need_score=1,
+            sig_icp_keyword_match_score=3,
+        )]
+        _, out_dir = run_export(tmp_path, enriched)
+        signals = detail_for(out_dir, "Acme Brasil")["scoring_inputs"]["signals"]
+        assert signals["sig_foreign_hq_score"] == 3.0
+        assert signals["sig_intl_footprint_score"] == 2.0
+        assert signals["sig_lnd_onboarding_score"] == 1.0
+        assert signals["sig_explicit_lnd_score"] == 3.0
+
+    def test_scoring_inputs_falls_back_to_direct_name_for_legacy_rows(self, tmp_path):
+        # Legacy (enrich_clients_claude.py) rows may already carry the
+        # LEAN_COEFFICIENTS name directly — must still work, not regress.
+        enriched = [enriched_row(sig_foreign_hq_score=3)]
+        _, out_dir = run_export(tmp_path, enriched)
+        detail = detail_for(out_dir, "Acme Brasil")
+        assert detail["scoring_inputs"]["signals"]["sig_foreign_hq_score"] == 3.0
+
+    def test_scoring_inputs_v2_name_takes_priority_over_direct_name(self, tmp_path):
+        # If both are somehow present, the real v2 source column wins —
+        # it's the one the pipeline actually scored from.
+        enriched = [enriched_row(
+            sig_foreign_hq_score_for_next_scoring=3, sig_foreign_hq_score=0,
+        )]
+        _, out_dir = run_export(tmp_path, enriched)
+        detail = detail_for(out_dir, "Acme Brasil")
+        assert detail["scoring_inputs"]["signals"]["sig_foreign_hq_score"] == 3.0
+
+    def test_scoring_input_field_sources_matches_v2_adapter_mapping(self):
+        """Drift guard: _SCORING_INPUT_FIELD_SOURCES must always mirror
+        lead_v2_scoring_adapter.py's actual rename, since that adapter is the
+        source of truth for what the v2 pipeline really scores from."""
+        from export_lead_prioritizer_to_lovable_json import _SCORING_INPUT_FIELD_SOURCES
+        from lead_v2_scoring_adapter import build_score_company_input_from_v2_result
+        from lead_output_schema import LeadPrioritizationResult
+        import inspect
+
+        # Build a minimal-but-complete v2 result with distinct sentinel
+        # values per field, run it through the real adapter, and check our
+        # mapping resolves to the same source attribute for every renamed
+        # field — rather than re-parsing adapter source, prove it via
+        # behavior: construct a row using our mapping's source names and
+        # confirm score_company sees identical values either way.
+        sentinel_result = LeadPrioritizationResult(
+            company_name="X", domain="x.com", input_country="Italy",
+            sig_foreign_hq_score_for_next_scoring=3,
+            sig_international_profile_score=2,
+            sig_onboarding_training_need_score=1,
+            sig_icp_keyword_match_score=0,
+            sig_employer_branding_score=2,
+        )
+        adapter_row = build_score_company_input_from_v2_result(sentinel_result)
+
+        for lean_field, source_field in _SCORING_INPUT_FIELD_SOURCES.items():
+            source_value = getattr(sentinel_result, source_field)
+            assert adapter_row[lean_field] == source_value, (
+                f"_SCORING_INPUT_FIELD_SOURCES[{lean_field!r}] = "
+                f"{source_field!r} does not match what "
+                f"lead_v2_scoring_adapter actually reads for that field"
+            )
