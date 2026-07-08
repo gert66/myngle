@@ -14,6 +14,7 @@ from typing import Optional
 
 from lead_output_schema import LeadInput, LeadPrioritizationResult, HQDetectionResult
 from hq_simple_detector import build_simple_hq_query, is_hosted_careers_platform_domain
+from lead_country_config import gl_hl_for_hq_country
 from lead_hq_ai_interpreter import call_serper_for_hq, interpret_hq_with_ai
 from lead_hq_firecrawl_source import collect_own_domain_hq_pages
 from lead_hq_location_summary import build_hq_location_summary
@@ -251,10 +252,17 @@ def prioritize_single_lead(
     domain_root, query = build_simple_hq_query(input_row.company_name, input_row.domain)
     domain_is_hosted_platform = is_hosted_careers_platform_domain(input_row.domain)
 
+    # gl always set when the effective country is recognised; hl additionally
+    # omitted for known multilingual countries (e.g. Switzerland) rather than
+    # guessing a language. Unrecognised/blank country -> (None, None), so the
+    # request is byte-identical to before gl/hl existed.
+    _hq_gl, _hq_hl = gl_hl_for_hq_country(effective_country)
     serper_payload = call_serper_for_hq(
         domain_root=domain_root,
         query=query,
         serper_api_key=serper_api_key,
+        gl=_hq_gl,
+        hl=_hq_hl,
         cache_index=cache_index,
         force_refresh=force_refresh,
     )
@@ -272,6 +280,7 @@ def prioritize_single_lead(
     if firecrawl_api_key and input_row.domain and not domain_is_hosted_platform:
         fc = collect_own_domain_hq_pages(
             input_row.domain, firecrawl_api_key,
+            country=effective_country,
             cache_index=cache_index, force_refresh=force_refresh,
         )
         if fc["used"]:

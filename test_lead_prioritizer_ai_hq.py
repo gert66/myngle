@@ -1370,3 +1370,135 @@ class TestCallSerperForHqCache:
             )
         mock_urlopen.assert_called_once()
         assert result == {"organic": ["live"]}
+
+
+# ---------------------------------------------------------------------------
+# call_serper_for_hq: gl/hl localization (Lusha enrichment plan, Stap 1).
+# ---------------------------------------------------------------------------
+
+class TestCallSerperForHqGlHl:
+    def _capture_body(self, payload: dict = None):
+        captured = {}
+
+        class _FakeResponse:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *a):
+                return False
+
+            def read(self):
+                return json.dumps(payload or {}).encode()
+
+        def _fake_urlopen(req, timeout=15):
+            captured["body"] = json.loads(req.data.decode())
+            return _FakeResponse()
+
+        return captured, patch("urllib.request.urlopen", side_effect=_fake_urlopen)
+
+    def test_gl_and_hl_included_when_given(self):
+        from lead_hq_ai_interpreter import call_serper_for_hq
+
+        captured, patcher = self._capture_body()
+        with patcher:
+            call_serper_for_hq(
+                domain_root="acme.com", query="acme headquarters", serper_api_key="k",
+                gl="it", hl="it",
+            )
+        assert captured["body"] == {"q": "acme headquarters", "num": 10, "gl": "it", "hl": "it"}
+
+    def test_gl_without_hl(self):
+        from lead_hq_ai_interpreter import call_serper_for_hq
+
+        captured, patcher = self._capture_body()
+        with patcher:
+            call_serper_for_hq(
+                domain_root="acme.com", query="acme headquarters", serper_api_key="k",
+                gl="ch", hl=None,
+            )
+        assert captured["body"] == {"q": "acme headquarters", "num": 10, "gl": "ch"}
+        assert "hl" not in captured["body"]
+
+    def test_omitted_gl_hl_matches_pre_existing_request_shape(self):
+        from lead_hq_ai_interpreter import call_serper_for_hq
+
+        captured, patcher = self._capture_body()
+        with patcher:
+            call_serper_for_hq(
+                domain_root="acme.com", query="acme headquarters", serper_api_key="k",
+            )
+        assert captured["body"] == {"q": "acme headquarters", "num": 10}
+
+
+# ---------------------------------------------------------------------------
+# End-to-end: prioritize_single_lead resolves gl/hl and passes a country to
+# the own-domain Firecrawl crawl from the lead's effective country.
+# ---------------------------------------------------------------------------
+
+class TestPrioritizeSingleLeadCountryLocalization:
+    def test_serper_hq_call_receives_gl_hl_for_known_country(self):
+        seen = {}
+
+        def _fake_call_serper_for_hq(**kwargs):
+            seen.update(kwargs)
+            return {"organic": []}
+
+        with patch("lead_prioritizer_core.call_serper_for_hq",
+                   side_effect=_fake_call_serper_for_hq), \
+             _mock_anthropic(_ai_json(classification="unclear")):
+            prioritize_single_lead(
+                LeadInput(company_name="Acme", domain="acme.it", input_country="Italy"),
+                serper_api_key="s", anthropic_api_key="a",
+            )
+        assert seen.get("gl") == "it"
+        assert seen.get("hl") == "it"
+
+    def test_switzerland_sets_gl_but_not_hl(self):
+        seen = {}
+
+        def _fake_call_serper_for_hq(**kwargs):
+            seen.update(kwargs)
+            return {"organic": []}
+
+        with patch("lead_prioritizer_core.call_serper_for_hq",
+                   side_effect=_fake_call_serper_for_hq), \
+             _mock_anthropic(_ai_json(classification="unclear")):
+            prioritize_single_lead(
+                LeadInput(company_name="Acme", domain="acme.ch", input_country="Switzerland"),
+                serper_api_key="s", anthropic_api_key="a",
+            )
+        assert seen.get("gl") == "ch"
+        assert seen.get("hl") is None
+
+    def test_unknown_country_omits_gl_hl(self):
+        seen = {}
+
+        def _fake_call_serper_for_hq(**kwargs):
+            seen.update(kwargs)
+            return {"organic": []}
+
+        with patch("lead_prioritizer_core.call_serper_for_hq",
+                   side_effect=_fake_call_serper_for_hq), \
+             _mock_anthropic(_ai_json(classification="unclear")):
+            prioritize_single_lead(
+                LeadInput(company_name="Acme", domain="acme.com", input_country="Narnia"),
+                serper_api_key="s", anthropic_api_key="a",
+            )
+        assert seen.get("gl") is None
+        assert seen.get("hl") is None
+
+    def test_own_domain_firecrawl_crawl_receives_effective_country(self):
+        seen = {}
+
+        def _fake_collect(domain, key, **kwargs):
+            seen.update(kwargs)
+            return {"pages": [], "pages_crawled": [], "used": False}
+
+        with patch("lead_prioritizer_core.collect_own_domain_hq_pages",
+                   side_effect=_fake_collect), \
+             _mock_anthropic(_ai_json(classification="unclear")):
+            prioritize_single_lead(
+                LeadInput(company_name="Acme", domain="acme.it", input_country="Italy"),
+                serper_api_key="s", anthropic_api_key="a", firecrawl_api_key="fc-key",
+            )
+        assert seen.get("country") == "Italy"

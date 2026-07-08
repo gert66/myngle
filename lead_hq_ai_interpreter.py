@@ -26,6 +26,8 @@ try:
 except ImportError:
     _openai_lib = None  # type: ignore[assignment]
 
+from lead_country_config import normalize_country_for_hq as _normalize_country_for_hq
+
 if TYPE_CHECKING:
     from lead_output_schema import HQDetectionResult, LeadInput
 
@@ -140,6 +142,8 @@ def call_serper_for_hq(
     domain_root: str,
     query: str,
     serper_api_key: str,
+    gl: Optional[str] = None,
+    hl: Optional[str] = None,
     cache_index: Optional[dict] = None,
     force_refresh: bool = False,
 ) -> dict:
@@ -150,9 +154,18 @@ def call_serper_for_hq(
 
     Returns an empty dict on any error so callers can treat it defensively.
 
+    ``gl``/``hl`` (Serper's country/language params) are only included in
+    the request when explicitly given — mirrors
+    ``lead_non_hq_enrichment.call_serper_for_enrichment`` exactly, so a
+    caller that doesn't pass them keeps the exact request shape used today.
+    The caller (``prioritize_single_lead``) resolves them from the lead's
+    effective country via ``lead_country_config.gl_hl_for_hq_country`` —
+    this function itself does no country lookup.
+
     ``cache_index`` (default ``None``) is an optional in-memory, GCS-backed
     shared cache index (see ``enrichment_cache.py``), keyed on
-    ``domain_root`` + signal type ``"hq"``. When ``None`` — the default —
+    ``domain_root`` + signal type ``"hq"`` (not on ``gl``/``hl`` — an HQ fact
+    doesn't change with search locale). When ``None`` — the default —
     behavior is completely unchanged from before this parameter existed:
     every call hits Serper live. When provided, a fresh-enough cached
     response is returned without a network call; a miss still calls Serper
@@ -179,7 +192,12 @@ def call_serper_for_hq(
         usage_tracker.record_cache_miss("serper")
 
     usage_tracker.record_serper_call("hq")
-    payload_bytes = json.dumps({"q": query, "num": 10}).encode()
+    request_payload: dict = {"q": query, "num": 10}
+    if gl:
+        request_payload["gl"] = gl
+    if hl:
+        request_payload["hl"] = hl
+    payload_bytes = json.dumps(request_payload).encode()
     req = urllib.request.Request(
         "https://google.serper.dev/search",
         data=payload_bytes,
@@ -496,44 +514,6 @@ def _parse_ai_response(raw: str) -> dict:
     if fields.get("classification"):
         return fields
     return {}
-
-
-def _normalize_country_for_hq(value: object) -> str:
-    """Lowercase canonical country — handles ISO-2, ISO-3, full names."""
-    _MAP = {
-        "it": "italy", "ita": "italy", "italia": "italy", "italy": "italy", "italian": "italy",
-        "de": "germany", "deu": "germany", "germany": "germany",
-        "deutschland": "germany", "german": "germany",
-        "fr": "france", "fra": "france", "france": "france", "french": "france",
-        "uk": "united kingdom", "gb": "united kingdom", "gbr": "united kingdom",
-        "united kingdom": "united kingdom", "great britain": "united kingdom",
-        "england": "united kingdom", "scotland": "united kingdom", "wales": "united kingdom",
-        "us": "united states", "usa": "united states", "united states": "united states",
-        "america": "united states",
-        "ch": "switzerland", "switzerland": "switzerland", "swiss": "switzerland",
-        "nl": "netherlands", "netherlands": "netherlands", "holland": "netherlands",
-        "the netherlands": "netherlands", "nederland": "netherlands",
-        "be": "belgium", "belgium": "belgium",
-        "at": "austria", "austria": "austria",
-        "es": "spain", "spain": "spain",
-        "se": "sweden", "sweden": "sweden",
-        "no": "norway", "norway": "norway",
-        "dk": "denmark", "denmark": "denmark",
-        "fi": "finland", "finland": "finland",
-        "jp": "japan", "japan": "japan",
-        "cn": "china", "china": "china",
-        "pl": "poland", "poland": "poland",
-        "pt": "portugal", "portugal": "portugal",
-        "ie": "ireland", "ireland": "ireland",
-        "lu": "luxembourg", "luxembourg": "luxembourg",
-        "sg": "singapore", "singapore": "singapore",
-        "br": "brazil", "bra": "brazil", "brasil": "brazil",
-        "brazil": "brazil", "brazilian": "brazil",
-        "uy": "uruguay", "ury": "uruguay", "uruguay": "uruguay",
-        "uruguayan": "uruguay", "república oriental del uruguay": "uruguay",
-    }
-    text = re.sub(r"\s+", " ", re.sub(r"\.", "", str(value or "").strip().lower()))
-    return _MAP.get(text, text)
 
 
 # ---------------------------------------------------------------------------
