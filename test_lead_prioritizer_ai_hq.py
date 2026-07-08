@@ -1528,6 +1528,31 @@ class TestPrioritizeSingleLeadCountryLocalization:
             )
         assert seen.get("country") == "Italy"
 
+    def test_non_lusha_caller_without_input_country_falls_back_to_default(self):
+        # Verification (Stap 1/2 audit): a caller with no input_country and
+        # no Lusha fields at all (e.g. an existing CLI-style caller) must
+        # keep exactly the pre-Stap-1 fallback: default_input_country, and
+        # gl/hl derived from THAT value -- never a regression to "no
+        # localization at all" just because the row itself is bare.
+        lead = LeadInput(company_name="Acme", domain="acme.com")
+        seen = {}
+
+        def _fake_call_serper_for_hq(**kwargs):
+            seen.update(kwargs)
+            return {"organic": []}
+
+        with patch("lead_prioritizer_core.call_serper_for_hq",
+                   side_effect=_fake_call_serper_for_hq), \
+             _mock_anthropic(_ai_json(classification="unclear")):
+            result = prioritize_single_lead(
+                lead, serper_api_key="s", anthropic_api_key="a",
+                default_input_country="Italy",
+            )
+        assert result.input_country == "Italy"
+        assert seen.get("gl") == "it"
+        assert seen.get("hl") == "it"
+        assert result.lusha_main_industry is None
+
 
 # ---------------------------------------------------------------------------
 # Sector priority chain (Lusha enrichment plan, Stap 2): Lusha mapping (tier
