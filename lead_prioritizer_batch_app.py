@@ -1056,139 +1056,228 @@ def main() -> None:  # pragma: no cover - exercised only under `streamlit run`
     elif run_mode == NON_ENGLISH_FOREIGN_HQ_ONLY_MODE:
         st.caption(NON_ENGLISH_FOREIGN_HQ_ONLY_HELP_TEXT)
 
-    # ── AI provider (experimental) ────────────────────────────────────────────
-    st.subheader("AI provider")
-    provider_label = st.selectbox(
-        "AI provider for HQ interpretation", AI_PROVIDER_LABELS, index=0,
-        help="Anthropic only is the production default. The OpenAI and "
-             "compare options (including the OpenAI-mini-vs-DeepSeek "
-             "triple compare) are experimental and only available for the "
-             "standard batch modes without C5.")
-    ai_provider_mode = ai_provider_label_to_mode(provider_label)
-    openai_model = DEFAULT_OPENAI_MODEL
-    deepseek_model = DEFAULT_DEEPSEEK_MODEL
-    if ai_provider_mode in ("openai", "compare"):
-        # Two-way compare now defaults to OpenAI mini (nano returned too many
-        # unclear cases in real-company testing); "OpenAI only" keeps its own
-        # default and stays freely user-selectable either way.
-        _default_openai_model = (
-            DEFAULT_OPENAI_MINI_MODEL if ai_provider_mode == "compare" else DEFAULT_OPENAI_MODEL)
-        openai_model = st.selectbox(
-            "OpenAI model", list(SUPPORTED_OPENAI_MODELS),
-            index=list(SUPPORTED_OPENAI_MODELS).index(_default_openai_model))
-    if ai_provider_mode == "compare":
-        st.warning(COMPARE_MODE_WARNING_TEXT)
-    if ai_provider_mode == "compare_triple":
-        st.caption(
-            f"Fixed OpenAI model for this mode: OpenAI mini = "
-            f"**{DEFAULT_OPENAI_MINI_MODEL}**.")
-        deepseek_model = st.selectbox(
-            "DeepSeek model", list(SUPPORTED_DEEPSEEK_MODELS),
-            index=list(SUPPORTED_DEEPSEEK_MODELS).index(DEFAULT_DEEPSEEK_MODEL),
-            help="deepseek-v4-flash is cheaper; deepseek-v4-pro is being "
-                 "tested for better quality on unclear/blank cases.")
-        st.warning(COMPARE_TRIPLE_MODE_WARNING_TEXT)
+    # ── AI provider (experimental) — moved to the left sidebar: an advanced,
+    # rarely-touched setting, not part of the main day-to-day workflow. ───────
+    with st.sidebar:
+        st.divider()
+        st.subheader("AI provider")
+        provider_label = st.selectbox(
+            "AI provider for HQ interpretation", AI_PROVIDER_LABELS, index=0,
+            help="Anthropic only is the production default. The OpenAI and "
+                 "compare options (including the OpenAI-mini-vs-DeepSeek "
+                 "triple compare) are experimental and only available for the "
+                 "standard batch modes without C5.")
+        ai_provider_mode = ai_provider_label_to_mode(provider_label)
+        openai_model = DEFAULT_OPENAI_MODEL
+        deepseek_model = DEFAULT_DEEPSEEK_MODEL
+        if ai_provider_mode in ("openai", "compare"):
+            # Two-way compare now defaults to OpenAI mini (nano returned too many
+            # unclear cases in real-company testing); "OpenAI only" keeps its own
+            # default and stays freely user-selectable either way.
+            _default_openai_model = (
+                DEFAULT_OPENAI_MINI_MODEL if ai_provider_mode == "compare" else DEFAULT_OPENAI_MODEL)
+            openai_model = st.selectbox(
+                "OpenAI model", list(SUPPORTED_OPENAI_MODELS),
+                index=list(SUPPORTED_OPENAI_MODELS).index(_default_openai_model))
+        if ai_provider_mode == "compare":
+            st.warning(COMPARE_MODE_WARNING_TEXT)
+        if ai_provider_mode == "compare_triple":
+            st.caption(
+                f"Fixed OpenAI model for this mode: OpenAI mini = "
+                f"**{DEFAULT_OPENAI_MINI_MODEL}**.")
+            deepseek_model = st.selectbox(
+                "DeepSeek model", list(SUPPORTED_DEEPSEEK_MODELS),
+                index=list(SUPPORTED_DEEPSEEK_MODELS).index(DEFAULT_DEEPSEEK_MODEL),
+                help="deepseek-v4-flash is cheaper; deepseek-v4-pro is being "
+                     "tested for better quality on unclear/blank cases.")
+            st.warning(COMPARE_TRIPLE_MODE_WARNING_TEXT)
 
     # ── Row controls ──────────────────────────────────────────────────────────
     st.subheader("Rows")
     rc1, rc2 = st.columns(2)
     start_row = rc1.number_input("Start row", min_value=0, value=0, step=1)
     row_limit = rc2.number_input("Row limit (0 = all remaining)", min_value=0, value=0, step=1)
-    stop_on_error = st.checkbox("Stop on first row error", value=False)
-    include_raw_ai_json = st.checkbox("Include raw AI JSON", value=False)
-    compose_caller_content = st.checkbox(
-        "Compose caller content via AI (Step 3, opt-in)", value=False,
-        help="Compose why_relevant/what_is_hot/cold_caller_summary/"
-             "caller_angle/call_starter via the Anthropic API instead of "
-             "deterministic templates. Falls back to templates per-row on "
-             "any failure (default: off).")
-    rich_icp_context = st.checkbox(
-        "Rijkere ICP-context via AI (opt-in)", value=False,
-        help="Compose icp_buying_signals/icp_likely_training_interest/"
-             "icp_potential_buyer_function via the Anthropic API using "
-             "broader context evidence. Independent of 'Compose caller "
-             "content via AI' above; never affects scoring (default: off).")
-    ai_signal_scoring = st.checkbox(
-        "AI-signaalscoring (opt-in) — verandert scores", value=False,
-        help="Vervangt de deterministische keyword-verdicts per signaal door "
-             "één Anthropic-call die hetzelfde (al gefilterde) bewijs "
-             "semantisch beoordeelt. LET OP: in tegenstelling tot de opties "
-             "hierboven en Deep Dive VERANDERT dit final_commercial_fit_score "
-             "(zelfde scoreformule, ander signaal-invoer). Valt bij een "
-             "AI-fout terug op deterministische scoring. Elke rij registreert "
-             "welke modus is gebruikt via signal_scoring_mode (default: uit).")
-    if ai_signal_scoring:
-        st.warning(
-            "AI-signaalscoring is ingeschakeld: final_commercial_fit_score kan "
-            "afwijken van de standaard (deterministische) modus. Meng geen "
-            "datasets van beide modi zonder signal_scoring_mode te checken."
-        )
-    legacy_enrichment_mode = st.checkbox(
-        "Legacy enrichment mode (vergelijking met oud systeem)", value=False,
-        help="Draait het oude enrich_clients_claude.py Step-2 Serper+Claude-"
-             "beoordelingsstijl (dezelfde holistische 9-signalen-beoordeling, "
-             "zonder het competitor-signaal/query, zonder Jina-scraping) NAAST "
-             "de normale v2-flow, puur om oud en nieuw op dezelfde lead te "
-             "vergelijken. Vult legacy_score/legacy_tier/legacy_icp_*-kolommen; "
-             "verandert final_commercial_fit_score of signals nooit "
-             "(default: uit).")
-    deep_dive = st.checkbox(
-        "Deep dive voor top-leads (opt-in)", value=False,
-        help="Runs a deeper, source-backed evidence collection AFTER "
-             "scoring (Firecrawl if the key above is set, else localized "
-             "Serper + plain fetches) for rows that clear the score "
-             "threshold below and/or a confirmed foreign-HQ signal. Writes "
-             "a 'Deep Dive' sheet; never affects scoring. Independent of "
-             "the two options above (default: off).")
-    deep_dive_min_score = 8.0
-    verify_quotes = True
-    auto_correct_quotes = True
-    if deep_dive:
-        dd1, dd2 = st.columns(2)
-        deep_dive_min_score = dd1.number_input(
-            "Deep dive score threshold", min_value=0.0, max_value=10.0,
-            value=8.0, step=0.5,
-            help="Rows with final_commercial_fit_score at or above this "
-                 "value trigger a deep dive.")
-        deep_dive_on_foreign_hq = dd2.checkbox(
-            "Also trigger on confirmed foreign HQ", value=True)
-        verify_quotes = st.checkbox(
-            "Verify Deep Dive quotes against the source page", value=True,
-            help="Mechanically re-checks every claim's quote against the "
-                 "actual page text, catching an AI hallucinated/paraphrased "
-                 "quote (on by default).")
-        if verify_quotes:
-            auto_correct_quotes = st.checkbox(
-                "Auto-correct fuzzy/not-found quotes", value=True,
-                help="A fuzzy-matched quote is replaced by the real page "
-                     "text; a not-found quote gets one bundled re-extraction "
-                     "attempt per company, mechanically re-verified before "
-                     "being accepted (on by default, only used when "
-                     "verification above is on).")
-        else:
-            auto_correct_quotes = False
-    else:
-        deep_dive_on_foreign_hq = True
 
-    # ── Autosave (output workbook to disk when the run completes) ─────────────
-    autosave_enabled = st.checkbox(
-        "Autosave output workbook when run completes", value=False)
-    autosave_dir = DEFAULT_AUTOSAVE_DIR
-    if autosave_enabled:
-        source_folder_text = st.text_input(
-            "Input/source folder for outputs", value="",
-            help="Because browsers do not expose the uploaded file path, paste "
-                 "the folder where this country input file lives. Outputs "
-                 "will default to this folder.")
-        autosave_dir = st.text_input(
-            "Autosave directory", value=str(resolve_batch_output_dir(source_folder_text)))
-        if not source_folder_text.strip():
-            st.caption(
-                "Streamlit cannot infer the original upload folder "
-                "automatically; paste the source folder if you want outputs "
-                "saved next to your input files."
+    # ── Opt-in behavior toggles — moved to the left sidebar: settings you set
+    # once and rarely revisit, kept out of the main day-to-day workflow. ─────
+    with st.sidebar:
+        st.divider()
+        st.subheader("Rows — opt-in behavior")
+        stop_on_error = st.checkbox("Stop on first row error", value=False)
+        include_raw_ai_json = st.checkbox("Include raw AI JSON", value=False)
+        compose_caller_content = st.checkbox(
+            "Compose caller content via AI (Step 3, opt-in)", value=True,
+            help="Compose why_relevant/what_is_hot/cold_caller_summary/"
+                 "caller_angle/call_starter via the Anthropic API instead of "
+                 "deterministic templates. Falls back to templates per-row on "
+                 "any failure (default: on).")
+        rich_icp_context = st.checkbox(
+            "Rijkere ICP-context via AI (opt-in)", value=True,
+            help="Compose icp_buying_signals/icp_likely_training_interest/"
+                 "icp_potential_buyer_function via the Anthropic API using "
+                 "broader context evidence. Independent of 'Compose caller "
+                 "content via AI' above; never affects scoring (default: on).")
+        ai_signal_scoring = st.checkbox(
+            "AI-signaalscoring (opt-in) — verandert scores", value=False,
+            help="Vervangt de deterministische keyword-verdicts per signaal door "
+                 "één Anthropic-call die hetzelfde (al gefilterde) bewijs "
+                 "semantisch beoordeelt. LET OP: in tegenstelling tot de opties "
+                 "hierboven en Deep Dive VERANDERT dit final_commercial_fit_score "
+                 "(zelfde scoreformule, ander signaal-invoer). Valt bij een "
+                 "AI-fout terug op deterministische scoring. Elke rij registreert "
+                 "welke modus is gebruikt via signal_scoring_mode (default: uit).")
+        if ai_signal_scoring:
+            st.warning(
+                "AI-signaalscoring is ingeschakeld: final_commercial_fit_score kan "
+                "afwijken van de standaard (deterministische) modus. Meng geen "
+                "datasets van beide modi zonder signal_scoring_mode te checken."
             )
-        st.caption(AUTOSAVE_HELP_TEXT)
+        legacy_enrichment_mode = st.checkbox(
+            "Legacy enrichment mode (vergelijking met oud systeem)", value=False,
+            help="Draait het oude enrich_clients_claude.py Step-2 Serper+Claude-"
+                 "beoordelingsstijl (dezelfde holistische 9-signalen-beoordeling, "
+                 "zonder het competitor-signaal/query, zonder Jina-scraping) NAAST "
+                 "de normale v2-flow, puur om oud en nieuw op dezelfde lead te "
+                 "vergelijken. Vult legacy_score/legacy_tier/legacy_icp_*-kolommen; "
+                 "verandert final_commercial_fit_score of signals nooit "
+                 "(default: uit).")
+        gate_full_enrichment_on_foreign_hq = run_mode in (
+            FOREIGN_HQ_ONLY_MODE, NON_ENGLISH_FOREIGN_HQ_ONLY_MODE)
+        use_enrichment_cache = st.checkbox(
+            "Gebruik gedeelde enrichment-cache (GCS, per land)", value=True,
+            help="Slaat Serper- en Firecrawl-resultaten op in één gedeeld "
+                 "indexbestand per land in GCS (gcloud/gsutil, geen nieuwe "
+                 "dependency), zodat runs vanaf verschillende machines "
+                 "(bijv. thuis-laptop en werk-desktop) hetzelfde "
+                 "cache-resultaat zien en dezelfde bedrijven/pagina's niet "
+                 "onnodig opnieuw opzoeken of scrapen. De index wordt eenmalig "
+                 "gedownload bij de start van de run, tussentijds elke ~50 "
+                 "leads en aan het einde teruggeschreven. Alle cache-entries "
+                 "(Serper en Firecrawl) blijven 120 dagen geldig. Puur een "
+                 "snelheids-optimalisatie — bij een download-/uploadfout "
+                 "valt de run automatisch terug op live opzoeken zonder de "
+                 "run te breken (default: aan).")
+        enrichment_cache_bucket = st.text_input(
+            "GCS bucket voor enrichment-cache", value=DEFAULT_GCS_BUCKET,
+            disabled=not use_enrichment_cache,
+            help="Zelfde bucket-conventie als de bestaande GCS-upload "
+                 "(gcloud/gsutil). De cache-indexbestanden komen terecht "
+                 "onder _enrichment_cache/<land>_cache_index.json in deze "
+                 "bucket. Alleen relevant als de cache-checkbox hierboven "
+                 "aan staat.")
+        deep_dive = st.checkbox(
+            "Deep dive voor top-leads (opt-in)", value=True,
+            help="Runs a deeper, source-backed evidence collection AFTER "
+                 "scoring (Firecrawl if the key above is set, else localized "
+                 "Serper + plain fetches) for rows that clear the score "
+                 "threshold below and/or a confirmed foreign-HQ signal. Writes "
+                 "a 'Deep Dive' sheet; never affects scoring. Independent of "
+                 "the two options above (default: on, threshold 0 — all rows).")
+        deep_dive_min_score = 0.0
+        verify_quotes = True
+        auto_correct_quotes = True
+        if deep_dive:
+            dd1, dd2 = st.columns(2)
+            deep_dive_min_score = dd1.number_input(
+                "Deep dive score threshold", min_value=0.0, max_value=10.0,
+                value=0.0, step=0.5,
+                help="Rows with final_commercial_fit_score at or above this "
+                     "value trigger a deep dive (default 0 — all rows, for now).")
+            deep_dive_on_foreign_hq = dd2.checkbox(
+                "Also trigger on confirmed foreign HQ", value=True)
+            verify_quotes = st.checkbox(
+                "Verify Deep Dive quotes against the source page", value=True,
+                help="Mechanically re-checks every claim's quote against the "
+                     "actual page text, catching an AI hallucinated/paraphrased "
+                     "quote (on by default).")
+            if verify_quotes:
+                auto_correct_quotes = st.checkbox(
+                    "Auto-correct fuzzy/not-found quotes", value=True,
+                    help="A fuzzy-matched quote is replaced by the real page "
+                         "text; a not-found quote gets one bundled re-extraction "
+                         "attempt per company, mechanically re-verified before "
+                         "being accepted (on by default, only used when "
+                         "verification above is on).")
+            else:
+                auto_correct_quotes = False
+        else:
+            deep_dive_on_foreign_hq = True
+
+        # ── Public Source Signal Enrichment (opt-in, evidence-only) ───────────
+        st.subheader("Public Source Signal Enrichment")
+        public_source_signal_enrichment = st.checkbox(
+            "Run Public Source Signal Enrichment", value=False,
+            help="Optional evidence-only block. It retrieves public "
+                 "company-level evidence from a configured public source and "
+                 "adds it to the Evidence sheet. It does not directly change "
+                 "scoring.")
+        public_source_signal_query = "vacancies"
+        public_source_base_url = ""
+        public_source_label = ""
+        public_source_max_pages = 3
+        public_source_error = ""
+        if public_source_signal_enrichment:
+            public_source_signal_query = st.text_input(
+                "Public source signal to look for", value="vacancies",
+                key="public_source_signal_query")
+            public_source_base_url = st.text_input(
+                "Public source base URL", value="", key="public_source_base_url")
+            public_source_label = st.text_input(
+                "Public source label", value="", key="public_source_label")
+            public_source_max_pages = int(st.number_input(
+                "Max pages to retrieve", min_value=1, max_value=10, value=3,
+                step=1, key="public_source_max_pages"))
+            if not firecrawl_key:
+                public_source_error = (
+                    f"{_FIRECRAWL_KEY_NAME} is missing. Set it in "
+                    ".streamlit/secrets.toml or the environment to use Public "
+                    "Source Signal Enrichment, or turn the checkbox off."
+                )
+            elif not public_source_base_url.strip():
+                public_source_error = (
+                    "Public source base URL is required when Public Source "
+                    "Signal Enrichment is enabled."
+                )
+            if public_source_error:
+                st.error(public_source_error)
+
+        # ── Autosave (output workbook to disk when the run completes) ────────
+        autosave_enabled = st.checkbox(
+            "Autosave output workbook when run completes", value=False)
+        autosave_dir = DEFAULT_AUTOSAVE_DIR
+        if autosave_enabled:
+            source_folder_text = st.text_input(
+                "Input/source folder for outputs", value="",
+                help="Because browsers do not expose the uploaded file path, paste "
+                     "the folder where this country input file lives. Outputs "
+                     "will default to this folder.")
+            autosave_dir = st.text_input(
+                "Autosave directory", value=str(resolve_batch_output_dir(source_folder_text)))
+            if not source_folder_text.strip():
+                st.caption(
+                    "Streamlit cannot infer the original upload folder "
+                    "automatically; paste the source folder if you want outputs "
+                    "saved next to your input files."
+                )
+            st.caption(AUTOSAVE_HELP_TEXT)
+
+    # ── Export settings (feeds the after-run Lovable export configured in the
+    # sidebar) — kept in the main panel: who's calling and which country this
+    # export is for are core, frequently-checked info, not a rarely-touched
+    # knob. ────────────────────────────────────────────────────────────────
+    st.subheader("Export settings")
+    _uploaded_filename = getattr(uploaded, "name", "") or ""
+    _country_default = resolve_auto_export_country_default(
+        default_country or "", _uploaded_filename, SUPPORTED_DEFAULT_INPUT_COUNTRIES)
+    ec1, ec2 = st.columns(2)
+    auto_export_country = ec1.text_input(
+        "Export country", value=_country_default,
+        key="auto_lovable_export_country",
+        help="Defaults to the selected \"Default input country\", else a "
+             "guess from the uploaded filename. Always overridable.")
+    auto_lovable_callers_raw = ec2.text_input(
+        "Cold callers (comma-separated)", value=DEFAULT_COLD_CALLERS_TEXT,
+        key="auto_lovable_callers")
 
     # ── Parallel processing ───────────────────────────────────────────────────
     st.subheader("Parallel processing")
@@ -1216,165 +1305,158 @@ def main() -> None:  # pragma: no cover - exercised only under `streamlit run`
             "I understand this may use many API calls and want to run this batch",
             value=True)
 
-    # ── C5 Sonnet HQ adjudication (optional, country-agnostic) ────────────────
-    st.subheader("C5 Sonnet HQ adjudication")
-    c5_enabled = st.checkbox("Use C5 Sonnet adjudication", value=True)
-    c5_scoring_behavior = "conservative_adjustment"
-    c5_scope = "score_3_or_manual_review"
-    c5_model_tier = "sonnet"
-    c5_model_override = ""
-    c5_model_used = ""
-    c5_model_error = None
-    c5_opus_confirm = False
-    c5_block_reason = ""
-    if c5_enabled:
-        c5_scoring_behavior = st.selectbox(
-            "C5 scoring behavior", list(C5_SCORING_BEHAVIORS),
-            index=list(C5_SCORING_BEHAVIORS).index("conservative_adjustment"),
-            help="append_only: add C5 fields only. conservative_adjustment: may "
-                 "confirm/downgrade existing score-3 positives; never auto-upgrades "
-                 "score-0 rows.")
-        c5_scope = st.selectbox(
-            "Rows to send to C5", list(C5_SCOPES),
-            index=list(C5_SCOPES).index("score_3_or_manual_review"))
-        c5_model_tier = st.selectbox("C5 model tier", list(C5_MODEL_TIER_CHOICES), index=0)
-        if c5_model_tier == "sonnet":
-            st.caption(f"Sonnet default model: **{DEFAULT_SONNET_ADJUDICATION_MODEL}**")
-        c5_model_override = st.text_input(
-            "C5 explicit model override (optional)", value="",
-            help="Overrides the tier. Required for the opus tier.")
-        c5_model_used, c5_model_error = resolve_c5_model(c5_model_tier, c5_model_override)
-        if c5_model_tier == "opus":
-            st.warning(_OPUS_WARNING)
-            rl = int(row_limit)
-            if rl == 0 or rl > _C5_OPUS_ROW_CAP:
-                c5_opus_confirm = st.checkbox(
-                    "I understand Opus is expensive and want to continue", value=False)
-        if c5_model_error:
-            c5_block_reason = c5_model_error
-        elif c5_model_tier == "opus":
-            _guard = check_opus_guardrail(c5_model_tier, int(row_limit), c5_opus_confirm)
-            if _guard:
-                c5_block_reason = _guard
-        if c5_block_reason:
-            st.error(c5_block_reason)
+    # ── C5 Sonnet HQ adjudication (optional, country-agnostic) — moved to the
+    # left sidebar: an advanced setting configured once, not part of the
+    # main day-to-day workflow. ───────────────────────────────────────────
+    with st.sidebar:
+        st.divider()
+        st.subheader("C5 Sonnet HQ adjudication")
+        c5_enabled = st.checkbox("Use C5 Sonnet adjudication", value=True)
+        c5_scoring_behavior = "conservative_adjustment"
+        c5_scope = "score_3_or_manual_review"
+        c5_model_tier = "sonnet"
+        c5_model_override = ""
+        c5_model_used = ""
+        c5_model_error = None
+        c5_opus_confirm = False
+        c5_block_reason = ""
+        if c5_enabled:
+            c5_scoring_behavior = st.selectbox(
+                "C5 scoring behavior", list(C5_SCORING_BEHAVIORS),
+                index=list(C5_SCORING_BEHAVIORS).index("conservative_adjustment"),
+                help="append_only: add C5 fields only. conservative_adjustment: may "
+                     "confirm/downgrade existing score-3 positives; never auto-upgrades "
+                     "score-0 rows.")
+            c5_scope = st.selectbox(
+                "Rows to send to C5", list(C5_SCOPES),
+                index=list(C5_SCOPES).index("score_3_or_manual_review"))
+            c5_model_tier = st.selectbox("C5 model tier", list(C5_MODEL_TIER_CHOICES), index=0)
+            if c5_model_tier == "sonnet":
+                st.caption(f"Sonnet default model: **{DEFAULT_SONNET_ADJUDICATION_MODEL}**")
+            c5_model_override = st.text_input(
+                "C5 explicit model override (optional)", value="",
+                help="Overrides the tier. Required for the opus tier.")
+            c5_model_used, c5_model_error = resolve_c5_model(c5_model_tier, c5_model_override)
+            if c5_model_tier == "opus":
+                st.warning(_OPUS_WARNING)
+                rl = int(row_limit)
+                if rl == 0 or rl > _C5_OPUS_ROW_CAP:
+                    c5_opus_confirm = st.checkbox(
+                        "I understand Opus is expensive and want to continue", value=False)
+            if c5_model_error:
+                c5_block_reason = c5_model_error
+            elif c5_model_tier == "opus":
+                _guard = check_opus_guardrail(c5_model_tier, int(row_limit), c5_opus_confirm)
+                if _guard:
+                    c5_block_reason = _guard
+            if c5_block_reason:
+                st.error(c5_block_reason)
 
-    ai_provider_error = validate_ai_provider_run(
-        ai_provider_mode, run_mode, c5_enabled, openai_key, deepseek_key)
-    if ai_provider_error:
-        st.error(ai_provider_error)
+        ai_provider_error = validate_ai_provider_run(
+            ai_provider_mode, run_mode, c5_enabled, openai_key, deepseek_key)
+        if ai_provider_error:
+            st.error(ai_provider_error)
 
-    # ── After-run Lovable JSON / GCS export (optional, one-click/overnight) ───
-    st.subheader("After-run Lovable JSON / GCS export")
-    st.caption(
-        "Optional: set this up before running an overnight/unattended batch "
-        "so the enriched workbook, Lovable JSON export, and (if enabled) GCS "
-        "upload all happen automatically once the batch completes. Off by "
-        "default; the manual Lovable JSON export section after a run stays "
-        "available either way. Not available for the Compare provider modes "
-        "(those return a comparison workbook instead of batch tables)."
-    )
-    auto_lovable_export_enabled = st.checkbox(
-        "After batch completes, automatically export Lovable JSON",
-        value=True, key="auto_lovable_export_enabled")
+    # ── After-run Lovable JSON / GCS export (optional, one-click/overnight) —
+    # moved to the left sidebar EXCEPT Export country / Cold callers above,
+    # which stay in the main panel (core, frequently-checked run info). ─────
+    with st.sidebar:
+        st.divider()
+        st.subheader("After-run Lovable JSON / GCS export")
+        st.caption(
+            "Optional: set this up before running an overnight/unattended batch "
+            "so the enriched workbook, Lovable JSON export, and (if enabled) GCS "
+            "upload all happen automatically once the batch completes. Off by "
+            "default; the manual Lovable JSON export section after a run stays "
+            "available either way. Not available for the Compare provider modes "
+            "(those return a comparison workbook instead of batch tables)."
+        )
+        auto_lovable_export_enabled = st.checkbox(
+            "After batch completes, automatically export Lovable JSON",
+            value=True, key="auto_lovable_export_enabled")
 
-    auto_export_country = ""
-    auto_lovable_callers_raw = DEFAULT_COLD_CALLERS_TEXT
-    auto_foreign_hq_only = default_foreign_hq_only_export(run_mode)
-    auto_bucket_size = 500
-    auto_content_language = DEFAULT_CONTENT_LANGUAGE
-    auto_lovable_base_dir = ""
-    auto_gcs_upload_enabled = False
-    auto_gcs_bucket = ""
-    auto_gcs_country_folder = ""
-    auto_gcs_run_folder = ""
-    auto_upload_current = True
-    auto_upload_archive = True
+        auto_foreign_hq_only = default_foreign_hq_only_export(run_mode)
+        auto_bucket_size = 500
+        auto_content_language = DEFAULT_CONTENT_LANGUAGE
+        auto_lovable_base_dir = ""
+        auto_gcs_upload_enabled = False
+        auto_gcs_bucket = ""
+        auto_gcs_country_folder = ""
+        auto_gcs_run_folder = ""
+        auto_upload_current = True
+        auto_upload_archive = True
 
-    if auto_lovable_export_enabled:
-        _uploaded_filename = getattr(uploaded, "name", "") or ""
-        _country_default = resolve_auto_export_country_default(
-            default_country or "", _uploaded_filename, SUPPORTED_DEFAULT_INPUT_COUNTRIES)
+        if auto_lovable_export_enabled:
+            ae3, ae4 = st.columns(2)
+            auto_foreign_hq_only = ae3.checkbox(
+                "Foreign-HQ-only export",
+                value=default_foreign_hq_only_export(run_mode),
+                key="auto_lovable_foreign_hq_only")
+            auto_bucket_size = ae4.number_input(
+                "Bucket size", min_value=1, value=500, step=50,
+                key="auto_lovable_bucket_size")
 
-        ae1, ae2 = st.columns(2)
-        auto_export_country = ae1.text_input(
-            "Export country", value=_country_default,
-            key="auto_lovable_export_country",
-            help="Defaults to the selected \"Default input country\", else a "
-                 "guess from the uploaded filename. Always overridable.")
-        auto_lovable_callers_raw = ae2.text_input(
-            "Cold callers (comma-separated)", value=DEFAULT_COLD_CALLERS_TEXT,
-            key="auto_lovable_callers")
+            auto_content_language = st.selectbox(
+                "Lovable content language", list(SUPPORTED_CONTENT_LANGUAGES),
+                index=list(SUPPORTED_CONTENT_LANGUAGES).index(DEFAULT_CONTENT_LANGUAGE),
+                key="auto_lovable_content_language",
+                help=LOVABLE_CONTENT_LANGUAGE_HELP_TEXT)
 
-        ae3, ae4 = st.columns(2)
-        auto_foreign_hq_only = ae3.checkbox(
-            "Foreign-HQ-only export",
-            value=default_foreign_hq_only_export(run_mode),
-            key="auto_lovable_foreign_hq_only")
-        auto_bucket_size = ae4.number_input(
-            "Bucket size", min_value=1, value=500, step=50,
-            key="auto_lovable_bucket_size")
+            auto_lovable_base_dir = st.text_input(
+                "Local Lovable output folder (base)",
+                value=default_auto_lovable_base_folder(auto_export_country),
+                key="auto_lovable_output_base_dir",
+                help="A run-specific timestamped subfolder is created here "
+                     "automatically once the batch completes.")
+            st.caption(f"Preview: `{auto_lovable_base_dir}/<run_timestamp>/`")
 
-        auto_content_language = st.selectbox(
-            "Lovable content language", list(SUPPORTED_CONTENT_LANGUAGES),
-            index=list(SUPPORTED_CONTENT_LANGUAGES).index(DEFAULT_CONTENT_LANGUAGE),
-            key="auto_lovable_content_language",
-            help=LOVABLE_CONTENT_LANGUAGE_HELP_TEXT)
+            auto_gcs_upload_enabled = st.checkbox(
+                "After Lovable JSON export, upload to Google Cloud Storage",
+                value=True, key="auto_lovable_gcs_upload_enabled")
 
-        auto_lovable_base_dir = st.text_input(
-            "Local Lovable output folder (base)",
-            value=default_auto_lovable_base_folder(auto_export_country),
-            key="auto_lovable_output_base_dir",
-            help="A run-specific timestamped subfolder is created here "
-                 "automatically once the batch completes.")
-        st.caption(f"Preview: `{auto_lovable_base_dir}/<run_timestamp>/`")
+            if auto_gcs_upload_enabled:
+                _auto_default_bucket = get_secret_or_env(_GCS_BUCKET_NAME_KEY) or DEFAULT_GCS_BUCKET
+                _auto_base_prefix = get_secret_or_env(_GCS_BASE_PREFIX_KEY)
+                _auto_default_prefix = default_gcs_country_prefix(
+                    auto_export_country, _auto_base_prefix)
 
-        auto_gcs_upload_enabled = st.checkbox(
-            "After Lovable JSON export, upload to Google Cloud Storage",
-            value=True, key="auto_lovable_gcs_upload_enabled")
+                ag1, ag2 = st.columns(2)
+                auto_gcs_bucket = ag1.text_input(
+                    "GCS bucket", value=_auto_default_bucket, key="auto_lovable_gcs_bucket")
+                auto_gcs_country_folder = ag2.text_input(
+                    "GCS prefix/path (e.g. <country>)", value=_auto_default_prefix,
+                    key="auto_lovable_gcs_country_folder")
+                auto_gcs_run_folder = st.text_input(
+                    "GCS run folder",
+                    value=default_gcs_run_folder(run_mode, _dt.now()),
+                    key="auto_lovable_gcs_run_folder")
 
-        if auto_gcs_upload_enabled:
-            _auto_default_bucket = get_secret_or_env(_GCS_BUCKET_NAME_KEY) or DEFAULT_GCS_BUCKET
-            _auto_base_prefix = get_secret_or_env(_GCS_BASE_PREFIX_KEY)
-            _auto_default_prefix = default_gcs_country_prefix(
-                auto_export_country, _auto_base_prefix)
+                au1, au2 = st.columns(2)
+                auto_upload_current = au1.checkbox(
+                    f"Overwrite {normalize_gcs_prefix(auto_gcs_country_folder) or '<prefix>'}/current/",
+                    value=True, key="auto_lovable_gcs_upload_current")
+                auto_upload_archive = au2.checkbox(
+                    f"Archive to {normalize_gcs_prefix(auto_gcs_country_folder) or '<prefix>'}"
+                    f"/runs/{normalize_gcs_prefix(auto_gcs_run_folder) or '<run_folder>'}/",
+                    value=True, key="auto_lovable_gcs_upload_archive")
 
-            ag1, ag2 = st.columns(2)
-            auto_gcs_bucket = ag1.text_input(
-                "GCS bucket", value=_auto_default_bucket, key="auto_lovable_gcs_bucket")
-            auto_gcs_country_folder = ag2.text_input(
-                "GCS prefix/path (e.g. <country>)", value=_auto_default_prefix,
-                key="auto_lovable_gcs_country_folder")
-            auto_gcs_run_folder = st.text_input(
-                "GCS run folder",
-                value=default_gcs_run_folder(run_mode, _dt.now()),
-                key="auto_lovable_gcs_run_folder")
-
-            au1, au2 = st.columns(2)
-            auto_upload_current = au1.checkbox(
-                f"Overwrite {normalize_gcs_prefix(auto_gcs_country_folder) or '<prefix>'}/current/",
-                value=True, key="auto_lovable_gcs_upload_current")
-            auto_upload_archive = au2.checkbox(
-                f"Archive to {normalize_gcs_prefix(auto_gcs_country_folder) or '<prefix>'}"
-                f"/runs/{normalize_gcs_prefix(auto_gcs_run_folder) or '<run_folder>'}/",
-                value=True, key="auto_lovable_gcs_upload_archive")
-
-    auto_export_error = validate_auto_export_settings(
-        auto_export_enabled=auto_lovable_export_enabled,
-        export_country=auto_export_country,
-        cold_callers=parse_cold_callers(auto_lovable_callers_raw),
-        auto_gcs_upload_enabled=auto_gcs_upload_enabled,
-        gcs_bucket=auto_gcs_bucket,
-        gcs_prefix=auto_gcs_country_folder,
-        upload_current=auto_upload_current,
-        upload_archive=auto_upload_archive,
-    )
-    if auto_export_error:
-        st.error(auto_export_error)
+        auto_export_error = validate_auto_export_settings(
+            auto_export_enabled=auto_lovable_export_enabled,
+            export_country=auto_export_country,
+            cold_callers=parse_cold_callers(auto_lovable_callers_raw),
+            auto_gcs_upload_enabled=auto_gcs_upload_enabled,
+            gcs_bucket=auto_gcs_bucket,
+            gcs_prefix=auto_gcs_country_folder,
+            upload_current=auto_upload_current,
+            upload_archive=auto_upload_archive,
+        )
+        if auto_export_error:
+            st.error(auto_export_error)
 
     run_disabled = (not keys_ok) or (not big_run_ok) or selected_count == 0 \
         or bool(c5_block_reason) or bool(default_country_error) \
-        or bool(ai_provider_error) or bool(auto_export_error)
+        or bool(ai_provider_error) or bool(auto_export_error) \
+        or bool(public_source_error)
 
     # ── Run ─────────────────────────────────────────────────────────────────
     st.caption(RUN_BUTTON_NOTE_TEXT)
@@ -1396,11 +1478,19 @@ def main() -> None:  # pragma: no cover - exercised only under `streamlit run`
             rich_icp_context=rich_icp_context,
             ai_signal_scoring=ai_signal_scoring,
             legacy_enrichment_mode=legacy_enrichment_mode,
+            gate_full_enrichment_on_foreign_hq=gate_full_enrichment_on_foreign_hq,
+            use_enrichment_cache=use_enrichment_cache,
+            enrichment_cache_bucket=enrichment_cache_bucket,
             deep_dive=deep_dive,
             deep_dive_min_score=deep_dive_min_score,
             deep_dive_on_foreign_hq=deep_dive_on_foreign_hq,
             verify_quotes=verify_quotes,
             auto_correct_quotes=auto_correct_quotes,
+            public_source_signal_enrichment=public_source_signal_enrichment,
+            public_source_signal_query=public_source_signal_query,
+            public_source_base_url=public_source_base_url,
+            public_source_label=public_source_label,
+            public_source_max_pages=public_source_max_pages,
             # "compare" / "compare_triple" run their own dedicated path below;
             # the config itself stays anthropic unless OpenAI-only was
             # explicitly selected.

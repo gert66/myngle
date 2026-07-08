@@ -16,8 +16,12 @@ import pytest
 from export_lead_prioritizer_to_lovable_json import (
     FOREIGN_HQ_SIGNAL_LABEL,
     LovableExportError,
+    classify_curated_evidence,
     export_batch_output_tables_to_lovable_json,
     export_workbook_to_lovable_json,
+    has_topical_keywords,
+    is_domain_relevant_for_url,
+    is_generic_or_raw_text,
     is_technical_reason,
     main as export_cli_main,
     parse_key_source_links,
@@ -763,6 +767,34 @@ def test_detail_exposes_detected_sector_fields(tmp_path):
     assert detail["sector_source_title"] == "About Acme"
 
 
+def test_blank_sector_evidence_url_does_not_crash_vendor_contamination_check(tmp_path):
+    """Lusha-mapped sectors (Lusha enrichment plan, Stap 2) have no Serper
+    evidence URL at all, so ``sector_evidence_url`` is now routinely blank.
+    Excel round-trips a blank cell in an otherwise-populated column as a
+    float NaN, not an empty string or None -- the vendor-contamination check
+    must tolerate that (previously crashed: 'float' object has no attribute
+    'strip'), and a NaN URL must never be mistaken for a hosted careers
+    platform."""
+    enriched = [
+        enriched_row(
+            source_index=1, company_name="Acme Brasil", domain="acme.com.br",
+            industry="", detected_industry="Consumer goods",
+            sector_evidence_url="https://acme.com/about",
+        ),
+        enriched_row(
+            source_index=2, company_name="Zeta Ltd", domain="zeta.com",
+            industry="", detected_industry="Chemicals",
+            # sector_evidence_url intentionally omitted -- pandas fills this
+            # cell with NaN because the column exists (row 1 set it).
+        ),
+    ]
+    _, out_dir = run_export(tmp_path, enriched)
+
+    detail = detail_for(out_dir, "Zeta Ltd")
+    assert detail["detected_industry"] == "Chemicals"
+    assert detail["industry"] == "Chemicals"
+
+
 def test_sector_industry_not_a_visible_commercial_driver(tmp_path):
     enriched = [enriched_row(detected_industry="Retail")]
     evidence = [
@@ -1407,6 +1439,119 @@ def test_own_domain_labeled_official_website_no_duplicates(tmp_path):
     assert dorc_home_entries[0]["label"] == "Official website"
 
 
+class TestRawCountryListRecognizedAsInternationalTopic:
+    """Real-run finding (fresh live Serper call, same Adecco lead): a raw
+    list of country names -- "We're present in 12 sites across the
+    Americas: Antilles-Guyane Argentina Brazil Canada Chile Colombia
+    Ecuador Mexico Peru Puerto Rico Uruguay United States" -- never uses
+    any of the topic-vocabulary words ("countries", "international",
+    "global", ...), so has_topical_keywords rejected it as off-topic even
+    though it is obviously strong international-footprint evidence.
+    "sites" belongs in the same vocabulary bucket as the already-listed
+    "offices"/"branches"/"stores"/"locations"."""
+
+    _TEXT = (
+        "We're present in 12 sites across the Americas: Antilles-Guyane "
+        "Argentina Brazil Canada Chile Colombia Ecuador Mexico Peru "
+        "Puerto Rico Uruguay United States"
+    )
+
+    def test_has_topical_keywords_now_true(self):
+        assert has_topical_keywords(self._TEXT, "international_profile") is True
+
+    def test_classify_curated_evidence_accepts_it(self):
+        signal = {
+            "signal_name": "international_profile",
+            "evidence": self._TEXT,
+            "evidence_url": "https://careers.adeccogroup.com/en/our-locations",
+            "evidence_title": "Our Locations - Adecco Group",
+        }
+        result = classify_curated_evidence(
+            signal, employee_range=None,
+            own_domains={"adecco.com", "adeccogroup.com"}, company_name="Adecco")
+        assert result["rejected_reason"] is None
+        assert result["evidence"] == self._TEXT
+
+
+class TestTruncatedSnippetNotRejectedAsEventFragment:
+    """Real-run finding: Adecco's international_profile evidence
+    ("...active in 62 countries, with ...") was misclassified as a
+    promotional event/marketing fragment purely because it ends in "...",
+    which is how Google/Serper marks an ordinary truncated snippet, not a
+    "coming soon..." teaser."""
+
+    def test_bare_trailing_ellipsis_is_not_generic(self):
+        text = (
+            "Adecco is part of The Adecco Group and headquartered in "
+            "Zurich, Switzerland. We are a leading global workforce "
+            "solutions provider active in 62 countries, with ..."
+        )
+        assert is_generic_or_raw_text(text) is False
+
+    def test_genuine_teaser_phrase_still_rejected(self):
+        assert is_generic_or_raw_text("New office opening -- coming soon...") is True
+
+    def test_classify_curated_evidence_accepts_the_real_adecco_snippet(self):
+        signal = {
+            "signal_name": "international_profile",
+            "evidence": (
+                "Adecco is part of The Adecco Group and headquartered in "
+                "Zurich, Switzerland. We are a leading global workforce "
+                "solutions provider active in 62 countries, with ..."
+            ),
+            "evidence_url": "https://www.adecco.com/employers/who-we-are",
+            "evidence_title": "Who we are",
+        }
+        result = classify_curated_evidence(
+            signal, employee_range=None, own_domains={"adecco.com"}, company_name="Adecco")
+        assert result["rejected_reason"] is None
+        assert result["evidence"] == signal["evidence"]
+
+
+class TestExternalSourceRelevanceChecksTitleToo:
+    """Real-run finding: Clariant's Wikipedia evidence ("...the public
+    company encompasses 68 subsidiaries...") was rejected as an unrelated
+    domain because the extracted sentence never repeats "Clariant" -- even
+    though the source page is titled "Clariant - Wikipedia"."""
+
+    def test_title_alone_establishes_relevance(self):
+        assert is_domain_relevant_for_url(
+            "https://en.wikipedia.org/wiki/Clariant",
+            own_domains={"clariant.com"},
+            company_name="Clariant",
+            context_text="The public company encompasses 68 subsidiaries in 36 countries.",
+            strict_third_party=True,
+            evidence_title="Clariant - Wikipedia",
+        ) is True
+
+    def test_no_title_and_no_mention_still_rejected(self):
+        assert is_domain_relevant_for_url(
+            "https://en.wikipedia.org/wiki/Clariant",
+            own_domains={"clariant.com"},
+            company_name="Clariant",
+            context_text="The public company encompasses 68 subsidiaries in 36 countries.",
+            strict_third_party=True,
+            evidence_title=None,
+        ) is False
+
+    def test_classify_curated_evidence_accepts_the_real_clariant_snippet(self):
+        signal = {
+            "signal_name": "international_profile",
+            "evidence": (
+                "Headquartered in Muttenz, Switzerland, the public company "
+                "encompasses 68 subsidiaries in 36 countries (2023). Major "
+                "manufacturing sites are located in Europe, North America, "
+                "South America, China, and India."
+            ),
+            "evidence_url": "https://en.wikipedia.org/wiki/Clariant",
+            "evidence_title": "Clariant - Wikipedia",
+        }
+        result = classify_curated_evidence(
+            signal, employee_range=None, own_domains={"clariant.com"}, company_name="Clariant")
+        assert result["rejected_reason"] is None
+        assert result["evidence"] == signal["evidence"]
+
+
 def test_commercial_fit_drivers_not_inconsistent_with_what_is_hot(tmp_path):
     signals = [
         {"source_index": 1, "signal_name": "international_profile", "signal_score": 2,
@@ -1428,6 +1573,56 @@ def test_commercial_fit_drivers_not_inconsistent_with_what_is_hot(tmp_path):
     assert "Learning and development" not in summary_line
     drivers_by_label = {d["label"]: d for d in ui["commercial_fit_drivers"]}
     assert "learning and development or onboarding needs" not in drivers_by_label
+
+
+def test_company_size_complexity_driver_notes_missing_external_source(tmp_path):
+    """company_size_complexity (Lusha size data, Stap 3/4) never has an
+    evidence_url -- it comes from the spreadsheet's own structured columns,
+    not a web page. A positive driver with zero evidence_sources must say
+    so explicitly instead of looking like an unsubstantiated Strong claim."""
+    signals = [
+        {"source_index": 1, "signal_name": "company_size_complexity", "signal_score": 2,
+         "evidence_quote": "Lusha company size data: 10,001-100,000 employees."},
+    ]
+    row = _dorc_row(employee_range="10001-100000")
+    _, out_dir = run_export(tmp_path, [row], signals=signals,
+                            export_country="Netherlands", foreign_hq_only=False)
+
+    detail = detail_for(out_dir, "DORC Dutch Ophthalmic Research Center (International)")
+    drivers_by_label = {d["label"]: d for d in detail["ui_payload"]["commercial_fit_drivers"]}
+    driver = drivers_by_label["Possible onboarding need"]
+    assert driver["strength"] == "Strong"
+    assert "evidence_source_url" not in driver
+    assert "evidence_sources" not in driver
+    assert driver["note"] == (
+        "Sourced from the company's own structured data (e.g. Lusha), not a "
+        "web page -- no external link available."
+    )
+    assert "cross_check_url" not in driver
+
+
+def test_company_size_complexity_driver_gets_linkedin_cross_check_link(tmp_path):
+    """When the lead's own linkedin_url is known, the no-source
+    "Possible onboarding need" driver gets a clearly-labeled cross-check
+    link -- NOT evidence_source_url/evidence_sources, since LinkedIn did
+    not produce the Lusha employee-count figure and must never be implied
+    to be its source."""
+    signals = [
+        {"source_index": 1, "signal_name": "company_size_complexity", "signal_score": 2,
+         "evidence_quote": "Lusha company size data: 10,001-100,000 employees."},
+    ]
+    row = _dorc_row(employee_range="10001-100000",
+                     linkedin_url="https://www.linkedin.com/company/dorc")
+    _, out_dir = run_export(tmp_path, [row], signals=signals,
+                            export_country="Netherlands", foreign_hq_only=False)
+
+    detail = detail_for(out_dir, "DORC Dutch Ophthalmic Research Center (International)")
+    drivers_by_label = {d["label"]: d for d in detail["ui_payload"]["commercial_fit_drivers"]}
+    driver = drivers_by_label["Possible onboarding need"]
+    assert driver["cross_check_url"] == "https://www.linkedin.com/company/dorc"
+    assert driver["cross_check_label"] == "Verify on LinkedIn (not the source of this figure)"
+    assert "evidence_source_url" not in driver
+    assert "evidence_sources" not in driver
 
 
 def test_no_visible_ui_payload_field_contains_shorthand_or_raw_tokens(tmp_path):

@@ -145,6 +145,43 @@ class TestFlatten:
         assert row["what_is_hot_app"] == "Foreign HQ signal: Germany"
         assert row["v2_pipeline_mode"] == "full_v2_single_lead"
 
+    def test_flattens_lusha_audit_fields(self):
+        # Regression: lusha_main_industry/lusha_sub_industry (Stap 2) and
+        # company_size_complexity_source/lusha_employees/lusha_revenue
+        # (Stap 3) must actually reach the Enriched Leads export -- these
+        # exist on LeadPrioritizationResult but only appear in the Excel
+        # output when also listed in _RESULT_FLAT_FIELDS.
+        row = flatten_result_for_excel(
+            _sample_result(
+                lusha_main_industry="Manufacturing",
+                lusha_sub_industry="Industrial Machinery & Equipment",
+                sector_source="lusha_mapped",
+                company_size_complexity_source="lusha",
+                lusha_employees="201-500",
+                lusha_revenue="$50M - $100M",
+            ), {"c": "Acme", "d": "acme.com"}, source_index=1, run_success=True, run_error="")
+        assert row["lusha_main_industry"] == "Manufacturing"
+        assert row["lusha_sub_industry"] == "Industrial Machinery & Equipment"
+        assert row["sector_source"] == "lusha_mapped"
+        assert row["company_size_complexity_source"] == "lusha"
+        assert row["lusha_employees"] == "201-500"
+        assert row["lusha_revenue"] == "$50M - $100M"
+
+    def test_flattens_ai_hq_usage_audit_fields(self):
+        # Regression: found while comparing ai_hq_input_tokens before/after
+        # the Lusha enrichment plan's Stap 5 -- these pre-existing fields
+        # were on LeadPrioritizationResult but missing from
+        # _RESULT_FLAT_FIELDS, so they never reached the Excel export.
+        row = flatten_result_for_excel(
+            _sample_result(
+                ai_hq_input_tokens=2500, ai_hq_output_tokens=260,
+                ai_hq_total_tokens=2760, ai_hq_estimated_cost_usd=0.0038,
+            ), {"c": "Acme", "d": "acme.com"}, source_index=1, run_success=True, run_error="")
+        assert row["ai_hq_input_tokens"] == 2500
+        assert row["ai_hq_output_tokens"] == 260
+        assert row["ai_hq_total_tokens"] == 2760
+        assert row["ai_hq_estimated_cost_usd"] == 0.0038
+
     def test_flattens_rich_icp_context_fields(self):
         row = flatten_result_for_excel(
             _sample_result(
@@ -420,6 +457,63 @@ class TestRunBatch:
         cfg = BatchRunConfig(company_name_column="company", domain_column="domain")
         assert cfg.legacy_enrichment_mode is False
 
+    def test_public_source_signal_enrichment_defaults(self):
+        cfg = BatchRunConfig(company_name_column="company", domain_column="domain")
+        assert cfg.public_source_signal_enrichment is False
+        assert cfg.public_source_signal_query == "vacancies"
+        assert cfg.public_source_base_url == ""
+        assert cfg.public_source_label == ""
+        assert cfg.public_source_max_pages == 3
+
+    @pytest.mark.parametrize("public_source_signal_enrichment", [False, True])
+    def test_public_source_signal_enrichment_passthrough_independent_of_other_flags(
+        self, public_source_signal_enrichment,
+    ):
+        seen = {}
+
+        def _fake(lead_input, **kwargs):
+            seen.update(kwargs)
+            return _sample_result(company_name=lead_input.company_name)
+
+        cfg = BatchRunConfig(
+            company_name_column="company", domain_column="domain",
+            run_mode="full", row_limit=1,
+            public_source_signal_enrichment=public_source_signal_enrichment,
+            public_source_signal_query="internships",
+            public_source_base_url="https://example-registry.test/search",
+            public_source_label="Example registry",
+            public_source_max_pages=5,
+        )
+        with patch("lead_prioritizer_batch_core.prioritize_single_lead", side_effect=_fake):
+            run_batch_dataframe(self._df, cfg, "SERP", "ANTH", firecrawl_api_key="fc-key")
+
+        assert seen.get("public_source_signal_enrichment") is public_source_signal_enrichment
+        assert seen.get("public_source_signal_query") == "internships"
+        assert seen.get("public_source_base_url") == "https://example-registry.test/search"
+        assert seen.get("public_source_label") == "Example registry"
+        assert seen.get("public_source_max_pages") == 5
+        assert seen.get("firecrawl_api_key") == "fc-key"
+        # Independent of every other opt-in flag.
+        assert seen.get("legacy_enrichment_mode") is False
+        assert seen.get("compose_icp_context") is False
+        assert seen.get("ai_signal_scoring") is False
+
+    def test_public_source_signal_enrichment_off_still_passes_defaults(self):
+        # Off by default: missing Firecrawl key / base URL blocks only the
+        # feature itself (inside the collector), never a normal run.
+        seen = {}
+
+        def _fake(lead_input, **kwargs):
+            seen.update(kwargs)
+            return _sample_result(company_name=lead_input.company_name)
+
+        cfg = BatchRunConfig(company_name_column="company", domain_column="domain",
+                             run_mode="full", row_limit=1)
+        with patch("lead_prioritizer_batch_core.prioritize_single_lead", side_effect=_fake):
+            run_batch_dataframe(self._df, cfg, "SERP", "ANTH")
+        assert seen.get("public_source_signal_enrichment") is False
+        assert seen.get("public_source_base_url") == ""
+
     def test_continue_on_error(self):
         calls = {"n": 0}
 
@@ -519,6 +613,254 @@ class TestRunBatch:
         # Acme (ok) + Beta (error) then stop → 2 rows, Gamma never processed.
         assert out["enriched_leads"].shape[0] == 2
         assert out["run_summary"].iloc[0]["processed_rows"] == 2
+
+
+# ---------------------------------------------------------------------------
+# Lusha row-field auto-detection (Lusha enrichment plan, Stap 2 + Stap 3).
+# No new BatchRunConfig column-name setting: detected directly from a row
+# dict's own keys, case-insensitively. A row with none of these column
+# names (any non-Lusha dataset) yields all-None -- exactly "no Lusha data
+# available", the existing fallback for every LeadInput.lusha_* consumer.
+# ---------------------------------------------------------------------------
+
+class TestLushaFieldsFromRow:
+    def test_detects_exact_lusha_column_names(self):
+        row = {
+            "Company Name": "Acme AG",
+            "Company Main Industry": "Manufacturing",
+            "Company Sub Industry": "Industrial Machinery & Equipment",
+            "Company Description": "We make things.",
+            "Company Specialties": "machinery, engineering",
+            "Company Number of Employees": "201-500",
+            "Company Revenue": "$50M - $100M",
+        }
+        out = bc._lusha_fields_from_row(row)
+        assert out == {
+            "lusha_main_industry": "Manufacturing",
+            "lusha_sub_industry": "Industrial Machinery & Equipment",
+            "lusha_description": "We make things.",
+            "lusha_specialties": "machinery, engineering",
+            "lusha_employees": "201-500",
+            "lusha_revenue": "$50M - $100M",
+        }
+
+    def test_case_and_spacing_insensitive(self):
+        row = {"company_main_industry": "Healthcare", "COMPANY SUB INDUSTRY": "Hospitals & Clinics"}
+        out = bc._lusha_fields_from_row(row)
+        assert out["lusha_main_industry"] == "Healthcare"
+        assert out["lusha_sub_industry"] == "Hospitals & Clinics"
+
+    def test_non_lusha_row_yields_all_none(self):
+        row = {"company": "Acme", "domain": "acme.com"}
+        out = bc._lusha_fields_from_row(row)
+        assert out == {
+            "lusha_main_industry": None, "lusha_sub_industry": None,
+            "lusha_description": None, "lusha_specialties": None,
+            "lusha_employees": None, "lusha_revenue": None,
+        }
+
+    def test_blank_values_treated_as_none(self):
+        row = {"Company Main Industry": "", "Company Description": "   "}
+        out = bc._lusha_fields_from_row(row)
+        assert out["lusha_main_industry"] is None
+        assert out["lusha_description"] is None
+
+    def test_nan_string_treated_as_none(self):
+        row = {"Company Main Industry": "nan"}
+        out = bc._lusha_fields_from_row(row)
+        assert out["lusha_main_industry"] is None
+
+
+class TestLushaFieldsWiredIntoLeadInput:
+    def test_run_batch_dataframe_passes_lusha_fields_to_prioritize_single_lead(self):
+        df = pd.DataFrame({
+            "company": ["Acme"],
+            "domain": ["acme.com"],
+            "Company Main Industry": ["Manufacturing"],
+            "Company Sub Industry": ["Industrial Machinery & Equipment"],
+        })
+        seen = {}
+
+        def _fake(lead_input, **kwargs):
+            seen["lusha_main_industry"] = lead_input.lusha_main_industry
+            seen["lusha_sub_industry"] = lead_input.lusha_sub_industry
+            return _sample_result(company_name=lead_input.company_name)
+
+        cfg = BatchRunConfig(company_name_column="company", domain_column="domain",
+                             run_mode="full", row_limit=1)
+        with patch("lead_prioritizer_batch_core.prioritize_single_lead", side_effect=_fake):
+            run_batch_dataframe(df, cfg, "SERP", "ANTH")
+        assert seen["lusha_main_industry"] == "Manufacturing"
+        assert seen["lusha_sub_industry"] == "Industrial Machinery & Equipment"
+
+    def test_non_lusha_dataframe_passes_none_lusha_fields(self):
+        seen = {}
+
+        def _fake(lead_input, **kwargs):
+            seen["lusha_main_industry"] = lead_input.lusha_main_industry
+            return _sample_result(company_name=lead_input.company_name)
+
+        cfg = BatchRunConfig(company_name_column="company", domain_column="domain",
+                             run_mode="full", row_limit=1)
+        with patch("lead_prioritizer_batch_core.prioritize_single_lead", side_effect=_fake):
+            run_batch_dataframe(
+                pd.DataFrame({"company": ["Acme"], "domain": ["acme.com"]}), cfg, "SERP", "ANTH")
+        assert seen["lusha_main_industry"] is None
+
+
+# ---------------------------------------------------------------------------
+# Shared GCS enrichment cache (opt-in) — BatchRunConfig.use_enrichment_cache.
+# Regression: default (off) must never load/save a cache index or pass a
+# cache_index other than None. When on: one index download per distinct
+# country actually present, correct per-row index for a mixed-country
+# dataset, and the run_summary cache hit/miss delta columns.
+# ---------------------------------------------------------------------------
+
+class TestEnrichmentCacheWiring:
+    _df = pd.DataFrame({
+        "company": ["Acme", "Beta"],
+        "domain": ["acme.com", "beta.com"],
+    })
+
+    def test_default_off_never_loads_or_passes_cache_index(self):
+        seen = {}
+
+        def _fake(lead_input, **kwargs):
+            seen.update(kwargs)
+            return _sample_result(company_name=lead_input.company_name)
+
+        cfg = BatchRunConfig(company_name_column="company", domain_column="domain",
+                             run_mode="full", row_limit=1)
+        with patch("lead_prioritizer_batch_core.prioritize_single_lead", side_effect=_fake), \
+             patch("enrichment_cache.load_cache_index") as mock_load, \
+             patch("enrichment_cache.save_cache_index") as mock_save:
+            run_batch_dataframe(self._df, cfg, "SERP", "ANTH")
+        assert seen.get("cache_index") is None
+        mock_load.assert_not_called()
+        mock_save.assert_not_called()
+
+    def test_default_off_run_summary_has_no_cache_columns(self):
+        cfg = BatchRunConfig(company_name_column="company", domain_column="domain",
+                             run_mode="full", row_limit=1)
+        with patch("lead_prioritizer_batch_core.prioritize_single_lead",
+                   side_effect=lambda li, **k: _sample_result(company_name=li.company_name)):
+            out = run_batch_dataframe(self._df, cfg, "SERP", "ANTH")
+        for col in ("serper_cache_hits", "serper_cache_misses",
+                    "firecrawl_cache_hits", "firecrawl_cache_misses"):
+            assert col not in out["run_summary"].columns
+
+    def test_enabled_downloads_once_per_distinct_country_and_saves_at_end(self):
+        loads = []
+
+        def _fake_load(bucket, country_slug):
+            loads.append((bucket, country_slug))
+            return {}
+
+        cfg = BatchRunConfig(company_name_column="company", domain_column="domain",
+                             run_mode="full", row_limit=0,
+                             use_enrichment_cache=True,
+                             enrichment_cache_bucket="test-bucket")
+        with patch("lead_prioritizer_batch_core.prioritize_single_lead",
+                   side_effect=lambda li, **k: _sample_result(company_name=li.company_name)), \
+             patch("enrichment_cache.load_cache_index", side_effect=_fake_load), \
+             patch("enrichment_cache.save_cache_index") as mock_save:
+            run_batch_dataframe(self._df, cfg, "SERP", "ANTH")
+        # Both rows default to the same country (config.default_input_country),
+        # so exactly one distinct-country download, not one per row.
+        assert loads == [("test-bucket", "italy")]
+        assert mock_save.call_count >= 1
+
+    def test_enabled_passes_loaded_index_object_to_prioritize_single_lead(self):
+        sentinel_index = {"serper|acme.com|hq": {"fetched_at": "x", "response": {}}}
+        seen = {}
+
+        def _fake(lead_input, **kwargs):
+            seen.update(kwargs)
+            return _sample_result(company_name=lead_input.company_name)
+
+        cfg = BatchRunConfig(company_name_column="company", domain_column="domain",
+                             run_mode="full", row_limit=1,
+                             use_enrichment_cache=True,
+                             enrichment_cache_bucket="test-bucket")
+        with patch("lead_prioritizer_batch_core.prioritize_single_lead", side_effect=_fake), \
+             patch("enrichment_cache.load_cache_index", return_value=sentinel_index), \
+             patch("enrichment_cache.save_cache_index"):
+            run_batch_dataframe(self._df, cfg, "SERP", "ANTH")
+        assert seen.get("cache_index") is sentinel_index
+
+    def test_mixed_country_dataset_uses_correct_per_row_index(self):
+        df = pd.DataFrame({
+            "company": ["Acme IT", "Beta NL"],
+            "domain": ["acme.it", "beta.nl"],
+            "country": ["Italy", "Netherlands"],
+        })
+        indexes_by_slug = {
+            "italy": {"marker": "italy-index"},
+            "netherlands": {"marker": "netherlands-index"},
+        }
+        seen_per_company = {}
+
+        def _fake(lead_input, **kwargs):
+            seen_per_company[lead_input.company_name] = kwargs.get("cache_index")
+            return _sample_result(company_name=lead_input.company_name)
+
+        cfg = BatchRunConfig(company_name_column="company", domain_column="domain",
+                             input_country_column="country",
+                             run_mode="full", row_limit=0,
+                             use_enrichment_cache=True,
+                             enrichment_cache_bucket="test-bucket")
+        with patch("lead_prioritizer_batch_core.prioritize_single_lead", side_effect=_fake), \
+             patch("enrichment_cache.load_cache_index",
+                   side_effect=lambda bucket, slug: indexes_by_slug[slug]), \
+             patch("enrichment_cache.save_cache_index"):
+            run_batch_dataframe(df, cfg, "SERP", "ANTH")
+
+        assert seen_per_company["Acme IT"] is indexes_by_slug["italy"]
+        assert seen_per_company["Beta NL"] is indexes_by_slug["netherlands"]
+
+    def test_enabled_run_summary_reports_cache_hit_miss_delta(self):
+        import usage_tracker
+
+        def _fake(lead_input, **kwargs):
+            usage_tracker.record_cache_hit("serper")
+            usage_tracker.record_cache_miss("serper")
+            usage_tracker.record_cache_hit("firecrawl")
+            return _sample_result(company_name=lead_input.company_name)
+
+        cfg = BatchRunConfig(company_name_column="company", domain_column="domain",
+                             run_mode="full", row_limit=0,
+                             use_enrichment_cache=True,
+                             enrichment_cache_bucket="test-bucket")
+        with patch("lead_prioritizer_batch_core.prioritize_single_lead", side_effect=_fake), \
+             patch("enrichment_cache.load_cache_index", return_value={}), \
+             patch("enrichment_cache.save_cache_index"):
+            out = run_batch_dataframe(self._df, cfg, "SERP", "ANTH")
+        summary = out["run_summary"].iloc[0]
+        assert summary["serper_cache_hits"] == 2   # one per row (Acme, Beta)
+        assert summary["serper_cache_misses"] == 2
+        assert summary["firecrawl_cache_hits"] == 2
+        assert summary["firecrawl_cache_misses"] == 0
+
+    def test_failing_download_falls_back_to_none_index_without_crash(self):
+        seen = {}
+
+        def _fake(lead_input, **kwargs):
+            seen.update(kwargs)
+            return _sample_result(company_name=lead_input.company_name)
+
+        cfg = BatchRunConfig(company_name_column="company", domain_column="domain",
+                             run_mode="full", row_limit=1,
+                             use_enrichment_cache=True,
+                             enrichment_cache_bucket="test-bucket")
+        # A failing download degrades to {} (enrichment_cache.load_cache_index's
+        # own contract) -- confirm the batch run still completes successfully
+        # with an (empty-but-not-None) cache_index rather than crashing.
+        with patch("lead_prioritizer_batch_core.prioritize_single_lead", side_effect=_fake), \
+             patch("enrichment_cache.load_cache_index", return_value={}), \
+             patch("enrichment_cache.save_cache_index"):
+            out = run_batch_dataframe(self._df, cfg, "SERP", "ANTH")
+        assert seen.get("cache_index") == {}
+        assert out["enriched_leads"].shape[0] == 1
 
 
 # ---------------------------------------------------------------------------
@@ -1600,6 +1942,217 @@ class TestForeignHQOnlyMode:
         assert len(out["enriched_leads"]) == 2
 
 
+class TestForeignHqOnlyEnrichmentCacheWiring:
+    """run_batch_foreign_hq_only's Phase 1 (hq_only run_batch_dataframe) and
+    Phase 3 (_run_gated_full_enrichment) each run their own independent
+    cache load/save cycle; the combined run_summary counts must cover BOTH
+    phases, not just Phase 3."""
+
+    _df = pd.DataFrame({
+        "company": ["Confirmed Foreign Co", "Local Domestic Co"],
+        "domain": ["confirmed.com.br", "local.com.br"],
+    })
+    _cfg = BatchRunConfig(
+        company_name_column="company", domain_column="domain",
+        run_mode=FOREIGN_HQ_ONLY_MODE, row_limit=2,
+        default_input_country="Brazil",
+        use_enrichment_cache=True, enrichment_cache_bucket="test-bucket",
+    )
+
+    def test_default_off_never_touches_cache(self):
+        cfg = BatchRunConfig(
+            company_name_column="company", domain_column="domain",
+            run_mode=FOREIGN_HQ_ONLY_MODE, row_limit=2,
+            default_input_country="Brazil",
+        )
+        fake = _fake_prioritize_for_foreign_hq(
+            {"Confirmed Foreign Co": 3.0, "Local Domestic Co": 0.0})
+        with patch("lead_prioritizer_batch_core.prioritize_single_lead", side_effect=fake), \
+             patch("enrichment_cache.load_cache_index") as mock_load, \
+             patch("enrichment_cache.save_cache_index") as mock_save:
+            out = run_batch_foreign_hq_only(self._df, cfg, "S", "A")
+        mock_load.assert_not_called()
+        mock_save.assert_not_called()
+        for col in ("serper_cache_hits", "serper_cache_misses",
+                    "firecrawl_cache_hits", "firecrawl_cache_misses"):
+            assert col not in out["run_summary"].columns
+
+    def test_enabled_downloads_and_saves_for_both_phases(self):
+        fake = _fake_prioritize_for_foreign_hq(
+            {"Confirmed Foreign Co": 3.0, "Local Domestic Co": 0.0})
+        with patch("lead_prioritizer_batch_core.prioritize_single_lead", side_effect=fake), \
+             patch("enrichment_cache.load_cache_index", return_value={}) as mock_load, \
+             patch("enrichment_cache.save_cache_index") as mock_save:
+            out = run_batch_foreign_hq_only(self._df, self._cfg, "S", "A")
+        # At least once for Phase 1 (hq_only run_batch_dataframe) and once
+        # for Phase 3 (_run_gated_full_enrichment) — both run independently.
+        assert mock_load.call_count >= 2
+        assert mock_save.call_count >= 2
+        assert len(out["enriched_leads"]) == 2
+
+    def test_enabled_run_summary_reports_combined_hit_miss_delta(self):
+        import usage_tracker
+
+        def _fake(lead_input, **kwargs):
+            usage_tracker.record_cache_miss("serper")
+            score = 3.0 if lead_input.company_name == "Confirmed Foreign Co" else 0.0
+            if kwargs.get("run_full_v2_pipeline"):
+                return _sample_result(
+                    company_name=lead_input.company_name, domain=lead_input.domain,
+                    input_country=lead_input.input_country or "Brazil",
+                    sig_foreign_hq_score_for_next_scoring=score,
+                    final_commercial_fit_score=99.0,
+                )
+            return _sample_result(
+                company_name=lead_input.company_name, domain=lead_input.domain,
+                input_country=lead_input.input_country or "Brazil",
+                sig_foreign_hq_score_for_next_scoring=score,
+                final_commercial_fit_score=None, evidence_items=[], signals=[],
+            )
+
+        with patch("lead_prioritizer_batch_core.prioritize_single_lead", side_effect=_fake), \
+             patch("enrichment_cache.load_cache_index", return_value={}), \
+             patch("enrichment_cache.save_cache_index"):
+            out = run_batch_foreign_hq_only(self._df, self._cfg, "S", "A")
+        summary = out["run_summary"].iloc[0]
+        # 2 rows in Phase 1 (hq_only) + 1 eligible row in Phase 3 (full) = 3.
+        assert summary["serper_cache_misses"] == 3
+
+
+# ---------------------------------------------------------------------------
+# BatchRunConfig.gate_full_enrichment_on_foreign_hq: opt-in gating INSIDE the
+# regular run_batch_dataframe path, sharing _run_gated_full_enrichment with
+# run_batch_foreign_hq_only. The extraction itself is regression-tested by
+# every existing TestForeignHQOnlyMode / TestConfirmedForeignHQGate /
+# TestNonEnglishForeignHqOnlyMode* / TestExistingForeignHQOnlyModeUnaffected
+# test above still passing unchanged (run_batch_foreign_hq_only now calls the
+# shared helper internally instead of duplicating the loop).
+# ---------------------------------------------------------------------------
+
+class TestGatedFullEnrichmentInRunBatchDataframe:
+    _df = pd.DataFrame({
+        "company": ["Confirmed Foreign Co", "Local Domestic Co"],
+        "domain": ["confirmed.com.br", "local.com.br"],
+    })
+
+    def _cfg(self, **overrides):
+        base = dict(
+            company_name_column="company", domain_column="domain",
+            run_mode="full", row_limit=2, default_input_country="Brazil",
+        )
+        base.update(overrides)
+        return BatchRunConfig(**base)
+
+    def test_default_is_off(self):
+        assert BatchRunConfig(
+            company_name_column="company", domain_column="domain",
+        ).gate_full_enrichment_on_foreign_hq is False
+
+    def test_gate_off_is_byte_identical_to_pre_existing_behavior(self):
+        # HARD RULE: gate off (the default) must be 100% the existing
+        # per-row path -- no enrichment_skipped/gated_* columns anywhere,
+        # every row enriched directly regardless of HQ score.
+        fake = _fake_prioritize_for_foreign_hq(
+            {"Confirmed Foreign Co": 3.0, "Local Domestic Co": 0.0})
+        cfg = self._cfg(gate_full_enrichment_on_foreign_hq=False)
+        with patch("lead_prioritizer_batch_core.prioritize_single_lead", side_effect=fake):
+            out = run_batch_dataframe(self._df, cfg, "S", "A")
+        assert "enrichment_skipped" not in out["enriched_leads"].columns
+        assert "gated_full_enrichment_attempted_count" not in out["run_summary"].columns
+        assert "gated_full_enrichment_skipped_count" not in out["run_summary"].columns
+        assert "gated_estimated_serper_calls_saved" not in out["run_summary"].columns
+        rows = out["enriched_leads"].set_index("company_name")
+        assert rows.loc["Local Domestic Co", "final_commercial_fit_score"] == 99.0
+        assert rows.loc["Confirmed Foreign Co", "final_commercial_fit_score"] == 99.0
+
+    def test_gate_on_skips_non_confirmed_rows(self):
+        fake = _fake_prioritize_for_foreign_hq(
+            {"Confirmed Foreign Co": 3.0, "Local Domestic Co": 0.0})
+        cfg = self._cfg(gate_full_enrichment_on_foreign_hq=True)
+        with patch("lead_prioritizer_batch_core.prioritize_single_lead", side_effect=fake):
+            out = run_batch_dataframe(self._df, cfg, "S", "A")
+        rows = out["enriched_leads"].set_index("company_name")
+        assert rows.loc["Local Domestic Co", "enrichment_skipped"] == True  # noqa: E712
+        assert rows.loc["Local Domestic Co", "enrichment_skip_reason"] == "Not confirmed foreign HQ"
+        assert pd.isna(rows.loc["Local Domestic Co", "final_commercial_fit_score"])
+
+    def test_gate_on_enriches_confirmed_rows(self):
+        fake = _fake_prioritize_for_foreign_hq(
+            {"Confirmed Foreign Co": 3.0, "Local Domestic Co": 0.0})
+        cfg = self._cfg(gate_full_enrichment_on_foreign_hq=True)
+        with patch("lead_prioritizer_batch_core.prioritize_single_lead", side_effect=fake):
+            out = run_batch_dataframe(self._df, cfg, "S", "A")
+        rows = out["enriched_leads"].set_index("company_name")
+        assert rows.loc["Confirmed Foreign Co", "enrichment_skipped"] == False  # noqa: E712
+        assert rows.loc["Confirmed Foreign Co", "enrichment_skip_reason"] == ""
+        assert rows.loc["Confirmed Foreign Co", "final_commercial_fit_score"] == 99.0
+
+    def test_gate_on_run_summary_counts(self):
+        fake = _fake_prioritize_for_foreign_hq(
+            {"Confirmed Foreign Co": 3.0, "Local Domestic Co": 0.0})
+        cfg = self._cfg(gate_full_enrichment_on_foreign_hq=True)
+        with patch("lead_prioritizer_batch_core.prioritize_single_lead", side_effect=fake):
+            out = run_batch_dataframe(self._df, cfg, "S", "A")
+        summary = out["run_summary"].iloc[0].to_dict()
+        assert summary["gated_full_enrichment_attempted_count"] == 1
+        assert summary["gated_full_enrichment_skipped_count"] == 1
+        # skipped_rows * 4 -- the 4 extra non-HQ Serper calls a full v2
+        # enrichment would otherwise have made per row.
+        assert summary["gated_estimated_serper_calls_saved"] == 4
+
+    def test_gate_on_output_shape_matches_run_batch_dataframe_contract(self):
+        # deep_dive key is always present, matching run_batch_dataframe's own
+        # contract (unlike run_batch_foreign_hq_only, which omits it).
+        fake = _fake_prioritize_for_foreign_hq(
+            {"Confirmed Foreign Co": 3.0, "Local Domestic Co": 0.0})
+        cfg = self._cfg(gate_full_enrichment_on_foreign_hq=True)
+        with patch("lead_prioritizer_batch_core.prioritize_single_lead", side_effect=fake):
+            out = run_batch_dataframe(self._df, cfg, "S", "A")
+        assert set(out.keys()) == {"enriched_leads", "evidence", "signals", "deep_dive", "run_summary"}
+        assert len(out["deep_dive"]) == 0  # deep_dive off by default
+
+    def test_no_infinite_recursion_when_gate_on(self):
+        # Regression guard: Phase 1's internal hq_only sub-call must force
+        # gate_full_enrichment_on_foreign_hq=False, or run_batch_dataframe
+        # would re-enter its own gated branch forever.
+        fake = _fake_prioritize_for_foreign_hq(
+            {"Confirmed Foreign Co": 3.0, "Local Domestic Co": 0.0})
+        cfg = self._cfg(gate_full_enrichment_on_foreign_hq=True)
+        with patch("lead_prioritizer_batch_core.prioritize_single_lead", side_effect=fake):
+            out = run_batch_dataframe(self._df, cfg, "S", "A")
+        assert len(out["enriched_leads"]) == 2
+
+    def test_gate_on_reuses_full_ai_kwargs_not_a_stripped_down_call(self):
+        # Unlike run_batch_foreign_hq_only's minimal run_full_v2_pipeline=True
+        # call, the gated run_batch_dataframe path must pass the SAME
+        # ai_kwargs/flags an ungated call would build for every row (e.g.
+        # compose_caller_content_flag), so nothing already supported is
+        # silently dropped just because gating is on.
+        seen_kwargs = {}
+
+        def _fake(lead_input, **kwargs):
+            if kwargs.get("run_full_v2_pipeline"):
+                seen_kwargs.update(kwargs)
+                return _sample_result(
+                    company_name=lead_input.company_name, domain=lead_input.domain,
+                    input_country=lead_input.input_country or "Brazil",
+                    sig_foreign_hq_score_for_next_scoring=3.0,
+                    final_commercial_fit_score=99.0,
+                )
+            return _sample_result(
+                company_name=lead_input.company_name, domain=lead_input.domain,
+                input_country=lead_input.input_country or "Brazil",
+                sig_foreign_hq_score_for_next_scoring=3.0,
+                final_commercial_fit_score=None, evidence_items=[], signals=[],
+            )
+
+        cfg = self._cfg(gate_full_enrichment_on_foreign_hq=True,
+                        compose_caller_content=True)
+        with patch("lead_prioritizer_batch_core.prioritize_single_lead", side_effect=_fake):
+            run_batch_dataframe(self._df, cfg, "S", "A")
+        assert seen_kwargs.get("compose_caller_content_flag") is True
+
+
 # ---------------------------------------------------------------------------
 # Parallel chunk processing
 # ---------------------------------------------------------------------------
@@ -1827,6 +2380,37 @@ class TestParallelBatch:
         assert len(saved) == 3
         assert sorted(rep["chunk_index"] for rep, _ in saved) == [1, 2, 3]
         assert all("enriched_leads" in tab for _, tab in saved)
+
+
+class TestGateFullEnrichmentOnForeignHqParallelConsistency:
+    """Step 3: gate_full_enrichment_on_foreign_hq needs no extra plumbing in
+    run_batch_dataframe_parallel / run_single_batch_unit for the regular run
+    modes -- both just pass the same BatchRunConfig through to
+    run_batch_dataframe, which branches on the flag internally."""
+
+    _df = pd.DataFrame({
+        "company": ["Confirmed Foreign Co", "Local Domestic Co"],
+        "domain": ["confirmed.com.br", "local.com.br"],
+    })
+    _cfg = BatchRunConfig(
+        company_name_column="company", domain_column="domain",
+        run_mode="full", row_limit=2, default_input_country="Brazil",
+        gate_full_enrichment_on_foreign_hq=True,
+    )
+
+    def test_parallel_path_applies_the_same_gate_as_sequential(self):
+        fake = _fake_prioritize_for_foreign_hq(
+            {"Confirmed Foreign Co": 3.0, "Local Domestic Co": 0.0})
+        with patch("lead_prioritizer_batch_core.prioritize_single_lead", side_effect=fake):
+            seq = run_batch_dataframe(self._df, self._cfg, "S", "A")
+            par = run_batch_dataframe_parallel(self._df, self._cfg, "S", "A", workers=1)
+        seq_rows = seq["enriched_leads"].set_index("company_name")
+        par_rows = par["enriched_leads"].set_index("company_name")
+        for name in ("Confirmed Foreign Co", "Local Domestic Co"):
+            assert par_rows.loc[name, "enrichment_skipped"] == \
+                seq_rows.loc[name, "enrichment_skipped"]
+            assert par_rows.loc[name, "enrichment_skip_reason"] == \
+                seq_rows.loc[name, "enrichment_skip_reason"]
 
 
 # ---------------------------------------------------------------------------

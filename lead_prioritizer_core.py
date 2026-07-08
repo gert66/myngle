@@ -10,9 +10,11 @@ Implements AI-first HQ detection for a single lead:
 from __future__ import annotations
 
 import json
+from typing import Optional
 
 from lead_output_schema import LeadInput, LeadPrioritizationResult, HQDetectionResult
 from hq_simple_detector import build_simple_hq_query, is_hosted_careers_platform_domain
+from lead_country_config import gl_hl_for_hq_country
 from lead_hq_ai_interpreter import call_serper_for_hq, interpret_hq_with_ai
 from lead_hq_firecrawl_source import collect_own_domain_hq_pages
 from lead_hq_location_summary import build_hq_location_summary
@@ -22,6 +24,8 @@ from lead_non_hq_signal_extractor import (
     extract_sector_industry,
     summarize_non_hq_signals_for_result,
 )
+from lead_lusha_sector_mapping import sector_from_lusha_industry, sector_from_lusha_text
+from lead_lusha_size_signal import lusha_size_signal
 from lead_ai_signal_scorer import score_signals_with_ai
 from lead_app_summary_builder import build_app_summary_fields
 from lead_v2_scoring_adapter import score_lead_v2_result
@@ -36,6 +40,7 @@ from lead_icp_context_composer import (
     compose_icp_context as run_icp_context_composition,
 )
 from lead_legacy_enrichment import run_legacy_enrichment
+from lead_public_source_signal_enrichment import collect_public_source_signal_evidence
 
 _DEFAULT_AI_MODEL = "claude-haiku-4-5-20251001"
 
@@ -75,6 +80,13 @@ def prioritize_single_lead(
     compose_caller_content_flag: bool = False,
     compose_icp_context: bool = False,
     legacy_enrichment_mode: bool = False,
+    public_source_signal_enrichment: bool = False,
+    public_source_signal_query: str = "vacancies",
+    public_source_base_url: str = "",
+    public_source_label: str = "",
+    public_source_max_pages: int = 3,
+    cache_index: Optional[dict] = None,
+    force_refresh: bool = False,
     run_full_v2_pipeline: bool = False,
 ) -> LeadPrioritizationResult:
     """Orchestrate HQ detection and scoring for a single lead.
@@ -174,6 +186,36 @@ def prioritize_single_lead(
     **not** part of the ``run_full_v2_pipeline`` preset: it must be turned on
     explicitly.
 
+    ``public_source_signal_enrichment`` (default ``False``) is an explicit
+    opt-in, evidence-only step: it retrieves public company-level evidence
+    for ``public_source_signal_query`` (default ``"vacancies"``) from a
+    single user-configured public source (``public_source_base_url``) via
+    Firecrawl (``lead_public_source_signal_enrichment.
+    collect_public_source_signal_evidence``), and appends the result to
+    ``evidence_items``. Runs strictly AFTER regular non-HQ evidence collection
+    and BEFORE signal extraction, so the existing deterministic extractor and
+    app-summary logic see it naturally. It can never directly move
+    ``final_commercial_fit_score`` or create a score: its
+    ``signal_name`` (``"public_source_signal"``) is deliberately not one of
+    the five scored non-HQ signal names, so ``extract_non_hq_signals`` and
+    ``extract_sector_industry`` both ignore it. A missing ``firecrawl_api_key``
+    or ``public_source_base_url`` yields no evidence, never an error.
+    Deliberately **not** part of the ``run_full_v2_pipeline`` preset: it must
+    be turned on explicitly.
+
+    ``cache_index`` (default ``None``) is an optional in-memory, GCS-backed
+    shared enrichment cache (see ``enrichment_cache.py``) for ONE country —
+    the caller (batch orchestration) downloads it once at the start of a run
+    and is responsible for persisting it back to GCS afterward. When
+    ``None`` — the default — every Serper/Firecrawl call this function makes
+    (HQ, own-domain Firecrawl crawl, non-HQ evidence collection, Public
+    Source Signal Enrichment) hits the network live, exactly as before this
+    parameter existed. ``force_refresh`` (default ``False``) bypasses any
+    cached entry for this lead's calls without needing to clear the whole
+    index. Rich ICP context's own Serper queries are NOT wired into this
+    cache in this iteration (out of scope; see enrichment-cache delivery
+    notes) — only the four call families listed above are.
+
     ``run_full_v2_pipeline`` (default ``False``) is an explicit opt-in preset
     that turns on all optional v2 steps (2–6) for a single-lead end-to-end run.
     It does not add batch processing, change legacy ranking, or alter the
@@ -201,6 +243,7 @@ def prioritize_single_lead(
         build_app_summary_fields_flag, calculate_commercial_score_flag,
         build_caller_app_fields_flag, compose_caller_content_flag,
         compose_icp_context, legacy_enrichment_mode,
+        public_source_signal_enrichment,
     )):
         v2_pipeline_mode = "partial_v2"
     else:
@@ -211,10 +254,19 @@ def prioritize_single_lead(
     domain_root, query = build_simple_hq_query(input_row.company_name, input_row.domain)
     domain_is_hosted_platform = is_hosted_careers_platform_domain(input_row.domain)
 
+    # gl always set when the effective country is recognised; hl additionally
+    # omitted for known multilingual countries (e.g. Switzerland) rather than
+    # guessing a language. Unrecognised/blank country -> (None, None), so the
+    # request is byte-identical to before gl/hl existed.
+    _hq_gl, _hq_hl = gl_hl_for_hq_country(effective_country)
     serper_payload = call_serper_for_hq(
         domain_root=domain_root,
         query=query,
         serper_api_key=serper_api_key,
+        gl=_hq_gl,
+        hl=_hq_hl,
+        cache_index=cache_index,
+        force_refresh=force_refresh,
     )
 
     # ── PRIMARY HQ source: crawl the company's own domain via Firecrawl ────────
@@ -228,7 +280,11 @@ def prioritize_single_lead(
     # behavior — never an error, mirroring the Deep Dive precedent.
     crawled_pages: list = []
     if firecrawl_api_key and input_row.domain and not domain_is_hosted_platform:
-        fc = collect_own_domain_hq_pages(input_row.domain, firecrawl_api_key)
+        fc = collect_own_domain_hq_pages(
+            input_row.domain, firecrawl_api_key,
+            country=effective_country,
+            cache_index=cache_index, force_refresh=force_refresh,
+        )
         if fc["used"]:
             crawled_pages = fc["pages"]
 
@@ -251,6 +307,8 @@ def prioritize_single_lead(
         openai_api_key=openai_api_key,
         deepseek_api_key=deepseek_api_key,
         crawled_pages=crawled_pages,
+        lusha_description=input_row.lusha_description,
+        lusha_specialties=input_row.lusha_specialties,
     )
 
     # ── Step 2: non-HQ evidence collection (evidence only, no scores) ─────────
@@ -262,7 +320,31 @@ def prioritize_single_lead(
             domain=input_row.domain,
             serper_api_key=serper_api_key,
             country=effective_country,
+            cache_index=cache_index,
+            force_refresh=force_refresh,
         )
+
+    # ── Public Source Signal Enrichment (opt-in, evidence-only) ───────────────
+    # Adds LeadEvidence items from a single user-configured public source for
+    # a user-configured signal query, via Firecrawl. Off by default. Runs
+    # strictly AFTER regular non-HQ evidence collection and BEFORE signal
+    # extraction, so the existing deterministic extractor / app-summary logic
+    # picks it up naturally. Its signal_name ("public_source_signal") is not
+    # one of the five scored non-HQ signal names, so extract_non_hq_signals /
+    # extract_sector_industry both ignore it — this can never directly move
+    # final_commercial_fit_score or create a score.
+    if public_source_signal_enrichment:
+        evidence_items.extend(collect_public_source_signal_evidence(
+            company_name=input_row.company_name,
+            domain=input_row.domain,
+            signal_query=public_source_signal_query,
+            source_base_url=public_source_base_url,
+            firecrawl_api_key=firecrawl_api_key,
+            source_label=public_source_label,
+            max_pages=public_source_max_pages,
+            cache_index=cache_index,
+            force_refresh=force_refresh,
+        ))
 
     # ── Step 3: non-HQ signal extraction (no live Serper calls) ───────────────
     # Deterministic by default. ``ai_signal_scoring`` is a separate, explicit
@@ -273,6 +355,10 @@ def prioritize_single_lead(
     # deterministic extractor so a row is never left without signals.
     signals = []
     signal_scoring_mode = "deterministic"
+    # Usage/cost audit for the AI signal-scoring call -- populated only when
+    # ai_signal_scoring was actually attempted, whether or not it succeeded
+    # (tokens are spent either way). Blank fields when never attempted.
+    non_hq_ai_audit: dict = {}
     if extract_non_hq_signals_flag:
         if ai_signal_scoring:
             ai_scoring_result = score_signals_with_ai(
@@ -282,6 +368,14 @@ def prioritize_single_lead(
                 anthropic_api_key=anthropic_api_key,
                 ai_model=ai_model,
             )
+            if ai_scoring_result.call_attempted:
+                non_hq_ai_audit = dict(
+                    non_hq_ai_model=ai_scoring_result.model,
+                    non_hq_ai_input_tokens=ai_scoring_result.input_tokens,
+                    non_hq_ai_output_tokens=ai_scoring_result.output_tokens,
+                    non_hq_ai_total_tokens=ai_scoring_result.total_tokens,
+                    non_hq_ai_estimated_cost_usd=ai_scoring_result.estimated_cost_usd,
+                )
             if ai_scoring_result.call_success:
                 signals = ai_scoring_result.signals
                 signal_scoring_mode = "ai"
@@ -289,37 +383,77 @@ def prioritize_single_lead(
                 signals = extract_non_hq_signals(evidence_items, company_domain=input_row.domain)
         else:
             signals = extract_non_hq_signals(evidence_items, company_domain=input_row.domain)
+
+        # ── company_size_complexity: Lusha employee/revenue data is the
+        # ONLY source for this signal (Lusha enrichment plan, Stap 4 —
+        # supersedes the earlier Stap-3 "Serper stays a permanent
+        # fallback" design). There is no live Serper query for this
+        # signal anymore (removed from build_non_hq_enrichment_queries),
+        # so ``company_size_complexity_source`` is either ``"lusha"`` (a
+        # usable Lusha value was found) or ``None`` (missing/unparseable
+        # Lusha data — the score/reason/evidence fields simply stay
+        # ``None``, exactly as the schema always allowed).
+        company_size_complexity_source = None
+        _lusha_size = lusha_size_signal(input_row.lusha_employees, input_row.lusha_revenue)
+        if _lusha_size is not None:
+            signals = [s for s in signals if s.signal_name != "company_size_complexity"]
+            signals.append(_lusha_size)
+            company_size_complexity_source = "lusha"
+    else:
+        company_size_complexity_source = None
     non_hq_summary = summarize_non_hq_signals_for_result(signals)
 
-    # Sector/industry metadata from sector_industry evidence (deterministic,
-    # audit/app only — feeds no score, C4, C5, HQ, or foreign-HQ filtering).
-    sector_summary = extract_sector_industry(evidence_items)
+    # Sector/industry metadata (deterministic, audit/app only — feeds no
+    # score, C4, C5, HQ, or foreign-HQ filtering). Priority chain (Lusha
+    # enrichment plan, Stap 2, revised Stap 4 — the live Serper
+    # sector_industry query/evidence tier is gone; there is no Serper
+    # fallback for sector anymore):
+    #   1. Lusha Sub/Main Industry mapped onto our internal categories
+    #      (free, no API call, highest priority when present).
+    #   2. Own-domain Firecrawl+AI-derived industry (existing fallback).
+    #   3. Lusha Company Description/Specialties keyword match (last resort,
+    #      free, no API call, reuses extract_sector_industry's own matcher).
+    #   4. Empty, exactly as before any of this existed.
+    sector_summary = sector_from_lusha_industry(
+        input_row.lusha_main_industry, input_row.lusha_sub_industry)
 
-    # Fallback: when the deterministic keyword detector above found nothing
-    # at all (no Serper-snippet keyword hit — e.g. AEG Power Solutions, SDX),
-    # reuse the industry the HQ interpreter already derived from the SAME
-    # material at no extra API cost — but ONLY when that material genuinely
-    # included the company's own crawled-domain content (`crawled_pages`
-    # non-empty here means Firecrawl actually fetched the company's own
-    # site; see collect_own_domain_hq_pages above). A Serper-only AI guess
-    # (no own-domain crawl) is deliberately NOT used as a sector source —
-    # the point of this fallback is to lean on the same primary, most-
-    # authoritative source the HQ classification already trusts, not to
-    # add a second, weaker AI guess on top of thin secondary snippets.
-    # A keyword match always wins when present (never overwritten here).
-    if not sector_summary["detected_industry"] and hq.ai_hq_industry and crawled_pages:
-        sector_summary = dict(sector_summary)
-        sector_summary["detected_industry"] = hq.ai_hq_industry
-        sector_summary["detected_sub_industry"] = hq.ai_hq_sub_industry or None
-        sector_summary["sector_confidence"] = "Medium"
-        sector_summary["sector_reason"] = (
-            "Derived by AI from the company's own crawled website content "
-            "during HQ interpretation (own-domain source); no sector keyword "
-            "matched in the separate Serper sector-search evidence."
-        )
-        sector_summary["sector_evidence_url"] = crawled_pages[0].get("url")
-        sector_summary["sector_source_title"] = "Company website (AI-derived)"
-        sector_summary["sector_source"] = "own_domain_ai"
+    if sector_summary is None:
+        # No live Serper sector_industry query/evidence anymore (Stap 4) —
+        # start from the empty shape and try the remaining free tiers.
+        sector_summary = extract_sector_industry([])
+
+        # Fallback: reuse the industry the HQ interpreter already derived
+        # from the SAME material at no extra API cost — but ONLY when that
+        # material genuinely included the company's own crawled-domain
+        # content (`crawled_pages` non-empty here means Firecrawl actually
+        # fetched the company's own site; see collect_own_domain_hq_pages
+        # above). A Serper-only AI guess (no own-domain crawl) is
+        # deliberately NOT used as a sector source — the point of this
+        # fallback is to lean on the same primary, most-authoritative
+        # source the HQ classification already trusts, not to add a
+        # second, weaker AI guess on top of thin secondary snippets.
+        if not sector_summary["detected_industry"] and hq.ai_hq_industry and crawled_pages:
+            sector_summary = dict(sector_summary)
+            sector_summary["detected_industry"] = hq.ai_hq_industry
+            sector_summary["detected_sub_industry"] = hq.ai_hq_sub_industry or None
+            sector_summary["sector_confidence"] = "Medium"
+            sector_summary["sector_reason"] = (
+                "Derived by AI from the company's own crawled website content "
+                "during HQ interpretation (own-domain source); no sector keyword "
+                "matched in the separate Serper sector-search evidence."
+            )
+            sector_summary["sector_evidence_url"] = crawled_pages[0].get("url")
+            sector_summary["sector_source_title"] = "Company website (AI-derived)"
+            sector_summary["sector_source"] = "own_domain_ai"
+
+        # Last resort: the same keyword matcher applied to Lusha Company
+        # Description/Specialties text — free, no API call. Never
+        # overwrites a hit from any tier above.
+        if not sector_summary["detected_industry"]:
+            text_sector = sector_from_lusha_text(
+                input_row.lusha_description, input_row.lusha_specialties)
+            if text_sector["detected_industry"]:
+                sector_summary = text_sector
 
     # ── Step 4: deterministic app/evidence summary fields (no live calls) ─────
     # Built only from signals/evidence already present; never collects or
@@ -428,6 +562,10 @@ def prioritize_single_lead(
         employer_branding_evidence_quote=non_hq_summary["employer_branding_evidence_quote"],
         signal_extractor_version=non_hq_summary["signal_extractor_version"],
         signal_scoring_mode=signal_scoring_mode,
+        company_size_complexity_source=company_size_complexity_source,
+        lusha_employees=input_row.lusha_employees,
+        lusha_revenue=input_row.lusha_revenue,
+        **non_hq_ai_audit,
         # Sector / industry metadata (audit & app only — never scoring)
         detected_industry=sector_summary["detected_industry"],
         detected_sub_industry=sector_summary["detected_sub_industry"],
@@ -438,6 +576,8 @@ def prioritize_single_lead(
         sector_evidence_quote=sector_summary["sector_evidence_quote"],
         sector_source_title=sector_summary["sector_source_title"],
         sector_source=sector_summary["sector_source"],
+        lusha_main_industry=input_row.lusha_main_industry,
+        lusha_sub_industry=input_row.lusha_sub_industry,
         evidence_summary_app=app_summary["evidence_summary_app"],
         key_source_links_app=app_summary["key_source_links_app"],
         advanced_notes_app=app_summary["advanced_notes_app"],

@@ -26,6 +26,8 @@ try:
 except ImportError:
     _openai_lib = None  # type: ignore[assignment]
 
+from lead_country_config import normalize_country_for_hq as _normalize_country_for_hq
+
 if TYPE_CHECKING:
     from lead_output_schema import HQDetectionResult, LeadInput
 
@@ -140,6 +142,10 @@ def call_serper_for_hq(
     domain_root: str,
     query: str,
     serper_api_key: str,
+    gl: Optional[str] = None,
+    hl: Optional[str] = None,
+    cache_index: Optional[dict] = None,
+    force_refresh: bool = False,
 ) -> dict:
     """Fire a single Serper search and return the raw JSON payload.
 
@@ -147,6 +153,25 @@ def call_serper_for_hq(
     function does not construct queries itself.
 
     Returns an empty dict on any error so callers can treat it defensively.
+
+    ``gl``/``hl`` (Serper's country/language params) are only included in
+    the request when explicitly given — mirrors
+    ``lead_non_hq_enrichment.call_serper_for_enrichment`` exactly, so a
+    caller that doesn't pass them keeps the exact request shape used today.
+    The caller (``prioritize_single_lead``) resolves them from the lead's
+    effective country via ``lead_country_config.gl_hl_for_hq_country`` —
+    this function itself does no country lookup.
+
+    ``cache_index`` (default ``None``) is an optional in-memory, GCS-backed
+    shared cache index (see ``enrichment_cache.py``), keyed on
+    ``domain_root`` + signal type ``"hq"`` (not on ``gl``/``hl`` — an HQ fact
+    doesn't change with search locale). When ``None`` — the default —
+    behavior is completely unchanged from before this parameter existed:
+    every call hits Serper live. When provided, a fresh-enough cached
+    response is returned without a network call; a miss still calls Serper
+    live and stores the raw JSON payload back into ``cache_index`` (the
+    caller is responsible for eventually persisting ``cache_index`` to GCS
+    via ``enrichment_cache.save_cache_index``).
     """
     import urllib.request
     import usage_tracker
@@ -154,8 +179,25 @@ def call_serper_for_hq(
     if not serper_api_key or not query:
         return {}
 
+    if cache_index is not None:
+        import enrichment_cache
+        cached = enrichment_cache.get_cached(
+            cache_index, "serper", domain_root, "hq",
+            ttl_days=enrichment_cache.serper_ttl_days("hq"),
+            force_refresh=force_refresh,
+        )
+        if cached is not None:
+            usage_tracker.record_cache_hit("serper")
+            return cached
+        usage_tracker.record_cache_miss("serper")
+
     usage_tracker.record_serper_call("hq")
-    payload_bytes = json.dumps({"q": query, "num": 10}).encode()
+    request_payload: dict = {"q": query, "num": 10}
+    if gl:
+        request_payload["gl"] = gl
+    if hl:
+        request_payload["hl"] = hl
+    payload_bytes = json.dumps(request_payload).encode()
     req = urllib.request.Request(
         "https://google.serper.dev/search",
         data=payload_bytes,
@@ -167,9 +209,14 @@ def call_serper_for_hq(
     )
     try:
         with urllib.request.urlopen(req, timeout=15) as resp:
-            return json.loads(resp.read().decode())
+            result = json.loads(resp.read().decode())
     except Exception:
         return {}
+
+    if cache_index is not None and result:
+        enrichment_cache.put_cached(
+            cache_index, "serper", domain_root, "hq", response=result)
+    return result
 
 
 # ---------------------------------------------------------------------------
@@ -227,6 +274,34 @@ Answer Box:
 Top organic results (title + snippet):
 {organic_text}
 """
+
+# ADDITIONAL CONTEXT block — appended (never baked into the template above)
+# ONLY when the own-domain Firecrawl content is thin/absent (Lusha
+# enrichment plan, Stap 5 scope correction). Rich own-domain content
+# already gives the classifier enough to work with; adding generic Lusha
+# marketing text on top of that was observed to occasionally tip a
+# genuinely ambiguous case's classification (e.g. a dual-HQ multinational)
+# without ever changing the actual score (C4 already catches that), so it
+# is now withheld entirely for well-evidenced companies -- not even a
+# "(none)" placeholder, to keep the prompt (and cost) identical to before
+# Stap 5 for every row where it isn't needed.
+_LUSHA_CONTEXT_BLOCK_TEMPLATE = """
+ADDITIONAL CONTEXT — company's own self-description (structured company
+data, not the live website; lower authority than the primary and
+secondary sources above — use this only to fill gaps when those are thin
+or silent, never to override them):
+{lusha_context_text}
+"""
+
+# A company's own-domain Firecrawl content counts as "thin" when the
+# combined stripped text across all crawled pages is under this many
+# characters (or no pages were crawled at all). Validated against real
+# data: a company with genuinely no usable own-site content measures 0
+# chars (e.g. "5265 studio"/5265.it), while every well-evidenced company
+# checked measured 5,400+ chars (Sika, TE Connectivity) up to 15,000
+# (dsm.com, Nestle) -- a wide gap with no borderline cases near 400, so
+# this threshold cleanly separates "nothing useful" from "already enough".
+_OWN_SITE_CONTENT_THIN_THRESHOLD_CHARS = 400
 
 # IMPORTANT — prompt-cache boundary. Together with ``_SYSTEM_PROMPT``, this
 # text forms the single ``cache_control``-marked system block sent on every
@@ -296,6 +371,53 @@ def _format_own_site_pages(crawled_pages) -> str:
     return "\n".join(lines)
 
 
+def _own_site_content_is_thin(crawled_pages) -> bool:
+    """True when the company's own-domain Firecrawl content gives the
+    classifier little/nothing to work with — no pages at all, or a
+    combined (stripped, pre-truncation) text length under
+    ``_OWN_SITE_CONTENT_THIN_THRESHOLD_CHARS`` across every crawled page.
+    Used to gate whether the Lusha ADDITIONAL CONTEXT section is even
+    considered (see ``_build_user_message``) — a well-evidenced company
+    never needs it.
+    """
+    pages = [p for p in (crawled_pages or []) if (p.get("text") or "").strip()]
+    if not pages:
+        return True
+    combined_len = sum(len((p.get("text") or "").strip()) for p in pages)
+    return combined_len < _OWN_SITE_CONTENT_THIN_THRESHOLD_CHARS
+
+
+# Lusha enrichment plan, Stap 5 — truncation lengths for the free,
+# already-in-hand Lusha Company Description / Company Specialties text
+# added to the per-lead ADDITIONAL CONTEXT section. Sized relative to the
+# other per-lead budgets already in this file (own-site pages: 1500
+# chars/page; KG/answer-box text: ~400 chars; an organic snippet: 200
+# chars): a description is normally a few sentences of free-form prose
+# (needs more room than a single search snippet, but far less than a full
+# crawled page), a specialties field is just a short comma-separated
+# keyword list (a few words are enough to be useful).
+_LUSHA_DESCRIPTION_MAX_CHARS = 800
+_LUSHA_SPECIALTIES_MAX_CHARS = 300
+
+
+def _format_lusha_context(description, specialties) -> str:
+    """Render the Lusha Description/Specialties ADDITIONAL CONTEXT section.
+
+    Returns ``"  (none)"`` when both are blank — same convention as the
+    other per-lead sections (``kg_text``/``ab_text``/``organic_text``) —
+    so a non-Lusha caller (or a Lusha row with both fields blank) produces
+    an identical section to what a caller passing nothing at all would.
+    """
+    desc = (description or "").strip()[:_LUSHA_DESCRIPTION_MAX_CHARS]
+    spec = (specialties or "").strip()[:_LUSHA_SPECIALTIES_MAX_CHARS]
+    lines = []
+    if desc:
+        lines.append(f"  Description: {desc}")
+    if spec:
+        lines.append(f"  Specialties: {spec}")
+    return "\n".join(lines) if lines else "  (none)"
+
+
 def _build_user_message(
     *,
     domain_root: str,
@@ -303,6 +425,8 @@ def _build_user_message(
     query: str,
     serper_payload: dict,
     crawled_pages=None,
+    lusha_description=None,
+    lusha_specialties=None,
 ) -> str:
     own_site_text = _format_own_site_pages(crawled_pages)
 
@@ -326,7 +450,7 @@ def _build_user_message(
         organic_lines.append(f"  [{i}] {t}\n      {s}\n      URL: {url}")
     organic_text = "\n".join(organic_lines) if organic_lines else "  (none)"
 
-    return _USER_TEMPLATE_PER_LEAD.format(
+    message = _USER_TEMPLATE_PER_LEAD.format(
         domain_root=domain_root,
         input_country=input_country or "(unknown)",
         query=query,
@@ -335,6 +459,17 @@ def _build_user_message(
         ab_text=ab_text,
         organic_text=organic_text,
     )
+
+    # ADDITIONAL CONTEXT (Lusha Description/Specialties) is appended ONLY
+    # when the own-domain content above is thin/absent (Stap 5 scope
+    # correction) — a well-evidenced company's prompt is byte-for-byte
+    # identical to before this feature existed, no extra tokens, no extra
+    # risk of a generic marketing blurb tipping an already-clear case.
+    if _own_site_content_is_thin(crawled_pages):
+        lusha_context_text = _format_lusha_context(lusha_description, lusha_specialties)
+        message += _LUSHA_CONTEXT_BLOCK_TEMPLATE.format(lusha_context_text=lusha_context_text)
+
+    return message
 
 
 def _known_urls_from_serper_payload(serper_payload: dict) -> list:
@@ -467,44 +602,6 @@ def _parse_ai_response(raw: str) -> dict:
     if fields.get("classification"):
         return fields
     return {}
-
-
-def _normalize_country_for_hq(value: object) -> str:
-    """Lowercase canonical country — handles ISO-2, ISO-3, full names."""
-    _MAP = {
-        "it": "italy", "ita": "italy", "italia": "italy", "italy": "italy", "italian": "italy",
-        "de": "germany", "deu": "germany", "germany": "germany",
-        "deutschland": "germany", "german": "germany",
-        "fr": "france", "fra": "france", "france": "france", "french": "france",
-        "uk": "united kingdom", "gb": "united kingdom", "gbr": "united kingdom",
-        "united kingdom": "united kingdom", "great britain": "united kingdom",
-        "england": "united kingdom", "scotland": "united kingdom", "wales": "united kingdom",
-        "us": "united states", "usa": "united states", "united states": "united states",
-        "america": "united states",
-        "ch": "switzerland", "switzerland": "switzerland", "swiss": "switzerland",
-        "nl": "netherlands", "netherlands": "netherlands", "holland": "netherlands",
-        "the netherlands": "netherlands", "nederland": "netherlands",
-        "be": "belgium", "belgium": "belgium",
-        "at": "austria", "austria": "austria",
-        "es": "spain", "spain": "spain",
-        "se": "sweden", "sweden": "sweden",
-        "no": "norway", "norway": "norway",
-        "dk": "denmark", "denmark": "denmark",
-        "fi": "finland", "finland": "finland",
-        "jp": "japan", "japan": "japan",
-        "cn": "china", "china": "china",
-        "pl": "poland", "poland": "poland",
-        "pt": "portugal", "portugal": "portugal",
-        "ie": "ireland", "ireland": "ireland",
-        "lu": "luxembourg", "luxembourg": "luxembourg",
-        "sg": "singapore", "singapore": "singapore",
-        "br": "brazil", "bra": "brazil", "brasil": "brazil",
-        "brazil": "brazil", "brazilian": "brazil",
-        "uy": "uruguay", "ury": "uruguay", "uruguay": "uruguay",
-        "uruguayan": "uruguay", "república oriental del uruguay": "uruguay",
-    }
-    text = re.sub(r"\s+", " ", re.sub(r"\.", "", str(value or "").strip().lower()))
-    return _MAP.get(text, text)
 
 
 # ---------------------------------------------------------------------------
@@ -726,6 +823,8 @@ def interpret_hq_with_ai(
     openai_api_key: str = "",
     deepseek_api_key: str = "",
     crawled_pages=None,
+    lusha_description=None,
+    lusha_specialties=None,
 ) -> "HQDetectionResult":
     """Interpret HQ from a Serper payload using Anthropic (Haiku by default).
 
@@ -735,6 +834,15 @@ def interpret_hq_with_ai(
     existing behavior. Usage/cost audit fields (``ai_hq_provider`` /
     ``ai_hq_*_tokens`` / ``ai_hq_estimated_cost_usd``) are populated when the
     provider reports usage; they stay blank rather than guessed.
+
+    ``lusha_description``/``lusha_specialties`` (default ``None`` — Lusha
+    enrichment plan, Stap 5) are optional, already-in-hand Lusha Company
+    Description/Specialties text added to the per-lead user message as a
+    lower-authority ADDITIONAL CONTEXT section (see
+    ``_format_lusha_context``) — free, no extra API call. Omitting them
+    (every existing caller) produces byte-for-byte the same prompt as
+    before this parameter existed. Never touches the cached system prompt
+    or the JSON parser/post-AI scoring rules.
 
     Returns an ``HQDetectionResult`` with AI audit fields populated.
     The only deterministic post-AI step is a normalised country comparison.
@@ -779,6 +887,8 @@ def interpret_hq_with_ai(
             query=query,
             serper_payload=serper_payload,
             crawled_pages=crawled_pages,
+            lusha_description=lusha_description,
+            lusha_specialties=lusha_specialties,
         )
         if provider == "openai":
             raw_text, usage = _call_openai_hq(provider_api_key, model, user_msg)

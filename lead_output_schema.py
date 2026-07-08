@@ -11,6 +11,17 @@ class LeadInput:
     company_name: str
     domain: Optional[str] = None
     input_country: Optional[str] = None
+    # Optional Lusha-export fields (Lusha enrichment plan, Stap 2). Blank for
+    # any non-Lusha caller -- every downstream consumer treats these as
+    # "no Lusha data available" and falls back to its existing behavior.
+    lusha_main_industry: Optional[str] = None
+    lusha_sub_industry: Optional[str] = None
+    lusha_description: Optional[str] = None
+    lusha_specialties: Optional[str] = None
+    # Lusha Company Number of Employees / Company Revenue (Stap 3). Same
+    # "blank for any non-Lusha caller -> existing behavior" contract.
+    lusha_employees: Optional[str] = None
+    lusha_revenue: Optional[str] = None
 
 
 @dataclass
@@ -248,6 +259,28 @@ class LeadPrioritizationResult:
     # actually produced `signals`, so AI- and keyword-scored datasets are
     # never silently mixed.
     signal_scoring_mode: Optional[str] = "deterministic"
+    # Which source produced sig_company_size_complexity_score / its sibling
+    # fields (Lusha enrichment plan, Stap 4): "lusha" (structured Lusha
+    # Company Number of Employees / Company Revenue data — see
+    # lead_lusha_size_signal.py) or None when that data is missing/blank/
+    # unparseable. There is no Serper query/fallback for this signal
+    # anymore (removed from build_non_hq_enrichment_queries) — when None,
+    # every sig_company_size_complexity_score/reason/evidence_* field
+    # simply stays None.
+    company_size_complexity_source: Optional[str] = None
+    # Raw Lusha size values (audit only) — always populated verbatim from
+    # the input row when present, regardless of which source above won.
+    lusha_employees: Optional[str] = None
+    lusha_revenue: Optional[str] = None
+    # AI signal-scoring usage/cost audit (populated only when ai_signal_scoring
+    # was actually attempted -- see lead_ai_signal_scorer.py). Blank when the
+    # call was never attempted, or when MODEL_PRICING_USD_PER_MTOK does not
+    # know the model -- never a guessed cost, mirrors ai_hq_estimated_cost_usd.
+    non_hq_ai_model: Optional[str] = None
+    non_hq_ai_input_tokens: Optional[int] = None
+    non_hq_ai_output_tokens: Optional[int] = None
+    non_hq_ai_total_tokens: Optional[int] = None
+    non_hq_ai_estimated_cost_usd: Optional[float] = None
     # ── Sector / industry detection (audit & app metadata — NEVER scoring) ─────
     detected_industry: Optional[str] = None
     detected_sub_industry: Optional[str] = None
@@ -258,11 +291,20 @@ class LeadPrioritizationResult:
     sector_evidence_quote: Optional[str] = None
     sector_source_title: Optional[str] = None
     # Which path produced detected_industry/detected_sub_industry:
-    # "keyword_match" (deterministic Serper-snippet keyword match, wins when
-    # present) or "own_domain_ai" (fallback: the HQ interpreter's AI-derived
-    # industry from genuinely crawled own-domain content, used only when the
-    # keyword match found nothing at all). None when neither found anything.
+    # "lusha_mapped" (Lusha Sub/Main Industry mapped onto our internal
+    # categories, highest priority — see lead_lusha_sector_mapping.py),
+    # "keyword_match" (deterministic Serper-snippet keyword match),
+    # "own_domain_ai" (the HQ interpreter's AI-derived industry from
+    # genuinely crawled own-domain content), or "lusha_text_fallback" (last
+    # resort: the same keyword matcher applied to Lusha Company
+    # Description/Specialties text). None when nothing found anything.
     sector_source: Optional[str] = None
+    # Raw Lusha industry values (audit only) — always populated verbatim
+    # from the input row when present, REGARDLESS of whether the mapping in
+    # lead_lusha_sector_mapping.py produced a hit, so the original label is
+    # never lost even when detected_industry came from a different tier.
+    lusha_main_industry: Optional[str] = None
+    lusha_sub_industry: Optional[str] = None
     # App-facing text (placeholders)
     evidence_summary_app: Optional[str] = None
     key_source_links_app: Optional[str] = None

@@ -61,6 +61,12 @@ def _fresh_state() -> dict:
         "anthropic_by_model": defaultdict(
             lambda: {"calls": 0, "input_tokens": 0, "output_tokens": 0}),
         "firecrawl_calls": 0,
+        # Shared enrichment cache (enrichment_cache.py) hit/miss counts, keyed
+        # by source ("serper" / "firecrawl"). Recorded at the exact same
+        # low-level call sites as record_serper_call/record_firecrawl_call —
+        # a hit means that call was skipped entirely.
+        "cache_hits": defaultdict(int),
+        "cache_misses": defaultdict(int),
     }
 
 
@@ -143,6 +149,27 @@ def record_firecrawl_call() -> None:
         pass
 
 
+def record_cache_hit(source: str) -> None:
+    """A cached response was used instead of a live call — call this at the
+    same low-level call site that would otherwise have called
+    record_serper_call/record_firecrawl_call for this request."""
+    try:
+        with _lock:
+            _state["cache_hits"][str(source or "unknown")] += 1
+    except Exception:
+        pass
+
+
+def record_cache_miss(source: str) -> None:
+    """No usable cache entry was found (absent, expired, or force-refreshed)
+    — the caller proceeds to a live call right after this."""
+    try:
+        with _lock:
+            _state["cache_misses"][str(source or "unknown")] += 1
+    except Exception:
+        pass
+
+
 # ---------------------------------------------------------------------------
 # Reporting
 # ---------------------------------------------------------------------------
@@ -170,6 +197,8 @@ def snapshot() -> dict:
         by_model = {m: dict(e) for m, e in _state["anthropic_by_model"].items()}
         anthropic_calls = _state["anthropic_calls"]
         firecrawl_calls = _state["firecrawl_calls"]
+        cache_hits = dict(_state["cache_hits"])
+        cache_misses = dict(_state["cache_misses"])
 
     serper_total = sum(serper.values())
     in_tok = sum(e["input_tokens"] for e in by_model.values())
@@ -197,6 +226,8 @@ def snapshot() -> dict:
         "estimated_firecrawl_usd": firecrawl_usd,
         "estimated_total_usd": round(total_usd, 6),
         "estimated_total_eur": total_eur,
+        "cache_hits": cache_hits,
+        "cache_misses": cache_misses,
     }
 
 

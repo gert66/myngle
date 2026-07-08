@@ -50,6 +50,10 @@ import re
 from typing import Optional
 from urllib.parse import urlparse as _urlparse
 
+from lead_country_config import COUNTRY_ALIASES as _COUNTRY_ALIASES
+from lead_country_config import normalize_country_for_hq as _normalize_country_for_hq
+from lead_country_config import std_country as _std_country
+
 # Legal-form suffixes to strip when building a company-name fallback root.
 # Kept deliberately conservative — only unambiguous suffixes.
 _LEGAL_SUFFIXES_RE = re.compile(
@@ -339,9 +343,11 @@ def build_simple_hq_query(
 # ---------------------------------------------------------------------------
 
 # ── Location lookup tables (subset extracted from probe app) ─────────────────
-# TODO: future step — move country-specific location rules (_INTL_CITIES,
-#       _COUNTRY_ALIASES, _ITALY_PROVINCE_CODES, _ITALY_*) into a dedicated
-#       lead_country_config.py module so hq_simple_detector stays thin.
+# TODO: future step — move the remaining country-specific location rules
+#       (_INTL_CITIES, _ITALY_PROVINCE_CODES, _ITALY_*) into a dedicated
+#       location-config module. _COUNTRY_ALIASES / _normalize_country_for_hq
+#       have already moved to lead_country_config.py (imported above) —
+#       hq_simple_detector no longer defines them itself.
 
 _INTL_CITIES: dict[str, tuple[str, str]] = {
     "berlin": ("Berlin", "Germany"), "munich": ("Munich", "Germany"),
@@ -389,33 +395,6 @@ _INTL_CITIES: dict[str, tuple[str, str]] = {
     "venice": ("Venice", "Italy"), "venezia": ("Venezia", "Italy"),
     "padova": ("Padova", "Italy"), "bergamo": ("Bergamo", "Italy"),
     "brescia": ("Brescia", "Italy"), "modena": ("Modena", "Italy"),
-}
-
-_COUNTRY_ALIASES: dict[str, str] = {
-    # Full names and safe aliases only — NO 2-letter ISO codes (too short for substring matching)
-    "italy": "Italy", "italia": "Italy", "italian": "Italy", "ita": "Italy",
-    "germany": "Germany", "deutschland": "Germany", "german": "Germany", "deu": "Germany",
-    "france": "France", "french": "France", "fra": "France",
-    "spain": "Spain", "españa": "Spain", "spanish": "Spain",
-    "netherlands": "Netherlands", "holland": "Netherlands", "dutch": "Netherlands",
-    "the netherlands": "Netherlands", "nederland": "Netherlands",
-    "belgium": "Belgium", "belgian": "Belgium",
-    "switzerland": "Switzerland", "swiss": "Switzerland", "svizzera": "Switzerland",
-    "austria": "Austria", "austrian": "Austria",
-    "united kingdom": "United Kingdom", "great britain": "United Kingdom",
-    "england": "United Kingdom", "scotland": "United Kingdom", "wales": "United Kingdom",
-    "united states": "United States", "usa": "United States", "america": "United States",
-    "japan": "Japan", "japanese": "Japan",
-    "china": "China", "chinese": "China",
-    "sweden": "Sweden", "swedish": "Sweden",
-    "denmark": "Denmark", "danish": "Denmark",
-    "norway": "Norway", "norwegian": "Norway",
-    "finland": "Finland", "finnish": "Finland",
-    "portugal": "Portugal", "portuguese": "Portugal",
-    "poland": "Poland", "polish": "Poland",
-    "luxembourg": "Luxembourg",
-    "ireland": "Ireland", "irish": "Ireland",
-    "singapore": "Singapore",
 }
 
 # Italian province codes → (city, country)
@@ -555,43 +534,9 @@ _DIRECTORY_DOMAINS = frozenset({
 
 
 # ── Core helpers (no I/O) ────────────────────────────────────────────────────
-
-def _std_country(raw: str) -> str:
-    return _COUNTRY_ALIASES.get(raw.strip().lower(), raw.strip())
-
-
-def _normalize_country_for_hq(value: object) -> str:
-    """Lowercase canonical country key — handles ISO-2, ISO-3, full names."""
-    _MAP = {
-        "it": "italy", "ita": "italy", "italia": "italy", "italy": "italy", "italian": "italy",
-        "de": "germany", "deu": "germany", "germany": "germany",
-        "deutschland": "germany", "german": "germany",
-        "fr": "france", "fra": "france", "france": "france", "french": "france",
-        "uk": "united kingdom", "gb": "united kingdom", "gbr": "united kingdom",
-        "united kingdom": "united kingdom", "great britain": "united kingdom",
-        "england": "united kingdom", "scotland": "united kingdom", "wales": "united kingdom",
-        "us": "united states", "usa": "united states", "united states": "united states",
-        "america": "united states",
-        "ch": "switzerland", "switzerland": "switzerland", "swiss": "switzerland",
-        "nl": "netherlands", "netherlands": "netherlands", "holland": "netherlands",
-        "the netherlands": "netherlands", "nederland": "netherlands",
-        "be": "belgium", "belgium": "belgium",
-        "at": "austria", "austria": "austria",
-        "es": "spain", "spain": "spain",
-        "se": "sweden", "sweden": "sweden",
-        "no": "norway", "norway": "norway",
-        "dk": "denmark", "denmark": "denmark",
-        "fi": "finland", "finland": "finland",
-        "jp": "japan", "japan": "japan",
-        "cn": "china", "china": "china",
-        "pl": "poland", "poland": "poland",
-        "pt": "portugal", "portugal": "portugal",
-        "ie": "ireland", "ireland": "ireland",
-        "lu": "luxembourg", "luxembourg": "luxembourg",
-        "sg": "singapore", "singapore": "singapore",
-    }
-    text = re.sub(r"\s+", " ", re.sub(r"\.", "", str(value or "").strip().lower()))
-    return _MAP.get(text, text)
+# _std_country / _normalize_country_for_hq / _COUNTRY_ALIASES are imported
+# from lead_country_config at the top of this file (see the module docstring
+# TODO note above) — no longer defined here.
 
 
 def _resolve_city_country(text: str) -> tuple[str, str]:

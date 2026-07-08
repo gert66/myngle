@@ -122,6 +122,76 @@ class TestFirecrawlScrapePage:
         assert "boom" in result["status"]
 
 
+class TestFirecrawlScrapePageCache:
+    """Shared GCS enrichment cache (opt-in cache_index param) — keyed on the
+    full URL, TTL 120 days, only ok=True results are ever cached (a 404/error
+    must always retry live next time)."""
+
+    def test_default_none_cache_index_always_calls_live(self):
+        resp = Mock(status_code=200)
+        resp.json.return_value = {"data": {"markdown": "# About Acme"}}
+        with patch("deep_dive_runner.requests.post", return_value=resp) as mock_post:
+            result = _firecrawl_scrape_page("https://acme.com/about", "fc-key")
+        mock_post.assert_called_once()
+        assert result["ok"] is True
+
+    def test_cache_hit_skips_network_call(self):
+        import enrichment_cache
+
+        index: dict = {}
+        enrichment_cache.put_cached(
+            index, "firecrawl", "https://acme.com/about",
+            response={"ok": True, "text": "cached text", "status": "ok", "hard_failure": False},
+        )
+        with patch("deep_dive_runner.requests.post") as mock_post:
+            result = _firecrawl_scrape_page(
+                "https://acme.com/about", "fc-key", cache_index=index)
+        mock_post.assert_not_called()
+        assert result["text"] == "cached text"
+
+    def test_cache_miss_calls_live_and_populates_cache_on_success(self):
+        import enrichment_cache
+
+        index: dict = {}
+        resp = Mock(status_code=200)
+        resp.json.return_value = {"data": {"markdown": "# About Acme"}}
+        with patch("deep_dive_runner.requests.post", return_value=resp) as mock_post:
+            result = _firecrawl_scrape_page(
+                "https://acme.com/about", "fc-key", cache_index=index)
+        mock_post.assert_called_once()
+        assert result["ok"] is True
+        cached = enrichment_cache.get_cached(
+            index, "firecrawl", "https://acme.com/about", ttl_days=120)
+        assert cached == result
+
+    def test_404_result_is_never_cached(self):
+        import enrichment_cache
+
+        index: dict = {}
+        resp = Mock(status_code=404)
+        with patch("deep_dive_runner.requests.post", return_value=resp):
+            _firecrawl_scrape_page("https://acme.com/nope", "fc-key", cache_index=index)
+        cached = enrichment_cache.get_cached(
+            index, "firecrawl", "https://acme.com/nope", ttl_days=120)
+        assert cached is None
+
+    def test_force_refresh_ignores_fresh_cache_entry(self):
+        import enrichment_cache
+
+        index: dict = {}
+        enrichment_cache.put_cached(
+            index, "firecrawl", "https://acme.com/about",
+            response={"ok": True, "text": "cached text", "status": "ok", "hard_failure": False},
+        )
+        resp = Mock(status_code=200)
+        resp.json.return_value = {"data": {"markdown": "# Live Acme"}}
+        with patch("deep_dive_runner.requests.post", return_value=resp) as mock_post:
+            result = _firecrawl_scrape_page(
+                "https://acme.com/about", "fc-key", cache_index=index, force_refresh=True)
+        mock_post.assert_called_once()
+        assert result["text"] == "# Live Acme"
+
+
 # ---------------------------------------------------------------------------
 # Firecrawl page collection (own + parent domain, capped, hard-failure abort)
 # ---------------------------------------------------------------------------

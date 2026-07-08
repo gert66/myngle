@@ -36,6 +36,7 @@ from typing import Optional
 
 # Reuse the tested Firecrawl scrape helper rather than re-implementing it.
 from deep_dive_runner import _firecrawl_scrape_page
+from lead_country_config import normalize_country_for_hq as _normalize_country_for_hq
 
 # Candidate own-domain pages tried in order, focused on where a company
 # describes its group/parent/HQ (not the broader careers/newsroom set Deep
@@ -43,6 +44,17 @@ from deep_dive_runner import _firecrawl_scrape_page
 _HQ_CANDIDATE_PAGE_PATHS: tuple[str, ...] = (
     "", "/about", "/about-us", "/company", "/company-profile", "/en/about",
 )
+
+# Extra localized "about us" paths tried in addition to the English ones
+# above, keyed on the SAME normalized country key lead_country_config uses.
+# Appended (never replacing) the English defaults, so an unknown/blank
+# country keeps candidate_paths byte-identical to before this existed.
+_COUNTRY_HQ_CANDIDATE_PATHS: dict[str, tuple[str, ...]] = {
+    "italy": ("/chi-siamo",),
+    "netherlands": ("/over-ons",),
+    "germany": ("/ueber-uns",),
+    "france": ("/a-propos",),
+}
 
 # Own-domain HQ crawls are deliberately small — a couple of pages are enough
 # to describe a parent/group, and this runs on every row with a Firecrawl key.
@@ -55,6 +67,9 @@ def collect_own_domain_hq_pages(
     *,
     max_pages: int = _DEFAULT_MAX_HQ_PAGES,
     candidate_paths: "tuple[str, ...] | None" = None,
+    country: Optional[str] = None,
+    cache_index: Optional[dict] = None,
+    force_refresh: bool = False,
 ) -> dict:
     """Crawl the company's own domain for HQ classification material.
 
@@ -68,8 +83,27 @@ def collect_own_domain_hq_pages(
     or a hard failure) — the caller MUST ignore ``pages`` entirely and fall back
     to Serper-only, since a bad/exhausted key fails consistently and partial
     results would be misleading. Never raises.
+
+    ``candidate_paths``, when given explicitly, is used verbatim (existing
+    override behavior, unchanged). Otherwise the default is
+    ``_HQ_CANDIDATE_PAGE_PATHS`` plus, when ``country`` maps to an entry in
+    ``_COUNTRY_HQ_CANDIDATE_PATHS`` (e.g. Italy -> ``/chi-siamo``), that
+    country's localized path(s) appended at the end — more candidates to try
+    within the same ``max_pages`` cap, never fewer. A blank/unrecognised
+    ``country`` (the default) keeps ``candidate_paths`` identical to before
+    this parameter existed.
+
+    ``cache_index``/``force_refresh`` (default ``None``/``False``) are passed
+    straight through to ``_firecrawl_scrape_page`` (see ``enrichment_cache.py``)
+    — this function has no caching logic of its own. ``None`` (the default)
+    means every page hits Firecrawl live, exactly as before this parameter
+    existed.
     """
-    paths = candidate_paths or _HQ_CANDIDATE_PAGE_PATHS
+    if candidate_paths is not None:
+        paths = candidate_paths
+    else:
+        paths = _HQ_CANDIDATE_PAGE_PATHS + _COUNTRY_HQ_CANDIDATE_PATHS.get(
+            _normalize_country_for_hq(country), ())
     domain = (domain or "").strip()
     if not firecrawl_api_key or not domain:
         return {"pages": [], "pages_crawled": [], "used": False}
@@ -84,7 +118,10 @@ def collect_own_domain_hq_pages(
         if len(pages) >= max_pages:
             break
         url = base + path
-        result = _firecrawl_scrape_page(url, firecrawl_api_key)
+        result = _firecrawl_scrape_page(
+            url, firecrawl_api_key,
+            cache_index=cache_index, force_refresh=force_refresh,
+        )
         pages_crawled.append({"url": url, "status": result["status"]})
         if result["hard_failure"]:
             # Bad/exhausted key or network outage: abandon Firecrawl entirely.

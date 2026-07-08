@@ -83,6 +83,17 @@ NON_ENGLISH_FOREIGN_HQ_ONLY_PHASE_LABELS = {
     3: "Full enrichment for confirmed non-English foreign-HQ leads",
 }
 
+# Phase labels for the opt-in foreign-HQ gate INSIDE the regular
+# run_batch_dataframe (BatchRunConfig.gate_full_enrichment_on_foreign_hq).
+# Phase 2 never actually fires on this path (C5 is not wired into it yet —
+# see _run_batch_dataframe_gated); kept as a 3-entry dict purely for a
+# consistent shape with the other phase-based progress payloads above.
+GATED_FULL_ENRICHMENT_PHASE_LABELS = {
+    1: "HQ screening",
+    2: "C5 adjudication (not used in this path yet)",
+    3: "Full enrichment for confirmed foreign-HQ leads",
+}
+
 
 @dataclass
 class BatchRunConfig:
@@ -136,6 +147,41 @@ class BatchRunConfig:
     # on. Both are independent of deep_dive_on_foreign_hq / min_score.
     verify_quotes: bool = True
     auto_correct_quotes: bool = True
+    # Public Source Signal Enrichment — explicit opt-in, off by default, and
+    # INDEPENDENT of every flag above. Adds LeadEvidence items retrieved via
+    # Firecrawl from a single user-configured public source for a user-
+    # configured signal query; never touches final_commercial_fit_score or
+    # creates a score directly. See lead_public_source_signal_enrichment.py.
+    public_source_signal_enrichment: bool = False
+    public_source_signal_query: str = "vacancies"
+    public_source_base_url: str = ""
+    public_source_label: str = ""
+    public_source_max_pages: int = 3
+    # Opt-in foreign-HQ gating inside the REGULAR run_batch_dataframe path —
+    # explicit opt-in, off by default, and INDEPENDENT of every flag above.
+    # Reuses the exact two-phase pattern already proven in
+    # run_batch_foreign_hq_only (cheap HQ-only screening for every row, full
+    # v2 enrichment only for rows confirmed foreign-HQ; skipped rows are kept
+    # with enrichment_skipped=True + foreign_hq_skip_reason) via the shared
+    # _run_gated_full_enrichment helper, but without switching run_mode to a
+    # separate dedicated mode. Default False means run_batch_dataframe's
+    # existing behavior is completely unchanged for every current caller. C5
+    # is not supported in this gated path yet (run_batch_dataframe has never
+    # supported C5) — see _run_batch_dataframe_gated.
+    gate_full_enrichment_on_foreign_hq: bool = False
+    # Shared, GCS-backed Serper/Firecrawl cache — explicit opt-in, off by
+    # default, and INDEPENDENT of every flag above. When enabled, a batch run
+    # downloads one cache index per country present in the dataset ONCE at
+    # the start (see enrichment_cache.py), consults it in-memory for every
+    # Serper/Firecrawl call made by prioritize_single_lead (HQ, own-domain
+    # Firecrawl crawl, non-HQ evidence collection, Public Source Signal
+    # Enrichment), and uploads the updated index back at the end (and
+    # periodically during a long run). Lets runs from different machines
+    # share results and avoid redundant lookups/scrapes. Default False means
+    # every existing caller's behavior — and its exact Serper/Firecrawl call
+    # volume — is completely unchanged.
+    use_enrichment_cache: bool = False
+    enrichment_cache_bucket: str = ""
 
 
 # ---------------------------------------------------------------------------
@@ -219,6 +265,11 @@ _RESULT_FLAT_FIELDS = [
     "ai_hq_model", "ai_hq_classification", "ai_hq_confidence",
     "ai_parent_company", "ai_parent_hq_country", "ai_parent_hq_city",
     "ai_call_attempted", "ai_call_success", "ai_hq_error",
+    # HQ-call usage/cost audit (pre-existing on LeadPrioritizationResult;
+    # was missing from this export list -- found while comparing
+    # ai_hq_input_tokens before/after the Lusha enrichment plan's Stap 5).
+    "ai_hq_input_tokens", "ai_hq_output_tokens", "ai_hq_total_tokens",
+    "ai_hq_estimated_cost_usd",
     # non-HQ signal scores / reasons / evidence
     "sig_international_profile_score", "sig_onboarding_training_need_score",
     "sig_company_size_complexity_score", "sig_icp_keyword_match_score",
@@ -236,10 +287,20 @@ _RESULT_FLAT_FIELDS = [
     "company_size_complexity_evidence_quote", "icp_keyword_match_evidence_quote",
     "employer_branding_evidence_quote",
     "signal_extractor_version", "signal_scoring_mode",
+    # Which source produced the company_size_complexity signal above —
+    # "lusha" (Lusha employee/revenue data, highest priority), "serper_
+    # keyword_match" (existing deterministic fallback, unchanged), or
+    # None. See lead_lusha_size_signal.py (Lusha enrichment plan, Stap 3).
+    "company_size_complexity_source",
     # sector / industry detection (audit & app metadata — never scoring)
     "detected_industry", "detected_sub_industry", "detected_company_type",
     "sector_confidence", "sector_reason", "sector_evidence_url",
     "sector_evidence_quote", "sector_source_title", "sector_source",
+    # Raw Lusha values (audit only), always populated verbatim from the
+    # input row when present — see lead_lusha_sector_mapping.py (Stap 2)
+    # and lead_lusha_size_signal.py (Stap 3).
+    "lusha_main_industry", "lusha_sub_industry",
+    "lusha_employees", "lusha_revenue",
     # Raw AI-derived industry from the HQ interpretation step (own-domain
     # content) — the source of the "own_domain_ai" sector fallback above.
     "ai_hq_industry", "ai_hq_sub_industry",
@@ -444,6 +505,169 @@ def build_run_summary_dataframe(
 
 
 # ---------------------------------------------------------------------------
+# Shared enrichment cache orchestration (opt-in, GCS-backed) — see
+# enrichment_cache.py for the actual index format / download-upload
+# mechanics. Everything here is pure glue: resolve which country a row
+# belongs to, load/save one index per distinct country actually present in
+# the batch (never assuming a batch is single-country), and read the
+# before/after usage_tracker delta for the run_summary hit/miss columns.
+# ---------------------------------------------------------------------------
+
+def _effective_country_for_row(original: dict, config: "BatchRunConfig") -> str:
+    """Mirrors ``prioritize_single_lead``'s own effective-country resolution
+    (the row's own ``input_country_column`` value, else
+    ``config.default_input_country``) — used ONLY to pick which per-country
+    cache index a row should use, so cache-index selection can never
+    disagree with what ``prioritize_single_lead`` itself computes for that
+    same row."""
+    country = None
+    if config.input_country_column:
+        country = str(original.get(config.input_country_column, "") or "").strip() or None
+    return (country or "").strip() or config.default_input_country
+
+
+def _load_country_cache_indexes(rows: list, config: "BatchRunConfig") -> dict:
+    """One cache index per DISTINCT effective country actually present among
+    ``rows`` (a list of row dicts) — one GCS download per country, never per
+    row, and never assuming the whole batch is a single country just because
+    ``config.default_input_country`` names one: a dataset whose
+    ``input_country`` column varies per row gets one index per country group.
+
+    Callers are expected to only invoke this when
+    ``config.use_enrichment_cache`` is True (checked at each call site, not
+    guarded here), so a caller iterating a DataFrame never pays a wasted
+    row-to-dict pass when caching is off.
+    """
+    import enrichment_cache
+    from lovable_gcs_upload import country_folder_slug
+    slugs = {country_folder_slug(_effective_country_for_row(r, config)) for r in rows}
+    return {
+        slug: enrichment_cache.load_cache_index(config.enrichment_cache_bucket, slug)
+        for slug in slugs
+    }
+
+
+def _cache_index_for_row(
+    original: dict, config: "BatchRunConfig", country_indexes: dict,
+) -> Optional[dict]:
+    """The correct per-country cache index for one row, or ``None`` when
+    caching is off / that country's index was not loaded for some reason
+    (defensive — a lookup miss here must never be able to break a row; it
+    just means that one row runs live instead of cache-checked)."""
+    if not country_indexes:
+        return None
+    from lovable_gcs_upload import country_folder_slug
+    slug = country_folder_slug(_effective_country_for_row(original, config))
+    return country_indexes.get(slug)
+
+
+def _save_country_cache_indexes(config: "BatchRunConfig", country_indexes: dict) -> None:
+    """Upload every loaded country's index back to GCS. No-op when caching is
+    off or nothing was loaded. Never raises — ``enrichment_cache.
+    save_cache_index`` already returns a result dict rather than raising; a
+    failed upload only means this run's cache updates are lost, never that
+    the batch run itself fails."""
+    if not config.use_enrichment_cache or not country_indexes:
+        return
+    import enrichment_cache
+    for slug, idx in country_indexes.items():
+        enrichment_cache.save_cache_index(config.enrichment_cache_bucket, slug, idx)
+
+
+def _cache_usage_counts_snapshot() -> dict:
+    """Current cumulative cache hit/miss counts from ``usage_tracker``, or an
+    all-zero dict if ``usage_tracker`` is unavailable for any reason
+    (defensive — this must never break a batch run)."""
+    try:
+        import usage_tracker
+        snap = usage_tracker.snapshot()
+        return {
+            "serper_hits": snap["cache_hits"].get("serper", 0),
+            "serper_misses": snap["cache_misses"].get("serper", 0),
+            "firecrawl_hits": snap["cache_hits"].get("firecrawl", 0),
+            "firecrawl_misses": snap["cache_misses"].get("firecrawl", 0),
+        }
+    except Exception:
+        return {"serper_hits": 0, "serper_misses": 0, "firecrawl_hits": 0, "firecrawl_misses": 0}
+
+
+def _apply_cache_run_summary_counts(
+    run_summary: pd.DataFrame, cache_usage_before: Optional[dict],
+) -> pd.DataFrame:
+    """Add ``serper_cache_hits``/``serper_cache_misses``/
+    ``firecrawl_cache_hits``/``firecrawl_cache_misses`` columns, computed as
+    the ``usage_tracker`` delta since ``cache_usage_before`` was snapshotted
+    at the start of this run. A no-op — ``run_summary`` returned completely
+    unchanged — when ``cache_usage_before`` is ``None`` (caching was off for
+    this run), so the default run_summary shape never gains these columns.
+    """
+    if cache_usage_before is None:
+        return run_summary
+    after = _cache_usage_counts_snapshot()
+    run_summary["serper_cache_hits"] = after["serper_hits"] - cache_usage_before["serper_hits"]
+    run_summary["serper_cache_misses"] = after["serper_misses"] - cache_usage_before["serper_misses"]
+    run_summary["firecrawl_cache_hits"] = after["firecrawl_hits"] - cache_usage_before["firecrawl_hits"]
+    run_summary["firecrawl_cache_misses"] = (
+        after["firecrawl_misses"] - cache_usage_before["firecrawl_misses"])
+    return run_summary
+
+
+# ---------------------------------------------------------------------------
+# Lusha row-field auto-detection (Lusha enrichment plan, Stap 2) — no new
+# BatchRunConfig column-name setting: Lusha export column names are a
+# well-known, fixed vocabulary, so these are detected directly from each
+# row dict's own keys, case-insensitively, mirroring the same approach
+# input_cleaner_lusha_edition.py uses (kept self-contained here rather than
+# imported from that Streamlit app, so the core pipeline never depends on
+# a UI module).
+# ---------------------------------------------------------------------------
+
+_LUSHA_ROW_FIELD_CANDIDATES: dict[str, tuple[str, ...]] = {
+    "lusha_main_industry": ("company main industry", "main industry"),
+    "lusha_sub_industry": ("company sub industry", "sub industry"),
+    "lusha_description": ("company description", "description"),
+    "lusha_specialties": ("company specialties", "specialties"),
+    # Stap 3 — company size/complexity priority source.
+    "lusha_employees": (
+        "company number of employees", "number of employees",
+        "lusha employee range", "lusha api employee range", "employee range",
+    ),
+    "lusha_revenue": (
+        "company revenue", "revenue",
+        "lusha revenue range", "lusha api revenue range", "revenue range",
+    ),
+}
+
+
+def _normalize_row_col_key(col) -> str:
+    return re.sub(r"[\s_\-]+", " ", str(col).strip().lower())
+
+
+def _lusha_fields_from_row(row: dict) -> dict:
+    """Best-effort detection of Lusha Main/Sub Industry, Description,
+    Specialties, Number of Employees, and Revenue directly from ``row``'s
+    own keys. A row from a non-Lusha dataset simply has none of these
+    column names, so every value defaults to ``None`` — exactly "no Lusha
+    data available", the existing fallback behavior for every downstream
+    consumer of ``LeadInput.lusha_*``.
+    """
+    cols_norm = {_normalize_row_col_key(k): k for k in row.keys()}
+    out: dict = {}
+    for field_name, candidates in _LUSHA_ROW_FIELD_CANDIDATES.items():
+        value = None
+        for cand in candidates:
+            norm = _normalize_row_col_key(cand)
+            if norm in cols_norm:
+                raw = row.get(cols_norm[norm])
+                s = str(raw or "").strip()
+                if s and s.lower() != "nan":
+                    value = s
+                break
+        out[field_name] = value
+    return out
+
+
+# ---------------------------------------------------------------------------
 # Batch runner
 # ---------------------------------------------------------------------------
 
@@ -483,7 +707,27 @@ def run_batch_dataframe(
     ``None`` for backward compatibility (the CLI and existing callers are
     unaffected).  If the callback raises, the exception is swallowed so it can
     never break enrichment.
+
+    ``config.gate_full_enrichment_on_foreign_hq`` (default ``False``) is an
+    explicit opt-in that reuses the two-phase gating pattern already proven in
+    ``run_batch_foreign_hq_only`` (shared via ``_run_gated_full_enrichment``)
+    INSIDE this regular batch path, instead of requiring a separate dedicated
+    mode: cheap HQ-only screening runs for every row first (1 Serper call per
+    company), and the full per-row v2 pipeline then runs ONLY for rows
+    confirmed foreign-HQ (see ``is_confirmed_foreign_hq_for_full_enrichment``).
+    Skipped rows are kept in the output with ``enrichment_skipped=True`` and a
+    ``foreign_hq_skip_reason``, exactly like ``run_batch_foreign_hq_only``. C5
+    is not wired into this path yet (``run_batch_dataframe`` has never
+    supported C5) — a documented limitation (see
+    ``_run_batch_dataframe_gated``), not a silent gap. Default ``False`` means
+    every existing caller's behavior is completely unchanged.
     """
+    if config.gate_full_enrichment_on_foreign_hq:
+        return _run_batch_dataframe_gated(
+            df, config, serper_api_key, anthropic_api_key,
+            progress_callback, openai_api_key, firecrawl_api_key,
+        )
+
     flags = resolve_pipeline_flags(config.run_mode)
     # Step 3 AI caller-content composition is independent of run_mode — an
     # explicit opt-in on top of whatever the mode already enables.
@@ -506,11 +750,35 @@ def run_batch_dataframe(
         # lead_hq_firecrawl_source.py). Empty key → Serper-only HQ, exactly as
         # before. Runs for every HQ detection regardless of run_mode.
         "firecrawl_api_key": firecrawl_api_key,
+        # Public Source Signal Enrichment — independent opt-in (see
+        # BatchRunConfig above); off by default, a missing Firecrawl key
+        # blocks only this feature (yields no evidence), never the run.
+        "public_source_signal_enrichment": config.public_source_signal_enrichment,
+        "public_source_signal_query": config.public_source_signal_query,
+        "public_source_base_url": config.public_source_base_url,
+        "public_source_label": config.public_source_label,
+        "public_source_max_pages": config.public_source_max_pages,
     }
     if config.ai_model:
         ai_kwargs["ai_model"] = config.ai_model
     selected = select_batch_rows(df, config)
     selected_rows = len(selected)
+
+    # ── Shared enrichment cache (opt-in, GCS-backed) — see enrichment_cache.py.
+    # Loaded ONCE per distinct country present in the selected rows (never
+    # once per row, and never assuming the whole batch is one country) so a
+    # mixed-country dataset (input_country varies per row) still gets the
+    # right per-row index. Zero cost on the default path: nothing here runs
+    # at all unless config.use_enrichment_cache is explicitly True.
+    country_cache_indexes: dict = {}
+    _cache_usage_before: Optional[dict] = None
+    _cache_save_interval: Optional[int] = None
+    if config.use_enrichment_cache:
+        import enrichment_cache
+        country_cache_indexes = _load_country_cache_indexes(
+            [r.to_dict() for _, r in selected.iterrows()], config)
+        _cache_usage_before = _cache_usage_counts_snapshot()
+        _cache_save_interval = enrichment_cache.INTERMEDIATE_SAVE_INTERVAL
 
     enriched_rows: list[dict] = []
     evidence_rows: list[dict] = []
@@ -526,16 +794,20 @@ def run_batch_dataframe(
         if config.input_country_column:
             country = str(original.get(config.input_country_column, "") or "").strip() or None
 
+        cache_index = _cache_index_for_row(original, config, country_cache_indexes)
+
         processed += 1
         run_success = True
         run_error = ""
         result = None
         try:
             result = prioritize_single_lead(
-                LeadInput(company_name=company, domain=domain, input_country=country),
+                LeadInput(company_name=company, domain=domain, input_country=country,
+                          **_lusha_fields_from_row(original)),
                 serper_api_key=serper_api_key,
                 anthropic_api_key=anthropic_api_key,
                 default_input_country=config.default_input_country,
+                cache_index=cache_index,
                 **ai_kwargs,
                 **flags,
             )
@@ -595,22 +867,35 @@ def run_batch_dataframe(
             except Exception:
                 pass  # a broken callback must never break enrichment
 
+        # Periodic safety-net upload during a long run (crash protection) —
+        # only when caching is on; a failed intermediate save is silently
+        # retried at the next checkpoint / the final save below.
+        if _cache_save_interval and processed % _cache_save_interval == 0:
+            _save_country_cache_indexes(config, country_cache_indexes)
+
         if not run_success and not config.continue_on_error:
             break
+
+    # Final save — always runs when caching is on, even if the loop ended
+    # early or the last periodic checkpoint already covered most of it.
+    _save_country_cache_indexes(config, country_cache_indexes)
+
+    run_summary = build_run_summary_dataframe(
+        config,
+        total_input_rows=len(df),
+        selected_rows=len(selected),
+        processed_rows=processed,
+        success_count=success,
+        error_count=error,
+    )
+    run_summary = _apply_cache_run_summary_counts(run_summary, _cache_usage_before)
 
     return {
         "enriched_leads": pd.DataFrame(enriched_rows),
         "evidence": pd.DataFrame(evidence_rows),
         "signals": pd.DataFrame(signal_rows),
         "deep_dive": pd.DataFrame(deep_dive_rows),
-        "run_summary": build_run_summary_dataframe(
-            config,
-            total_input_rows=len(df),
-            selected_rows=len(selected),
-            processed_rows=processed,
-            success_count=success,
-            error_count=error,
-        ),
+        "run_summary": run_summary,
     }
 
 
@@ -974,7 +1259,12 @@ def _run_hq_and_c5_screening(
             progress_callback, phase_labels, 2,
             payload.get("c5_processed"), payload.get("c5_selected"), payload)
 
-    hq_config = replace(config, run_mode="hq_only")
+    # gate_full_enrichment_on_foreign_hq is forced off for this Phase-1 sub-
+    # call regardless of the caller's config: Phase 1 is always a plain
+    # hq_only pass, and a caller whose own config has the gate on (the new
+    # run_batch_dataframe opt-in path routes back through here) must never
+    # have run_batch_dataframe re-enter its own gated branch recursively.
+    hq_config = replace(config, run_mode="hq_only", gate_full_enrichment_on_foreign_hq=False)
     hq_tables = run_batch_dataframe(
         df, hq_config, serper_api_key, anthropic_api_key,
         progress_callback=_phase1_cb if progress_callback is not None else None,
@@ -1044,6 +1334,307 @@ def foreign_hq_skip_reason(row: dict, c5_enabled: bool) -> str:
     return "Not confirmed foreign HQ"
 
 
+def _run_gated_full_enrichment(
+    rows: list[dict],
+    config: "BatchRunConfig",
+    serper_api_key: str,
+    anthropic_api_key: str,
+    *,
+    c5_enabled: bool,
+    prioritize_kwargs: dict,
+    phase_labels: dict,
+    progress_callback: Optional[Callable[[dict], None]] = None,
+    openai_api_key: str = "",
+    firecrawl_api_key: str = "",
+    run_deep_dive_step: bool = False,
+) -> dict:
+    """Phase 3 of the foreign-HQ gating pattern: per-row eligibility check,
+    then full enrichment for eligible rows / a skip marker for the rest.
+
+    Extracted from ``run_batch_foreign_hq_only`` so that mode and the opt-in
+    ``BatchRunConfig.gate_full_enrichment_on_foreign_hq`` gate inside the
+    regular ``run_batch_dataframe`` share ONE implementation of "cheap HQ
+    screening for everyone (already done by the caller via
+    ``_run_hq_and_c5_screening`` before this runs), expensive full
+    enrichment only for confirmed-foreign-HQ rows, skip the rest with a
+    reason" — no duplicated eligibility/skip/progress logic between the two
+    callers.
+
+    ``rows`` is the Enriched-Leads dict list AFTER Phase 1 (HQ screening) and
+    optional Phase 2 (C5) have already run — this function only performs the
+    eligibility check and Phase 3 itself; it never re-runs HQ/C4/C5.
+
+    ``prioritize_kwargs`` is merged into every eligible row's
+    ``prioritize_single_lead(...)`` call, on top of the base
+    ``LeadInput``/``serper_api_key``/``anthropic_api_key``/
+    ``default_input_country``. This is what lets each caller control exactly
+    which optional v2 steps run for confirmed rows without the helper
+    hardcoding one caller's flag set: ``run_batch_foreign_hq_only`` passes
+    only ``{"run_full_v2_pipeline": True}`` (matching its existing, tested,
+    minimal behavior exactly), while the new gated ``run_batch_dataframe``
+    path passes its full per-row ``ai_kwargs``/``flags`` dict so nothing that
+    path already supports (compose_caller_content, rich_icp_context, AI
+    signal scoring, Public Source Signal Enrichment, ...) is silently dropped
+    just because gating was turned on.
+
+    ``run_deep_dive_step`` (default ``False``) additionally runs Deep Dive
+    after scoring for eligible rows that clear ``should_run_deep_dive``. Kept
+    as an explicit parameter — never read from ``config.deep_dive`` directly
+    — so ``run_batch_foreign_hq_only``, which has never supported Deep Dive,
+    keeps behaving exactly as before regardless of what a caller's config
+    happens to contain.
+
+    Returns a dict with ``out_rows``, ``evidence_rows``, ``signal_rows``,
+    ``deep_dive_rows`` (lists of dicts) and ``attempted``/``skipped``/
+    ``confirmed``/``total_confirmed``/``p3_success``/``p3_error`` (ints) —
+    callers build their own ``enriched_leads``/``run_summary`` DataFrames
+    from these, since the exact run_summary column names differ between
+    ``run_batch_foreign_hq_only`` (its established, tested contract) and the
+    new gated path (see ``_run_batch_dataframe_gated``).
+
+    When ``config.use_enrichment_cache`` is True, this function runs its own
+    independent per-country cache load/use/save cycle (see the module-level
+    cache helpers) and additionally returns ``cache_usage_before`` — the
+    ``usage_tracker`` cache-count snapshot taken before this phase started —
+    so callers can compute their own hit/miss delta via
+    ``_apply_cache_run_summary_counts``. ``cache_usage_before`` is ``None``
+    when caching is off, matching that helper's no-op contract.
+    """
+    out_rows: list[dict] = []
+    evidence_rows: list[dict] = []
+    signal_rows: list[dict] = []
+    deep_dive_rows: list[dict] = []
+    attempted = skipped = confirmed = 0
+    p3_success = p3_error = 0
+
+    # ── Shared enrichment cache (opt-in, GCS-backed) — its own independent
+    # load/save cycle, separate from Phase 1's (inside _run_hq_and_c5_screening
+    # -> run_batch_dataframe(hq_config, ...), which already handles the HQ-
+    # only queries' caching). This is safe because Phase 1 always completes
+    # fully — including its own final upload — BEFORE this Phase-3 loop
+    # starts (strictly sequential, never concurrent), so a fresh download
+    # here always sees Phase 1's just-uploaded entries; there is no
+    # lost-write race between the two phases' cache saves.
+    country_cache_indexes: dict = {}
+    _cache_usage_before: Optional[dict] = None
+    _cache_save_interval: Optional[int] = None
+    if config.use_enrichment_cache:
+        import enrichment_cache
+        country_cache_indexes = _load_country_cache_indexes(rows, config)
+        _cache_usage_before = _cache_usage_counts_snapshot()
+        _cache_save_interval = enrichment_cache.INTERMEDIATE_SAVE_INTERVAL
+
+    # Eligibility precomputed so progress can report a fixed phase-3 total.
+    confirmed_flags = [
+        is_confirmed_foreign_hq_for_full_enrichment(r, c5_enabled=c5_enabled)
+        for r in rows
+    ]
+    total_confirmed = sum(confirmed_flags)
+
+    for row, is_confirmed in zip(rows, confirmed_flags):
+        if not is_confirmed:
+            out_row = dict(row)
+            out_row["enrichment_skipped"] = True
+            out_row["enrichment_skip_reason"] = foreign_hq_skip_reason(row, c5_enabled)
+            out_row["full_enrichment_gate_reason"] = ""
+            out_rows.append(out_row)
+            skipped += 1
+            continue
+
+        confirmed += 1
+        attempted += 1
+        if _c5_score(row.get("sig_foreign_hq_score_for_next_scoring")) == 3.0:
+            gate_reason = "Confirmed foreign HQ (final HQ score 3)"
+        else:
+            gate_reason = "Confirmed by C5 foreign-parent adjudication"
+        company = str(row.get(config.company_name_column, "") or "").strip()
+        domain = str(row.get(config.domain_column, "") or "").strip() or None
+        country = None
+        if config.input_country_column:
+            country = str(row.get(config.input_country_column, "") or "").strip() or None
+        source_index = row.get("source_index")
+        cache_index = _cache_index_for_row(row, config, country_cache_indexes)
+
+        result = None
+        try:
+            result = prioritize_single_lead(
+                LeadInput(company_name=company, domain=domain, input_country=country,
+                          **_lusha_fields_from_row(row)),
+                serper_api_key=serper_api_key,
+                anthropic_api_key=anthropic_api_key,
+                default_input_country=config.default_input_country,
+                cache_index=cache_index,
+                **prioritize_kwargs,
+            )
+            out_row = flatten_result_for_excel(
+                result, row, source_index, True, "", config.include_raw_ai_json,
+            )
+            evidence_rows.extend(flatten_evidence_for_excel(result, source_index))
+            signal_rows.extend(flatten_signals_for_excel(result, source_index))
+            p3_success += 1
+        except Exception as exc:  # per-row isolation, matching run_batch_dataframe
+            out_row = dict(row)
+            out_row["run_success"] = False
+            out_row["run_error"] = f"{type(exc).__name__}: {str(exc)[:300]}"
+            p3_error += 1
+
+        # ── Deep Dive (opt-in, mirrors run_batch_dataframe's own placement:
+        # AFTER scoring, never feeds back into evidence_items/signals/scoring).
+        if run_deep_dive_step and result is not None:
+            should_run, trigger_reason = should_run_deep_dive(result, config)
+            if should_run:
+                dd_result = run_deep_dive(
+                    company_name=result.company_name or company,
+                    domain=domain,
+                    country=result.input_country,
+                    parent_company=result.ai_parent_company,
+                    parent_domain=None,
+                    trigger_reason=trigger_reason,
+                    serper_api_key=serper_api_key,
+                    anthropic_api_key=anthropic_api_key,
+                    firecrawl_api_key=firecrawl_api_key,
+                    max_pages=config.deep_dive_max_pages,
+                    verify_quotes=config.verify_quotes,
+                    auto_correct_quotes=config.auto_correct_quotes,
+                )
+                deep_dive_rows.extend(flatten_deep_dive_for_excel(dd_result, source_index))
+
+        out_row["enrichment_skipped"] = False
+        out_row["enrichment_skip_reason"] = ""
+        out_row["full_enrichment_gate_reason"] = gate_reason
+        out_rows.append(out_row)
+
+        _emit_batch_phase_progress(progress_callback, phase_labels, 3,
+                                   attempted, total_confirmed, {
+            "success_count": p3_success,
+            "error_count": p3_error,
+            "current_company_name": company,
+            # legacy keys kept for compatibility with earlier payload shape
+            "foreign_hq_full_processed": attempted,
+            "foreign_hq_full_selected": total_confirmed,
+        })
+
+        if _cache_save_interval and attempted % _cache_save_interval == 0:
+            _save_country_cache_indexes(config, country_cache_indexes)
+
+    if config.use_enrichment_cache:
+        _save_country_cache_indexes(config, country_cache_indexes)
+
+    return {
+        "out_rows": out_rows,
+        "evidence_rows": evidence_rows,
+        "signal_rows": signal_rows,
+        "deep_dive_rows": deep_dive_rows,
+        "attempted": attempted,
+        "skipped": skipped,
+        "confirmed": confirmed,
+        "total_confirmed": total_confirmed,
+        "p3_success": p3_success,
+        "p3_error": p3_error,
+        "cache_usage_before": _cache_usage_before,
+    }
+
+
+def _run_batch_dataframe_gated(
+    df: pd.DataFrame,
+    config: BatchRunConfig,
+    serper_api_key: str,
+    anthropic_api_key: str,
+    progress_callback: Optional[Callable[[dict], None]],
+    openai_api_key: str,
+    firecrawl_api_key: str,
+) -> dict:
+    """``run_batch_dataframe``'s opt-in path when
+    ``config.gate_full_enrichment_on_foreign_hq`` is True: cheap HQ-only
+    screening for every row (Phase 1, 1 Serper call per company, via
+    ``_run_hq_and_c5_screening`` with C5 disabled), then the full per-row v2
+    pipeline — using the SAME ``ai_kwargs``/``flags`` the default
+    ``run_batch_dataframe`` path would build for every row — ONLY for rows
+    confirmed foreign-HQ (Phase 3, via the shared ``_run_gated_full_enrichment``,
+    also used by ``run_batch_foreign_hq_only``). Rows that are not confirmed
+    are kept in the output with ``enrichment_skipped=True`` and a
+    ``foreign_hq_skip_reason``.
+
+    KNOWN LIMITATION: C5 is not wired into this path yet — ``run_batch_dataframe``
+    itself has never supported C5 (only the dedicated foreign-HQ-only modes
+    do), so Phase 1 always runs with ``c5_enabled=False`` here. Adding C5
+    support to this opt-in path would be a reasonable future extension
+    (following the exact pattern ``run_batch_foreign_hq_only`` already uses),
+    not something this task adds. Deep Dive, by contrast, mirrors the
+    default path's own behavior exactly — it runs for eligible rows whenever
+    ``config.deep_dive`` is set, same as an ungated ``run_batch_dataframe`` call.
+
+    Returns the same dict shape as ``run_batch_dataframe`` (``enriched_leads``,
+    ``evidence``, ``signals``, ``deep_dive``, ``run_summary``) — ``run_summary``
+    additionally carries ``gated_full_enrichment_attempted_count`` /
+    ``gated_full_enrichment_skipped_count`` /
+    ``gated_estimated_serper_calls_saved`` (``skipped * 4``, matching the four
+    extra non-HQ Serper calls a full v2 enrichment would otherwise have made).
+    """
+    rows, _c5_counts = _run_hq_and_c5_screening(
+        df, config, serper_api_key, anthropic_api_key,
+        c5_enabled=False, c5_scoring_behavior="", c5_scope="",
+        c5_model_used="", c5_model_tier="",
+        phase_labels=GATED_FULL_ENRICHMENT_PHASE_LABELS,
+        progress_callback=progress_callback,
+    )
+
+    # Exactly the same ai_kwargs/flags construction as the default
+    # run_batch_dataframe path below, so an eligible (confirmed foreign-HQ)
+    # row gets identical treatment to what every row would get with gating off.
+    flags = resolve_pipeline_flags(config.run_mode)
+    flags["compose_caller_content_flag"] = config.compose_caller_content
+    flags["compose_icp_context"] = config.rich_icp_context
+    flags["ai_signal_scoring"] = config.ai_signal_scoring
+    flags["legacy_enrichment_mode"] = config.legacy_enrichment_mode
+    ai_kwargs: dict = {
+        "ai_provider": config.ai_provider,
+        "openai_api_key": openai_api_key,
+        "firecrawl_api_key": firecrawl_api_key,
+        "public_source_signal_enrichment": config.public_source_signal_enrichment,
+        "public_source_signal_query": config.public_source_signal_query,
+        "public_source_base_url": config.public_source_base_url,
+        "public_source_label": config.public_source_label,
+        "public_source_max_pages": config.public_source_max_pages,
+    }
+    if config.ai_model:
+        ai_kwargs["ai_model"] = config.ai_model
+
+    gated = _run_gated_full_enrichment(
+        rows, config, serper_api_key, anthropic_api_key,
+        c5_enabled=False,
+        prioritize_kwargs={**ai_kwargs, **flags},
+        phase_labels=GATED_FULL_ENRICHMENT_PHASE_LABELS,
+        progress_callback=progress_callback,
+        openai_api_key=openai_api_key,
+        firecrawl_api_key=firecrawl_api_key,
+        run_deep_dive_step=config.deep_dive,
+    )
+
+    out_rows = gated["out_rows"]
+    success_count = sum(1 for r in out_rows if r.get("run_success", True))
+    error_count = len(out_rows) - success_count
+
+    run_summary = build_run_summary_dataframe(
+        config, total_input_rows=len(df), selected_rows=len(rows),
+        processed_rows=len(rows), success_count=success_count, error_count=error_count,
+    )
+    # Gating audit counts (Step 4) — only present when gating is on; the
+    # default (ungated) run_summary shape is completely unaffected.
+    run_summary["gated_full_enrichment_attempted_count"] = gated["attempted"]
+    run_summary["gated_full_enrichment_skipped_count"] = gated["skipped"]
+    run_summary["gated_estimated_serper_calls_saved"] = gated["skipped"] * 4
+    run_summary = _apply_cache_run_summary_counts(run_summary, gated.get("cache_usage_before"))
+
+    return {
+        "enriched_leads": pd.DataFrame(out_rows),
+        "evidence": pd.DataFrame(gated["evidence_rows"]),
+        "signals": pd.DataFrame(gated["signal_rows"]),
+        "deep_dive": pd.DataFrame(gated["deep_dive_rows"]),
+        "run_summary": run_summary,
+    }
+
+
 def run_batch_foreign_hq_only(
     df: pd.DataFrame,
     config: BatchRunConfig,
@@ -1078,7 +1669,23 @@ def run_batch_foreign_hq_only(
     Returns the same dict shape as ``run_batch_dataframe``: ``enriched_leads``,
     ``evidence``, ``signals``, ``run_summary`` (extended with the mode's own
     counts and, always, the C5 settings/counts columns).
+
+    Phase 3 (the eligibility check + full-enrichment-or-skip loop below) is
+    implemented by the shared ``_run_gated_full_enrichment`` helper — also
+    used by the opt-in ``BatchRunConfig.gate_full_enrichment_on_foreign_hq``
+    gate inside the regular ``run_batch_dataframe`` — so the two callers can
+    never drift apart on eligibility/skip-reason/progress behavior. This
+    function passes ``prioritize_kwargs={"run_full_v2_pipeline": True}`` and
+    ``run_deep_dive_step=False``, matching its pre-refactor behavior exactly
+    (Deep Dive has never been supported in this mode).
     """
+    # Snapshotted BEFORE Phase 1 so the eventual run_summary counts cover
+    # BOTH phases' cache usage (Phase 1's own run_batch_dataframe(hq_config)
+    # call already does its own independent cache load/use/save cycle, whose
+    # hit/miss counts would otherwise be silently dropped here since only
+    # `rows` is kept from Phase 1's return value, not its run_summary).
+    _cache_usage_before = _cache_usage_counts_snapshot() if config.use_enrichment_cache else None
+
     rows, c5_counts = _run_hq_and_c5_screening(
         df, config, serper_api_key, anthropic_api_key,
         c5_enabled=c5_enabled, c5_scoring_behavior=c5_scoring_behavior,
@@ -1086,76 +1693,20 @@ def run_batch_foreign_hq_only(
         phase_labels=FOREIGN_HQ_ONLY_PHASE_LABELS, progress_callback=progress_callback,
     )
 
-    out_rows: list[dict] = []
-    evidence_rows: list[dict] = []
-    signal_rows: list[dict] = []
-    attempted = skipped = confirmed = 0
-    p3_success = p3_error = 0
-
-    # Eligibility precomputed so progress can report a fixed phase-3 total.
-    confirmed_flags = [
-        is_confirmed_foreign_hq_for_full_enrichment(r, c5_enabled=c5_enabled)
-        for r in rows
-    ]
-    total_confirmed = sum(confirmed_flags)
-
-    for row, is_confirmed in zip(rows, confirmed_flags):
-        if not is_confirmed:
-            out_row = dict(row)
-            out_row["enrichment_skipped"] = True
-            out_row["enrichment_skip_reason"] = foreign_hq_skip_reason(row, c5_enabled)
-            out_row["full_enrichment_gate_reason"] = ""
-            out_rows.append(out_row)
-            skipped += 1
-            continue
-
-        confirmed += 1
-        attempted += 1
-        if _c5_score(row.get("sig_foreign_hq_score_for_next_scoring")) == 3.0:
-            gate_reason = "Confirmed foreign HQ (final HQ score 3)"
-        else:
-            gate_reason = "Confirmed by C5 foreign-parent adjudication"
-        company = str(row.get(config.company_name_column, "") or "").strip()
-        domain = str(row.get(config.domain_column, "") or "").strip() or None
-        country = None
-        if config.input_country_column:
-            country = str(row.get(config.input_country_column, "") or "").strip() or None
-        source_index = row.get("source_index")
-
-        try:
-            result = prioritize_single_lead(
-                LeadInput(company_name=company, domain=domain, input_country=country),
-                serper_api_key=serper_api_key,
-                anthropic_api_key=anthropic_api_key,
-                default_input_country=config.default_input_country,
-                run_full_v2_pipeline=True,
-            )
-            out_row = flatten_result_for_excel(
-                result, row, source_index, True, "", config.include_raw_ai_json,
-            )
-            evidence_rows.extend(flatten_evidence_for_excel(result, source_index))
-            signal_rows.extend(flatten_signals_for_excel(result, source_index))
-            p3_success += 1
-        except Exception as exc:  # per-row isolation, matching run_batch_dataframe
-            out_row = dict(row)
-            out_row["run_success"] = False
-            out_row["run_error"] = f"{type(exc).__name__}: {str(exc)[:300]}"
-            p3_error += 1
-
-        out_row["enrichment_skipped"] = False
-        out_row["enrichment_skip_reason"] = ""
-        out_row["full_enrichment_gate_reason"] = gate_reason
-        out_rows.append(out_row)
-
-        _emit_batch_phase_progress(progress_callback, FOREIGN_HQ_ONLY_PHASE_LABELS, 3,
-                                   attempted, total_confirmed, {
-            "success_count": p3_success,
-            "error_count": p3_error,
-            "current_company_name": company,
-            # legacy keys kept for compatibility with earlier payload shape
-            "foreign_hq_full_processed": attempted,
-            "foreign_hq_full_selected": total_confirmed,
-        })
+    gated = _run_gated_full_enrichment(
+        rows, config, serper_api_key, anthropic_api_key,
+        c5_enabled=c5_enabled,
+        prioritize_kwargs={"run_full_v2_pipeline": True},
+        phase_labels=FOREIGN_HQ_ONLY_PHASE_LABELS,
+        progress_callback=progress_callback,
+        run_deep_dive_step=False,
+    )
+    out_rows = gated["out_rows"]
+    evidence_rows = gated["evidence_rows"]
+    signal_rows = gated["signal_rows"]
+    attempted = gated["attempted"]
+    skipped = gated["skipped"]
+    confirmed = gated["confirmed"]
 
     success_count = sum(1 for r in out_rows if r.get("run_success", True))
     error_count = len(out_rows) - success_count
@@ -1177,6 +1728,7 @@ def run_batch_foreign_hq_only(
         c5_model_used=c5_model_used if c5_enabled else "",
         counts=c5_counts,
     )
+    run_summary = _apply_cache_run_summary_counts(run_summary, _cache_usage_before)
 
     return {
         "enriched_leads": pd.DataFrame(out_rows),
@@ -1628,7 +2180,8 @@ def run_batch_non_english_foreign_hq_only(
 
         try:
             result = prioritize_single_lead(
-                LeadInput(company_name=company, domain=domain, input_country=country),
+                LeadInput(company_name=company, domain=domain, input_country=country,
+                          **_lusha_fields_from_row(row)),
                 serper_api_key=serper_api_key,
                 anthropic_api_key=anthropic_api_key,
                 default_input_country=config.default_input_country,
@@ -1773,6 +2326,21 @@ def run_single_batch_unit(
     every other mode runs ``run_batch_dataframe`` plus the same optional C5
     post-step and Run Summary extension the Streamlit app performs
     sequentially. Used by the parallel runner for each chunk.
+
+    ``config.gate_full_enrichment_on_foreign_hq`` needs NO extra plumbing
+    here: ``run_batch_dataframe`` itself branches on that flag (see
+    ``_run_batch_dataframe_gated``), so every existing caller — including
+    this parallel path — picks up the opt-in gate automatically for the
+    regular run modes, by just passing the same ``config`` through unchanged.
+
+    KNOWN LIMITATION / TODO: combining ``gate_full_enrichment_on_foreign_hq``
+    with ``c5_enabled=True`` at THIS level has not been considered — the C5
+    post-step below would run as a blanket pass over ``tables["enriched_leads"]``,
+    which then contains a mix of fully-enriched (confirmed foreign-HQ) and
+    gate-skipped rows. Untested combination; do not assume it behaves the same
+    as C5 running only against fully-enriched rows. Scoping that properly
+    (e.g. skipping gate-skipped rows in the C5 post-step) is a reasonable
+    future extension, not part of this task.
     """
     if config.run_mode == FOREIGN_HQ_ONLY_MODE:
         return run_batch_foreign_hq_only(

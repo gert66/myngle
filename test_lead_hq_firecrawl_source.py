@@ -106,3 +106,94 @@ class TestFailureModes:
         assert out["pages"] == []
         # pages_crawled still records what was attempted.
         assert len(out["pages_crawled"]) >= 1
+
+
+class TestCountryLocalizedPaths:
+    """Lusha enrichment plan, Stap 1: extra localized candidate paths appended
+    for known countries, on top of (never instead of) the English defaults."""
+
+    def test_no_country_keeps_default_six_paths(self):
+        empty = _ok_resp("   ")
+        with patch("deep_dive_runner.requests.post", return_value=empty) as post:
+            collect_own_domain_hq_pages("acme.com", "fc-key")
+        urls = [c.kwargs["json"]["url"] for c in post.call_args_list]
+        assert urls == [
+            "https://acme.com", "https://acme.com/about", "https://acme.com/about-us",
+            "https://acme.com/company", "https://acme.com/company-profile",
+            "https://acme.com/en/about",
+        ]
+
+    def test_unknown_country_keeps_default_six_paths(self):
+        empty = _ok_resp("   ")
+        with patch("deep_dive_runner.requests.post", return_value=empty) as post:
+            collect_own_domain_hq_pages("acme.com", "fc-key", country="Narnia")
+        assert post.call_count == 6
+
+    def test_italy_appends_chi_siamo(self):
+        empty = _ok_resp("   ")
+        with patch("deep_dive_runner.requests.post", return_value=empty) as post:
+            collect_own_domain_hq_pages("acme.it", "fc-key", country="Italy")
+        urls = [c.kwargs["json"]["url"] for c in post.call_args_list]
+        assert urls[-1] == "https://acme.it/chi-siamo"
+        assert len(urls) == 7
+
+    def test_netherlands_appends_over_ons(self):
+        empty = _ok_resp("   ")
+        with patch("deep_dive_runner.requests.post", return_value=empty) as post:
+            collect_own_domain_hq_pages("acme.nl", "fc-key", country="Netherlands")
+        urls = [c.kwargs["json"]["url"] for c in post.call_args_list]
+        assert urls[-1] == "https://acme.nl/over-ons"
+
+    def test_germany_appends_ueber_uns(self):
+        empty = _ok_resp("   ")
+        with patch("deep_dive_runner.requests.post", return_value=empty) as post:
+            collect_own_domain_hq_pages("acme.de", "fc-key", country="Germany")
+        urls = [c.kwargs["json"]["url"] for c in post.call_args_list]
+        assert urls[-1] == "https://acme.de/ueber-uns"
+
+    def test_france_appends_a_propos(self):
+        empty = _ok_resp("   ")
+        with patch("deep_dive_runner.requests.post", return_value=empty) as post:
+            collect_own_domain_hq_pages("acme.fr", "fc-key", country="France")
+        urls = [c.kwargs["json"]["url"] for c in post.call_args_list]
+        assert urls[-1] == "https://acme.fr/a-propos"
+
+    def test_localized_path_found_within_max_pages_cap(self):
+        # All English paths 404; the localized Italian path succeeds and is
+        # still found because it's tried within the same max_pages budget.
+        four_oh_four = Mock(status_code=404)
+        ok = _ok_resp("Chi siamo: parte di un gruppo estero.")
+        with patch("deep_dive_runner.requests.post",
+                   side_effect=[four_oh_four] * 6 + [ok]):
+            out = collect_own_domain_hq_pages(
+                "acme.it", "fc-key", country="Italy", max_pages=3)
+        assert out["used"] is True
+        assert len(out["pages"]) == 1
+        assert out["pages"][0]["url"] == "https://acme.it/chi-siamo"
+
+    def test_localized_path_never_tried_when_default_cap_reached_by_english_paths(self):
+        # Verification (Stap 1/2 audit): when the first 3 English paths are
+        # ALL successful, the default max_pages=3 cap is already reached --
+        # the localized Italian path is never even attempted. "More chances,
+        # never fewer": the language paths only matter when the English
+        # ones don't already satisfy the cap.
+        ok = _ok_resp("Homepage content about the company.")
+        with patch("deep_dive_runner.requests.post", return_value=ok) as post:
+            out = collect_own_domain_hq_pages(
+                "acme.it", "fc-key", country="Italy", max_pages=3)
+        assert out["used"] is True
+        assert len(out["pages"]) == 3
+        urls = [c.kwargs["json"]["url"] for c in post.call_args_list]
+        assert "https://acme.it/chi-siamo" not in urls
+        assert len(urls) == 3
+
+    def test_explicit_candidate_paths_override_ignores_country(self):
+        # Existing override behavior stays exactly as before -- country is
+        # ignored whenever the caller passes candidate_paths explicitly.
+        empty = _ok_resp("   ")
+        with patch("deep_dive_runner.requests.post", return_value=empty) as post:
+            collect_own_domain_hq_pages(
+                "acme.it", "fc-key", country="Italy",
+                candidate_paths=("", "/x"), max_pages=5)
+        urls = [c.kwargs["json"]["url"] for c in post.call_args_list]
+        assert urls == ["https://acme.it", "https://acme.it/x"]

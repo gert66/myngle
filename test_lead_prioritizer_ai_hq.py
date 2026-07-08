@@ -778,6 +778,27 @@ class TestAnthropicPromptCaching:
         second = m._SYSTEM_PROMPT + "\n\n" + m._USER_TEMPLATE_STATIC_INSTRUCTIONS
         assert first == second
 
+    def test_cache_boundary_hash_is_pinned(self):
+        # Hard regression test for the prompt-cache boundary (Lusha
+        # enrichment plan, Stap 5): _SYSTEM_PROMPT +
+        # _USER_TEMPLATE_STATIC_INSTRUCTIONS is the ONE block sent with
+        # cache_control=ephemeral on every HQ call. Pinning its SHA256 (not
+        # just comparing it to itself, as the test above does) means any
+        # FUTURE accidental edit to either constant -- even a single
+        # character, e.g. from a change meant only for the per-lead
+        # template -- fails this test immediately instead of silently
+        # turning every cheap cache read into an expensive cache write.
+        # Recorded before Stap 5's change (which only touches
+        # _USER_TEMPLATE_PER_LEAD, never these two) and confirmed
+        # unchanged after it.
+        import hashlib
+        import lead_hq_ai_interpreter as m
+        combined = m._SYSTEM_PROMPT + "\n\n" + m._USER_TEMPLATE_STATIC_INSTRUCTIONS
+        assert len(combined) == 3361
+        assert hashlib.sha256(combined.encode("utf-8")).hexdigest() == (
+            "0f85a295e5abaea39235204b5fb79b3ac65c06f6b90a62a6224d3fc2355665c4"
+        )
+
     def test_cache_creation_and_read_tokens_propagated(self):
         ai = _ai_json(classification="domestic", confidence="High",
                       parent_hq_country="Italy")
@@ -1273,9 +1294,13 @@ class TestSectorFallbackToOwnDomainAi:
         assert result.detected_industry is None
         assert result.sector_source is None
 
-    def test_keyword_match_always_wins_over_ai_fallback(self):
-        # sector_industry evidence with a clean keyword hit must never be
-        # overwritten by the AI-derived fallback, even when a crawl happened.
+    def test_sector_industry_evidence_no_longer_consulted(self):
+        # Lusha enrichment plan, Stap 4: the live Serper sector_industry
+        # query/evidence tier is gone. Even a clean keyword hit in
+        # sector_industry-tagged evidence is no longer consulted -- the
+        # own-domain AI fallback (tier 2) wins whenever a genuine crawl
+        # happened, exactly like test_fallback_fires_when_keyword_detector_
+        # found_nothing above.
         with patch(
             "lead_prioritizer_core.collect_own_domain_hq_pages",
             return_value=self._fc_used,
@@ -1297,5 +1322,733 @@ class TestSectorFallbackToOwnDomainAi:
                 firecrawl_api_key="fc-key",
                 collect_non_hq_evidence=True, extract_non_hq_signals_flag=True,
             )
-        assert result.sector_source == "keyword_match"
+        assert result.sector_source == "own_domain_ai"
+        assert result.detected_industry == "Power electronics"
+
+    def test_own_domain_ai_wins_over_lusha_text_fallback(self):
+        # Tier 2 (own-domain Firecrawl+AI) must never be overwritten by the
+        # lower-priority tier 3 (Lusha Description/Specialties keyword
+        # match), even when both would independently produce a hit.
+        lead = LeadInput(
+            company_name="AEG Power Solutions", domain="aegps.com",
+            input_country="Germany",
+            lusha_description="A retail company with stores nationwide.",
+        )
+        with patch(
+            "lead_prioritizer_core.collect_own_domain_hq_pages",
+            return_value=self._fc_used,
+        ), _mock_serper(_EMPTY_SERPER), _mock_anthropic(self._ai):
+            result = prioritize_single_lead(
+                lead, serper_api_key="s", anthropic_api_key="a",
+                firecrawl_api_key="fc-key",
+                collect_non_hq_evidence=True, extract_non_hq_signals_flag=True,
+            )
+        assert result.sector_source == "own_domain_ai"
+        assert result.detected_industry == "Power electronics"
+
+
+# ---------------------------------------------------------------------------
+# call_serper_for_hq: shared GCS enrichment cache (opt-in cache_index param).
+# ---------------------------------------------------------------------------
+
+class TestCallSerperForHqCache:
+    def _mock_urlopen(self, payload: dict):
+        response = MagicMock()
+        response.read.return_value = json.dumps(payload).encode()
+        response.__enter__ = MagicMock(return_value=response)
+        response.__exit__ = MagicMock(return_value=False)
+        return patch("urllib.request.urlopen", return_value=response)
+
+    def test_default_none_cache_index_always_calls_serper_live(self):
+        from lead_hq_ai_interpreter import call_serper_for_hq
+
+        with self._mock_urlopen({"organic": [{"title": "x"}]}) as mock_urlopen:
+            result = call_serper_for_hq(
+                domain_root="acme.com", query="acme headquarters", serper_api_key="k",
+            )
+        mock_urlopen.assert_called_once()
+        assert result == {"organic": [{"title": "x"}]}
+
+    def test_cache_hit_skips_network_call(self):
+        from lead_hq_ai_interpreter import call_serper_for_hq
+        import enrichment_cache
+
+        index: dict = {}
+        enrichment_cache.put_cached(
+            index, "serper", "acme.com", "hq", response={"organic": ["cached"]})
+
+        with self._mock_urlopen({"organic": ["live"]}) as mock_urlopen:
+            result = call_serper_for_hq(
+                domain_root="acme.com", query="acme headquarters", serper_api_key="k",
+                cache_index=index,
+            )
+        mock_urlopen.assert_not_called()
+        assert result == {"organic": ["cached"]}
+
+    def test_cache_miss_calls_live_and_populates_cache(self):
+        from lead_hq_ai_interpreter import call_serper_for_hq
+        import enrichment_cache
+
+        index: dict = {}
+        with self._mock_urlopen({"organic": ["live"]}) as mock_urlopen:
+            result = call_serper_for_hq(
+                domain_root="acme.com", query="acme headquarters", serper_api_key="k",
+                cache_index=index,
+            )
+        mock_urlopen.assert_called_once()
+        assert result == {"organic": ["live"]}
+        cached = enrichment_cache.get_cached(
+            index, "serper", "acme.com", "hq", ttl_days=120)
+        assert cached == {"organic": ["live"]}
+
+    def test_force_refresh_ignores_fresh_cache_entry(self):
+        from lead_hq_ai_interpreter import call_serper_for_hq
+        import enrichment_cache
+
+        index: dict = {}
+        enrichment_cache.put_cached(
+            index, "serper", "acme.com", "hq", response={"organic": ["cached"]})
+
+        with self._mock_urlopen({"organic": ["live"]}) as mock_urlopen:
+            result = call_serper_for_hq(
+                domain_root="acme.com", query="acme headquarters", serper_api_key="k",
+                cache_index=index, force_refresh=True,
+            )
+        mock_urlopen.assert_called_once()
+        assert result == {"organic": ["live"]}
+
+
+# ---------------------------------------------------------------------------
+# call_serper_for_hq: gl/hl localization (Lusha enrichment plan, Stap 1).
+# ---------------------------------------------------------------------------
+
+class TestCallSerperForHqGlHl:
+    def _capture_body(self, payload: dict = None):
+        captured = {}
+
+        class _FakeResponse:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *a):
+                return False
+
+            def read(self):
+                return json.dumps(payload or {}).encode()
+
+        def _fake_urlopen(req, timeout=15):
+            captured["body"] = json.loads(req.data.decode())
+            return _FakeResponse()
+
+        return captured, patch("urllib.request.urlopen", side_effect=_fake_urlopen)
+
+    def test_gl_and_hl_included_when_given(self):
+        from lead_hq_ai_interpreter import call_serper_for_hq
+
+        captured, patcher = self._capture_body()
+        with patcher:
+            call_serper_for_hq(
+                domain_root="acme.com", query="acme headquarters", serper_api_key="k",
+                gl="it", hl="it",
+            )
+        assert captured["body"] == {"q": "acme headquarters", "num": 10, "gl": "it", "hl": "it"}
+
+    def test_gl_without_hl(self):
+        from lead_hq_ai_interpreter import call_serper_for_hq
+
+        captured, patcher = self._capture_body()
+        with patcher:
+            call_serper_for_hq(
+                domain_root="acme.com", query="acme headquarters", serper_api_key="k",
+                gl="ch", hl=None,
+            )
+        assert captured["body"] == {"q": "acme headquarters", "num": 10, "gl": "ch"}
+        assert "hl" not in captured["body"]
+
+    def test_omitted_gl_hl_matches_pre_existing_request_shape(self):
+        from lead_hq_ai_interpreter import call_serper_for_hq
+
+        captured, patcher = self._capture_body()
+        with patcher:
+            call_serper_for_hq(
+                domain_root="acme.com", query="acme headquarters", serper_api_key="k",
+            )
+        assert captured["body"] == {"q": "acme headquarters", "num": 10}
+
+
+# ---------------------------------------------------------------------------
+# End-to-end: prioritize_single_lead resolves gl/hl and passes a country to
+# the own-domain Firecrawl crawl from the lead's effective country.
+# ---------------------------------------------------------------------------
+
+class TestPrioritizeSingleLeadCountryLocalization:
+    def test_serper_hq_call_receives_gl_hl_for_known_country(self):
+        seen = {}
+
+        def _fake_call_serper_for_hq(**kwargs):
+            seen.update(kwargs)
+            return {"organic": []}
+
+        with patch("lead_prioritizer_core.call_serper_for_hq",
+                   side_effect=_fake_call_serper_for_hq), \
+             _mock_anthropic(_ai_json(classification="unclear")):
+            prioritize_single_lead(
+                LeadInput(company_name="Acme", domain="acme.it", input_country="Italy"),
+                serper_api_key="s", anthropic_api_key="a",
+            )
+        assert seen.get("gl") == "it"
+        assert seen.get("hl") == "it"
+
+    def test_switzerland_sets_gl_but_not_hl(self):
+        seen = {}
+
+        def _fake_call_serper_for_hq(**kwargs):
+            seen.update(kwargs)
+            return {"organic": []}
+
+        with patch("lead_prioritizer_core.call_serper_for_hq",
+                   side_effect=_fake_call_serper_for_hq), \
+             _mock_anthropic(_ai_json(classification="unclear")):
+            prioritize_single_lead(
+                LeadInput(company_name="Acme", domain="acme.ch", input_country="Switzerland"),
+                serper_api_key="s", anthropic_api_key="a",
+            )
+        assert seen.get("gl") == "ch"
+        assert seen.get("hl") is None
+
+    def test_unknown_country_omits_gl_hl(self):
+        seen = {}
+
+        def _fake_call_serper_for_hq(**kwargs):
+            seen.update(kwargs)
+            return {"organic": []}
+
+        with patch("lead_prioritizer_core.call_serper_for_hq",
+                   side_effect=_fake_call_serper_for_hq), \
+             _mock_anthropic(_ai_json(classification="unclear")):
+            prioritize_single_lead(
+                LeadInput(company_name="Acme", domain="acme.com", input_country="Narnia"),
+                serper_api_key="s", anthropic_api_key="a",
+            )
+        assert seen.get("gl") is None
+        assert seen.get("hl") is None
+
+    def test_own_domain_firecrawl_crawl_receives_effective_country(self):
+        seen = {}
+
+        def _fake_collect(domain, key, **kwargs):
+            seen.update(kwargs)
+            return {"pages": [], "pages_crawled": [], "used": False}
+
+        with patch("lead_prioritizer_core.collect_own_domain_hq_pages",
+                   side_effect=_fake_collect), \
+             _mock_anthropic(_ai_json(classification="unclear")):
+            prioritize_single_lead(
+                LeadInput(company_name="Acme", domain="acme.it", input_country="Italy"),
+                serper_api_key="s", anthropic_api_key="a", firecrawl_api_key="fc-key",
+            )
+        assert seen.get("country") == "Italy"
+
+    def test_non_lusha_caller_without_input_country_falls_back_to_default(self):
+        # Verification (Stap 1/2 audit): a caller with no input_country and
+        # no Lusha fields at all (e.g. an existing CLI-style caller) must
+        # keep exactly the pre-Stap-1 fallback: default_input_country, and
+        # gl/hl derived from THAT value -- never a regression to "no
+        # localization at all" just because the row itself is bare.
+        lead = LeadInput(company_name="Acme", domain="acme.com")
+        seen = {}
+
+        def _fake_call_serper_for_hq(**kwargs):
+            seen.update(kwargs)
+            return {"organic": []}
+
+        with patch("lead_prioritizer_core.call_serper_for_hq",
+                   side_effect=_fake_call_serper_for_hq), \
+             _mock_anthropic(_ai_json(classification="unclear")):
+            result = prioritize_single_lead(
+                lead, serper_api_key="s", anthropic_api_key="a",
+                default_input_country="Italy",
+            )
+        assert result.input_country == "Italy"
+        assert seen.get("gl") == "it"
+        assert seen.get("hl") == "it"
+        assert result.lusha_main_industry is None
+
+
+# ---------------------------------------------------------------------------
+# Sector priority chain (Lusha enrichment plan, Stap 2): Lusha mapping (tier
+# 1, highest) -> Serper evidence keyword match (existing) -> own-domain AI
+# (existing) -> Lusha Description/Specialties text (tier 3, last resort).
+# lusha_main_industry/lusha_sub_industry audit fields are always populated
+# from the input regardless of which tier (if any) won.
+# ---------------------------------------------------------------------------
+
+class TestSectorPriorityChain:
+    _lead_no_lusha = LeadInput(company_name="Acme", domain="acme.com", input_country="Italy")
+
+    def test_lusha_mapping_wins_over_serper_evidence(self):
+        lead = LeadInput(
+            company_name="Acme", domain="acme.com", input_country="Italy",
+            lusha_main_industry="Manufacturing",
+            lusha_sub_industry="Industrial Machinery & Equipment",
+        )
+        with _mock_serper(_EMPTY_SERPER), _mock_anthropic(_ai_json()), patch(
+            "lead_prioritizer_core.extract_sector_industry",
+            return_value={
+                "detected_industry": "Software", "detected_sub_industry": None,
+                "detected_company_type": None, "sector_confidence": "High",
+                "sector_reason": "should not win", "sector_evidence_url": "https://x",
+                "sector_evidence_quote": None, "sector_source_title": None,
+                "sector_source": "keyword_match",
+            },
+        ):
+            result = prioritize_single_lead(
+                lead, serper_api_key="s", anthropic_api_key="a")
         assert result.detected_industry == "Industrial equipment and machinery"
+        assert result.sector_source == "lusha_mapped"
+
+    def test_no_lusha_mapping_falls_through_to_serper_evidence_unchanged(self):
+        with _mock_serper(_EMPTY_SERPER), _mock_anthropic(_ai_json()), patch(
+            "lead_prioritizer_core.extract_sector_industry",
+            return_value={
+                "detected_industry": "Software", "detected_sub_industry": None,
+                "detected_company_type": None, "sector_confidence": "High",
+                "sector_reason": "matched", "sector_evidence_url": "https://x",
+                "sector_evidence_quote": None, "sector_source_title": None,
+                "sector_source": "keyword_match",
+            },
+        ):
+            result = prioritize_single_lead(
+                self._lead_no_lusha, serper_api_key="s", anthropic_api_key="a")
+        assert result.detected_industry == "Software"
+        assert result.sector_source == "keyword_match"
+
+    def test_lusha_text_fallback_only_when_evidence_and_ai_tiers_empty(self):
+        empty_sector = {
+            "detected_industry": None, "detected_sub_industry": None,
+            "detected_company_type": None, "sector_confidence": None,
+            "sector_reason": None, "sector_evidence_url": None,
+            "sector_evidence_quote": None, "sector_source_title": None,
+            "sector_source": None,
+        }
+        lead = LeadInput(
+            company_name="Acme", domain="acme.com", input_country="Italy",
+            lusha_description="We manufacture industrial machinery worldwide.",
+        )
+        with _mock_serper(_EMPTY_SERPER), _mock_anthropic(_ai_json()), patch(
+            "lead_prioritizer_core.extract_sector_industry", return_value=empty_sector,
+        ):
+            result = prioritize_single_lead(lead, serper_api_key="s", anthropic_api_key="a")
+        assert result.detected_industry == "Industrial equipment and machinery"
+        assert result.sector_source == "lusha_text_fallback"
+
+    def test_no_sector_data_anywhere_stays_none_exactly_as_before(self):
+        empty_sector = {
+            "detected_industry": None, "detected_sub_industry": None,
+            "detected_company_type": None, "sector_confidence": None,
+            "sector_reason": None, "sector_evidence_url": None,
+            "sector_evidence_quote": None, "sector_source_title": None,
+            "sector_source": None,
+        }
+        with _mock_serper(_EMPTY_SERPER), _mock_anthropic(_ai_json()), patch(
+            "lead_prioritizer_core.extract_sector_industry", return_value=empty_sector,
+        ):
+            result = prioritize_single_lead(
+                self._lead_no_lusha, serper_api_key="s", anthropic_api_key="a")
+        assert result.detected_industry is None
+        assert result.sector_source is None
+
+    def test_lusha_audit_fields_always_populated_regardless_of_winning_tier(self):
+        lead = LeadInput(
+            company_name="Acme", domain="acme.com", input_country="Italy",
+            lusha_main_industry="Some Unmapped Label",
+            lusha_sub_industry="Also Unmapped",
+        )
+        empty_sector = {
+            "detected_industry": None, "detected_sub_industry": None,
+            "detected_company_type": None, "sector_confidence": None,
+            "sector_reason": None, "sector_evidence_url": None,
+            "sector_evidence_quote": None, "sector_source_title": None,
+            "sector_source": None,
+        }
+        with _mock_serper(_EMPTY_SERPER), _mock_anthropic(_ai_json()), patch(
+            "lead_prioritizer_core.extract_sector_industry", return_value=empty_sector,
+        ):
+            result = prioritize_single_lead(lead, serper_api_key="s", anthropic_api_key="a")
+        # Neither Lusha label mapped to anything -- detected_industry stays
+        # empty -- but the raw audit values are still preserved verbatim.
+        assert result.detected_industry is None
+        assert result.lusha_main_industry == "Some Unmapped Label"
+        assert result.lusha_sub_industry == "Also Unmapped"
+
+    def test_lusha_audit_fields_none_when_no_lusha_input(self):
+        with _mock_serper(_EMPTY_SERPER), _mock_anthropic(_ai_json()):
+            result = prioritize_single_lead(
+                self._lead_no_lusha, serper_api_key="s", anthropic_api_key="a")
+        assert result.lusha_main_industry is None
+        assert result.lusha_sub_industry is None
+
+
+# ---------------------------------------------------------------------------
+# company_size_complexity priority chain (Lusha enrichment plan, Stap 3):
+# Lusha employee/revenue data (new, highest priority) -> existing
+# deterministic Serper-keyword signal (unchanged, fallback only). The
+# Serper query/evidence/extraction for this signal is never removed --
+# only overridden when usable Lusha data is present.
+# ---------------------------------------------------------------------------
+
+class TestCompanySizeComplexityPriorityChain:
+    def _serper_signal(self):
+        from lead_output_schema import LeadSignal
+        return LeadSignal(
+            signal_name="company_size_complexity",
+            signal_value="positive_evidence", signal_score=2.0,
+            signal_confidence="High", signal_reason="Serper keyword match.",
+            evidence_url="https://acme.com/about", parser_source="serper_organic_1",
+        )
+
+    def _other_signal(self, name):
+        from lead_output_schema import LeadSignal
+        return LeadSignal(signal_name=name, signal_value="positive_evidence", signal_score=2.0)
+
+    def test_lusha_data_wins_over_serper_signal(self):
+        lead = LeadInput(
+            company_name="Acme", domain="acme.com", input_country="Italy",
+            lusha_employees="201-500", lusha_revenue="$50M - $100M",
+        )
+        with _mock_serper(_EMPTY_SERPER), _mock_anthropic(_ai_json()), patch(
+            "lead_prioritizer_core.extract_non_hq_signals",
+            return_value=[self._serper_signal()],
+        ):
+            result = prioritize_single_lead(
+                lead, serper_api_key="s", anthropic_api_key="a",
+                collect_non_hq_evidence=True, extract_non_hq_signals_flag=True,
+            )
+        assert result.company_size_complexity_source == "lusha"
+        assert result.sig_company_size_complexity_score == 2.0
+        assert "Lusha company size data" in result.company_size_complexity_reason
+        assert result.lusha_employees == "201-500"
+        assert result.lusha_revenue == "$50M - $100M"
+
+    def test_missing_lusha_data_yields_no_signal(self):
+        # No Serper fallback exists anymore (Lusha enrichment plan, Stap 4,
+        # supersedes the earlier Stap-3 "permanent Serper fallback" design)
+        # -- missing Lusha data simply means no company_size_complexity
+        # signal at all; the score/reason/evidence fields stay None,
+        # exactly as the schema always allowed.
+        lead = LeadInput(company_name="Acme", domain="acme.com", input_country="Italy")
+        with _mock_serper(_EMPTY_SERPER), _mock_anthropic(_ai_json()), patch(
+            "lead_prioritizer_core.extract_non_hq_signals", return_value=[],
+        ):
+            result = prioritize_single_lead(
+                lead, serper_api_key="s", anthropic_api_key="a",
+                collect_non_hq_evidence=True, extract_non_hq_signals_flag=True,
+            )
+        assert result.company_size_complexity_source is None
+        assert result.sig_company_size_complexity_score is None
+        assert result.company_size_complexity_reason is None
+        assert result.lusha_employees is None
+
+    def test_unparseable_lusha_data_yields_no_signal(self):
+        lead = LeadInput(
+            company_name="Acme", domain="acme.com", input_country="Italy",
+            lusha_employees="garbage", lusha_revenue="also garbage",
+        )
+        with _mock_serper(_EMPTY_SERPER), _mock_anthropic(_ai_json()), patch(
+            "lead_prioritizer_core.extract_non_hq_signals", return_value=[],
+        ):
+            result = prioritize_single_lead(
+                lead, serper_api_key="s", anthropic_api_key="a",
+                collect_non_hq_evidence=True, extract_non_hq_signals_flag=True,
+            )
+        assert result.company_size_complexity_source is None
+        assert result.sig_company_size_complexity_score is None
+        # Raw (unusable) Lusha values are still preserved for audit.
+        assert result.lusha_employees == "garbage"
+        # Raw (unusable) Lusha values are still preserved for audit.
+        assert result.lusha_employees == "garbage"
+
+    def test_neither_lusha_nor_serper_produced_anything(self):
+        lead = LeadInput(company_name="Acme", domain="acme.com", input_country="Italy")
+        with _mock_serper(_EMPTY_SERPER), _mock_anthropic(_ai_json()), patch(
+            "lead_prioritizer_core.extract_non_hq_signals", return_value=[],
+        ):
+            result = prioritize_single_lead(
+                lead, serper_api_key="s", anthropic_api_key="a",
+                collect_non_hq_evidence=True, extract_non_hq_signals_flag=True,
+            )
+        assert result.company_size_complexity_source is None
+        assert result.sig_company_size_complexity_score is None
+
+    def test_signal_extraction_flag_off_stays_unchanged_regardless_of_lusha_data(self):
+        lead = LeadInput(
+            company_name="Acme", domain="acme.com", input_country="Italy",
+            lusha_employees="201-500", lusha_revenue="$50M - $100M",
+        )
+        with _mock_serper(_EMPTY_SERPER), _mock_anthropic(_ai_json()):
+            result = prioritize_single_lead(
+                lead, serper_api_key="s", anthropic_api_key="a",
+                extract_non_hq_signals_flag=False,
+            )
+        assert result.company_size_complexity_source is None
+        assert result.sig_company_size_complexity_score is None
+
+    def test_lusha_size_win_does_not_affect_other_signals(self):
+        lead = LeadInput(
+            company_name="Acme", domain="acme.com", input_country="Italy",
+            lusha_employees="201-500",
+        )
+        with _mock_serper(_EMPTY_SERPER), _mock_anthropic(_ai_json()), patch(
+            "lead_prioritizer_core.extract_non_hq_signals",
+            return_value=[self._serper_signal(), self._other_signal("international_profile")],
+        ):
+            result = prioritize_single_lead(
+                lead, serper_api_key="s", anthropic_api_key="a",
+                collect_non_hq_evidence=True, extract_non_hq_signals_flag=True,
+            )
+        assert result.company_size_complexity_source == "lusha"
+        assert result.sig_international_profile_score == 2.0
+
+
+# ---------------------------------------------------------------------------
+# _build_user_message: ADDITIONAL CONTEXT section for Lusha Description/
+# Specialties (Lusha enrichment plan, Stap 5). Per-lead template only --
+# the cached system+static block is covered by
+# TestAnthropicPromptCaching.test_cache_boundary_hash_is_pinned above.
+# ---------------------------------------------------------------------------
+
+class TestBuildUserMessageLushaContext:
+    """NOTE (Stap 5 scope correction): none of these tests pass
+    ``crawled_pages``, so ``crawled_pages=None`` -> own-site content counts
+    as thin -> the ADDITIONAL CONTEXT section is always considered here.
+    ``TestOwnSiteContentThinGating`` below covers the rich-vs-thin gate
+    itself (section present vs. entirely absent)."""
+
+    def _build(self, **kwargs):
+        from lead_hq_ai_interpreter import _build_user_message
+        return _build_user_message(
+            domain_root="acme", input_country="Italy", query="acme headquarters",
+            serper_payload=_EMPTY_SERPER, **kwargs,
+        )
+
+    def test_no_lusha_fields_matches_pre_stap5_output_exactly(self):
+        # Every existing caller (no lusha_description/lusha_specialties
+        # passed at all) must get byte-for-byte the same prompt as before
+        # this parameter existed -- confirmed against a message built
+        # without the new kwargs, and separately that the section reads
+        # "(none)", identical to every other empty per-lead section.
+        msg_omitted = self._build()
+        msg_explicit_none = self._build(lusha_description=None, lusha_specialties=None)
+        assert msg_omitted == msg_explicit_none
+        assert "ADDITIONAL CONTEXT" in msg_omitted
+        assert "  (none)" in msg_omitted
+
+    def test_blank_strings_also_render_as_none(self):
+        msg = self._build(lusha_description="", lusha_specialties="   ")
+        assert "ADDITIONAL CONTEXT" in msg
+        section = msg.split("ADDITIONAL CONTEXT")[1]
+        assert "(none)" in section
+
+    def test_description_only(self):
+        msg = self._build(lusha_description="A global manufacturer of industrial machinery.")
+        assert "Description: A global manufacturer of industrial machinery." in msg
+        assert "Specialties:" not in msg
+
+    def test_specialties_only(self):
+        msg = self._build(lusha_specialties="machinery, engineering, exports")
+        assert "Specialties: machinery, engineering, exports" in msg
+        assert "Description:" not in msg
+
+    def test_both_description_and_specialties(self):
+        msg = self._build(
+            lusha_description="A global manufacturer of industrial machinery.",
+            lusha_specialties="machinery, engineering",
+        )
+        assert "Description: A global manufacturer of industrial machinery." in msg
+        assert "Specialties: machinery, engineering" in msg
+
+    def test_description_truncated_at_800_chars(self):
+        long_desc = "x" * 2000
+        msg = self._build(lusha_description=long_desc)
+        section = msg.split("ADDITIONAL CONTEXT")[1]
+        desc_line = next(l for l in section.splitlines() if l.strip().startswith("Description:"))
+        rendered = desc_line.split("Description:", 1)[1].strip()
+        assert len(rendered) == 800
+
+    def test_specialties_truncated_at_300_chars(self):
+        long_spec = "y" * 1000
+        msg = self._build(lusha_specialties=long_spec)
+        section = msg.split("ADDITIONAL CONTEXT")[1]
+        spec_line = next(l for l in section.splitlines() if l.strip().startswith("Specialties:"))
+        rendered = spec_line.split("Specialties:", 1)[1].strip()
+        assert len(rendered) == 300
+
+    def test_labelled_as_lower_authority_than_primary_and_secondary(self):
+        msg = self._build(lusha_description="Some description.")
+        assert "PRIMARY SOURCE" in msg
+        assert "SECONDARY SOURCE" in msg
+        assert "ADDITIONAL CONTEXT" in msg
+        # Ordering: additional context comes after both existing sources,
+        # never renamed/reprioritised ahead of them.
+        assert msg.index("PRIMARY SOURCE") < msg.index("SECONDARY SOURCE") < msg.index("ADDITIONAL CONTEXT")
+        assert "lower authority" in msg[msg.index("ADDITIONAL CONTEXT"):]
+
+    def test_interpret_hq_with_ai_omitted_lusha_params_matches_existing_behavior(self):
+        # End-to-end: interpret_hq_with_ai without the new kwargs (every
+        # existing caller) sends the identical user message as before.
+        ai = _ai_json(classification="unclear")
+        captured = {}
+        mock_msg = MagicMock()
+        mock_msg.content = [MagicMock(text=ai)]
+        mock_client = MagicMock()
+        mock_client.messages.create.return_value = mock_msg
+        mock_lib = MagicMock()
+        mock_lib.Anthropic.return_value = mock_client
+
+        def _capture_create(**kwargs):
+            captured.update(kwargs)
+            return mock_msg
+
+        mock_client.messages.create.side_effect = _capture_create
+
+        with patch("lead_hq_ai_interpreter._anthropic_lib", mock_lib):
+            interpret_hq_with_ai(
+                lead_input=LeadInput(company_name="Acme", domain="acme.com", input_country="Italy"),
+                domain_root="acme", query="acme headquarters",
+                serper_payload=_EMPTY_SERPER, anthropic_api_key="fake",
+            )
+        user_content = captured["messages"][0]["content"]
+        assert "ADDITIONAL CONTEXT" in user_content
+        assert "  (none)" in user_content
+
+    def test_interpret_hq_with_ai_passes_lusha_fields_into_user_message(self):
+        ai = _ai_json(classification="unclear")
+        captured = {}
+        mock_msg = MagicMock()
+        mock_msg.content = [MagicMock(text=ai)]
+        mock_client = MagicMock()
+
+        def _capture_create(**kwargs):
+            captured.update(kwargs)
+            return mock_msg
+
+        mock_client.messages.create.side_effect = _capture_create
+        mock_lib = MagicMock()
+        mock_lib.Anthropic.return_value = mock_client
+
+        with patch("lead_hq_ai_interpreter._anthropic_lib", mock_lib):
+            interpret_hq_with_ai(
+                lead_input=LeadInput(company_name="Acme", domain="acme.com", input_country="Italy"),
+                domain_root="acme", query="acme headquarters",
+                serper_payload=_EMPTY_SERPER, anthropic_api_key="fake",
+                lusha_description="A global manufacturer of industrial machinery.",
+                lusha_specialties="machinery, engineering",
+            )
+        user_content = captured["messages"][0]["content"]
+        assert "Description: A global manufacturer of industrial machinery." in user_content
+        assert "Specialties: machinery, engineering" in user_content
+
+
+# ---------------------------------------------------------------------------
+# _own_site_content_is_thin / thin-vs-rich gating (Lusha enrichment plan,
+# Stap 5 scope correction): the ADDITIONAL CONTEXT section is only
+# considered when the own-domain Firecrawl content is thin/absent. A
+# well-evidenced company gets byte-for-byte the pre-Stap-5 prompt -- the
+# section is entirely omitted, not even rendered as "(none)".
+# ---------------------------------------------------------------------------
+
+def _page(text: str, url: str = "https://acme.com/about") -> dict:
+    return {"url": url, "text": text, "source_kind": "own_domain", "retrieval_method": "firecrawl"}
+
+
+class TestOwnSiteContentThinGating:
+    def test_no_crawled_pages_counts_as_thin(self):
+        from lead_hq_ai_interpreter import _own_site_content_is_thin
+        assert _own_site_content_is_thin(None) is True
+        assert _own_site_content_is_thin([]) is True
+
+    def test_pages_with_only_blank_text_count_as_thin(self):
+        from lead_hq_ai_interpreter import _own_site_content_is_thin
+        assert _own_site_content_is_thin([_page("   ")]) is True
+
+    def test_combined_length_under_threshold_is_thin(self):
+        from lead_hq_ai_interpreter import _own_site_content_is_thin
+        assert _own_site_content_is_thin([_page("x" * 399)]) is True
+
+    def test_combined_length_at_or_above_threshold_is_not_thin(self):
+        from lead_hq_ai_interpreter import _own_site_content_is_thin
+        assert _own_site_content_is_thin([_page("x" * 400)]) is False
+        assert _own_site_content_is_thin([_page("x" * 200), _page("y" * 200, "https://acme.com/x")]) is False
+
+    def test_rich_own_site_content_omits_lusha_section_entirely(self):
+        from lead_hq_ai_interpreter import _build_user_message
+        rich_pages = [_page("x" * 5000)]
+        msg = _build_user_message(
+            domain_root="acme", input_country="Italy", query="acme headquarters",
+            serper_payload=_EMPTY_SERPER, crawled_pages=rich_pages,
+            lusha_description="A global manufacturer of industrial machinery.",
+            lusha_specialties="machinery, engineering",
+        )
+        assert "ADDITIONAL CONTEXT" not in msg
+        assert "A global manufacturer" not in msg
+        assert "machinery, engineering" not in msg
+
+    def test_thin_own_site_content_includes_lusha_section(self):
+        from lead_hq_ai_interpreter import _build_user_message
+        thin_pages = [_page("x" * 50)]
+        msg = _build_user_message(
+            domain_root="acme", input_country="Italy", query="acme headquarters",
+            serper_payload=_EMPTY_SERPER, crawled_pages=thin_pages,
+            lusha_description="A global manufacturer of industrial machinery.",
+            lusha_specialties="machinery, engineering",
+        )
+        assert "ADDITIONAL CONTEXT" in msg
+        assert "Description: A global manufacturer of industrial machinery." in msg
+        assert "Specialties: machinery, engineering" in msg
+
+    def test_rich_own_site_with_no_lusha_data_matches_pre_stap5_output(self):
+        # Rich content + no Lusha data at all: message must be identical
+        # whether or not the (empty) lusha_* kwargs are passed.
+        from lead_hq_ai_interpreter import _build_user_message
+        rich_pages = [_page("x" * 5000)]
+        msg_with_kwargs = _build_user_message(
+            domain_root="acme", input_country="Italy", query="acme headquarters",
+            serper_payload=_EMPTY_SERPER, crawled_pages=rich_pages,
+            lusha_description=None, lusha_specialties=None,
+        )
+        msg_without_kwargs = _build_user_message(
+            domain_root="acme", input_country="Italy", query="acme headquarters",
+            serper_payload=_EMPTY_SERPER, crawled_pages=rich_pages,
+        )
+        assert msg_with_kwargs == msg_without_kwargs
+        assert "ADDITIONAL CONTEXT" not in msg_with_kwargs
+
+    def test_threshold_boundary_via_interpret_hq_with_ai(self):
+        # End-to-end: rich crawled_pages -> no ADDITIONAL CONTEXT reaches
+        # the actual Anthropic call's user message.
+        ai = _ai_json(classification="unclear")
+        captured = {}
+        mock_msg = MagicMock()
+        mock_msg.content = [MagicMock(text=ai)]
+        mock_client = MagicMock()
+
+        def _capture_create(**kwargs):
+            captured.update(kwargs)
+            return mock_msg
+
+        mock_client.messages.create.side_effect = _capture_create
+        mock_lib = MagicMock()
+        mock_lib.Anthropic.return_value = mock_client
+
+        with patch("lead_hq_ai_interpreter._anthropic_lib", mock_lib):
+            interpret_hq_with_ai(
+                lead_input=LeadInput(company_name="Acme", domain="acme.com", input_country="Italy"),
+                domain_root="acme", query="acme headquarters",
+                serper_payload=_EMPTY_SERPER, anthropic_api_key="fake",
+                crawled_pages=[_page("x" * 5000)],
+                lusha_description="A global manufacturer of industrial machinery.",
+                lusha_specialties="machinery, engineering",
+            )
+        user_content = captured["messages"][0]["content"]
+        assert "ADDITIONAL CONTEXT" not in user_content
+        assert "A global manufacturer" not in user_content
