@@ -1,11 +1,21 @@
 """
 input_cleaner_lusha_edition.py — Layer 0: mYngle Input Cleaner · Lusha Edition
 ================================================================================
-Prefilters raw Lusha company exports (e.g. Switzerland.xlsx, thousands of rows
-x ~30 columns) on commercially interesting companies BEFORE they go into the
-(expensive) Lead Prioritizer. No Serper, no Firecrawl, no scraping — only the
-data Lusha already provides, plus an optional cheap Anthropic Haiku prescreen
-on the already-present Company Description for rows Lusha left unlabelled.
+Prefilters raw Lusha company exports (e.g. Switzerland.xlsx, Spain.xlsx —
+country-level "full export" files with thousands of rows x ~30 columns) on
+commercially interesting companies BEFORE they go into the (expensive) Lead
+Prioritizer. No Serper, no Firecrawl, no scraping — only the data Lusha
+already provides, plus an optional cheap Anthropic Haiku prescreen on the
+already-present Company Description for rows Lusha left unlabelled.
+
+Column detection (``detect_lusha_columns``) only looks for the canonical
+fields it needs (name, domain, description, employees, revenue, industries,
+country, intent topics, LinkedIn URL); any extra firmographic columns a
+given export happens to include (Company Year Founded, Total Funding
+Amount, Company SIC/NAIC, Company Continent/State/City, Company Country
+ISO, Company Intent Level, Topic Count Trend, ...) are simply ignored, so
+new "full export" files are recognized automatically without code changes
+as long as the core headers are present.
 
 This is a standalone app (same pattern as input_cleaner_lite.py /
 input_cleaner_register_edition.py): no coupling to the batch-core pipeline.
