@@ -1409,6 +1409,7 @@ _NO_EXTERNAL_SOURCE_NOTE = (
     "Sourced from the company's own structured data (e.g. Lusha), not a "
     "web page -- no external link available."
 )
+_CROSS_CHECK_LINKEDIN_LABEL = "Verify on LinkedIn (not the source of this figure)"
 _REJECTED_NOTES: "dict[str, str]" = {
     "generic": (
         "The available evidence was too generic to confirm this signal "
@@ -1718,6 +1719,7 @@ def build_fixed_commercial_fit_drivers(
     confirmed_domestic: bool = False,
     domestic_location_text: "str | None" = None,
     domestic_evidence_urls: "list | None" = None,
+    linkedin_url: "str | None" = None,
 ) -> list[dict]:
     """Non-Italy commercial_fit_drivers: always exactly the six fixed
     dimensions in _FIXED_DRIVER_SIGNAL_ORDER, never omitted. Each is either
@@ -1787,7 +1789,11 @@ def build_fixed_commercial_fit_drivers(
             # company_size_complexity: Lusha structured data has no web page
             # to link to) gets an explicit note instead of looking like an
             # unsubstantiated claim -- the AI-composed overlay below only
-            # ever replaces "evidence", never "note".
+            # ever replaces "evidence", never "note". When the company's own
+            # LinkedIn page is known, it also gets a clearly-labeled
+            # cross_check_url/cross_check_label -- NOT evidence_source_url,
+            # since LinkedIn didn't produce this figure and must never be
+            # implied to be "the source".
             driver = {
                 "id": driver_id, "label": label,
                 "strength": _strength_for_score(score),
@@ -1795,6 +1801,9 @@ def build_fixed_commercial_fit_drivers(
                 "note": "" if sources else _NO_EXTERNAL_SOURCE_NOTE,
             }
             _apply_driver_sources(driver, sources, scope)
+            if not sources and linkedin_url:
+                driver["cross_check_url"] = linkedin_url
+                driver["cross_check_label"] = _CROSS_CHECK_LINKEDIN_LABEL
             drivers.append(driver)
         elif _WEAK_TIER_ENABLED and signal_name in _WEAK_VISIBLE_SIGNAL_NAMES and sources:
             # Fix (a)+(b): a scored signal whose evidence text did not pass the
@@ -2523,6 +2532,7 @@ def _build_detail_record(
             confirmed_domestic=confirmed_domestic,
             domestic_location_text=domestic_location_text,
             domestic_evidence_urls=domestic_evidence_urls,
+            linkedin_url=clean_str(row.get("linkedin_url")),
         )
         cold_caller_summary = build_curated_cold_caller_summary(
             foreign_hq_detected, parent_company, parent_hq_country, curated_signals)

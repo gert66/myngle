@@ -1598,6 +1598,31 @@ def test_company_size_complexity_driver_notes_missing_external_source(tmp_path):
         "Sourced from the company's own structured data (e.g. Lusha), not a "
         "web page -- no external link available."
     )
+    assert "cross_check_url" not in driver
+
+
+def test_company_size_complexity_driver_gets_linkedin_cross_check_link(tmp_path):
+    """When the lead's own linkedin_url is known, the no-source
+    "Possible onboarding need" driver gets a clearly-labeled cross-check
+    link -- NOT evidence_source_url/evidence_sources, since LinkedIn did
+    not produce the Lusha employee-count figure and must never be implied
+    to be its source."""
+    signals = [
+        {"source_index": 1, "signal_name": "company_size_complexity", "signal_score": 2,
+         "evidence_quote": "Lusha company size data: 10,001-100,000 employees."},
+    ]
+    row = _dorc_row(employee_range="10001-100000",
+                     linkedin_url="https://www.linkedin.com/company/dorc")
+    _, out_dir = run_export(tmp_path, [row], signals=signals,
+                            export_country="Netherlands", foreign_hq_only=False)
+
+    detail = detail_for(out_dir, "DORC Dutch Ophthalmic Research Center (International)")
+    drivers_by_label = {d["label"]: d for d in detail["ui_payload"]["commercial_fit_drivers"]}
+    driver = drivers_by_label["Possible onboarding need"]
+    assert driver["cross_check_url"] == "https://www.linkedin.com/company/dorc"
+    assert driver["cross_check_label"] == "Verify on LinkedIn (not the source of this figure)"
+    assert "evidence_source_url" not in driver
+    assert "evidence_sources" not in driver
 
 
 def test_no_visible_ui_payload_field_contains_shorthand_or_raw_tokens(tmp_path):
