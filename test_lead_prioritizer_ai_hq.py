@@ -1616,3 +1616,119 @@ class TestSectorPriorityChain:
                 self._lead_no_lusha, serper_api_key="s", anthropic_api_key="a")
         assert result.lusha_main_industry is None
         assert result.lusha_sub_industry is None
+
+
+# ---------------------------------------------------------------------------
+# company_size_complexity priority chain (Lusha enrichment plan, Stap 3):
+# Lusha employee/revenue data (new, highest priority) -> existing
+# deterministic Serper-keyword signal (unchanged, fallback only). The
+# Serper query/evidence/extraction for this signal is never removed --
+# only overridden when usable Lusha data is present.
+# ---------------------------------------------------------------------------
+
+class TestCompanySizeComplexityPriorityChain:
+    def _serper_signal(self):
+        from lead_output_schema import LeadSignal
+        return LeadSignal(
+            signal_name="company_size_complexity",
+            signal_value="positive_evidence", signal_score=2.0,
+            signal_confidence="High", signal_reason="Serper keyword match.",
+            evidence_url="https://acme.com/about", parser_source="serper_organic_1",
+        )
+
+    def _other_signal(self, name):
+        from lead_output_schema import LeadSignal
+        return LeadSignal(signal_name=name, signal_value="positive_evidence", signal_score=2.0)
+
+    def test_lusha_data_wins_over_serper_signal(self):
+        lead = LeadInput(
+            company_name="Acme", domain="acme.com", input_country="Italy",
+            lusha_employees="201-500", lusha_revenue="$50M - $100M",
+        )
+        with _mock_serper(_EMPTY_SERPER), _mock_anthropic(_ai_json()), patch(
+            "lead_prioritizer_core.extract_non_hq_signals",
+            return_value=[self._serper_signal()],
+        ):
+            result = prioritize_single_lead(
+                lead, serper_api_key="s", anthropic_api_key="a",
+                collect_non_hq_evidence=True, extract_non_hq_signals_flag=True,
+            )
+        assert result.company_size_complexity_source == "lusha"
+        assert result.sig_company_size_complexity_score == 2.0
+        assert "Lusha company size data" in result.company_size_complexity_reason
+        assert result.lusha_employees == "201-500"
+        assert result.lusha_revenue == "$50M - $100M"
+
+    def test_missing_lusha_data_falls_back_to_serper_signal_unchanged(self):
+        lead = LeadInput(company_name="Acme", domain="acme.com", input_country="Italy")
+        with _mock_serper(_EMPTY_SERPER), _mock_anthropic(_ai_json()), patch(
+            "lead_prioritizer_core.extract_non_hq_signals",
+            return_value=[self._serper_signal()],
+        ):
+            result = prioritize_single_lead(
+                lead, serper_api_key="s", anthropic_api_key="a",
+                collect_non_hq_evidence=True, extract_non_hq_signals_flag=True,
+            )
+        assert result.company_size_complexity_source == "serper_keyword_match"
+        assert result.sig_company_size_complexity_score == 2.0
+        assert result.company_size_complexity_reason == "Serper keyword match."
+        assert result.lusha_employees is None
+
+    def test_unparseable_lusha_data_falls_back_to_serper_signal(self):
+        lead = LeadInput(
+            company_name="Acme", domain="acme.com", input_country="Italy",
+            lusha_employees="garbage", lusha_revenue="also garbage",
+        )
+        with _mock_serper(_EMPTY_SERPER), _mock_anthropic(_ai_json()), patch(
+            "lead_prioritizer_core.extract_non_hq_signals",
+            return_value=[self._serper_signal()],
+        ):
+            result = prioritize_single_lead(
+                lead, serper_api_key="s", anthropic_api_key="a",
+                collect_non_hq_evidence=True, extract_non_hq_signals_flag=True,
+            )
+        assert result.company_size_complexity_source == "serper_keyword_match"
+        assert result.company_size_complexity_reason == "Serper keyword match."
+        # Raw (unusable) Lusha values are still preserved for audit.
+        assert result.lusha_employees == "garbage"
+
+    def test_neither_lusha_nor_serper_produced_anything(self):
+        lead = LeadInput(company_name="Acme", domain="acme.com", input_country="Italy")
+        with _mock_serper(_EMPTY_SERPER), _mock_anthropic(_ai_json()), patch(
+            "lead_prioritizer_core.extract_non_hq_signals", return_value=[],
+        ):
+            result = prioritize_single_lead(
+                lead, serper_api_key="s", anthropic_api_key="a",
+                collect_non_hq_evidence=True, extract_non_hq_signals_flag=True,
+            )
+        assert result.company_size_complexity_source is None
+        assert result.sig_company_size_complexity_score is None
+
+    def test_signal_extraction_flag_off_stays_unchanged_regardless_of_lusha_data(self):
+        lead = LeadInput(
+            company_name="Acme", domain="acme.com", input_country="Italy",
+            lusha_employees="201-500", lusha_revenue="$50M - $100M",
+        )
+        with _mock_serper(_EMPTY_SERPER), _mock_anthropic(_ai_json()):
+            result = prioritize_single_lead(
+                lead, serper_api_key="s", anthropic_api_key="a",
+                extract_non_hq_signals_flag=False,
+            )
+        assert result.company_size_complexity_source is None
+        assert result.sig_company_size_complexity_score is None
+
+    def test_lusha_size_win_does_not_affect_other_signals(self):
+        lead = LeadInput(
+            company_name="Acme", domain="acme.com", input_country="Italy",
+            lusha_employees="201-500",
+        )
+        with _mock_serper(_EMPTY_SERPER), _mock_anthropic(_ai_json()), patch(
+            "lead_prioritizer_core.extract_non_hq_signals",
+            return_value=[self._serper_signal(), self._other_signal("international_profile")],
+        ):
+            result = prioritize_single_lead(
+                lead, serper_api_key="s", anthropic_api_key="a",
+                collect_non_hq_evidence=True, extract_non_hq_signals_flag=True,
+            )
+        assert result.company_size_complexity_source == "lusha"
+        assert result.sig_international_profile_score == 2.0

@@ -25,6 +25,7 @@ from lead_non_hq_signal_extractor import (
     summarize_non_hq_signals_for_result,
 )
 from lead_lusha_sector_mapping import sector_from_lusha_industry, sector_from_lusha_text
+from lead_lusha_size_signal import lusha_size_signal
 from lead_ai_signal_scorer import score_signals_with_ai
 from lead_app_summary_builder import build_app_summary_fields
 from lead_v2_scoring_adapter import score_lead_v2_result
@@ -380,6 +381,23 @@ def prioritize_single_lead(
                 signals = extract_non_hq_signals(evidence_items, company_domain=input_row.domain)
         else:
             signals = extract_non_hq_signals(evidence_items, company_domain=input_row.domain)
+
+        # ── company_size_complexity: Lusha employee/revenue data takes
+        # priority over the deterministic Serper-keyword signal just
+        # computed above (Lusha enrichment plan, Stap 3). The Serper
+        # query/evidence/extraction for this ONE signal is NOT removed —
+        # it stays exactly as it is today and is used as the fallback
+        # whenever Lusha data is missing, blank, or not parseable.
+        company_size_complexity_source = None
+        _lusha_size = lusha_size_signal(input_row.lusha_employees, input_row.lusha_revenue)
+        if _lusha_size is not None:
+            signals = [s for s in signals if s.signal_name != "company_size_complexity"]
+            signals.append(_lusha_size)
+            company_size_complexity_source = "lusha"
+        elif any(s.signal_name == "company_size_complexity" for s in signals):
+            company_size_complexity_source = "serper_keyword_match"
+    else:
+        company_size_complexity_source = None
     non_hq_summary = summarize_non_hq_signals_for_result(signals)
 
     # Sector/industry metadata (deterministic, audit/app only — feeds no
@@ -541,6 +559,9 @@ def prioritize_single_lead(
         employer_branding_evidence_quote=non_hq_summary["employer_branding_evidence_quote"],
         signal_extractor_version=non_hq_summary["signal_extractor_version"],
         signal_scoring_mode=signal_scoring_mode,
+        company_size_complexity_source=company_size_complexity_source,
+        lusha_employees=input_row.lusha_employees,
+        lusha_revenue=input_row.lusha_revenue,
         **non_hq_ai_audit,
         # Sector / industry metadata (audit & app only — never scoring)
         detected_industry=sector_summary["detected_industry"],
