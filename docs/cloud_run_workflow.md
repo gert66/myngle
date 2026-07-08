@@ -217,7 +217,11 @@ gcloud run jobs execute myngle-lead-prioritizer \
   --update-env-vars INPUT_GCS_URI=gs://myngle-input/incoming/klant.xlsx,OUTPUT_GCS_DIR=gs://myngle-runs/runs/20260101_120000_klant,RUN_ID=20260101_120000_klant,TASK_COUNT=25
 ```
 
-Dispatcher als Cloud Run **service** deployen:
+Dispatcher als Cloud Run **service** deployen (het service-account waaronder
+dit draait heeft `roles/run.developer`, of een rol met minimaal
+`run.jobs.run`, nodig — anders faalt `start_cloud_run_job_execution()` in
+`cloud_dispatcher.py` met een permission-error zodra hij een job probeert te
+starten):
 
 ```bash
 gcloud run deploy myngle-dispatcher \
@@ -316,10 +320,15 @@ python cloud_merge_results.py \
 - Geen Kubernetes.
 - Geen wijziging aan de bestaande scoringlogica in `commercial_fit_scoring.py`.
 - Streamlit (`streamlit_app.py`) blijft ongewijzigd bestaan en werken.
-- De dispatcher's Cloud Run Job execution-call is geïmplementeerd met de
-  `google-cloud-run` v2 client, maar is nooit end-to-end getest tegen een echte
-  Cloud Run Job in dit project — de eerste echte cloud-test gebeurt later
-  handmatig.
+- De dispatcher's Cloud Run Job execution-call (`google-cloud-run` v2 client)
+  is inmiddels end-to-end getest: `cloud_dispatcher.py` gedeployed als
+  authenticated Cloud Run service, aangeroepen met een gesimuleerd GCS
+  "object finalized"-event, en die triggerde succesvol een echte Cloud Run
+  Job execution (10 tasks, 3 rijen, 0 errors/429's, merge geslaagd). Vereist
+  wel dat het service-account van de dispatcher `roles/run.developer` (of
+  gelijkwaardig, incl. `run.jobs.run`) heeft — dat stond niet standaard aan.
+  Het Eventarc-triggerpad zelf (Cloud Storage "object finalized" → dispatcher)
+  is nog niet end-to-end getest, alleen de directe HTTP-aanroep.
 - Geen gedeelde/distributed concurrency-cap over Cloud Run-tasks heen — alleen
   per-call 429-retry/backoff (zie Rate-limit notities). Bij een te hoge
   `TASK_COUNT` t.o.v. de Firecrawl-tier leidt dat tot herhaalde, uiteindelijk
