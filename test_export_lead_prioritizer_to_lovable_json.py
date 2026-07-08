@@ -763,6 +763,34 @@ def test_detail_exposes_detected_sector_fields(tmp_path):
     assert detail["sector_source_title"] == "About Acme"
 
 
+def test_blank_sector_evidence_url_does_not_crash_vendor_contamination_check(tmp_path):
+    """Lusha-mapped sectors (Lusha enrichment plan, Stap 2) have no Serper
+    evidence URL at all, so ``sector_evidence_url`` is now routinely blank.
+    Excel round-trips a blank cell in an otherwise-populated column as a
+    float NaN, not an empty string or None -- the vendor-contamination check
+    must tolerate that (previously crashed: 'float' object has no attribute
+    'strip'), and a NaN URL must never be mistaken for a hosted careers
+    platform."""
+    enriched = [
+        enriched_row(
+            source_index=1, company_name="Acme Brasil", domain="acme.com.br",
+            industry="", detected_industry="Consumer goods",
+            sector_evidence_url="https://acme.com/about",
+        ),
+        enriched_row(
+            source_index=2, company_name="Zeta Ltd", domain="zeta.com",
+            industry="", detected_industry="Chemicals",
+            # sector_evidence_url intentionally omitted -- pandas fills this
+            # cell with NaN because the column exists (row 1 set it).
+        ),
+    ]
+    _, out_dir = run_export(tmp_path, enriched)
+
+    detail = detail_for(out_dir, "Zeta Ltd")
+    assert detail["detected_industry"] == "Chemicals"
+    assert detail["industry"] == "Chemicals"
+
+
 def test_sector_industry_not_a_visible_commercial_driver(tmp_path):
     enriched = [enriched_row(detected_industry="Retail")]
     evidence = [

@@ -2232,7 +2232,7 @@ def _industry_display_is_vendor_contaminated(
     themselves — only whether the curated layer mentions the industry."""
     if industry_source_column != "detected_industry":
         return False
-    return is_hosted_careers_platform_domain(row.get("sector_evidence_url"))
+    return is_hosted_careers_platform_domain(clean_str(row.get("sector_evidence_url")))
 
 
 def _build_url_context(evidence_rows: list[dict], signal_rows: list[dict]) -> "dict[str, str]":
