@@ -18,6 +18,7 @@ from rescore_from_gcs import (
     CURRENT_MANIFEST_FILENAME,
     LIST_FILENAME,
     build_rescore_manifest,
+    build_rescored_run,
     default_rescore_run_folder,
     download_current_run,
     download_file,
@@ -35,6 +36,8 @@ from rescore_from_gcs import (
     skipped_company_ids,
     tier_distribution,
     upload_file,
+    upload_rescored_run,
+    write_rescored_run,
 )
 
 
@@ -471,6 +474,76 @@ class TestDownloadCurrentRun:
              patch("rescore_from_gcs.subprocess.run", side_effect=_fake_gcs_tool_for_local_dir(remote_root)):
             with pytest.raises(RuntimeError, match="No re-scorable files"):
                 download_current_run("bucket-a", "brazil", tmp_path / "work")
+
+
+class TestBuildRescoredRunPureCore:
+    """build_rescored_run/write_rescored_run/upload_rescored_run — the
+    no-download/no-upload core reused by an interactive UI that recomputes
+    on every parameter tweak without re-hitting GCS."""
+
+    def _fixture_current(self) -> dict:
+        bucket = {
+            "company-a": fixture_detail("company-a", sig_foreign_hq_score=3),
+            "company-b": fixture_detail("company-b", sig_foreign_hq_score=0),
+        }
+        list_items = [
+            {"company_id": cid, "commercial_fit_score": d["commercial_fit_score"],
+             "commercial_tier": d["commercial_tier"]}
+            for cid, d in bucket.items()
+        ]
+        return {
+            "manifest": {"generated_at": "2026-07-01T00:00:00Z"},
+            "list_items": list_items,
+            "detail_files": {"company-details-000.json": bucket},
+        }
+
+    def test_build_rescored_run_shape(self):
+        current = self._fixture_current()
+        rescored_run = build_rescored_run(
+            current, params={}, country_folder="brazil",
+            run_folder="2026-07-08_rescore", now_iso="2026-07-08T00:00:00Z")
+
+        assert set(rescored_run) == {"list_items", "detail_files", "manifest"}
+        assert len(rescored_run["list_items"]) == 2
+        assert "company-details-000.json" in rescored_run["detail_files"]
+        assert rescored_run["manifest"]["companies_rescored"] == 2
+        assert rescored_run["manifest"]["run_folder"] == "2026-07-08_rescore"
+
+    def test_recomputing_with_different_params_does_not_touch_original_current(self):
+        current = self._fixture_current()
+        original_snapshot = json.loads(json.dumps(current))
+        build_rescored_run(
+            current, params={"intercept": -99.0}, country_folder="brazil",
+            run_folder="run1", now_iso="2026-07-08T00:00:00Z")
+        assert current == original_snapshot
+
+    def test_write_then_upload_round_trip(self, tmp_path):
+        current = self._fixture_current()
+        rescored_run = build_rescored_run(
+            current, params={}, country_folder="brazil",
+            run_folder="2026-07-08_rescore", now_iso="2026-07-08T00:00:00Z")
+
+        out_dir = write_rescored_run(rescored_run, tmp_path / "out")
+        assert (out_dir / LIST_FILENAME).exists()
+        assert (out_dir / "company-details-000.json").exists()
+        assert (out_dir / CURRENT_MANIFEST_FILENAME).exists()
+
+        mock_proc = MagicMock(returncode=0, stdout="", stderr="")
+        with patch("rescore_from_gcs.resolve_gcs_tool", return_value=["gcloud", "storage"]), \
+             patch("rescore_from_gcs.subprocess.run", return_value=mock_proc):
+            results = upload_rescored_run(out_dir, "bucket-a", "brazil", "2026-07-08_rescore")
+
+        assert len(results) == 3
+        assert all(r["success"] for r in results)
+        assert all(
+            r["destination"].startswith("gs://bucket-a/brazil/runs/2026-07-08_rescore/")
+            for r in results)
+
+    def test_upload_rescored_run_raises_without_gcs_tool(self, tmp_path):
+        (tmp_path / LIST_FILENAME).write_text("[]")
+        with patch("rescore_from_gcs.resolve_gcs_tool", return_value=None):
+            with pytest.raises(RuntimeError, match="gcloud"):
+                upload_rescored_run(tmp_path, "bucket-a", "brazil", "run1")
 
 
 class TestRescoreCountry:
