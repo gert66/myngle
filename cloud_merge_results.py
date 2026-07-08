@@ -36,6 +36,8 @@ from cloud_job_runner import (
     _gcs_client,
 )
 
+STATUS_SUFFIXES = ("_done.json", "_failed.json")
+
 DEFAULT_FINAL_OUTPUT_NAME = "lead_prioritizer_final.xlsx"
 
 
@@ -82,6 +84,24 @@ def list_part_files(output_dir: str) -> list[str]:
     return sorted(str(p) for p in local_parts_dir.glob("part_*.xlsx"))
 
 
+def list_status_files(output_dir: str, suffix: str) -> list[str]:
+    """Return status file locations (gs:// URIs or local paths) ending in suffix, sorted.
+
+    A task whose row-shard is empty (task_count > row_count, e.g. the
+    documented TASK_COUNT=10 first test against a small file) reports a
+    "done" status but never writes a parts/*.xlsx file — that's by design,
+    not a missing part. Counting status files (not part files) against
+    expected_task_count is what actually tells us every task reported in.
+    """
+    status_dir = join_path(output_dir, "status")
+    if is_gcs_uri(output_dir):
+        return sorted(list_gcs_uris(status_dir, suffix=suffix))
+    local_status_dir = Path(status_dir)
+    if not local_status_dir.is_dir():
+        return []
+    return sorted(str(p) for p in local_status_dir.glob(f"*{suffix}"))
+
+
 def _download_to_local(uri_or_path: str, local_path: Path) -> Path:
     if is_gcs_uri(uri_or_path):
         bucket_name, blob_name = parse_gcs_uri(uri_or_path)
@@ -124,14 +144,27 @@ def main(argv=None) -> int:
     print(f"[cloud_merge_results] Found {len(part_locations)} part file(s).", flush=True)
 
     expected = cfg["expected_task_count"]
-    if expected and len(part_locations) != expected:
-        err_msg = (
-            f"Expected {expected} part file(s) but found {len(part_locations)}. "
-            f"Parts present: {[Path(p).name for p in part_locations]}"
-        )
-        print(f"[cloud_merge_results] ERROR: {err_msg}", file=sys.stderr)
-        _write_manifest_failed(manifest_uri, cfg, started_at, err_msg)
-        return 1
+    if expected:
+        done_statuses = list_status_files(cfg["output_dir"], "_done.json")
+        failed_statuses = list_status_files(cfg["output_dir"], "_failed.json")
+        reported = len(done_statuses) + len(failed_statuses)
+        if reported != expected:
+            err_msg = (
+                f"Expected {expected} task(s) to report status but found {reported} "
+                f"({len(done_statuses)} done, {len(failed_statuses)} failed) — some tasks "
+                f"are still running or never started."
+            )
+            print(f"[cloud_merge_results] ERROR: {err_msg}", file=sys.stderr)
+            _write_manifest_failed(manifest_uri, cfg, started_at, err_msg)
+            return 1
+        if failed_statuses:
+            err_msg = (
+                f"{len(failed_statuses)} task(s) failed: "
+                f"{[Path(p).name for p in failed_statuses]}"
+            )
+            print(f"[cloud_merge_results] ERROR: {err_msg}", file=sys.stderr)
+            _write_manifest_failed(manifest_uri, cfg, started_at, err_msg)
+            return 1
 
     if not part_locations:
         err_msg = "No part files found to merge."

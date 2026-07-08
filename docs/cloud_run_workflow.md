@@ -108,7 +108,7 @@ gezet zijn (dat doet het platform automatisch); anders vallen we terug op
 |---|---|
 | `RUN_ID` | run-identifier |
 | `OUTPUT_GCS_DIR` | zelfde `runs/<run_id>` map als de tasks |
-| `EXPECTED_TASK_COUNT` | verwacht aantal part-bestanden (fail-fast bij mismatch) |
+| `EXPECTED_TASK_COUNT` | verwacht aantal tasks (fail-fast bij mismatch); dit is het aantal tasks dat een status-JSON moet hebben geschreven, **niet** het aantal part-bestanden — een task met een leeg rijblok (`TASK_COUNT` > aantal rijen) schrijft een `done`-status maar nooit een part-bestand, en telt hier gewoon mee |
 | `FINAL_OUTPUT_NAME` | optioneel, default `lead_prioritizer_final.xlsx` |
 
 ### `cloud_dispatcher.py` (service)
@@ -266,9 +266,12 @@ python cloud_merge_results.py \
 - Cloud Run Jobs kan losse gefaalde tasks automatisch retrien
   (`--max-retries`); dankzij de idempotentie-check hierboven verwerkt een
   retry nooit dubbel als de part al klaar staat.
-- `cloud_merge_results.py` faalt expliciet en duidelijk als het aantal
-  gevonden part-bestanden niet overeenkomt met `EXPECTED_TASK_COUNT` — dat is
-  het signaal om losse tasks opnieuw te draaien voordat je merget.
+- `cloud_merge_results.py` faalt expliciet en duidelijk als het aantal tasks
+  dat een status-JSON heeft geschreven (`done` + `failed` samen) niet
+  overeenkomt met `EXPECTED_TASK_COUNT`, of als er één of meer `failed`-
+  statussen tussen zitten — dat is het signaal om losse tasks opnieuw te
+  draaien voordat je merget. Tasks met een leeg rijblok (`done`, geen part-
+  bestand) tellen gewoon mee als "gerapporteerd" en blokkeren de merge niet.
 
 ## Eerste veilige instellingen
 
@@ -338,3 +341,10 @@ python cloud_merge_results.py \
 - Firecrawl/Serper 429's worden nu een paar keer met backoff geretried in
   plaats van de crawl voor die lead meteen als hard failure af te schrijven
   (zie Rate-limit notities hierboven).
+- `cloud_merge_results.py` telt sinds de eerste echte end-to-end-test tegen
+  Cloud Run status-bestanden (`done`/`failed`) in plaats van part-bestanden
+  om `EXPECTED_TASK_COUNT` te verifiëren. Met de eerdere part-telling faalde
+  elke merge zodra `TASK_COUNT` groter was dan het aantal rijen (bv. de
+  aanbevolen `TASK_COUNT=10` tegen een testbestand van een paar rijen) — een
+  taak met een leeg rijblok schrijft namelijk nooit een part-bestand, alleen
+  een `done`-status.
