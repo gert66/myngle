@@ -17,9 +17,14 @@ later handmatig uitvoert.
 4. Elke task downloadt dezelfde input-Excel, maar verwerkt alleen haar eigen
    aaneengesloten rijblok (contiguous chunk, geen round-robin — dat maakt
    debuggen makkelijker).
-5. Elke task roept de bestaande `enrich_clients_claude.py` CLI aan via
-   subprocess (geen herimplementatie van enrichment of scoring) en schrijft
-   een part-output-Excel plus een status-JSON naar Cloud Storage.
+5. Elke task roept `lead_prioritizer_batch_cli.py` aan via subprocess — de
+   Lead Prioritizer **v2**-pipeline (Serper + Anthropic + Firecrawl, dezelfde
+   die de Streamlit batch-app en `run_batch_dataframe` gebruiken; geen
+   herimplementatie van enrichment of scoring) — en schrijft een
+   part-output-Excel plus een status-JSON naar Cloud Storage. Company-/
+   domain-/(optionele) land-kolom worden automatisch herkend (dezelfde
+   detectie als de Streamlit-app), of expliciet gezet via
+   `COMPANY_COLUMN`/`DOMAIN_COLUMN`/`INPUT_COUNTRY_COLUMN`.
 6. Zodra alle parts klaar zijn, draai je `cloud_merge_results.py` om alle
    part-outputs te combineren tot één finale Excel, gesorteerd op de
    oorspronkelijke rijvolgorde.
@@ -28,9 +33,10 @@ later handmatig uitvoert.
 
 Er is in v1 bewust **geen** database, **geen** 50 aparte buckets, **geen**
 Kubernetes, en **geen** wijziging aan de bestaande scoringlogica. De
-bestaande Streamlit-app (`streamlit_app.py`) en de lokale `.bat`-runners
-blijven ongewijzigd werken — de cloud-runner roept dezelfde
-`enrich_clients_claude.py` CLI aan die zij ook gebruiken.
+bestaande Streamlit-app (`streamlit_app.py`) blijft ongewijzigd werken — de
+cloud-runner roept dezelfde `lead_prioritizer_batch_cli.py` / batch-core aan
+die zij ook gebruikt. (De oude `enrich_clients_claude.py`-legacy-CLI wordt
+door de cloud-job niet meer aangeroepen — zie "Wijzigingen t.o.v. v1" onderaan.)
 
 ## Bucketstructuur
 
@@ -84,10 +90,13 @@ alleen `set`/`missing` per key, nooit de waarde zelf.
 | `TASK_COUNT` | totaal aantal tasks (fallback als `CLOUD_RUN_TASK_COUNT` ontbreekt) |
 | `CLOUD_RUN_TASK_INDEX` | door Cloud Run Jobs automatisch gezet (0-based) |
 | `CLOUD_RUN_TASK_COUNT` | door Cloud Run Jobs automatisch gezet |
-| `ANTHROPIC_API_KEY` / `SERPER_API_KEY` / `FIRECRAWL_API_KEY` | API keys |
-| `MAX_ROWS` | optioneel, beperkt rijen per task (smoke tests) |
+| `ANTHROPIC_API_KEY` / `SERPER_API_KEY` / `FIRECRAWL_API_KEY` | API keys (nooit als CLI-argument, altijd via env naar de subprocess) |
+| `MAX_ROWS` | optioneel, beperkt rijen per task (smoke tests) — anders verwerkt elke task zijn hele shard (`--row-limit 0`) |
 | `FORCE_RERUN` | `true` om een bestaande part-output te overschrijven |
-| `MODE` | vrij veld, alleen gelogd |
+| `MODE` | Lead Prioritizer v2 run mode (default `full`); moet een geldige `SUPPORTED_RUN_MODES`-waarde zijn, anders faalt de task direct vóór de "running"-status |
+| `COMPANY_COLUMN` / `DOMAIN_COLUMN` | optioneel; anders auto-detectie (zelfde candidate-lijsten als de Streamlit-app) |
+| `INPUT_COUNTRY_COLUMN` | optioneel; anders auto-detectie, en anders geen (per-rij land wordt dan aan `default_input_country` overgelaten) |
+| `DEEP_DIVE` / `RICH_ICP_CONTEXT` / `AI_SIGNAL_SCORING` | optionele opt-in feature-vlaggen, allemaal standaard uit |
 
 `CLOUD_RUN_TASK_INDEX`/`CLOUD_RUN_TASK_COUNT` hebben voorrang zodra beide
 gezet zijn (dat doet het platform automatisch); anders vallen we terug op
@@ -274,9 +283,28 @@ python cloud_merge_results.py \
 - Anthropic Haiku Scale-tier is ruim volgens de huidige console-screenshot,
   maar blijf 429's meten in Cloud Logging — dit is geen garantie, alleen een
   momentopname.
-- Firecrawl Standard heeft 50 concurrent requests. Cap eigen parallel
-  Firecrawl-gebruik op 40–45 als je later aparte throttling toevoegt, zodat er
-  marge overblijft naast de sharding-parallelism.
+- Firecrawl zit nu daadwerkelijk in het hot path (de v2-pipeline gebruikt
+  Firecrawl voor de eigen-domein-crawl, en voor Deep Dive/Public Source
+  Signal Enrichment als die opt-ins aanstaan) — dit was in de vorige versie
+  van dit document nog theoretisch, omdat de cloud-job toen de oude
+  Firecrawl-loze `enrich_clients_claude.py` aanriep. Elke task verwerkt zijn
+  shard sequentieel (één bedrijf tegelijk, geen in-task threadpool), dus de
+  gelijktijdige Firecrawl-load op elk moment is ongeveer `TASK_COUNT`
+  requests tegelijk (× de paar candidate-paths die één bedrijf soms na
+  elkaar probeert, maar dat is nooit echt gelijktijdig binnen één task).
+  Firecrawl Hobby (5 concurrent / 100 scrapes/min) is dus al snel de
+  bottleneck bij `TASK_COUNT` boven ~5; Firecrawl Standard (50 concurrent /
+  500 scrapes/min) past beter bij `TASK_COUNT=25–50`.
+- Een 429 van Firecrawl of Serper wordt sinds deze wijziging een paar keer
+  met backoff geretried (`api_retry.py`, gebruikt door
+  `deep_dive_runner._firecrawl_scrape_page` en
+  `lead_hq_ai_interpreter.call_serper_for_hq` /
+  `lead_non_hq_enrichment.call_serper_for_enrichment`) in plaats van de hele
+  crawl voor die lead meteen op te geven — dit maakt korte pieken onder
+  concurrent load draaglijk, maar is geen vervanging voor een verstandige
+  `TASK_COUNT` t.o.v. de Firecrawl-tier: er is geen gedeelde/verdeelde
+  rate-limiter over tasks heen, dus een structureel te hoge `TASK_COUNT`
+  leidt gewoon tot herhaalde 429's die alsnog uitputten.
 
 ## Bekende beperkingen (v1)
 
@@ -284,9 +312,29 @@ python cloud_merge_results.py \
 - Geen 50 aparte buckets — alles loopt via prefixes in één of twee buckets.
 - Geen Kubernetes.
 - Geen wijziging aan de bestaande scoringlogica in `commercial_fit_scoring.py`.
-- Streamlit (`streamlit_app.py`) en de lokale `.bat`-runners blijven ongewijzigd
-  bestaan en werken.
+- Streamlit (`streamlit_app.py`) blijft ongewijzigd bestaan en werken.
 - De dispatcher's Cloud Run Job execution-call is geïmplementeerd met de
   `google-cloud-run` v2 client, maar is nooit end-to-end getest tegen een echte
   Cloud Run Job in dit project — de eerste echte cloud-test gebeurt later
   handmatig.
+- Geen gedeelde/distributed concurrency-cap over Cloud Run-tasks heen — alleen
+  per-call 429-retry/backoff (zie Rate-limit notities). Bij een te hoge
+  `TASK_COUNT` t.o.v. de Firecrawl-tier leidt dat tot herhaalde, uiteindelijk
+  uitgeputte retries in plaats van een nette wachtrij.
+
+## Wijzigingen t.o.v. v1
+
+- De cloud-job draait sinds deze wijziging `lead_prioritizer_batch_cli.py`
+  (Lead Prioritizer v2, incl. Firecrawl) in plaats van de oude
+  `enrich_clients_claude.py`-legacy-CLI (alleen Serper + Claude web_search,
+  geen Firecrawl) — cloud-runs leveren nu dezelfde output als lokale/
+  Streamlit-runs, in plaats van een apart, ouder enrichment-format.
+- Company-/domain-/land-kolom worden automatisch herkend (of expliciet gezet
+  via `COMPANY_COLUMN`/`DOMAIN_COLUMN`/`INPUT_COUNTRY_COLUMN`) in plaats van
+  ongebruikt te blijven.
+- `MODE` wordt nu daadwerkelijk doorgegeven aan de v2-pipeline (met
+  validatie tegen `SUPPORTED_RUN_MODES`) in plaats van alleen gelogd te
+  worden.
+- Firecrawl/Serper 429's worden nu een paar keer met backoff geretried in
+  plaats van de crawl voor die lead meteen als hard failure af te schrijven
+  (zie Rate-limit notities hierboven).

@@ -2,7 +2,7 @@
 subprocess invocation, part-output upload, and status-JSON writing.
 
 Everything here uses local paths only (never gs://), so no GCS client is
-ever constructed. subprocess.run is always mocked — enrich_clients_claude.py
+ever constructed. subprocess.run is always mocked — lead_prioritizer_batch_cli.py
 never actually runs, so there are no live Anthropic/Serper/Firecrawl calls
 and no API keys are needed. An autouse fixture clears every cloud-related
 env var so tests never pick up real secrets or leftover config from the host.
@@ -27,6 +27,8 @@ _CLOUD_ENV_VARS = [
     "CLOUD_RUN_TASK_INDEX", "CLOUD_RUN_TASK_COUNT",
     "ANTHROPIC_API_KEY", "SERPER_API_KEY", "FIRECRAWL_API_KEY",
     "MAX_ROWS", "FORCE_RERUN", "MODE",
+    "COMPANY_COLUMN", "DOMAIN_COLUMN", "INPUT_COUNTRY_COLUMN",
+    "DEEP_DIVE", "RICH_ICP_CONTEXT", "AI_SIGNAL_SCORING",
 ]
 
 
@@ -44,13 +46,13 @@ def _write_synthetic_excel(path: Path, n_rows: int) -> None:
     df.to_excel(path, index=False)
 
 
-def _fake_enrich_subprocess(returncode: int = 0, write_output: bool = True):
-    """Stand-in for subprocess.run(["python", "enrich_clients_claude.py", ...]).
+def _fake_batch_cli_subprocess(returncode: int = 0, write_output: bool = True):
+    """Stand-in for subprocess.run(["python", "lead_prioritizer_batch_cli.py", ...]).
 
-    Never runs the real script. On a "successful" call it writes a part
-    output Excel where enrich_clients_claude.py's --output-dir/--output-name
-    would, so the runner's post-subprocess logic (locate output, upload) can
-    still be exercised without any live enrichment.
+    Never runs the real CLI. On a "successful" call it writes an output Excel
+    at the ``--output`` path, exactly like lead_prioritizer_batch_cli.py would,
+    so the runner's post-subprocess logic (locate output, upload) can still be
+    exercised without any live enrichment.
     """
     calls: list[list[str]] = []
 
@@ -58,12 +60,11 @@ def _fake_enrich_subprocess(returncode: int = 0, write_output: bool = True):
         calls.append(list(cmd))
         if returncode == 0 and write_output:
             input_path = Path(cmd[cmd.index("--input") + 1])
-            output_dir = Path(cmd[cmd.index("--output-dir") + 1])
-            output_name = cmd[cmd.index("--output-name") + 1]
+            output_path = Path(cmd[cmd.index("--output") + 1])
             df = pd.read_excel(input_path)
-            df["priority_score"] = 1  # stand-in for a real enrichment column
-            output_dir.mkdir(parents=True, exist_ok=True)
-            df.to_excel(output_dir / f"{output_name}.xlsx", index=False)
+            df["final_commercial_fit_score"] = 1  # stand-in for a real enrichment column
+            output_path.parent.mkdir(parents=True, exist_ok=True)
+            df.to_excel(output_path, index=False)
         return SimpleNamespace(returncode=returncode)
 
     _fake_run.calls = calls
@@ -77,7 +78,7 @@ def test_happy_path_task0_writes_part_and_done_status(tmp_path, monkeypatch):
     _write_synthetic_excel(input_path, 100)
     output_dir = tmp_path / "out"
 
-    fake_run = _fake_enrich_subprocess()
+    fake_run = _fake_batch_cli_subprocess()
     monkeypatch.setattr(cjr.subprocess, "run", fake_run)
 
     rc = cjr.main([
@@ -91,8 +92,12 @@ def test_happy_path_task0_writes_part_and_done_status(tmp_path, monkeypatch):
     assert rc == 0
     assert len(fake_run.calls) == 1
     cmd = fake_run.calls[0]
-    assert str(cjr.ENRICH_SCRIPT) in cmd
-    assert "--no-eta" in cmd
+    assert str(cjr.BATCH_CLI_SCRIPT) in cmd
+    assert cmd[cmd.index("--company-column") + 1] == "company_name"
+    assert cmd[cmd.index("--domain-column") + 1] == "domain"
+    assert cmd[cmd.index("--mode") + 1] == "full"
+    assert cmd[cmd.index("--row-limit") + 1] == "0"
+    assert "--yes" in cmd
 
     part_path = output_dir / "parts" / "part_0000.xlsx"
     assert part_path.exists()
@@ -113,15 +118,52 @@ def test_happy_path_task0_writes_part_and_done_status(tmp_path, monkeypatch):
     assert (output_dir / "status" / "part_0000_running.json").exists()
 
 
+def test_api_keys_passed_via_env_not_cmd(tmp_path, monkeypatch):
+    """Keys must never appear as plain CLI args (visible in process listings);
+    lead_prioritizer_batch_cli.py reads them from the environment."""
+    input_path = tmp_path / "input.xlsx"
+    _write_synthetic_excel(input_path, 10)
+    output_dir = tmp_path / "out"
+
+    captured_env = {}
+    fake_run = _fake_batch_cli_subprocess()
+
+    def _wrapped(cmd, env=None, **kwargs):
+        captured_env.update(env or {})
+        return fake_run(cmd, env=env, **kwargs)
+
+    monkeypatch.setattr(cjr.subprocess, "run", _wrapped)
+
+    rc = cjr.main([
+        "--input", str(input_path),
+        "--output-dir", str(output_dir),
+        "--task-index", "0",
+        "--task-count", "1",
+        "--run-id", "keys-via-env",
+        "--anthropic-key", "ant-secret",
+        "--serper-key", "serper-secret",
+        "--firecrawl-key", "fc-secret",
+    ])
+
+    assert rc == 0
+    cmd = fake_run.calls[0]
+    assert "ant-secret" not in cmd
+    assert "serper-secret" not in cmd
+    assert "fc-secret" not in cmd
+    assert captured_env["ANTHROPIC_API_KEY"] == "ant-secret"
+    assert captured_env["SERPER_API_KEY"] == "serper-secret"
+    assert captured_env["FIRECRAWL_API_KEY"] == "fc-secret"
+
+
 def test_max_rows_caps_rows_processed_but_not_rows_requested(tmp_path, monkeypatch):
-    """Regression test: enrich_clients_claude.py applies --max-rows itself
+    """Regression test: lead_prioritizer_batch_cli.py applies --row-limit itself
     (head-of-shard truncation), so rows_processed must reflect that even
     though the shard handed to it (rows_requested) is larger."""
     input_path = tmp_path / "input.xlsx"
     _write_synthetic_excel(input_path, 100)
     output_dir = tmp_path / "out"
 
-    fake_run = _fake_enrich_subprocess()
+    fake_run = _fake_batch_cli_subprocess()
     monkeypatch.setattr(cjr.subprocess, "run", fake_run)
 
     rc = cjr.main([
@@ -139,7 +181,93 @@ def test_max_rows_caps_rows_processed_but_not_rows_requested(tmp_path, monkeypat
     assert status["rows_processed"] == 3
 
     cmd = fake_run.calls[0]
-    assert cmd[cmd.index("--max-rows") + 1] == "3"
+    assert cmd[cmd.index("--row-limit") + 1] == "3"
+
+
+def test_mode_and_column_overrides_are_forwarded(tmp_path, monkeypatch):
+    input_path = tmp_path / "input.xlsx"
+    df = pd.DataFrame({
+        "Company Name": ["Acme"],
+        "Website": ["acme.example.com"],
+        "Land": ["Italy"],
+    })
+    df.to_excel(input_path, index=False)
+    output_dir = tmp_path / "out"
+
+    fake_run = _fake_batch_cli_subprocess()
+    monkeypatch.setattr(cjr.subprocess, "run", fake_run)
+
+    rc = cjr.main([
+        "--input", str(input_path),
+        "--output-dir", str(output_dir),
+        "--task-index", "0",
+        "--task-count", "1",
+        "--run-id", "overrides",
+        "--mode", "hq_only",
+        "--company-column", "Company Name",
+        "--domain-column", "Website",
+        "--input-country-column", "Land",
+        "--deep-dive",
+        "--rich-icp-context",
+        "--ai-signal-scoring",
+    ])
+
+    assert rc == 0
+    cmd = fake_run.calls[0]
+    assert cmd[cmd.index("--mode") + 1] == "hq_only"
+    assert cmd[cmd.index("--company-column") + 1] == "Company Name"
+    assert cmd[cmd.index("--domain-column") + 1] == "Website"
+    assert cmd[cmd.index("--input-country-column") + 1] == "Land"
+    assert "--deep-dive" in cmd
+    assert "--rich-icp-context" in cmd
+    assert "--ai-signal-scoring" in cmd
+
+
+def test_unresolvable_columns_fail_before_subprocess(tmp_path, monkeypatch):
+    input_path = tmp_path / "input.xlsx"
+    df = pd.DataFrame({"foo": ["a"], "bar": ["b"]})
+    df.to_excel(input_path, index=False)
+    output_dir = tmp_path / "out"
+
+    fake_run = _fake_batch_cli_subprocess()
+    monkeypatch.setattr(cjr.subprocess, "run", fake_run)
+
+    rc = cjr.main([
+        "--input", str(input_path),
+        "--output-dir", str(output_dir),
+        "--task-index", "0",
+        "--task-count", "1",
+        "--run-id", "unresolvable-columns",
+    ])
+
+    assert rc == 1
+    assert fake_run.calls == []
+    status = json.loads((output_dir / "status" / "part_0000_failed.json").read_text(encoding="utf-8"))
+    assert status["status"] == "failed"
+    assert "Could not resolve company/domain columns" in status["error"]
+
+
+def test_unknown_mode_fails_fast(tmp_path, monkeypatch):
+    input_path = tmp_path / "input.xlsx"
+    _write_synthetic_excel(input_path, 10)
+    output_dir = tmp_path / "out"
+
+    fake_run = _fake_batch_cli_subprocess()
+    monkeypatch.setattr(cjr.subprocess, "run", fake_run)
+
+    rc = cjr.main([
+        "--input", str(input_path),
+        "--output-dir", str(output_dir),
+        "--task-index", "0",
+        "--task-count", "1",
+        "--run-id", "unknown-mode",
+        "--mode", "not_a_real_mode",
+    ])
+
+    assert rc == 1
+    assert fake_run.calls == []
+    # Fails before the "running" status is even written.
+    assert not (output_dir / "status" / "part_0000_running.json").exists()
 
 
 # ── 2. Idempotency ──────────────────────────────────────────────────────────
@@ -154,7 +282,7 @@ def test_existing_part_output_skips_subprocess(tmp_path, monkeypatch):
     _write_synthetic_excel(part_path, 3)  # pre-existing, unrelated content
     original_bytes = part_path.read_bytes()
 
-    fake_run = _fake_enrich_subprocess()
+    fake_run = _fake_batch_cli_subprocess()
     monkeypatch.setattr(cjr.subprocess, "run", fake_run)
 
     rc = cjr.main([
@@ -182,7 +310,7 @@ def test_force_rerun_reprocesses_existing_part(tmp_path, monkeypatch):
     part_path.parent.mkdir(parents=True)
     _write_synthetic_excel(part_path, 3)
 
-    fake_run = _fake_enrich_subprocess()
+    fake_run = _fake_batch_cli_subprocess()
     monkeypatch.setattr(cjr.subprocess, "run", fake_run)
 
     rc = cjr.main([
@@ -207,7 +335,7 @@ def test_task_beyond_row_range_skips_subprocess_and_reports_zero_rows(tmp_path, 
     _write_synthetic_excel(input_path, 3)
     output_dir = tmp_path / "out"
 
-    fake_run = _fake_enrich_subprocess()
+    fake_run = _fake_batch_cli_subprocess()
     monkeypatch.setattr(cjr.subprocess, "run", fake_run)
 
     rc = cjr.main([
@@ -234,7 +362,7 @@ def test_subprocess_nonzero_exit_writes_failed_status(tmp_path, monkeypatch):
     _write_synthetic_excel(input_path, 100)
     output_dir = tmp_path / "out"
 
-    fake_run = _fake_enrich_subprocess(returncode=1)
+    fake_run = _fake_batch_cli_subprocess(returncode=1)
     monkeypatch.setattr(cjr.subprocess, "run", fake_run)
 
     rc = cjr.main([
@@ -260,7 +388,7 @@ def test_subprocess_nonzero_exit_writes_failed_status(tmp_path, monkeypatch):
 
 def test_missing_local_input_writes_failed_status(tmp_path, monkeypatch):
     output_dir = tmp_path / "out"
-    fake_run = _fake_enrich_subprocess()
+    fake_run = _fake_batch_cli_subprocess()
     monkeypatch.setattr(cjr.subprocess, "run", fake_run)
 
     rc = cjr.main([
@@ -279,13 +407,14 @@ def test_missing_local_input_writes_failed_status(tmp_path, monkeypatch):
 
 
 def test_missing_output_after_subprocess_success_writes_failed_status(tmp_path, monkeypatch):
-    """enrich_clients_claude.py exits 0 but (for whatever reason) never wrote
-    an .xlsx — the runner must still fail loudly instead of uploading nothing."""
+    """lead_prioritizer_batch_cli.py exits 0 but (for whatever reason) never
+    wrote an .xlsx — the runner must still fail loudly instead of uploading
+    nothing."""
     input_path = tmp_path / "input.xlsx"
     _write_synthetic_excel(input_path, 10)
     output_dir = tmp_path / "out"
 
-    fake_run = _fake_enrich_subprocess(returncode=0, write_output=False)
+    fake_run = _fake_batch_cli_subprocess(returncode=0, write_output=False)
     monkeypatch.setattr(cjr.subprocess, "run", fake_run)
 
     rc = cjr.main([
@@ -299,4 +428,4 @@ def test_missing_output_after_subprocess_success_writes_failed_status(tmp_path, 
     assert rc == 1
     status = json.loads((output_dir / "status" / "part_0000_failed.json").read_text(encoding="utf-8"))
     assert status["status"] == "failed"
-    assert "No .xlsx output found" in status["error"]
+    assert "No output written" in status["error"]

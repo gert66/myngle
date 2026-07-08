@@ -14,7 +14,10 @@ from __future__ import annotations
 
 import json
 import re
+import time
 from typing import TYPE_CHECKING, Optional
+
+import api_retry
 
 try:
     import anthropic as _anthropic_lib
@@ -146,6 +149,7 @@ def call_serper_for_hq(
     hl: Optional[str] = None,
     cache_index: Optional[dict] = None,
     force_refresh: bool = False,
+    max_429_retries: int = api_retry.DEFAULT_MAX_RETRIES,
 ) -> dict:
     """Fire a single Serper search and return the raw JSON payload.
 
@@ -153,6 +157,8 @@ def call_serper_for_hq(
     function does not construct queries itself.
 
     Returns an empty dict on any error so callers can treat it defensively.
+    A 429 (rate limited) is retried up to ``max_429_retries`` times with
+    backoff before giving up and returning ``{}``, same as any other error.
 
     ``gl``/``hl`` (Serper's country/language params) are only included in
     the request when explicitly given — mirrors
@@ -173,6 +179,7 @@ def call_serper_for_hq(
     caller is responsible for eventually persisting ``cache_index`` to GCS
     via ``enrichment_cache.save_cache_index``).
     """
+    import urllib.error
     import urllib.request
     import usage_tracker
 
@@ -207,11 +214,21 @@ def call_serper_for_hq(
         },
         method="POST",
     )
-    try:
-        with urllib.request.urlopen(req, timeout=15) as resp:
-            result = json.loads(resp.read().decode())
-    except Exception:
-        return {}
+    attempt = 0
+    while True:
+        try:
+            with urllib.request.urlopen(req, timeout=15) as resp:
+                result = json.loads(resp.read().decode())
+            break
+        except urllib.error.HTTPError as exc:
+            if exc.code == 429 and attempt < max_429_retries:
+                retry_after = api_retry.parse_retry_after(exc.headers.get("Retry-After"))
+                time.sleep(api_retry.backoff_seconds(attempt, retry_after))
+                attempt += 1
+                continue
+            return {}
+        except Exception:
+            return {}
 
     if cache_index is not None and result:
         enrichment_cache.put_cached(

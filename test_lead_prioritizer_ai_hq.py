@@ -9,6 +9,7 @@ All external calls (Serper + Anthropic) are mocked so no network is required.
 from __future__ import annotations
 
 import json
+import urllib.error
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -1416,6 +1417,77 @@ class TestCallSerperForHqCache:
             )
         mock_urlopen.assert_called_once()
         assert result == {"organic": ["live"]}
+
+
+# ---------------------------------------------------------------------------
+# call_serper_for_hq: 429 retry/backoff (expected under concurrent load).
+# ---------------------------------------------------------------------------
+
+def _http_error_429(retry_after: str | None = None):
+    headers = MagicMock()
+    headers.get.return_value = retry_after
+    return urllib.error.HTTPError("url", 429, "rate limited", headers, None)
+
+
+class TestCallSerperForHq429Retry:
+    def test_retries_then_succeeds(self):
+        from lead_hq_ai_interpreter import call_serper_for_hq
+
+        response = MagicMock()
+        response.read.return_value = json.dumps({"organic": ["live"]}).encode()
+        response.__enter__ = MagicMock(return_value=response)
+        response.__exit__ = MagicMock(return_value=False)
+
+        with patch("urllib.request.urlopen", side_effect=[_http_error_429(), response]) as mock_urlopen, \
+                patch("lead_hq_ai_interpreter.time.sleep") as mock_sleep:
+            result = call_serper_for_hq(
+                domain_root="acme.com", query="acme headquarters", serper_api_key="k",
+            )
+        assert result == {"organic": ["live"]}
+        assert mock_urlopen.call_count == 2
+        mock_sleep.assert_called_once()
+
+    def test_exhausts_retries_then_returns_empty(self):
+        from lead_hq_ai_interpreter import call_serper_for_hq
+
+        with patch("urllib.request.urlopen", side_effect=_http_error_429()) as mock_urlopen, \
+                patch("lead_hq_ai_interpreter.time.sleep"):
+            result = call_serper_for_hq(
+                domain_root="acme.com", query="acme headquarters", serper_api_key="k",
+                max_429_retries=2,
+            )
+        assert result == {}
+        assert mock_urlopen.call_count == 3  # initial attempt + 2 retries
+
+    def test_non_429_http_error_is_not_retried(self):
+        from lead_hq_ai_interpreter import call_serper_for_hq
+
+        headers = MagicMock()
+        error = urllib.error.HTTPError("url", 500, "server error", headers, None)
+        with patch("urllib.request.urlopen", side_effect=error) as mock_urlopen, \
+                patch("lead_hq_ai_interpreter.time.sleep") as mock_sleep:
+            result = call_serper_for_hq(
+                domain_root="acme.com", query="acme headquarters", serper_api_key="k",
+            )
+        assert result == {}
+        mock_urlopen.assert_called_once()
+        mock_sleep.assert_not_called()
+
+    def test_honors_retry_after_header(self):
+        from lead_hq_ai_interpreter import call_serper_for_hq
+        import api_retry
+
+        response = MagicMock()
+        response.read.return_value = json.dumps({"organic": ["live"]}).encode()
+        response.__enter__ = MagicMock(return_value=response)
+        response.__exit__ = MagicMock(return_value=False)
+
+        with patch("urllib.request.urlopen", side_effect=[_http_error_429("2.5"), response]), \
+                patch("lead_hq_ai_interpreter.time.sleep") as mock_sleep:
+            call_serper_for_hq(
+                domain_root="acme.com", query="acme headquarters", serper_api_key="k",
+            )
+        mock_sleep.assert_called_once_with(2.5)
 
 
 # ---------------------------------------------------------------------------

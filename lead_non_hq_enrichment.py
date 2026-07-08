@@ -13,8 +13,10 @@ public ``derive_domain_root`` helper for domain-root-first query building.
 from __future__ import annotations
 
 import json
+import time
 from typing import Optional
 
+import api_retry
 from hq_simple_detector import derive_domain_root
 from lead_output_schema import LeadEvidence
 
@@ -116,13 +118,16 @@ def call_serper_for_enrichment(
     signal_name: str = "",
     cache_index: Optional[dict] = None,
     force_refresh: bool = False,
+    max_429_retries: int = api_retry.DEFAULT_MAX_RETRIES,
 ) -> dict:
     """Fire a single Serper search and return the raw JSON payload.
 
     ``gl``/``hl`` (Serper's country/language params) are only included in the
     request when explicitly given, so callers that don't pass them keep the
     exact request shape used today. Returns ``{}`` on any error so callers can
-    treat it defensively; never raises on API / network failure.
+    treat it defensively; never raises on API / network failure. A 429 (rate
+    limited) is retried up to ``max_429_retries`` times with backoff before
+    giving up and returning ``{}``, same as any other error.
 
     ``domain``/``signal_name`` + ``cache_index`` (all default blank/``None``)
     are an optional in-memory, GCS-backed shared cache lookup (see
@@ -136,6 +141,7 @@ def call_serper_for_enrichment(
     call; a miss still calls Serper live and stores the result back into
     ``cache_index``.
     """
+    import urllib.error
     import urllib.request
     import usage_tracker
 
@@ -172,11 +178,21 @@ def call_serper_for_enrichment(
         },
         method="POST",
     )
-    try:
-        with urllib.request.urlopen(req, timeout=15) as resp:
-            result = json.loads(resp.read().decode())
-    except Exception:
-        return {}
+    attempt = 0
+    while True:
+        try:
+            with urllib.request.urlopen(req, timeout=15) as resp:
+                result = json.loads(resp.read().decode())
+            break
+        except urllib.error.HTTPError as exc:
+            if exc.code == 429 and attempt < max_429_retries:
+                retry_after = api_retry.parse_retry_after(exc.headers.get("Retry-After"))
+                time.sleep(api_retry.backoff_seconds(attempt, retry_after))
+                attempt += 1
+                continue
+            return {}
+        except Exception:
+            return {}
 
     if use_cache and result:
         enrichment_cache.put_cached(

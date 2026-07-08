@@ -1,11 +1,18 @@
 """Cloud Run Jobs worker entrypoint for the mYngle Lead Prioritizer.
 
 Reads (or downloads) one input Excel, slices out this task's contiguous row
-block, and calls the existing ``enrich_clients_claude.py`` CLI via
-subprocess to do the actual enrichment/scoring — nothing here re-implements
-that logic. The resulting part output and a status JSON are written to GCS
-(``gs://...`` paths) or to local paths, so the same script also runs as a
-local smoke test.
+block, and calls the existing ``lead_prioritizer_batch_cli.py`` (Lead
+Prioritizer v2 — Serper + Anthropic + Firecrawl) via subprocess to do the
+actual enrichment/scoring — nothing here re-implements that logic. The
+resulting part output and a status JSON are written to GCS (``gs://...``
+paths) or to local paths, so the same script also runs as a local smoke test.
+
+Company/domain/(optional) input-country columns are resolved the same way
+the Streamlit batch app resolves them (see
+``lead_prioritizer_batch_app.resolve_default_column``) unless overridden via
+COMPANY_COLUMN/DOMAIN_COLUMN/INPUT_COUNTRY_COLUMN (env or
+--company-column/--domain-column/--input-country-column), so a dataset that
+already works there needs no extra cloud-specific config.
 
 Cloud usage (inside the container, values injected by Cloud Run Jobs):
     python cloud_job_runner.py
@@ -37,7 +44,7 @@ import pandas as pd
 ROW_INDEX_COL = "_cloud_original_row_index"
 
 REPO_ROOT = Path(__file__).resolve().parent
-ENRICH_SCRIPT = REPO_ROOT / "enrich_clients_claude.py"
+BATCH_CLI_SCRIPT = REPO_ROOT / "lead_prioritizer_batch_cli.py"
 
 
 # ── gs:// / local path helpers ────────────────────────────────────────────
@@ -160,6 +167,35 @@ def add_row_index_column(df: pd.DataFrame) -> pd.DataFrame:
     return df
 
 
+def resolve_columns(cfg: "RunConfig", columns) -> tuple[str, str, Optional[str]]:
+    """Resolve company/domain/(optional) input-country column names.
+
+    Explicit ``cfg.company_column``/``cfg.domain_column``/
+    ``cfg.input_country_column`` (set via env or CLI flag) win; otherwise
+    falls back to the same auto-detection the Streamlit batch app's column-
+    mapping step uses, so a dataset that already works there needs no extra
+    cloud-specific config.
+    """
+    from lead_prioritizer_batch_app import (
+        COMPANY_CANDIDATES,
+        COUNTRY_CANDIDATES,
+        DOMAIN_CANDIDATES,
+        resolve_default_column,
+    )
+
+    cols = list(columns)
+    company_col = cfg.company_column or resolve_default_column(cols, COMPANY_CANDIDATES)
+    domain_col = cfg.domain_column or resolve_default_column(cols, DOMAIN_CANDIDATES)
+    if not company_col or not domain_col:
+        raise ValueError(
+            "Could not resolve company/domain columns "
+            f"(company={company_col!r}, domain={domain_col!r}); "
+            "set COMPANY_COLUMN/DOMAIN_COLUMN explicitly."
+        )
+    country_col = cfg.input_country_column or resolve_default_column(cols, COUNTRY_CANDIDATES)
+    return company_col, domain_col, country_col
+
+
 # ── Config ─────────────────────────────────────────────────────────────────
 
 @dataclass
@@ -175,6 +211,12 @@ class RunConfig:
     max_rows: Optional[int]
     force_rerun: bool
     mode: str
+    company_column: Optional[str] = None
+    domain_column: Optional[str] = None
+    input_country_column: Optional[str] = None
+    deep_dive: bool = False
+    rich_icp_context: bool = False
+    ai_signal_scoring: bool = False
 
 
 def build_arg_parser() -> argparse.ArgumentParser:
@@ -191,7 +233,20 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--firecrawl-key", default=None)
     parser.add_argument("--max-rows", type=int, default=None)
     parser.add_argument("--force-rerun", action="store_true")
-    parser.add_argument("--mode", default=None)
+    parser.add_argument("--mode", default=None,
+                         help="Lead Prioritizer v2 run mode (default: full).")
+    parser.add_argument("--company-column", default=None,
+                         help="Company name column (default: auto-detected).")
+    parser.add_argument("--domain-column", default=None,
+                         help="Domain column (default: auto-detected).")
+    parser.add_argument("--input-country-column", default=None,
+                         help="Optional per-row input country column (default: auto-detected).")
+    parser.add_argument("--deep-dive", action="store_true",
+                         help="Opt-in Step B (default: off; env DEEP_DIVE).")
+    parser.add_argument("--rich-icp-context", action="store_true",
+                         help="Opt-in rich ICP context (default: off; env RICH_ICP_CONTEXT).")
+    parser.add_argument("--ai-signal-scoring", action="store_true",
+                         help="Opt-in AI signal scoring (default: off; env AI_SIGNAL_SCORING).")
     return parser
 
 
@@ -229,7 +284,15 @@ def resolve_config(argv=None) -> RunConfig:
         firecrawl_key=args.firecrawl_key or os.environ.get("FIRECRAWL_API_KEY", ""),
         max_rows=max_rows,
         force_rerun=args.force_rerun or _env_bool("FORCE_RERUN"),
-        mode=args.mode or os.environ.get("MODE", ""),
+        mode=args.mode or os.environ.get("MODE", "") or "full",
+        company_column=args.company_column or os.environ.get("COMPANY_COLUMN") or None,
+        domain_column=args.domain_column or os.environ.get("DOMAIN_COLUMN") or None,
+        input_country_column=(
+            args.input_country_column or os.environ.get("INPUT_COUNTRY_COLUMN") or None
+        ),
+        deep_dive=args.deep_dive or _env_bool("DEEP_DIVE"),
+        rich_icp_context=args.rich_icp_context or _env_bool("RICH_ICP_CONTEXT"),
+        ai_signal_scoring=args.ai_signal_scoring or _env_bool("AI_SIGNAL_SCORING"),
     )
 
 
@@ -269,13 +332,22 @@ def main(argv=None) -> int:
         print("[cloud_job_runner] ERROR: no output dir specified (OUTPUT_GCS_DIR env var or --output-dir)", file=sys.stderr)
         return 1
 
+    from lead_prioritizer_batch_core import SUPPORTED_RUN_MODES
+    if cfg.mode not in SUPPORTED_RUN_MODES:
+        print(
+            f"[cloud_job_runner] ERROR: unknown mode {cfg.mode!r}; "
+            f"expected one of {sorted(SUPPORTED_RUN_MODES)}",
+            file=sys.stderr,
+        )
+        return 1
+
     task_label = f"part_{cfg.task_index:04d}"
     part_output_uri = join_path(cfg.output_dir, "parts", f"{task_label}.xlsx")
     status_running_uri = join_path(cfg.output_dir, "status", f"{task_label}_running.json")
     status_done_uri = join_path(cfg.output_dir, "status", f"{task_label}_done.json")
     status_failed_uri = join_path(cfg.output_dir, "status", f"{task_label}_failed.json")
 
-    print(f"[cloud_job_runner] run_id={cfg.run_id} task_index={cfg.task_index} task_count={cfg.task_count} mode={cfg.mode or '(default)'}", flush=True)
+    print(f"[cloud_job_runner] run_id={cfg.run_id} task_index={cfg.task_index} task_count={cfg.task_count} mode={cfg.mode}", flush=True)
     print(f"[cloud_job_runner] input={cfg.input_uri}", flush=True)
     print(f"[cloud_job_runner] output_dir={cfg.output_dir}", flush=True)
     print(
@@ -336,50 +408,61 @@ def main(argv=None) -> int:
         df_part = df_in.iloc[row_start:row_end].copy()
         rows_in_part = len(df_part)
 
+        company_col, domain_col, country_col = resolve_columns(cfg, df_part.columns)
+
         part_input_path = tmp_dir / f"input_part_{cfg.task_index:04d}.xlsx"
         df_part.to_excel(part_input_path, index=False)
 
         task_output_dir = tmp_dir / "output"
         task_output_dir.mkdir(parents=True, exist_ok=True)
-        output_name = task_label
+        local_output_path = task_output_dir / f"{task_label}.xlsx"
 
         cmd = [
-            sys.executable, str(ENRICH_SCRIPT),
+            sys.executable, str(BATCH_CLI_SCRIPT),
             "--input", str(part_input_path),
-            "--output-dir", str(task_output_dir),
-            "--output-name", output_name,
-            "--no-eta",
+            "--company-column", company_col,
+            "--domain-column", domain_col,
+            "--mode", cfg.mode,
+            # Each task already got its own contiguous row block above; process
+            # all of it (0 = no limit), except in a --max-rows smoke test.
+            "--row-limit", str(cfg.max_rows) if cfg.max_rows else "0",
+            "--output", str(local_output_path),
+            "--yes",
         ]
-        if cfg.anthropic_key:
-            cmd += ["--anthropic-key", cfg.anthropic_key]
-        if cfg.serper_key:
-            cmd += ["--serper-key", cfg.serper_key]
-        if cfg.max_rows:
-            cmd += ["--max-rows", str(cfg.max_rows)]
+        if country_col:
+            cmd += ["--input-country-column", country_col]
+        if cfg.deep_dive:
+            cmd += ["--deep-dive"]
+        if cfg.rich_icp_context:
+            cmd += ["--rich-icp-context"]
+        if cfg.ai_signal_scoring:
+            cmd += ["--ai-signal-scoring"]
 
         env = os.environ.copy()
+        if cfg.anthropic_key:
+            env["ANTHROPIC_API_KEY"] = cfg.anthropic_key
+        if cfg.serper_key:
+            env["SERPER_API_KEY"] = cfg.serper_key
         if cfg.firecrawl_key:
             env["FIRECRAWL_API_KEY"] = cfg.firecrawl_key
 
-        print(f"[cloud_job_runner] Invoking enrich_clients_claude.py for {rows_in_part} rows...", flush=True)
+        print(
+            f"[cloud_job_runner] Invoking lead_prioritizer_batch_cli.py for {rows_in_part} rows "
+            f"(company_column={company_col!r} domain_column={domain_col!r})...",
+            flush=True,
+        )
         proc = subprocess.run(cmd, env=env)
         if proc.returncode != 0:
-            raise RuntimeError(f"enrich_clients_claude.py exited with code {proc.returncode}")
+            raise RuntimeError(f"lead_prioritizer_batch_cli.py exited with code {proc.returncode}")
 
-        expected_output = task_output_dir / f"{output_name}.xlsx"
-        if expected_output.exists():
-            local_output_path = expected_output
-        else:
-            candidates = sorted(task_output_dir.glob("*.xlsx"))
-            if not candidates:
-                raise FileNotFoundError(f"No .xlsx output found in {task_output_dir}")
-            local_output_path = candidates[-1]
+        if not local_output_path.exists():
+            raise FileNotFoundError(f"No output written to {local_output_path}")
 
         print(f"[cloud_job_runner] Uploading part output -> {part_output_uri}", flush=True)
         upload_output_file(local_output_path, part_output_uri)
 
-        # enrich_clients_claude.py applies --max-rows itself (head-of-shard truncation),
-        # so the actually-processed count can be lower than the shard size.
+        # lead_prioritizer_batch_cli.py applies --row-limit itself (head-of-shard
+        # truncation), so the actually-processed count can be lower than the shard size.
         rows_processed = min(rows_in_part, cfg.max_rows) if cfg.max_rows else rows_in_part
 
         finished_at = _now_iso()

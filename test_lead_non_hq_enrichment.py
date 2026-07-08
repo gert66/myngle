@@ -8,7 +8,8 @@ gating (default must NOT call non-HQ enrichment).
 from __future__ import annotations
 
 import json
-from unittest.mock import patch
+import urllib.error
+from unittest.mock import MagicMock, patch
 
 from lead_output_schema import LeadEvidence, LeadInput
 from lead_non_hq_enrichment import (
@@ -259,6 +260,54 @@ class TestGlHlLocalization:
 
         assert calls
         assert all(c == (None, None) for c in calls)
+
+
+class TestCallSerperForEnrichment429Retry:
+    def _http_error_429(self, retry_after=None):
+        headers = MagicMock()
+        headers.get.return_value = retry_after
+        return urllib.error.HTTPError("url", 429, "rate limited", headers, None)
+
+    def test_retries_then_succeeds(self):
+        class _FakeResponse:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *a):
+                return False
+
+            def read(self):
+                return json.dumps({"organic": ["live"]}).encode()
+
+        with patch("urllib.request.urlopen",
+                    side_effect=[self._http_error_429(), _FakeResponse()]) as mock_urlopen, \
+                patch("lead_non_hq_enrichment.time.sleep") as mock_sleep:
+            result = call_serper_for_enrichment("acme international", "fake-key")
+
+        assert result == {"organic": ["live"]}
+        assert mock_urlopen.call_count == 2
+        mock_sleep.assert_called_once()
+
+    def test_exhausts_retries_then_returns_empty(self):
+        with patch("urllib.request.urlopen",
+                    side_effect=self._http_error_429()) as mock_urlopen, \
+                patch("lead_non_hq_enrichment.time.sleep"):
+            result = call_serper_for_enrichment(
+                "acme international", "fake-key", max_429_retries=2)
+
+        assert result == {}
+        assert mock_urlopen.call_count == 3
+
+    def test_non_429_http_error_is_not_retried(self):
+        headers = MagicMock()
+        error = urllib.error.HTTPError("url", 500, "server error", headers, None)
+        with patch("urllib.request.urlopen", side_effect=error) as mock_urlopen, \
+                patch("lead_non_hq_enrichment.time.sleep") as mock_sleep:
+            result = call_serper_for_enrichment("acme international", "fake-key")
+
+        assert result == {}
+        mock_urlopen.assert_called_once()
+        mock_sleep.assert_not_called()
 
 
 # ---------------------------------------------------------------------------

@@ -38,6 +38,7 @@ from __future__ import annotations
 
 import json
 import re
+import time
 import urllib.request
 from datetime import datetime, timezone
 from typing import Optional
@@ -49,6 +50,7 @@ except ImportError:  # pragma: no cover
 
 import requests
 
+import api_retry
 from deep_dive_schema import DeepDiveClaim, DeepDiveResult, DEEP_DIVE_CATEGORIES
 from hq_simple_detector import is_hosted_careers_platform_domain
 from lead_hq_ai_interpreter import _host_from, _hosts_match
@@ -80,6 +82,7 @@ def _firecrawl_scrape_page(
     timeout: int = 15,
     cache_index: Optional[dict] = None,
     force_refresh: bool = False,
+    max_429_retries: int = api_retry.DEFAULT_MAX_RETRIES,
 ) -> dict:
     """POST one Firecrawl scrape request. Never raises.
 
@@ -87,6 +90,12 @@ def _firecrawl_scrape_page(
     ``hard_failure=True`` means Firecrawl itself is unusable right now
     (network error, or a key/quota problem) — the caller should abandon
     Firecrawl entirely and fall back, rather than just skipping this page.
+
+    A 429 (rate limited) is retried up to ``max_429_retries`` times with
+    backoff (honoring ``Retry-After`` when present) before being classified
+    as a hard failure like before — expected and recoverable under
+    concurrent load, unlike a bad key or exhausted quota (401/402/403),
+    which are never retried.
 
     ``cache_index`` (default ``None``) is an optional in-memory, GCS-backed
     shared cache index (see ``enrichment_cache.py``), keyed on the full
@@ -111,17 +120,26 @@ def _firecrawl_scrape_page(
             return cached
         usage_tracker.record_cache_miss("firecrawl")
 
-    try:
-        usage_tracker.record_firecrawl_call()
-        resp = requests.post(
-            _FC_API_URL,
-            headers={"Authorization": f"Bearer {firecrawl_api_key}",
-                     "Content-Type": "application/json"},
-            json={"url": url, "formats": ["markdown"]},
-            timeout=timeout,
-        )
-    except Exception as exc:
-        return {"ok": False, "text": "", "status": f"error:{str(exc)[:80]}", "hard_failure": True}
+    attempt = 0
+    while True:
+        try:
+            usage_tracker.record_firecrawl_call()
+            resp = requests.post(
+                _FC_API_URL,
+                headers={"Authorization": f"Bearer {firecrawl_api_key}",
+                         "Content-Type": "application/json"},
+                json={"url": url, "formats": ["markdown"]},
+                timeout=timeout,
+            )
+        except Exception as exc:
+            return {"ok": False, "text": "", "status": f"error:{str(exc)[:80]}", "hard_failure": True}
+
+        if resp.status_code == 429 and attempt < max_429_retries:
+            retry_after = api_retry.parse_retry_after(resp.headers.get("Retry-After"))
+            time.sleep(api_retry.backoff_seconds(attempt, retry_after))
+            attempt += 1
+            continue
+        break
 
     if resp.status_code == 200:
         try:
