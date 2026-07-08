@@ -1458,6 +1458,31 @@ def test_commercial_fit_drivers_not_inconsistent_with_what_is_hot(tmp_path):
     assert "learning and development or onboarding needs" not in drivers_by_label
 
 
+def test_company_size_complexity_driver_notes_missing_external_source(tmp_path):
+    """company_size_complexity (Lusha size data, Stap 3/4) never has an
+    evidence_url -- it comes from the spreadsheet's own structured columns,
+    not a web page. A positive driver with zero evidence_sources must say
+    so explicitly instead of looking like an unsubstantiated Strong claim."""
+    signals = [
+        {"source_index": 1, "signal_name": "company_size_complexity", "signal_score": 2,
+         "evidence_quote": "Lusha company size data: 10,001-100,000 employees."},
+    ]
+    row = _dorc_row(employee_range="10001-100000")
+    _, out_dir = run_export(tmp_path, [row], signals=signals,
+                            export_country="Netherlands", foreign_hq_only=False)
+
+    detail = detail_for(out_dir, "DORC Dutch Ophthalmic Research Center (International)")
+    drivers_by_label = {d["label"]: d for d in detail["ui_payload"]["commercial_fit_drivers"]}
+    driver = drivers_by_label["Possible onboarding need"]
+    assert driver["strength"] == "Strong"
+    assert "evidence_source_url" not in driver
+    assert "evidence_sources" not in driver
+    assert driver["note"] == (
+        "Sourced from the company's own structured data (e.g. Lusha), not a "
+        "web page -- no external link available."
+    )
+
+
 def test_no_visible_ui_payload_field_contains_shorthand_or_raw_tokens(tmp_path):
     enriched = [_dorc_row(
         c5_parent_company="Some Foreign Group", c5_parent_hq_country="Germany",

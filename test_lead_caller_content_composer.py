@@ -12,6 +12,8 @@ from unittest.mock import MagicMock, patch
 from lead_caller_content_composer import (
     DEFAULT_CALLER_CONTENT_MODEL,
     DRIVER_SIGNAL_NAMES,
+    _SYSTEM_PROMPT,
+    build_caller_content_prompt,
     build_curated_signals_from_result,
     compose_caller_content,
 )
@@ -125,6 +127,27 @@ class TestSuccessfulComposition:
         with _mock_anthropic(payload):
             result = compose_caller_content(**_BASE_KWARGS)
         assert result.driver_evidence == {"foreign_hq": "ok"}
+
+
+class TestDriverEvidenceIsolationInstructions:
+    """Real-run bug (Stap 6 follow-up): driver_evidence for
+    company_size_complexity ("Possible onboarding need") borrowed a "130
+    countries" fact from the unrelated international_profile signal's
+    evidence line, because nothing in the prompt forbade blending facts
+    across signals within one shared composition call. Both the system
+    prompt and the per-call rules list must carry an explicit
+    no-cross-signal-blending instruction."""
+
+    def test_system_prompt_forbids_cross_signal_blending(self):
+        assert "grounded ONLY in that same signal" in _SYSTEM_PROMPT
+        assert "DIFFERENT signal's evidence line" in _SYSTEM_PROMPT
+
+    def test_user_prompt_rules_forbid_cross_signal_blending(self):
+        prompt = build_caller_content_prompt(**{
+            k: v for k, v in _BASE_KWARGS.items() if k != "anthropic_api_key"
+        })
+        assert "never blend in a fact" in prompt
+        assert "signal's evidence line" in prompt
 
 
 # ---------------------------------------------------------------------------

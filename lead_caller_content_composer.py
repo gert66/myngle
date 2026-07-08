@@ -118,7 +118,12 @@ _SYSTEM_PROMPT = (
     "to prioritize a lead, not even as neutral context. When the supplied "
     "evidence is thin, do not force a confident claim -- instead write a "
     "useful light-discovery angle: concrete, checkable hypotheses grounded in "
-    "the company's sector, parent company, or country. "
+    "the company's sector, parent company, or country. Each driver_evidence "
+    "sentence must be grounded ONLY in that same signal's own evidence line "
+    "from the Curated signals list -- never combine, borrow, or blend a "
+    "specific fact (a country count, employee count, or other detail) from a "
+    "DIFFERENT signal's evidence line into it, even when both are true and "
+    "doing so would make the sentence sound more complete. "
     "Reply ONLY with a valid JSON object -- no prose, no markdown fences."
 )
 
@@ -155,6 +160,10 @@ Return JSON with exactly these keys:
 Rules:
 - "what_is_hot" has at most 5 concrete bullets, each grounded in the supplied evidence.
 - "driver_evidence" must use exactly these keys, one entry per key: {driver_keys}
+- Each "driver_evidence" sentence must use ONLY the evidence listed under that
+  same signal above -- never blend in a fact (e.g. a country count, employee
+  count, or other specific detail) that appears only under a different
+  signal's evidence line, even if it would make the sentence read better.
 - Never present external installer/product/partner/reseller training as internal L&D.
 - Never present rapid growth as a positive driver.
 - If curated signals are thin or empty, "why_relevant" and "cold_caller_summary" must

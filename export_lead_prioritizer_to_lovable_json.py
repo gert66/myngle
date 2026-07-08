@@ -1378,6 +1378,10 @@ _FIXED_DRIVER_SIGNAL_ORDER: "tuple[tuple[str, str, str], ...]" = (
 )
 
 _NOT_EVIDENCED_NOTE = "No reliable company-specific evidence found in the current sources."
+_NO_EXTERNAL_SOURCE_NOTE = (
+    "Sourced from the company's own structured data (e.g. Lusha), not a "
+    "web page -- no external link available."
+)
 _REJECTED_NOTES: "dict[str, str]" = {
     "generic": (
         "The available evidence was too generic to confirm this signal "
@@ -1752,10 +1756,16 @@ def build_fixed_commercial_fit_drivers(
         sources, scope = _driver_sources_and_scope(signal, own_domains)
         if result["evidence"]:
             # Strong (score >= 2) or Moderate (score >= 1) with clean evidence.
+            # A driver with no evidence_sources at all (currently only
+            # company_size_complexity: Lusha structured data has no web page
+            # to link to) gets an explicit note instead of looking like an
+            # unsubstantiated claim -- the AI-composed overlay below only
+            # ever replaces "evidence", never "note".
             driver = {
                 "id": driver_id, "label": label,
                 "strength": _strength_for_score(score),
-                "evidence": result["evidence"], "note": "",
+                "evidence": result["evidence"],
+                "note": "" if sources else _NO_EXTERNAL_SOURCE_NOTE,
             }
             _apply_driver_sources(driver, sources, scope)
             drivers.append(driver)
