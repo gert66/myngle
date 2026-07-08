@@ -195,8 +195,9 @@ def sector_from_lusha_industry(
     Returns a sector-summary-shaped dict (same keys as
     ``lead_non_hq_signal_extractor.extract_sector_industry``'s return
     value) on a hit, or ``None`` when neither field maps — the caller then
-    falls through to the existing Serper-evidence / own-domain-AI tiers
-    completely unchanged, exactly as before this module existed.
+    falls through to the remaining tiers (own-domain Firecrawl+AI, then
+    the Lusha Description/Specialties text fallback below — see Stap 4;
+    there is no live Serper sector query/evidence tier anymore).
     """
     sub_key = _norm(sub_industry)
     if sub_key and sub_key in LUSHA_SUB_INDUSTRY_MAP:

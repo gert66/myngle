@@ -171,6 +171,22 @@ class TestCountryLocalizedPaths:
         assert len(out["pages"]) == 1
         assert out["pages"][0]["url"] == "https://acme.it/chi-siamo"
 
+    def test_localized_path_never_tried_when_default_cap_reached_by_english_paths(self):
+        # Verification (Stap 1/2 audit): when the first 3 English paths are
+        # ALL successful, the default max_pages=3 cap is already reached --
+        # the localized Italian path is never even attempted. "More chances,
+        # never fewer": the language paths only matter when the English
+        # ones don't already satisfy the cap.
+        ok = _ok_resp("Homepage content about the company.")
+        with patch("deep_dive_runner.requests.post", return_value=ok) as post:
+            out = collect_own_domain_hq_pages(
+                "acme.it", "fc-key", country="Italy", max_pages=3)
+        assert out["used"] is True
+        assert len(out["pages"]) == 3
+        urls = [c.kwargs["json"]["url"] for c in post.call_args_list]
+        assert "https://acme.it/chi-siamo" not in urls
+        assert len(urls) == 3
+
     def test_explicit_candidate_paths_override_ignores_country(self):
         # Existing override behavior stays exactly as before -- country is
         # ignored whenever the caller passes candidate_paths explicitly.

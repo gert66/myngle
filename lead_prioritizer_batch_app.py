@@ -1141,19 +1141,8 @@ def main() -> None:  # pragma: no cover - exercised only under `streamlit run`
                  "vergelijken. Vult legacy_score/legacy_tier/legacy_icp_*-kolommen; "
                  "verandert final_commercial_fit_score of signals nooit "
                  "(default: uit).")
-        gate_full_enrichment_on_foreign_hq = st.checkbox(
-            "Alleen volledig verrijken bij bevestigde buitenlandse HQ (opt-in)",
-            value=True,
-            help="Bespaart Serper-calls door bedrijven zonder bevestigde "
-                 "buitenlandse HQ niet volledig te verrijken: eerst een "
-                 "goedkope HQ-screening voor alle rijen (1 Serper-call per "
-                 "bedrijf), daarna volledige verrijking (4 extra Serper-calls) "
-                 "alleen voor rijen met een bevestigde buitenlandse HQ. "
-                 "Overgeslagen rijen blijven in de output staan met "
-                 "enrichment_skipped=True en een reden. Hergebruikt hetzelfde "
-                 "gating-principe als de aparte 'Full enrichment, confirmed "
-                 "foreign-HQ only'-modus. C5 wordt in deze opt-in (nog) niet "
-                 "ondersteund (default: aan).")
+        gate_full_enrichment_on_foreign_hq = run_mode in (
+            FOREIGN_HQ_ONLY_MODE, NON_ENGLISH_FOREIGN_HQ_ONLY_MODE)
         use_enrichment_cache = st.checkbox(
             "Gebruik gedeelde enrichment-cache (GCS, per land)", value=True,
             help="Slaat Serper- en Firecrawl-resultaten op in één gedeeld "

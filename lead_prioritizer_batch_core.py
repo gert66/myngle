@@ -265,6 +265,11 @@ _RESULT_FLAT_FIELDS = [
     "ai_hq_model", "ai_hq_classification", "ai_hq_confidence",
     "ai_parent_company", "ai_parent_hq_country", "ai_parent_hq_city",
     "ai_call_attempted", "ai_call_success", "ai_hq_error",
+    # HQ-call usage/cost audit (pre-existing on LeadPrioritizationResult;
+    # was missing from this export list -- found while comparing
+    # ai_hq_input_tokens before/after the Lusha enrichment plan's Stap 5).
+    "ai_hq_input_tokens", "ai_hq_output_tokens", "ai_hq_total_tokens",
+    "ai_hq_estimated_cost_usd",
     # non-HQ signal scores / reasons / evidence
     "sig_international_profile_score", "sig_onboarding_training_need_score",
     "sig_company_size_complexity_score", "sig_icp_keyword_match_score",
@@ -282,10 +287,20 @@ _RESULT_FLAT_FIELDS = [
     "company_size_complexity_evidence_quote", "icp_keyword_match_evidence_quote",
     "employer_branding_evidence_quote",
     "signal_extractor_version", "signal_scoring_mode",
+    # Which source produced the company_size_complexity signal above —
+    # "lusha" (Lusha employee/revenue data, highest priority), "serper_
+    # keyword_match" (existing deterministic fallback, unchanged), or
+    # None. See lead_lusha_size_signal.py (Lusha enrichment plan, Stap 3).
+    "company_size_complexity_source",
     # sector / industry detection (audit & app metadata — never scoring)
     "detected_industry", "detected_sub_industry", "detected_company_type",
     "sector_confidence", "sector_reason", "sector_evidence_url",
     "sector_evidence_quote", "sector_source_title", "sector_source",
+    # Raw Lusha values (audit only), always populated verbatim from the
+    # input row when present — see lead_lusha_sector_mapping.py (Stap 2)
+    # and lead_lusha_size_signal.py (Stap 3).
+    "lusha_main_industry", "lusha_sub_industry",
+    "lusha_employees", "lusha_revenue",
     # Raw AI-derived industry from the HQ interpretation step (own-domain
     # content) — the source of the "own_domain_ai" sector fallback above.
     "ai_hq_industry", "ai_hq_sub_industry",
@@ -612,6 +627,15 @@ _LUSHA_ROW_FIELD_CANDIDATES: dict[str, tuple[str, ...]] = {
     "lusha_sub_industry": ("company sub industry", "sub industry"),
     "lusha_description": ("company description", "description"),
     "lusha_specialties": ("company specialties", "specialties"),
+    # Stap 3 — company size/complexity priority source.
+    "lusha_employees": (
+        "company number of employees", "number of employees",
+        "lusha employee range", "lusha api employee range", "employee range",
+    ),
+    "lusha_revenue": (
+        "company revenue", "revenue",
+        "lusha revenue range", "lusha api revenue range", "revenue range",
+    ),
 }
 
 
@@ -620,11 +644,12 @@ def _normalize_row_col_key(col) -> str:
 
 
 def _lusha_fields_from_row(row: dict) -> dict:
-    """Best-effort detection of Lusha Main/Sub Industry, Description, and
-    Specialties directly from ``row``'s own keys. A row from a non-Lusha
-    dataset simply has none of these column names, so every value defaults
-    to ``None`` — exactly "no Lusha data available", the existing fallback
-    behavior for every downstream consumer of ``LeadInput.lusha_*``.
+    """Best-effort detection of Lusha Main/Sub Industry, Description,
+    Specialties, Number of Employees, and Revenue directly from ``row``'s
+    own keys. A row from a non-Lusha dataset simply has none of these
+    column names, so every value defaults to ``None`` — exactly "no Lusha
+    data available", the existing fallback behavior for every downstream
+    consumer of ``LeadInput.lusha_*``.
     """
     cols_norm = {_normalize_row_col_key(k): k for k in row.keys()}
     out: dict = {}

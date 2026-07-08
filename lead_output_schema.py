@@ -18,6 +18,10 @@ class LeadInput:
     lusha_sub_industry: Optional[str] = None
     lusha_description: Optional[str] = None
     lusha_specialties: Optional[str] = None
+    # Lusha Company Number of Employees / Company Revenue (Stap 3). Same
+    # "blank for any non-Lusha caller -> existing behavior" contract.
+    lusha_employees: Optional[str] = None
+    lusha_revenue: Optional[str] = None
 
 
 @dataclass
@@ -255,6 +259,19 @@ class LeadPrioritizationResult:
     # actually produced `signals`, so AI- and keyword-scored datasets are
     # never silently mixed.
     signal_scoring_mode: Optional[str] = "deterministic"
+    # Which source produced sig_company_size_complexity_score / its sibling
+    # fields (Lusha enrichment plan, Stap 4): "lusha" (structured Lusha
+    # Company Number of Employees / Company Revenue data — see
+    # lead_lusha_size_signal.py) or None when that data is missing/blank/
+    # unparseable. There is no Serper query/fallback for this signal
+    # anymore (removed from build_non_hq_enrichment_queries) — when None,
+    # every sig_company_size_complexity_score/reason/evidence_* field
+    # simply stays None.
+    company_size_complexity_source: Optional[str] = None
+    # Raw Lusha size values (audit only) — always populated verbatim from
+    # the input row when present, regardless of which source above won.
+    lusha_employees: Optional[str] = None
+    lusha_revenue: Optional[str] = None
     # AI signal-scoring usage/cost audit (populated only when ai_signal_scoring
     # was actually attempted -- see lead_ai_signal_scorer.py). Blank when the
     # call was never attempted, or when MODEL_PRICING_USD_PER_MTOK does not

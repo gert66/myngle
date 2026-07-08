@@ -145,6 +145,43 @@ class TestFlatten:
         assert row["what_is_hot_app"] == "Foreign HQ signal: Germany"
         assert row["v2_pipeline_mode"] == "full_v2_single_lead"
 
+    def test_flattens_lusha_audit_fields(self):
+        # Regression: lusha_main_industry/lusha_sub_industry (Stap 2) and
+        # company_size_complexity_source/lusha_employees/lusha_revenue
+        # (Stap 3) must actually reach the Enriched Leads export -- these
+        # exist on LeadPrioritizationResult but only appear in the Excel
+        # output when also listed in _RESULT_FLAT_FIELDS.
+        row = flatten_result_for_excel(
+            _sample_result(
+                lusha_main_industry="Manufacturing",
+                lusha_sub_industry="Industrial Machinery & Equipment",
+                sector_source="lusha_mapped",
+                company_size_complexity_source="lusha",
+                lusha_employees="201-500",
+                lusha_revenue="$50M - $100M",
+            ), {"c": "Acme", "d": "acme.com"}, source_index=1, run_success=True, run_error="")
+        assert row["lusha_main_industry"] == "Manufacturing"
+        assert row["lusha_sub_industry"] == "Industrial Machinery & Equipment"
+        assert row["sector_source"] == "lusha_mapped"
+        assert row["company_size_complexity_source"] == "lusha"
+        assert row["lusha_employees"] == "201-500"
+        assert row["lusha_revenue"] == "$50M - $100M"
+
+    def test_flattens_ai_hq_usage_audit_fields(self):
+        # Regression: found while comparing ai_hq_input_tokens before/after
+        # the Lusha enrichment plan's Stap 5 -- these pre-existing fields
+        # were on LeadPrioritizationResult but missing from
+        # _RESULT_FLAT_FIELDS, so they never reached the Excel export.
+        row = flatten_result_for_excel(
+            _sample_result(
+                ai_hq_input_tokens=2500, ai_hq_output_tokens=260,
+                ai_hq_total_tokens=2760, ai_hq_estimated_cost_usd=0.0038,
+            ), {"c": "Acme", "d": "acme.com"}, source_index=1, run_success=True, run_error="")
+        assert row["ai_hq_input_tokens"] == 2500
+        assert row["ai_hq_output_tokens"] == 260
+        assert row["ai_hq_total_tokens"] == 2760
+        assert row["ai_hq_estimated_cost_usd"] == 0.0038
+
     def test_flattens_rich_icp_context_fields(self):
         row = flatten_result_for_excel(
             _sample_result(
@@ -579,10 +616,10 @@ class TestRunBatch:
 
 
 # ---------------------------------------------------------------------------
-# Lusha row-field auto-detection (Lusha enrichment plan, Stap 2). No new
-# BatchRunConfig column-name setting: detected directly from a row dict's
-# own keys, case-insensitively. A row with none of these column names
-# (any non-Lusha dataset) yields all-None -- exactly "no Lusha data
+# Lusha row-field auto-detection (Lusha enrichment plan, Stap 2 + Stap 3).
+# No new BatchRunConfig column-name setting: detected directly from a row
+# dict's own keys, case-insensitively. A row with none of these column
+# names (any non-Lusha dataset) yields all-None -- exactly "no Lusha data
 # available", the existing fallback for every LeadInput.lusha_* consumer.
 # ---------------------------------------------------------------------------
 
@@ -594,6 +631,8 @@ class TestLushaFieldsFromRow:
             "Company Sub Industry": "Industrial Machinery & Equipment",
             "Company Description": "We make things.",
             "Company Specialties": "machinery, engineering",
+            "Company Number of Employees": "201-500",
+            "Company Revenue": "$50M - $100M",
         }
         out = bc._lusha_fields_from_row(row)
         assert out == {
@@ -601,6 +640,8 @@ class TestLushaFieldsFromRow:
             "lusha_sub_industry": "Industrial Machinery & Equipment",
             "lusha_description": "We make things.",
             "lusha_specialties": "machinery, engineering",
+            "lusha_employees": "201-500",
+            "lusha_revenue": "$50M - $100M",
         }
 
     def test_case_and_spacing_insensitive(self):
@@ -615,6 +656,7 @@ class TestLushaFieldsFromRow:
         assert out == {
             "lusha_main_industry": None, "lusha_sub_industry": None,
             "lusha_description": None, "lusha_specialties": None,
+            "lusha_employees": None, "lusha_revenue": None,
         }
 
     def test_blank_values_treated_as_none(self):

@@ -25,6 +25,7 @@ from lead_non_hq_signal_extractor import (
     summarize_non_hq_signals_for_result,
 )
 from lead_lusha_sector_mapping import sector_from_lusha_industry, sector_from_lusha_text
+from lead_lusha_size_signal import lusha_size_signal
 from lead_ai_signal_scorer import score_signals_with_ai
 from lead_app_summary_builder import build_app_summary_fields
 from lead_v2_scoring_adapter import score_lead_v2_result
@@ -306,6 +307,8 @@ def prioritize_single_lead(
         openai_api_key=openai_api_key,
         deepseek_api_key=deepseek_api_key,
         crawled_pages=crawled_pages,
+        lusha_description=input_row.lusha_description,
+        lusha_specialties=input_row.lusha_specialties,
     )
 
     # ── Step 2: non-HQ evidence collection (evidence only, no scores) ─────────
@@ -380,37 +383,55 @@ def prioritize_single_lead(
                 signals = extract_non_hq_signals(evidence_items, company_domain=input_row.domain)
         else:
             signals = extract_non_hq_signals(evidence_items, company_domain=input_row.domain)
+
+        # ── company_size_complexity: Lusha employee/revenue data is the
+        # ONLY source for this signal (Lusha enrichment plan, Stap 4 —
+        # supersedes the earlier Stap-3 "Serper stays a permanent
+        # fallback" design). There is no live Serper query for this
+        # signal anymore (removed from build_non_hq_enrichment_queries),
+        # so ``company_size_complexity_source`` is either ``"lusha"`` (a
+        # usable Lusha value was found) or ``None`` (missing/unparseable
+        # Lusha data — the score/reason/evidence fields simply stay
+        # ``None``, exactly as the schema always allowed).
+        company_size_complexity_source = None
+        _lusha_size = lusha_size_signal(input_row.lusha_employees, input_row.lusha_revenue)
+        if _lusha_size is not None:
+            signals = [s for s in signals if s.signal_name != "company_size_complexity"]
+            signals.append(_lusha_size)
+            company_size_complexity_source = "lusha"
+    else:
+        company_size_complexity_source = None
     non_hq_summary = summarize_non_hq_signals_for_result(signals)
 
     # Sector/industry metadata (deterministic, audit/app only — feeds no
     # score, C4, C5, HQ, or foreign-HQ filtering). Priority chain (Lusha
-    # enrichment plan, Stap 2):
+    # enrichment plan, Stap 2, revised Stap 4 — the live Serper
+    # sector_industry query/evidence tier is gone; there is no Serper
+    # fallback for sector anymore):
     #   1. Lusha Sub/Main Industry mapped onto our internal categories
     #      (free, no API call, highest priority when present).
-    #   2. Serper sector_industry evidence keyword match (existing).
-    #   3. Own-domain Firecrawl+AI-derived industry (existing fallback).
-    #   4. Lusha Company Description/Specialties keyword match (last resort,
-    #      free, no API call).
-    #   5. Empty, exactly as before any of this existed.
+    #   2. Own-domain Firecrawl+AI-derived industry (existing fallback).
+    #   3. Lusha Company Description/Specialties keyword match (last resort,
+    #      free, no API call, reuses extract_sector_industry's own matcher).
+    #   4. Empty, exactly as before any of this existed.
     sector_summary = sector_from_lusha_industry(
         input_row.lusha_main_industry, input_row.lusha_sub_industry)
 
     if sector_summary is None:
-        sector_summary = extract_sector_industry(evidence_items)
+        # No live Serper sector_industry query/evidence anymore (Stap 4) —
+        # start from the empty shape and try the remaining free tiers.
+        sector_summary = extract_sector_industry([])
 
-        # Fallback: when the deterministic keyword detector above found
-        # nothing at all (no Serper-snippet keyword hit — e.g. AEG Power
-        # Solutions, SDX), reuse the industry the HQ interpreter already
-        # derived from the SAME material at no extra API cost — but ONLY
-        # when that material genuinely included the company's own
-        # crawled-domain content (`crawled_pages` non-empty here means
-        # Firecrawl actually fetched the company's own site; see
-        # collect_own_domain_hq_pages above). A Serper-only AI guess (no
-        # own-domain crawl) is deliberately NOT used as a sector source —
-        # the point of this fallback is to lean on the same primary, most-
-        # authoritative source the HQ classification already trusts, not to
-        # add a second, weaker AI guess on top of thin secondary snippets.
-        # A keyword match always wins when present (never overwritten here).
+        # Fallback: reuse the industry the HQ interpreter already derived
+        # from the SAME material at no extra API cost — but ONLY when that
+        # material genuinely included the company's own crawled-domain
+        # content (`crawled_pages` non-empty here means Firecrawl actually
+        # fetched the company's own site; see collect_own_domain_hq_pages
+        # above). A Serper-only AI guess (no own-domain crawl) is
+        # deliberately NOT used as a sector source — the point of this
+        # fallback is to lean on the same primary, most-authoritative
+        # source the HQ classification already trusts, not to add a
+        # second, weaker AI guess on top of thin secondary snippets.
         if not sector_summary["detected_industry"] and hq.ai_hq_industry and crawled_pages:
             sector_summary = dict(sector_summary)
             sector_summary["detected_industry"] = hq.ai_hq_industry
@@ -541,6 +562,9 @@ def prioritize_single_lead(
         employer_branding_evidence_quote=non_hq_summary["employer_branding_evidence_quote"],
         signal_extractor_version=non_hq_summary["signal_extractor_version"],
         signal_scoring_mode=signal_scoring_mode,
+        company_size_complexity_source=company_size_complexity_source,
+        lusha_employees=input_row.lusha_employees,
+        lusha_revenue=input_row.lusha_revenue,
         **non_hq_ai_audit,
         # Sector / industry metadata (audit & app only — never scoring)
         detected_industry=sector_summary["detected_industry"],
