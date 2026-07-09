@@ -6,7 +6,7 @@ pool, and see the resulting per-caller workload and the list of companies
 that change caller update live, entirely in-memory, before anything is
 written back to GCS.
 
-Nothing is uploaded until you explicitly click "Upload naar GCS" for a named
+Nothing is uploaded until you explicitly click "Upload to GCS" for a named
 run folder — current/ and every existing run stay untouched (a bad
 reallocation always has a fallback, exactly like the re-score explorer).
 
@@ -46,6 +46,14 @@ from reallocate_callers_from_gcs import (
 )
 from rescore_from_gcs import DEFAULT_GCS_BUCKET, promote_run_to_current
 
+UNASSIGNED_LABEL = "— (none)"
+
+# Fixed colors for the before/after workload chart so "Current" always reads
+# as the muted/reference bar and "New" always reads as the highlighted one —
+# a shared color per period, distinguished by axis position (caller), not by
+# a same-hue split that's hard to tell apart at a glance.
+CHART_COLOR_MAP = {"Current": "#94a3b8", "New": "#0284c7"}
+
 
 # =============================================================================
 # Pure helpers — no Streamlit/Plotly import required
@@ -65,8 +73,9 @@ def validate_callers(callers: list[str]) -> "Optional[str]":
     Mirrors ``rescore_streamlit_app.validate_tier_thresholds``'s style."""
     if not callers:
         return (
-            "Geef minstens één cold caller op — anders blijft elk bedrijf "
-            "zonder toegewezen beller (de export-validatie weigert dat)."
+            "Enter at least one cold caller — otherwise every company is "
+            "left without an assigned caller (the export validator rejects "
+            "that)."
         )
     return None
 
@@ -74,18 +83,21 @@ def validate_callers(callers: list[str]) -> "Optional[str]":
 def caller_distribution_dataframe(
     original_list_items: list[dict], new_list_items: list[dict],
 ) -> pd.DataFrame:
-    """Long-form ``(caller, when, count)`` table for a before/after workload
-    bar chart. Every caller appearing on either side gets a row on both
-    sides (0 where absent), so a caller who is dropped or newly added is
-    still visible; blank/None callers show as "— (geen)"."""
+    """Long-form ``(caller, period, count)`` table for a before/after
+    workload bar chart. Every caller appearing on either side gets a row on
+    both sides (0 where absent), so a caller who is dropped or newly added
+    is still visible; blank/None callers show as ``UNASSIGNED_LABEL``.
+    Callers are ordered by their new (post-reallocation) workload
+    descending, so the chart reads left-to-right from busiest to quietest."""
     before = caller_distribution(original_list_items)
     after = caller_distribution(new_list_items)
     callers = list(dict.fromkeys([*before, *after]))
+    callers.sort(key=lambda c: after.get(c, 0), reverse=True)
     rows = []
     for caller in callers:
-        label = caller if caller else "— (geen)"
-        rows.append({"caller": label, "when": "Huidig", "count": before.get(caller, 0)})
-        rows.append({"caller": label, "when": "Nieuw", "count": after.get(caller, 0)})
+        label = caller if caller else UNASSIGNED_LABEL
+        rows.append({"caller": label, "period": "Current", "count": before.get(caller, 0)})
+        rows.append({"caller": label, "period": "New", "count": after.get(caller, 0)})
     return pd.DataFrame(rows)
 
 
@@ -146,60 +158,61 @@ def main() -> None:  # pragma: no cover - exercised only under `streamlit run`
     import streamlit as st
 
     st.set_page_config(
-        page_title="Caller-reallocatie", page_icon="📞", layout="wide")
-    st.title("📞 Cold-caller reallocatie")
+        page_title="Caller reallocation", page_icon="📞", layout="wide")
+    st.title("📞 Cold-caller reallocation")
     st.caption(
-        "Herverdeel de cold callers over de bedrijven van één land — scores en "
-        "tiers blijven ongemoeid. Er wordt niets naar GCS geschreven tot je "
-        "expliciet uploadt; current/ en bestaande runs blijven onaangeroerd."
+        "Redistribute the cold callers across one country's companies — "
+        "scores and tiers are left untouched. Nothing is written to GCS "
+        "until you explicitly upload; current/ and existing runs stay "
+        "untouched."
     )
 
     # ---------------------------------------------------------------------
     # Sidebar — GCS data source
     # ---------------------------------------------------------------------
     with st.sidebar:
-        st.header("1. GCS-bron")
+        st.header("1. GCS source")
         bucket = st.text_input("Bucket", value=DEFAULT_GCS_BUCKET, key="bucket_input")
 
-        if st.button("🔍 Landen ophalen"):
-            with st.spinner("Bucket doorzoeken…"):
+        if st.button("🔍 Fetch countries"):
+            with st.spinner("Scanning bucket…"):
                 st.session_state["_available_countries"] = list_country_folders(bucket)
             if not st.session_state.get("_available_countries"):
                 st.warning(
-                    "Geen land-folders gevonden. Is gcloud/gsutil geïnstalleerd "
-                    "en ingelogd (`gcloud auth login`)?"
+                    "No country folders found. Is gcloud/gsutil installed "
+                    "and authenticated (`gcloud auth login`)?"
                 )
 
         countries = st.session_state.get("_available_countries", [])
         if countries:
-            country_folder = st.selectbox("Land-folder", options=countries, key="country_select")
+            country_folder = st.selectbox("Country folder", options=countries, key="country_select")
         else:
             country_folder = st.text_input(
-                "Land-folder (bv. brazil)", value="brazil", key="country_text")
+                "Country folder (e.g. brazil)", value="brazil", key="country_text")
 
-        if st.button("📥 Huidige run laden", type="primary"):
+        if st.button("📥 Load current run", type="primary"):
             old_dir = st.session_state.get("_work_dir")
             if old_dir:
                 shutil.rmtree(old_dir, ignore_errors=True)
             work_dir = tempfile.mkdtemp(prefix="reallocate_streamlit_")
             st.session_state["_work_dir"] = work_dir
             try:
-                with st.spinner(f"{country_folder}/current/ downloaden…"):
+                with st.spinner(f"Downloading {country_folder}/current/…"):
                     current = download_current_run(bucket, country_folder, work_dir)
                 st.session_state["_current"] = current
                 st.session_state["_current_country"] = country_folder
                 st.session_state["_current_bucket"] = bucket
                 n_companies = len(current["list_items"])
-                st.success(f"{n_companies} bedrijven geladen uit {country_folder}/current/.")
+                st.success(f"Loaded {n_companies} companies from {country_folder}/current/.")
                 # Seed the caller box with the run's existing pool.
                 st.session_state["_caller_box"] = ", ".join(
                     existing_cold_callers(current["list_items"]))
             except Exception as exc:
-                st.error(f"Laden mislukt: {exc}")
+                st.error(f"Load failed: {exc}")
 
     current = st.session_state.get("_current")
     if not current:
-        st.info("Laad eerst een land-folder via de zijbalk om te beginnen.")
+        st.info("Load a country folder from the sidebar to get started.")
         return
 
     country_folder = st.session_state["_current_country"]
@@ -212,25 +225,25 @@ def main() -> None:  # pragma: no cover - exercised only under `streamlit run`
     st.subheader("2. Cold callers")
     current_callers = existing_cold_callers(original_list_items)
     st.caption(
-        f"Huidige pool in {country_folder}/current/: "
-        f"**{', '.join(current_callers) or '— (geen)'}** "
-        f"({len(original_list_items)} bedrijven)."
+        f"Current pool in {country_folder}/current/: "
+        f"**{', '.join(current_callers) or UNASSIGNED_LABEL}** "
+        f"({len(original_list_items)} companies)."
     )
     caller_text = st.text_area(
-        "Nieuwe caller-pool (komma- of regel-gescheiden)",
+        "New caller pool (comma- or newline-separated)",
         value=st.session_state.get("_caller_box", ", ".join(current_callers)),
         key="_caller_box",
-        help="De volgorde bepaalt de round-robin toewijzing op scorerang: "
-             "rang 1 → eerste caller, rang 2 → tweede, enz. Dubbele namen "
-             "worden genegeerd.",
+        help="The order determines the round-robin assignment by score "
+             "rank: rank 1 → first caller, rank 2 → second, etc. Duplicate "
+             "names are ignored.",
     )
     new_callers = parse_caller_input(caller_text)
     rerank = st.checkbox(
-        "Herrangschik op huidige commercial_fit_score",
+        "Re-rank by current commercial_fit_score",
         value=False, key="_rerank",
-        help="Standaard blijft de export-tijd rang behouden. Zet dit aan om de "
-             "rangorde opnieuw af te leiden uit de huidige score (bv. na een "
-             "re-score), net zoals de export zelf sorteert.",
+        help="By default the export-time rank is preserved. Enable this to "
+             "re-derive the ranking from the current score (e.g. after a "
+             "re-score), the same way the export itself sorts.",
     )
 
     error = validate_callers(new_callers)
@@ -238,18 +251,18 @@ def main() -> None:  # pragma: no cover - exercised only under `streamlit run`
         st.error(error)
         return
 
-    st.write("Nieuwe pool:", " · ".join(f"`{c}`" for c in new_callers))
+    st.write("New pool:", " · ".join(f"`{c}`" for c in new_callers))
 
     # ---------------------------------------------------------------------
-    # Toewijzingsmethode: round-robin, of expliciete ranges per caller
+    # Assignment method: round-robin, or explicit ranges per caller
     # ---------------------------------------------------------------------
-    st.subheader("3. Toewijzingsmethode")
+    st.subheader("3. Assignment method")
     mode = st.radio(
-        "Hoe worden bedrijven aan callers toegewezen?",
+        "How are companies assigned to callers?",
         options=["round_robin", "ranges"],
         format_func=lambda v: (
-            "Round-robin (gelijk verdeeld over de scorerangorde)" if v == "round_robin"
-            else "Ranges per caller (aantal / percentiel / cohort)"
+            "Round-robin (evenly split across the score ranking)" if v == "round_robin"
+            else "Ranges per caller (count / percentile / cohort)"
         ),
         key="_assignment_mode",
         horizontal=True,
@@ -270,23 +283,22 @@ def main() -> None:  # pragma: no cover - exercised only under `streamlit run`
             st.session_state[settings_key] = settings
 
         st.caption(
-            "Elke caller krijgt een expliciete range op de scorerangorde "
-            "(rang 1 = hoogste score). Ranges kunnen per caller in een "
-            "andere eenheid worden opgegeven; ze werken samen op dezelfde "
-            "onderliggende rangorde. Bij overlap wint de laatste caller in "
-            "de lijst hierboven."
+            "Each caller gets an explicit range on the score ranking "
+            "(rank 1 = highest score). Ranges can be specified per caller "
+            "in a different unit; they all operate on the same underlying "
+            "ranking. On overlap, the last caller in the list above wins."
         )
         for caller in new_callers:
             cfg = settings.setdefault(
                 caller, {"mode": "count", "start": 1, "end": total_companies, "cohort_size": 100})
-            with st.expander(f"Range voor **{caller}**", expanded=True):
+            with st.expander(f"Range for **{caller}**", expanded=True):
                 col_mode, col_range = st.columns([1, 3])
                 range_mode = col_mode.selectbox(
-                    "Eenheid", options=list(RANGE_MODES),
+                    "Unit", options=list(RANGE_MODES),
                     index=list(RANGE_MODES).index(cfg["mode"]),
                     format_func=lambda v: {
-                        "count": "Aantal (rangnummer)",
-                        "percentile": "Percentiel (%)",
+                        "count": "Count (rank number)",
+                        "percentile": "Percentile (%)",
                         "cohort": "Cohort",
                     }[v],
                     key=f"_range_mode::{country_folder}::{caller}",
@@ -294,14 +306,14 @@ def main() -> None:  # pragma: no cover - exercised only under `streamlit run`
                 cfg["mode"] = range_mode
                 if range_mode == "count":
                     start, end = col_range.slider(
-                        "Rangbereik", min_value=1, max_value=max(1, total_companies),
+                        "Rank range", min_value=1, max_value=max(1, total_companies),
                         value=(int(cfg["start"]), int(min(cfg["end"], total_companies))),
                         key=f"_range_count::{country_folder}::{caller}",
                     )
                     cfg["start"], cfg["end"] = start, end
                 elif range_mode == "percentile":
                     start, end = col_range.slider(
-                        "Percentielbereik (%)", min_value=0.0, max_value=100.0,
+                        "Percentile range (%)", min_value=0.0, max_value=100.0,
                         value=(float(cfg["start"]), float(cfg["end"])), step=1.0,
                         key=f"_range_pct::{country_folder}::{caller}",
                     )
@@ -309,13 +321,13 @@ def main() -> None:  # pragma: no cover - exercised only under `streamlit run`
                 else:  # cohort
                     size_col, range_col = col_range.columns([1, 2])
                     cohort_size = size_col.number_input(
-                        "Cohortgrootte", min_value=1, value=int(cfg.get("cohort_size") or 100),
+                        "Cohort size", min_value=1, value=int(cfg.get("cohort_size") or 100),
                         key=f"_range_cohort_size::{country_folder}::{caller}",
                     )
                     cfg["cohort_size"] = cohort_size
                     max_cohort = max(1, math.ceil(total_companies / cohort_size))
                     start, end = range_col.slider(
-                        "Cohortbereik", min_value=1, max_value=max_cohort,
+                        "Cohort range", min_value=1, max_value=max_cohort,
                         value=(
                             min(int(cfg["start"]), max_cohort),
                             min(int(cfg["end"]), max_cohort),
@@ -329,24 +341,26 @@ def main() -> None:  # pragma: no cover - exercised only under `streamlit run`
                 )
                 start_rank, end_rank = resolve_range_bounds(bounds_preview, total_companies)
                 n_in_range = max(0, end_rank - start_rank + 1)
-                st.caption(f"→ rang {start_rank}–{end_rank} ({n_in_range} bedrijven).")
+                st.caption(f"→ rank {start_rank}–{end_rank} ({n_in_range} companies).")
 
         ranges = caller_ranges_from_settings(new_callers, settings)
         coverage = caller_ranges_coverage(ranges, total_companies)
         if coverage["gaps"]:
             st.warning(
-                f"{len(coverage['gaps'])} bedrijven vallen buiten elke range "
-                "(rang " + ", ".join(str(r) for r in coverage["gaps"][:10]) +
+                f"{len(coverage['gaps'])} companies fall outside every range "
+                "(rank " + ", ".join(str(r) for r in coverage["gaps"][:10]) +
                 (", …" if len(coverage["gaps"]) > 10 else "") +
-                ") en blijven onbeheerd totdat een range ze dekt."
+                ") and stay unmanaged until a range covers them."
             )
         if coverage["overlaps"]:
             st.info(
-                f"{len(coverage['overlaps'])} bedrijven vallen in meerdere ranges — "
-                "de laatst genoemde caller hierboven wint per bedrijf."
+                f"{len(coverage['overlaps'])} companies fall inside more than "
+                "one range — the last caller listed above wins per company."
             )
         assignment = assign_callers_by_ranges(
-            original_list_items, ranges, rerank_by_score=rerank)
+            original_list_items, ranges, rerank_by_score=rerank,
+            unassigned_label=UNASSIGNED_LABEL,
+        )
 
     # ---------------------------------------------------------------------
     # Live preview
@@ -358,20 +372,26 @@ def main() -> None:  # pragma: no cover - exercised only under `streamlit run`
     movers_df = movers_dataframe(original_list_items, assignment)
 
     m1, m2, m3 = st.columns(3)
-    m1.metric("Bedrijven totaal", len(original_list_items))
-    m2.metric("Wisselen van caller", len(movers_df))
+    m1.metric("Total companies", len(original_list_items))
+    m2.metric("Changing caller", len(movers_df))
     m3.metric("Callers in pool", len(new_callers))
 
-    st.subheader("Werkverdeling: huidig vs. nieuw")
+    st.subheader("Workload: current vs. new")
     dist_df = caller_distribution_dataframe(original_list_items, new_list_items)
-    st.plotly_chart(
-        px.bar(dist_df, x="caller", y="count", color="when", barmode="group"),
-        use_container_width=True,
+    fig = px.bar(
+        dist_df, x="caller", y="count", color="period", barmode="group",
+        text="count",
+        color_discrete_map=CHART_COLOR_MAP,
+        category_orders={"caller": list(dict.fromkeys(dist_df["caller"])), "period": ["Current", "New"]},
+        labels={"caller": "Caller", "count": "Companies", "period": "Period"},
     )
+    fig.update_traces(textposition="outside", cliponaxis=False)
+    fig.update_layout(legend_title_text="Period", yaxis_title="Companies", xaxis_title=None)
+    st.plotly_chart(fig, use_container_width=True)
 
-    st.subheader("Bedrijven die van caller wisselen")
+    st.subheader("Companies changing caller")
     if movers_df.empty:
-        st.info("Geen enkel bedrijf wisselt van caller met deze pool.")
+        st.info("No company changes caller with this pool.")
     else:
         st.dataframe(movers_df, use_container_width=True, hide_index=True)
 
@@ -379,20 +399,20 @@ def main() -> None:  # pragma: no cover - exercised only under `streamlit run`
     # Apply & upload
     # ---------------------------------------------------------------------
     st.divider()
-    st.subheader("4. Uploaden naar GCS")
+    st.subheader("4. Upload to GCS")
     st.caption(
-        "Schrijft naar een NIEUWE run-folder — current/ en bestaande runs "
-        "blijven ongewijzigd. De live Company Hub ziet deze toewijzing pas na "
-        "een aparte, expliciete 'current'-promotie."
+        "Writes to a NEW run folder — current/ and existing runs stay "
+        "unchanged. The live Company Hub only sees this assignment after a "
+        "separate, explicit 'current' promotion."
     )
     run_folder = st.text_input(
-        "Run-folder", value=default_reallocate_run_folder(), key="_run_folder")
+        "Run folder", value=default_reallocate_run_folder(), key="_run_folder")
     confirmed = st.checkbox(
-        f"Ik begrijp dat dit naar gs://{bucket}/{country_folder}/runs/"
-        f"{run_folder}/ schrijft (current/ blijft onaangeroerd).",
+        f"I understand this writes to gs://{bucket}/{country_folder}/runs/"
+        f"{run_folder}/ (current/ stays untouched).",
         key="_upload_confirmed",
     )
-    if st.button("📤 Upload naar GCS", type="primary", disabled=not confirmed):
+    if st.button("📤 Upload to GCS", type="primary", disabled=not confirmed):
         from reallocate_callers_from_gcs import (
             upload_reallocated_run,
             write_reallocated_run,
@@ -404,64 +424,64 @@ def main() -> None:  # pragma: no cover - exercised only under `streamlit run`
             )
             out_dir = write_reallocated_run(
                 reallocated_run, st.session_state["_work_dir"] + "/out")
-            with st.spinner("Uploaden…"):
+            with st.spinner("Uploading…"):
                 results = upload_reallocated_run(
                     out_dir, bucket, country_folder, run_folder)
             n_failed = sum(1 for r in results if not r["success"])
             if n_failed:
-                st.error(f"{n_failed} van {len(results)} uploads mislukt.")
+                st.error(f"{n_failed} of {len(results)} uploads failed.")
             else:
                 st.success(
-                    f"{len(results)} bestanden geüpload naar "
+                    f"{len(results)} files uploaded to "
                     f"gs://{bucket}/{country_folder}/runs/{run_folder}/"
                 )
                 st.session_state["_last_uploaded_run_folder"] = run_folder
             st.dataframe(pd.DataFrame(results), use_container_width=True, hide_index=True)
         except Exception as exc:
-            st.error(f"Upload mislukt: {exc}")
+            st.error(f"Upload failed: {exc}")
 
     # ---------------------------------------------------------------------
     # Promote to current — the deliberate, separate step that makes a run
     # live in the Company Hub.
     # ---------------------------------------------------------------------
     st.divider()
-    st.subheader("5. Promoveer naar current")
+    st.subheader("5. Promote to current")
     st.caption(
-        "De live Company Hub leest alleen uit current/. Zolang je hier niet "
-        "expliciet promoveert, blijft de zojuist geüploade run onzichtbaar "
-        "voor de Hub — precies zoals hierboven staat."
+        "The live Company Hub only reads from current/. Until you "
+        "explicitly promote here, the run you just uploaded stays invisible "
+        "to the Hub — exactly as stated above."
     )
     promote_run_folder = st.text_input(
-        "Te promoveren run-folder",
+        "Run folder to promote",
         value=st.session_state.get("_last_uploaded_run_folder", run_folder),
         key="_promote_run_folder",
     )
     promote_confirmed = st.checkbox(
-        f"Ik begrijp dat dit gs://{bucket}/{country_folder}/runs/"
-        f"{promote_run_folder}/ overschrijft naar gs://{bucket}/{country_folder}/"
-        f"current/ (de live Company Hub gaat dit direct tonen).",
+        f"I understand this overwrites gs://{bucket}/{country_folder}/runs/"
+        f"{promote_run_folder}/ onto gs://{bucket}/{country_folder}/"
+        f"current/ (the live Company Hub will show this immediately).",
         key="_promote_confirmed",
     )
     if st.button(
-        "🚀 Promoveer naar current", type="primary", disabled=not promote_confirmed,
+        "🚀 Promote to current", type="primary", disabled=not promote_confirmed,
     ):
         try:
-            with st.spinner(f"Promoveren van {promote_run_folder} naar current/…"):
+            with st.spinner(f"Promoting {promote_run_folder} to current/…"):
                 promote_result = promote_run_to_current(
                     bucket, country_folder, promote_run_folder)
             promote_results = promote_result["results"]
             n_failed = sum(1 for r in promote_results if not r["success"])
             if n_failed:
-                st.error(f"{n_failed} van {len(promote_results)} bestanden niet gepromoveerd.")
+                st.error(f"{n_failed} of {len(promote_results)} files not promoted.")
             else:
                 st.success(
-                    f"{len(promote_results)} bestanden gepromoveerd naar "
-                    f"gs://{bucket}/{country_folder}/current/ — de Company Hub "
-                    "toont deze toewijzing nu direct."
+                    f"{len(promote_results)} files promoted to "
+                    f"gs://{bucket}/{country_folder}/current/ — the Company "
+                    "Hub now shows this assignment immediately."
                 )
             st.dataframe(pd.DataFrame(promote_results), use_container_width=True, hide_index=True)
         except Exception as exc:
-            st.error(f"Promoveren mislukt: {exc}")
+            st.error(f"Promotion failed: {exc}")
 
 
 def _moved(assignment: dict, item: dict) -> dict:
