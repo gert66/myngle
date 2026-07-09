@@ -8,8 +8,12 @@ Conservative, explicit mapping:
   branding signals map to their existing scoring fields.
 - TI-onboarding is left at 0.0 (not inferred yet).
 - Rapid growth is 0.0 and never presented as a positive driver.
-- Company size complexity is a v2 audit signal only — it is NOT used as an
-  employee range, so size fields are left blank.
+- Company size complexity (the 0-3 AI/audit signal) is NOT used as an
+  employee range -- but the raw Lusha employee count/range on the result
+  (``lusha_employees``) is a genuinely different field and IS passed
+  through as ``lusha_employee_range``, so ``score_company``'s real
+  employee-size lookup (25% of the final blend) reflects the company's
+  actual size instead of always falling back to its "unknown" default.
 - Competitor is never mapped or scored.
 
 No AI, no live Serper, no mutation of the input result.  This does not change
@@ -25,9 +29,11 @@ _MAPPING_NOTE = (
     "sig_intl_footprint_score<-international_profile, "
     "sig_lnd_onboarding_score<-onboarding_training_need, "
     "sig_explicit_lnd_score<-icp_keyword_match, "
-    "sig_employer_branding_score<-employer_branding; "
+    "sig_employer_branding_score<-employer_branding, "
+    "lusha_employee_range<-lusha_employees; "
     "ti_onboarding/rapid_growth=0.0; "
-    "company_size_complexity is audit-only (not employee range); "
+    "company_size_complexity (the 0-3 audit signal) is not used as the "
+    "employee range -- lusha_employees is; "
     "competitor not mapped."
 )
 
@@ -62,11 +68,16 @@ def build_score_company_input_from_v2_result(result: LeadPrioritizationResult) -
         #    collected or presented as a positive v2 driver (and carries a
         #    negative coefficient in the model), so v2 never feeds it.
         "sig_rapid_growth_score": 0.0,
-        # H. Size — company_size_complexity is a v2 AUDIT signal only, not an
-        #    employee-range replacement, so employee-range fields stay blank.
+        # H. Size — the 0-3 company_size_complexity AI/audit signal is NOT an
+        #    employee-range replacement, but result.lusha_employees (the raw
+        #    Lusha employee count/range, always populated verbatim from the
+        #    input row when present) genuinely is one, so it's passed through
+        #    here -- otherwise company_size_score (25% of the final blend)
+        #    silently falls back to its "unknown" default for every v2-scored
+        #    company regardless of the company's actual size.
         "employee_range": "",
         "company_size": "",
-        "lusha_employee_range": "",
+        "lusha_employee_range": result.lusha_employees or "",
         "lusha_api_employee_range": "",
     }
 
