@@ -34,6 +34,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import threading
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -135,6 +136,41 @@ def write_status_json(dest: str, payload: dict) -> None:
         dest_path.write_text(text, encoding="utf-8")
 
 
+_CHECKPOINT_UPLOAD_INTERVAL_SECONDS = 20
+
+
+def _checkpoint_uploader_loop(
+    local_path: Path, dest_uri: str, stop_event: threading.Event, state: dict,
+) -> None:
+    """Background loop: while the batch subprocess runs, periodically upload
+    the local checkpoint file (written by ``lead_prioritizer_batch_cli.py``
+    via ``--checkpoint-path``, see ``batch_checkpoint.py``) to GCS if it
+    changed since the last upload -- so an OOM kill or crash mid-shard still
+    leaves *something* recoverable in GCS, instead of losing every row this
+    task had already processed.
+
+    Runs in a daemon thread; any error is swallowed (checkpoint uploads are
+    best-effort crash protection, never allowed to affect the actual task).
+    Polls ``stop_event`` instead of sleeping the full interval so shutdown
+    (once the subprocess finishes, success or failure) is prompt. Mutates
+    ``state`` (``{"uploaded": bool, "uri": str | None}``) so the caller can
+    report whether anything was actually salvageable after a failure.
+    """
+    last_mtime = None
+    while not stop_event.is_set():
+        try:
+            if local_path.exists():
+                mtime = local_path.stat().st_mtime
+                if mtime != last_mtime:
+                    upload_output_file(local_path, dest_uri)
+                    last_mtime = mtime
+                    state["uploaded"] = True
+                    state["uri"] = dest_uri
+        except Exception:
+            pass
+        stop_event.wait(_CHECKPOINT_UPLOAD_INTERVAL_SECONDS)
+
+
 def _now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
 
@@ -225,6 +261,7 @@ class RunConfig:
     c5_enabled: bool = False
     total_row_limit: Optional[int] = None
     gate_full_enrichment_on_foreign_hq: bool = False
+    checkpoint_every_rows: int = 5
 
 
 def build_arg_parser() -> argparse.ArgumentParser:
@@ -283,6 +320,14 @@ def build_arg_parser() -> argparse.ArgumentParser:
                               "GATE_FULL_ENRICHMENT_ON_FOREIGN_HQ). See "
                               "lead_prioritizer_batch_cli.py --help for the C5 "
                               "interaction caveat.")
+    parser.add_argument("--checkpoint-every-rows", type=int, default=None,
+                         help="Crash-protection: periodically upload this "
+                              "task's progress-so-far to GCS (status/"
+                              "<task>_checkpoint.json) while it's still "
+                              "running, so an OOM kill or crash loses at "
+                              "most this many rows instead of the whole "
+                              "shard's work (default: 5; env "
+                              "CHECKPOINT_EVERY_ROWS; 0 disables it).")
     return parser
 
 
@@ -351,6 +396,10 @@ def resolve_config(argv=None) -> RunConfig:
             args.gate_full_enrichment_on_foreign_hq
             or _env_bool("GATE_FULL_ENRICHMENT_ON_FOREIGN_HQ")
         ),
+        checkpoint_every_rows=(
+            args.checkpoint_every_rows if args.checkpoint_every_rows is not None
+            else int(os.environ.get("CHECKPOINT_EVERY_ROWS", "5"))
+        ),
     )
 
 
@@ -360,6 +409,7 @@ def _status_payload(
     rows_requested: int, rows_processed: int,
     status: str, started_at: str, finished_at: Optional[str], error: Optional[str],
     usage: Optional[dict] = None,
+    checkpoint_uri: Optional[str] = None,
 ) -> dict:
     return {
         "run_id": cfg.run_id,
@@ -381,6 +431,11 @@ def _status_payload(
         # orchestrator (cloud_run_streamlit_app.py) sums these across every task's
         # _done.json via usage_tracker.merge_snapshots() for one combined report.
         "usage": usage,
+        # Set only on a "failed" status when a periodic checkpoint managed to
+        # upload at least once before the crash -- see the checkpoint-upload
+        # thread in main(). None elsewhere (nothing to salvage: either the
+        # task is fine, or checkpointing was off/never got a chance to run).
+        "checkpoint_uri": checkpoint_uri,
     }
 
 
@@ -442,6 +497,7 @@ def main(argv=None) -> int:
     row_start: Optional[int] = None
     row_end: Optional[int] = None
     rows_in_part = 0
+    checkpoint_state: dict = {"uploaded": False, "uri": None}
 
     try:
         if is_gcs_uri(cfg.input_uri):
@@ -491,6 +547,8 @@ def main(argv=None) -> int:
         task_output_dir.mkdir(parents=True, exist_ok=True)
         local_output_path = task_output_dir / f"{task_label}.xlsx"
         usage_output_path = task_output_dir / f"{task_label}_usage.json"
+        checkpoint_local_path = task_output_dir / f"{task_label}_checkpoint.json"
+        checkpoint_status_uri = join_path(cfg.output_dir, "status", f"{task_label}_checkpoint.json")
 
         cmd = [
             sys.executable, str(BATCH_CLI_SCRIPT),
@@ -505,6 +563,9 @@ def main(argv=None) -> int:
             "--usage-output", str(usage_output_path),
             "--yes",
         ]
+        if cfg.checkpoint_every_rows > 0:
+            cmd += ["--checkpoint-path", str(checkpoint_local_path),
+                    "--checkpoint-every-rows", str(cfg.checkpoint_every_rows)]
         if country_col:
             cmd += ["--input-country-column", country_col]
         if cfg.compose_caller_content:
@@ -537,7 +598,38 @@ def main(argv=None) -> int:
             f"(company_column={company_col!r} domain_column={domain_col!r})...",
             flush=True,
         )
-        proc = subprocess.run(cmd, env=env)
+
+        checkpoint_stop_event = threading.Event()
+        checkpoint_thread = None
+        if cfg.checkpoint_every_rows > 0:
+            checkpoint_thread = threading.Thread(
+                target=_checkpoint_uploader_loop,
+                args=(checkpoint_local_path, checkpoint_status_uri,
+                      checkpoint_stop_event, checkpoint_state),
+                daemon=True,
+            )
+            checkpoint_thread.start()
+        try:
+            proc = subprocess.run(cmd, env=env)
+        finally:
+            # Always stop the uploader once the subprocess is done (success,
+            # non-zero exit, or an exception from subprocess.run itself) --
+            # never leave the daemon thread polling after this function returns.
+            checkpoint_stop_event.set()
+            if checkpoint_thread is not None:
+                checkpoint_thread.join(timeout=5)
+            # One last unconditional catch-up upload: the background thread
+            # only polls every _CHECKPOINT_UPLOAD_INTERVAL_SECONDS, so without
+            # this, a checkpoint written in the final few seconds before the
+            # subprocess exited (success OR failure) could be missed entirely.
+            if cfg.checkpoint_every_rows > 0 and checkpoint_local_path.exists():
+                try:
+                    upload_output_file(checkpoint_local_path, checkpoint_status_uri)
+                    checkpoint_state["uploaded"] = True
+                    checkpoint_state["uri"] = checkpoint_status_uri
+                except Exception:
+                    pass
+
         if proc.returncode != 0:
             raise RuntimeError(f"lead_prioritizer_batch_cli.py exited with code {proc.returncode}")
 
@@ -572,10 +664,17 @@ def main(argv=None) -> int:
         finished_at = _now_iso()
         err_msg = f"{type(exc).__name__}: {exc}"
         print(f"[cloud_job_runner] ERROR: {err_msg}", file=sys.stderr, flush=True)
+        if checkpoint_state["uploaded"]:
+            print(f"[cloud_job_runner] A partial checkpoint was uploaded to "
+                  f"{checkpoint_state['uri']} before the crash.", flush=True)
         try:
             write_status_json(
                 status_failed_uri,
-                _status_payload(cfg, part_output_uri, row_start, row_end, rows_in_part, 0, "failed", started_at, finished_at, err_msg),
+                _status_payload(
+                    cfg, part_output_uri, row_start, row_end, rows_in_part, 0, "failed",
+                    started_at, finished_at, err_msg,
+                    checkpoint_uri=checkpoint_state["uri"] if checkpoint_state["uploaded"] else None,
+                ),
             )
         except Exception as write_exc:
             print(f"[cloud_job_runner] ERROR: could not write failed status: {write_exc}", file=sys.stderr, flush=True)

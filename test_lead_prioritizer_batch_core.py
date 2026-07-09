@@ -590,6 +590,53 @@ class TestRunBatch:
         assert out["enriched_leads"].shape[0] == 3
         assert out["run_summary"].iloc[0]["success_count"] == 3
 
+    def test_checkpoint_callback_called_at_interval(self):
+        calls = []
+
+        def _fake(lead_input, **kwargs):
+            return _sample_result(company_name=lead_input.company_name)
+
+        def _checkpoint(enriched_rows, evidence_rows, signal_rows):
+            calls.append(len(enriched_rows))
+
+        cfg = BatchRunConfig(company_name_column="company", domain_column="domain",
+                             run_mode="full", row_limit=0)
+        with patch("lead_prioritizer_batch_core.prioritize_single_lead", side_effect=_fake):
+            run_batch_dataframe(self._df, cfg, "k1", "k2",
+                                checkpoint_callback=_checkpoint, checkpoint_every_rows=2)
+        # 3 rows, every 2 -> checkpoint fires once, after row 2 (not row 3).
+        assert calls == [2]
+
+    def test_checkpoint_callback_disabled_by_default(self):
+        calls = []
+
+        def _fake(lead_input, **kwargs):
+            return _sample_result(company_name=lead_input.company_name)
+
+        cfg = BatchRunConfig(company_name_column="company", domain_column="domain",
+                             run_mode="full", row_limit=0)
+        with patch("lead_prioritizer_batch_core.prioritize_single_lead", side_effect=_fake):
+            run_batch_dataframe(self._df, cfg, "k1", "k2",
+                                checkpoint_callback=lambda *a: calls.append(1))
+        # checkpoint_every_rows defaults to 0 -- callback never fires even
+        # though it was passed, unless the caller also opts into an interval.
+        assert calls == []
+
+    def test_checkpoint_callback_exception_does_not_break_batch(self):
+        def _fake(lead_input, **kwargs):
+            return _sample_result(company_name=lead_input.company_name)
+
+        def _boom(*_args):
+            raise ValueError("checkpoint broke")
+
+        cfg = BatchRunConfig(company_name_column="company", domain_column="domain",
+                             run_mode="full", row_limit=0)
+        with patch("lead_prioritizer_batch_core.prioritize_single_lead", side_effect=_fake):
+            out = run_batch_dataframe(self._df, cfg, "k1", "k2",
+                                      checkpoint_callback=_boom, checkpoint_every_rows=1)
+        assert out["enriched_leads"].shape[0] == 3
+        assert out["run_summary"].iloc[0]["success_count"] == 3
+
     def test_backward_compatible_without_callback(self):
         def _fake(lead_input, **kwargs):
             return _sample_result(company_name=lead_input.company_name)
@@ -2110,6 +2157,24 @@ class TestGatedFullEnrichmentInRunBatchDataframe:
             out = run_batch_dataframe(self._df, cfg, "S", "A")
         assert set(out.keys()) == {"enriched_leads", "evidence", "signals", "deep_dive", "run_summary"}
         assert len(out["deep_dive"]) == 0  # deep_dive off by default
+
+    def test_checkpoint_callback_fires_during_phase_3(self):
+        df = pd.DataFrame({
+            "company": ["Foreign A", "Foreign B", "Foreign C"],
+            "domain": ["a.com.br", "b.com.br", "c.com.br"],
+        })
+        fake = _fake_prioritize_for_foreign_hq(
+            {"Foreign A": 3.0, "Foreign B": 3.0, "Foreign C": 3.0})
+        cfg = self._cfg(gate_full_enrichment_on_foreign_hq=True, row_limit=3)
+        calls = []
+        with patch("lead_prioritizer_batch_core.prioritize_single_lead", side_effect=fake):
+            run_batch_dataframe(
+                df, cfg, "S", "A",
+                checkpoint_callback=lambda out_rows, ev, sig: calls.append(len(out_rows)),
+                checkpoint_every_rows=2,
+            )
+        # 3 confirmed rows, checkpoint every 2 -> fires once, after the 2nd.
+        assert calls == [2]
 
     def test_no_infinite_recursion_when_gate_on(self):
         # Regression guard: Phase 1's internal hq_only sub-call must force

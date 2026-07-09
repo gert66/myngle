@@ -204,6 +204,15 @@ def build_arg_parser() -> argparse.ArgumentParser:
                         "the eligibility decision), so a row C5 confirms as "
                         "foreign-HQ is pulled into full enrichment too, not "
                         "just given C5's own fields. Default: off.")
+    p.add_argument("--checkpoint-path", default=None,
+                   help="Local file path to periodically write progress-so-"
+                        "far to (crash protection for a long run) — see "
+                        "batch_checkpoint.py. Default: off (no checkpoint "
+                        "file written).")
+    p.add_argument("--checkpoint-every-rows", type=int, default=0,
+                   help="Write a checkpoint every N processed rows. Only "
+                        "takes effect when --checkpoint-path is also set. "
+                        "Default: 0 (disabled).")
     return p
 
 
@@ -372,6 +381,17 @@ def main(argv: Optional[list[str]] = None) -> int:
             print(f"ERROR: {c5_model_error}", file=sys.stderr)
             return 2
 
+    checkpoint_kwargs: dict = {}
+    if args.checkpoint_path and args.checkpoint_every_rows > 0:
+        from batch_checkpoint import make_checkpoint_callback
+
+        checkpoint_kwargs = dict(
+            checkpoint_callback=make_checkpoint_callback(
+                args.checkpoint_path, get_selected_rows=lambda: selected_count),
+            checkpoint_every_rows=args.checkpoint_every_rows,
+        )
+        print(f"Checkpoint    : every {args.checkpoint_every_rows} rows -> {args.checkpoint_path}")
+
     tables = run_batch_dataframe(
         df, config, serper, anthropic, firecrawl_api_key=firecrawl,
         **(
@@ -380,6 +400,7 @@ def main(argv: Optional[list[str]] = None) -> int:
                  c5_model_used=c5_model_used, c5_model_tier="sonnet")
             if gated_with_c5 else {}
         ),
+        **checkpoint_kwargs,
     )
 
     if gated_with_c5:

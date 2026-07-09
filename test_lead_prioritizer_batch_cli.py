@@ -217,6 +217,19 @@ class TestArgParsing:
         assert cfg.gate_full_enrichment_on_foreign_hq is True
 
 
+    def test_checkpoint_flags_default_off(self):
+        args = build_arg_parser().parse_args(
+            ["--input", "x.xlsx", "--company-column", "c", "--domain-column", "d"])
+        assert args.checkpoint_path is None
+        assert args.checkpoint_every_rows == 0
+
+    def test_checkpoint_flags_parse(self):
+        args = build_arg_parser().parse_args(
+            ["--input", "x.xlsx", "--company-column", "c", "--domain-column", "d",
+             "--checkpoint-path", "/tmp/checkpoint.json", "--checkpoint-every-rows", "5"])
+        assert args.checkpoint_path == "/tmp/checkpoint.json"
+        assert args.checkpoint_every_rows == 5
+
     def test_no_verify_quotes_flag_parses(self):
         args = build_arg_parser().parse_args(
             ["--input", "x.xlsx", "--company-column", "c", "--domain-column", "d",
@@ -440,6 +453,53 @@ class TestMain:
         # keys passed through to core but never written to disk output
         assert captured["serper"] == "SK" and captured["anthropic"] == "AK"
         assert out_path.read_bytes() == b"BYTES"
+
+    def test_checkpoint_kwargs_wired_when_flags_set(self, tmp_path):
+        p = tmp_path / "in.xlsx"
+        _write_xlsx(p, {"Sheet1": _LEADS})
+        out_path = tmp_path / "result.xlsx"
+        checkpoint_path = tmp_path / "checkpoint.json"
+        captured = {}
+
+        def _fake_run(df, config, serper, anthropic, **kwargs):
+            captured["kwargs"] = kwargs
+            return _fake_tables()
+
+        with patch("lead_prioritizer_batch_cli.load_api_keys", return_value=_KEYS_OK), \
+             patch("lead_prioritizer_batch_cli.run_batch_dataframe", side_effect=_fake_run), \
+             patch("lead_prioritizer_batch_cli.build_excel_workbook_bytes", return_value=b"BYTES"):
+            argv = self._base_argv(p, **{
+                "--output": str(out_path),
+                "--checkpoint-path": str(checkpoint_path),
+                "--checkpoint-every-rows": 1,
+            })
+            rc = main(argv)
+
+        assert rc == 0
+        assert "checkpoint_callback" in captured["kwargs"]
+        assert captured["kwargs"]["checkpoint_every_rows"] == 1
+        # the wired callback actually writes to the requested path
+        captured["kwargs"]["checkpoint_callback"]([{"a": 1}], [], [])
+        assert checkpoint_path.exists()
+
+    def test_checkpoint_kwargs_absent_by_default(self, tmp_path):
+        p = tmp_path / "in.xlsx"
+        _write_xlsx(p, {"Sheet1": _LEADS})
+        out_path = tmp_path / "result.xlsx"
+        captured = {}
+
+        def _fake_run(df, config, serper, anthropic, **kwargs):
+            captured["kwargs"] = kwargs
+            return _fake_tables()
+
+        with patch("lead_prioritizer_batch_cli.load_api_keys", return_value=_KEYS_OK), \
+             patch("lead_prioritizer_batch_cli.run_batch_dataframe", side_effect=_fake_run), \
+             patch("lead_prioritizer_batch_cli.build_excel_workbook_bytes", return_value=b"BYTES"):
+            rc = main(self._base_argv(p, **{"--output": str(out_path)}))
+
+        assert rc == 0
+        assert "checkpoint_callback" not in captured["kwargs"]
+        assert "checkpoint_every_rows" not in captured["kwargs"]
 
     def test_usage_output_writes_snapshot_json(self, tmp_path):
         p = tmp_path / "in.xlsx"

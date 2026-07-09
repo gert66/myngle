@@ -685,6 +685,8 @@ def run_batch_dataframe(
     c5_scope: str = "score_3_or_manual_review",
     c5_model_used: str = "",
     c5_model_tier: str = "",
+    checkpoint_callback: Optional[Callable[[list, list, list], None]] = None,
+    checkpoint_every_rows: int = 0,
 ) -> dict:
     """Run Lead Prioritizer v2 over selected rows.
 
@@ -737,6 +739,18 @@ def run_batch_dataframe(
     responsibility (an ``apply_c5_adjudication`` post-step), exactly as
     before; ``run_batch_dataframe`` still has no built-in C5 support outside
     the gated path.
+
+    ``checkpoint_callback``/``checkpoint_every_rows`` (default ``None``/``0`` —
+    disabled) are a crash-recovery safety net for long unattended runs (e.g.
+    a Cloud Run Jobs task processing a large shard): every
+    ``checkpoint_every_rows`` processed rows, ``checkpoint_callback`` is
+    called with the current ``(enriched_rows, evidence_rows, signal_rows)``
+    lists so a caller can persist progress-so-far to disk/GCS. Without this,
+    a crash (OOM kill, uncaught exception) partway through a shard loses
+    EVERY row processed so far, not just the one that failed, because
+    nothing is written until the whole shard finishes. Mirrors
+    ``config.use_enrichment_cache``'s periodic-save pattern; a raising
+    callback is swallowed so a broken checkpoint can never break enrichment.
     """
     if config.gate_full_enrichment_on_foreign_hq:
         return _run_batch_dataframe_gated(
@@ -744,6 +758,8 @@ def run_batch_dataframe(
             progress_callback, openai_api_key, firecrawl_api_key,
             c5_enabled=c5_enabled, c5_scoring_behavior=c5_scoring_behavior,
             c5_scope=c5_scope, c5_model_used=c5_model_used, c5_model_tier=c5_model_tier,
+            checkpoint_callback=checkpoint_callback,
+            checkpoint_every_rows=checkpoint_every_rows,
         )
 
     flags = resolve_pipeline_flags(config.run_mode)
@@ -890,6 +906,16 @@ def run_batch_dataframe(
         # retried at the next checkpoint / the final save below.
         if _cache_save_interval and processed % _cache_save_interval == 0:
             _save_country_cache_indexes(config, country_cache_indexes)
+
+        # Periodic progress checkpoint (crash protection) — see
+        # run_batch_dataframe's docstring. Never breaks the batch.
+        if checkpoint_callback is not None and checkpoint_every_rows and (
+            processed % checkpoint_every_rows == 0
+        ):
+            try:
+                checkpoint_callback(enriched_rows, evidence_rows, signal_rows)
+            except Exception:
+                pass
 
         if not run_success and not config.continue_on_error:
             break
@@ -1365,6 +1391,8 @@ def _run_gated_full_enrichment(
     openai_api_key: str = "",
     firecrawl_api_key: str = "",
     run_deep_dive_step: bool = False,
+    checkpoint_callback: Optional[Callable[[list, list, list], None]] = None,
+    checkpoint_every_rows: int = 0,
 ) -> dict:
     """Phase 3 of the foreign-HQ gating pattern: per-row eligibility check,
     then full enrichment for eligible rows / a skip marker for the rest.
@@ -1535,6 +1563,16 @@ def _run_gated_full_enrichment(
         if _cache_save_interval and attempted % _cache_save_interval == 0:
             _save_country_cache_indexes(config, country_cache_indexes)
 
+        # Periodic progress checkpoint (crash protection) — see
+        # run_batch_dataframe's docstring. Never breaks the batch.
+        if checkpoint_callback is not None and checkpoint_every_rows and (
+            attempted % checkpoint_every_rows == 0
+        ):
+            try:
+                checkpoint_callback(out_rows, evidence_rows, signal_rows)
+            except Exception:
+                pass
+
     if config.use_enrichment_cache:
         _save_country_cache_indexes(config, country_cache_indexes)
 
@@ -1567,6 +1605,8 @@ def _run_batch_dataframe_gated(
     c5_scope: str = "score_3_or_manual_review",
     c5_model_used: str = "",
     c5_model_tier: str = "",
+    checkpoint_callback: Optional[Callable[[list, list, list], None]] = None,
+    checkpoint_every_rows: int = 0,
 ) -> dict:
     """``run_batch_dataframe``'s opt-in path when
     ``config.gate_full_enrichment_on_foreign_hq`` is True: cheap HQ-only
@@ -1640,6 +1680,8 @@ def _run_batch_dataframe_gated(
         openai_api_key=openai_api_key,
         firecrawl_api_key=firecrawl_api_key,
         run_deep_dive_step=config.deep_dive,
+        checkpoint_callback=checkpoint_callback,
+        checkpoint_every_rows=checkpoint_every_rows,
     )
 
     out_rows = gated["out_rows"]
