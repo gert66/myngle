@@ -77,6 +77,14 @@ COEFFICIENT_LABELS: dict[str, str] = {
 
 TIER_LABELS: list[str] = ["🥇 Hot", "🥈 Warm", "🥉 Cool", "❄️ Pass"]
 
+# Consistent order + colours for the huidig/nieuw comparison across every
+# chart. Distinct hues (not two shades of one colour) so that even when the
+# current and re-scored distributions land on the same bar they stay
+# tellable apart — the earlier overlay/two-blues styling made "Huidig"
+# disappear behind "Nieuw".
+WHEN_ORDER: list[str] = ["Huidig", "Nieuw"]
+WHEN_COLORS: dict[str, str] = {"Huidig": "#8c8c8c", "Nieuw": "#1f77b4"}
+
 
 # =============================================================================
 # Pure helpers — no Streamlit/Plotly import required
@@ -361,7 +369,10 @@ def main() -> None:  # pragma: no cover - exercised only under `streamlit run`
             st.plotly_chart(
                 px.histogram(
                     dist_df, x="commercial_fit_score", color="when",
-                    barmode="overlay", nbins=20, opacity=0.65,
+                    barmode="group", nbins=20,
+                    category_orders={"when": WHEN_ORDER},
+                    color_discrete_map=WHEN_COLORS,
+                    labels={"commercial_fit_score": "commercial_fit_score", "when": ""},
                 ),
                 use_container_width=True,
             )
@@ -372,7 +383,12 @@ def main() -> None:  # pragma: no cover - exercised only under `streamlit run`
             st.info("Geen tier-data om te tonen.")
         else:
             st.plotly_chart(
-                px.bar(tier_df, x="tier", y="count", color="when", barmode="group"),
+                px.bar(
+                    tier_df, x="tier", y="count", color="when", barmode="group",
+                    category_orders={"when": WHEN_ORDER},
+                    color_discrete_map=WHEN_COLORS,
+                    labels={"when": ""},
+                ),
                 use_container_width=True,
             )
 
@@ -660,11 +676,13 @@ def main() -> None:  # pragma: no cover - exercised only under `streamlit run`
                 zonder_label = f"Zonder {signal_field}"
                 fig = px.histogram(
                     split_df, x="commercial_fit_score", color="when",
-                    facet_col="group", barmode="overlay", nbins=20, opacity=0.65,
+                    facet_col="group", barmode="group", nbins=20,
+                    color_discrete_map=WHEN_COLORS,
                     category_orders={
-                        "when": ["Huidig", "Nieuw"],
+                        "when": WHEN_ORDER,
                         "group": [met_label, zonder_label],
                     },
+                    labels={"when": ""},
                 )
                 st.plotly_chart(fig, use_container_width=True)
 
