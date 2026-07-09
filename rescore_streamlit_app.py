@@ -369,13 +369,13 @@ def main() -> None:  # pragma: no cover - exercised only under `streamlit run`
         st.subheader("Tier-drempels (final_commercial_fit_score)")
         thresholds_by_label = {label: score for score, label in params["tier_thresholds"]}
         hot = st.number_input(
-            "🥇 Hot vanaf", value=float(thresholds_by_label.get("🥇 Hot", 9.34)),
+            "🥇 Hot vanaf", value=float(thresholds_by_label.get("🥇 Hot", 8.86)),
             step=0.01, key="tier_hot")
         warm = st.number_input(
-            "🥈 Warm vanaf", value=float(thresholds_by_label.get("🥈 Warm", 8.28)),
+            "🥈 Warm vanaf", value=float(thresholds_by_label.get("🥈 Warm", 7.32)),
             step=0.01, key="tier_warm")
         cool = st.number_input(
-            "🥉 Cool vanaf", value=float(thresholds_by_label.get("🥉 Cool", 4.26)),
+            "🥉 Cool vanaf", value=float(thresholds_by_label.get("🥉 Cool", 5.04)),
             step=0.01, key="tier_cool")
         error = validate_tier_thresholds(hot, warm, cool)
         if error:
