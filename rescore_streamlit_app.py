@@ -345,6 +345,37 @@ def main() -> None:  # pragma: no cover - exercised only under `streamlit run`
     import plotly.graph_objects as go
     import streamlit as st
 
+    def render_before_after(original_by_id: dict, rescored_by_id: dict) -> None:
+        """Score-distribution histogram + tier bar chart for a huidig/nieuw
+        pair. Shared by the "Alle landen" and "Toepassen & uploaden" tabs.
+        Shows an info message instead of crashing when there is no company
+        with a score to plot (e.g. a country folder whose current/ run has
+        no company-details records)."""
+        dist_df = score_distribution_dataframe(original_by_id, rescored_by_id)
+        if not dist_df.empty:
+            dist_df = dist_df.dropna(subset=["commercial_fit_score"])
+        st.subheader("Scoreverdeling: huidig vs. nieuw")
+        if dist_df.empty:
+            st.info("Geen bedrijven met een score om te tonen.")
+        else:
+            st.plotly_chart(
+                px.histogram(
+                    dist_df, x="commercial_fit_score", color="when",
+                    barmode="overlay", nbins=20, opacity=0.65,
+                ),
+                use_container_width=True,
+            )
+
+        tier_df = tier_distribution_dataframe(original_by_id, rescored_by_id)
+        st.subheader("Tier-verdeling: huidig vs. nieuw")
+        if tier_df.empty:
+            st.info("Geen tier-data om te tonen.")
+        else:
+            st.plotly_chart(
+                px.bar(tier_df, x="tier", y="count", color="when", barmode="group"),
+                use_container_width=True,
+            )
+
     st.set_page_config(page_title="Re-score Explorer", page_icon="🎛️", layout="wide")
     st.title("🎛️ Commercial Fit Re-score Explorer")
     st.caption(
@@ -670,24 +701,15 @@ def main() -> None:  # pragma: no cover - exercised only under `streamlit run`
             )
 
             st.subheader("Per land")
-            st.dataframe(summary_df, use_container_width=True, hide_index=True)
+            if summary_df.empty:
+                st.info(
+                    "Geen bedrijven in de geladen landen — hebben deze "
+                    "land-folders een current/ run met company-details?"
+                )
+            else:
+                st.dataframe(summary_df, use_container_width=True, hide_index=True)
 
-            st.subheader("Scoreverdeling: huidig vs. nieuw (alle geladen landen)")
-            dist_df = score_distribution_dataframe(p_original, p_rescored)
-            st.plotly_chart(
-                px.histogram(
-                    dist_df, x="commercial_fit_score", color="when",
-                    barmode="overlay", nbins=20, opacity=0.65,
-                ),
-                use_container_width=True,
-            )
-
-            st.subheader("Tier-verdeling: huidig vs. nieuw (alle geladen landen)")
-            tier_df = tier_distribution_dataframe(p_original, p_rescored)
-            st.plotly_chart(
-                px.bar(tier_df, x="tier", y="count", color="when", barmode="group"),
-                use_container_width=True,
-            )
+            render_before_after(p_original, p_rescored)
 
     # ── Apply & upload ────────────────────────────────────────────────────────
     with tab_apply:
@@ -709,22 +731,7 @@ def main() -> None:  # pragma: no cover - exercised only under `streamlit run`
                 with st.expander("Overgeslagen bedrijven"):
                     st.write(", ".join(manifest["skipped_company_ids"]))
 
-            st.subheader("Scoreverdeling: huidig vs. nieuw")
-            dist_df = score_distribution_dataframe(original_by_id, rescored_by_id)
-            st.plotly_chart(
-                px.histogram(
-                    dist_df, x="commercial_fit_score", color="when",
-                    barmode="overlay", nbins=20, opacity=0.65,
-                ),
-                use_container_width=True,
-            )
-
-            st.subheader("Tier-verdeling: huidig vs. nieuw")
-            tier_df = tier_distribution_dataframe(original_by_id, rescored_by_id)
-            st.plotly_chart(
-                px.bar(tier_df, x="tier", y="count", color="when", barmode="group"),
-                use_container_width=True,
-            )
+            render_before_after(original_by_id, rescored_by_id)
 
             st.subheader("Grootste verschuivingen")
             movers_df = biggest_movers_dataframe(original_by_id, rescored_by_id)
