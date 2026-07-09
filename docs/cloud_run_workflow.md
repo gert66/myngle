@@ -508,8 +508,13 @@ gebeurt er vóórdat de Cloud Run Job start:
    domein wordt nooit overgeslagen, uit voorzichtigheid.
 4. Het invoerbestand dat daadwerkelijk naar Cloud Run gaat bevat dus alleen
    nog de nieuwe/nog-niet-verrijkte rijen — de Streamlit-app toont vooraf
-   hoeveel rijen zijn overgeslagen en hoeveel er verwerkt worden. Zijn het
-   er nul, dan wordt de Cloud Run Job niet eens gestart.
+   hoeveel rijen zijn overgeslagen en hoeveel er verwerkt worden. Staat er
+   ook een "Row limit (totaal)" ingesteld, dan houdt deze melding daar
+   rekening mee: **die rijlimiet wordt pas ná deze upload, server-side in
+   de Cloud Run Job zelf toegepast**, dus het getoonde aantal is het
+   werkelijke aantal ná die limiet, niet het (soms veel hogere) aantal
+   onbekende rijen vóór de limiet. Zijn het er nul, dan wordt de Cloud Run
+   Job niet eens gestart.
 5. Ná de run vult de gewone merge-stap de overgeslagen bedrijven gewoon
    weer aan vanuit de bestaande `current/`-data (ze komen niet voor in de
    nieuwe run z'n output, dus ze vallen in de "alleen aan de oude kant"-tak

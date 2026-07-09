@@ -842,11 +842,27 @@ def main() -> None:  # pragma: no cover - exercised only under `streamlit run`
                         f" (waarvan {len(known_domestic)} bekend-binnenlands uit de "
                         "gescreende-domeinen-ledger)" if known_domestic else ""
                     )
+                    # "Row limit (totaal)" hierboven wordt pas SERVER-SIDE
+                    # toegepast, in de Cloud Run Job zelf, ná deze upload --
+                    # zonder deze correctie meldde dit bijvoorbeeld "5038
+                    # rij(en) worden verwerkt" terwijl de job er door de
+                    # rijlimiet daadwerkelijk maar 300 verwerkte (bevestigd
+                    # door de merge-telling erna). Toon dus het werkelijke
+                    # aantal, niet het aantal vóór die limiet.
+                    effective_to_process = len(to_process)
+                    row_limit_note = ""
+                    if total_row_limit and len(to_process) > int(total_row_limit):
+                        effective_to_process = int(total_row_limit)
+                        row_limit_note = (
+                            f" (van deze {len(to_process)} onbekende rijen verwerkt de "
+                            f"job er, door de Row limit hierboven, uiteindelijk "
+                            f"maximaal {effective_to_process})"
+                        )
                     st.info(
                         f"Skip-filter: {len(skipped_rows)} van {len(df_prefilter)} rijen "
                         f"al bekend (volledig verrijkt in current/, of definitief "
                         f"binnenlands){domestic_note}, overgeslagen. "
-                        f"{len(to_process)} rij(en) worden verwerkt."
+                        f"{effective_to_process} rij(en) worden verwerkt{row_limit_note}."
                     )
                     if len(to_process) == 0:
                         st.success(
