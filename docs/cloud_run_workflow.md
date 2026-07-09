@@ -91,7 +91,8 @@ alleen `set`/`missing` per key, nooit de waarde zelf.
 | `CLOUD_RUN_TASK_INDEX` | door Cloud Run Jobs automatisch gezet (0-based) |
 | `CLOUD_RUN_TASK_COUNT` | door Cloud Run Jobs automatisch gezet |
 | `ANTHROPIC_API_KEY` / `SERPER_API_KEY` / `FIRECRAWL_API_KEY` | API keys (nooit als CLI-argument, altijd via env naar de subprocess) |
-| `MAX_ROWS` | optioneel, beperkt rijen per task (smoke tests) — anders verwerkt elke task zijn hele shard (`--row-limit 0`) |
+| `TOTAL_ROW_LIMIT` | optioneel, kapt het INPUT-bestand af tot de eerste N rijen VÓÓRDAT er geshard wordt, zodat N evenredig over alle tasks verdeeld wordt (bv. 100 met `TASK_COUNT=50` → ~2 rijen/task) |
+| `MAX_ROWS` | optioneel, beperkt rijen BINNEN de shard die één task al toegewezen kreeg (smoke tests) — anders verwerkt elke task zijn hele shard (`--row-limit 0`); niet hetzelfde als `TOTAL_ROW_LIMIT` hierboven |
 | `FORCE_RERUN` | `true` om een bestaande part-output te overschrijven |
 | `MODE` | Lead Prioritizer v2 run mode (default `full`); moet een geldige `SUPPORTED_RUN_MODES`-waarde zijn, anders faalt de task direct vóór de "running"-status |
 | `COMPANY_COLUMN` / `DOMAIN_COLUMN` | optioneel; anders auto-detectie (zelfde candidate-lijsten als de Streamlit-app) |

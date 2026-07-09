@@ -26,7 +26,7 @@ _CLOUD_ENV_VARS = [
     "INPUT_GCS_URI", "OUTPUT_GCS_DIR", "RUN_ID", "TASK_COUNT",
     "CLOUD_RUN_TASK_INDEX", "CLOUD_RUN_TASK_COUNT",
     "ANTHROPIC_API_KEY", "SERPER_API_KEY", "FIRECRAWL_API_KEY",
-    "MAX_ROWS", "FORCE_RERUN", "MODE",
+    "MAX_ROWS", "TOTAL_ROW_LIMIT", "FORCE_RERUN", "MODE",
     "COMPANY_COLUMN", "DOMAIN_COLUMN", "INPUT_COUNTRY_COLUMN",
     "COMPOSE_CALLER_CONTENT", "DEEP_DIVE", "DEEP_DIVE_MIN_SCORE",
     "DEEP_DIVE_ON_FOREIGN_HQ", "RICH_ICP_CONTEXT", "AI_SIGNAL_SCORING",
@@ -184,6 +184,55 @@ def test_max_rows_caps_rows_processed_but_not_rows_requested(tmp_path, monkeypat
 
     cmd = fake_run.calls[0]
     assert cmd[cmd.index("--row-limit") + 1] == "3"
+
+
+def test_total_row_limit_shrinks_shards_before_sharding(tmp_path, monkeypatch):
+    """--total-row-limit truncates the file to N rows BEFORE task_count shards
+    are computed, so the N rows are distributed proportionally across tasks --
+    distinct from --max-rows, which only caps rows WITHIN one already-computed
+    shard. 500 rows, total_row_limit=100, task_count=50 -> shard size 2, not 10."""
+    input_path = tmp_path / "input.xlsx"
+    _write_synthetic_excel(input_path, 500)
+    output_dir = tmp_path / "out"
+
+    fake_run = _fake_batch_cli_subprocess()
+    monkeypatch.setattr(cjr.subprocess, "run", fake_run)
+
+    rc = cjr.main([
+        "--input", str(input_path),
+        "--output-dir", str(output_dir),
+        "--task-index", "0",
+        "--task-count", "50",
+        "--total-row-limit", "100",
+        "--run-id", "total-row-limit",
+    ])
+
+    assert rc == 0
+    status = json.loads((output_dir / "status" / "part_0000_done.json").read_text(encoding="utf-8"))
+    assert status["row_start"] == 0
+    assert status["row_end"] == 2
+    assert status["rows_requested"] == 2
+
+
+def test_total_row_limit_unset_uses_full_file(tmp_path, monkeypatch):
+    input_path = tmp_path / "input.xlsx"
+    _write_synthetic_excel(input_path, 500)
+    output_dir = tmp_path / "out"
+
+    fake_run = _fake_batch_cli_subprocess()
+    monkeypatch.setattr(cjr.subprocess, "run", fake_run)
+
+    rc = cjr.main([
+        "--input", str(input_path),
+        "--output-dir", str(output_dir),
+        "--task-index", "0",
+        "--task-count", "50",
+        "--run-id", "no-total-row-limit",
+    ])
+
+    assert rc == 0
+    status = json.loads((output_dir / "status" / "part_0000_done.json").read_text(encoding="utf-8"))
+    assert status["row_end"] == 10  # 500 / 50, unaffected by any limit
 
 
 def test_mode_and_column_overrides_are_forwarded(tmp_path, monkeypatch):
