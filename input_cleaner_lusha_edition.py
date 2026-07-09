@@ -561,6 +561,20 @@ def _header_fill():
     return fill, font
 
 
+# Control characters (other than tab/newline/CR) that openpyxl's XML writer
+# rejects with IllegalCharacterError — Lusha's scraped company descriptions
+# occasionally contain them.
+_ILLEGAL_XLSX_CHARS_RE = re.compile(
+    "[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]"
+)
+
+
+def _sanitize_cell_value(val):
+    if isinstance(val, str):
+        return _ILLEGAL_XLSX_CHARS_RE.sub("", val)
+    return val
+
+
 def _write_sheet(
     ws, df: pd.DataFrame, highlight_rules: "list[tuple[str, str]] | None" = None,
 ) -> None:
@@ -591,6 +605,7 @@ def _write_sheet(
             val = row[col]
             if isinstance(val, float) and val != val:
                 val = ""
+            val = _sanitize_cell_value(val)
             cell = ws.cell(row=ri, column=ci, value=val)
             cell.alignment = Alignment(wrap_text=False, vertical="top")
             if fill is not None:
