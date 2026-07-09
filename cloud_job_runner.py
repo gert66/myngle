@@ -223,6 +223,7 @@ class RunConfig:
     use_enrichment_cache: bool = False
     enrichment_cache_bucket: str = ""
     c5_enabled: bool = False
+    total_row_limit: Optional[int] = None
 
 
 def build_arg_parser() -> argparse.ArgumentParser:
@@ -237,7 +238,15 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--anthropic-key", default=None)
     parser.add_argument("--serper-key", default=None)
     parser.add_argument("--firecrawl-key", default=None)
-    parser.add_argument("--max-rows", type=int, default=None)
+    parser.add_argument("--max-rows", type=int, default=None,
+                         help="Cap rows WITHIN this task's already-computed shard "
+                              "(local smoke-test knob; env MAX_ROWS). For a total-"
+                              "file row limit applied BEFORE sharding, use "
+                              "--total-row-limit instead.")
+    parser.add_argument("--total-row-limit", type=int, default=None,
+                         help="Truncate the input file to its first N rows BEFORE "
+                              "computing shards, so N is distributed proportionally "
+                              "across all tasks (env TOTAL_ROW_LIMIT).")
     parser.add_argument("--force-rerun", action="store_true")
     parser.add_argument("--mode", default=None,
                          help="Lead Prioritizer v2 run mode (default: full).")
@@ -291,6 +300,9 @@ def resolve_config(argv=None) -> RunConfig:
     max_rows = args.max_rows if args.max_rows is not None else (
         int(os.environ["MAX_ROWS"]) if os.environ.get("MAX_ROWS") else None
     )
+    total_row_limit = args.total_row_limit if args.total_row_limit is not None else (
+        int(os.environ["TOTAL_ROW_LIMIT"]) if os.environ.get("TOTAL_ROW_LIMIT") else None
+    )
 
     return RunConfig(
         input_uri=input_uri,
@@ -326,6 +338,7 @@ def resolve_config(argv=None) -> RunConfig:
             args.enrichment_cache_bucket or os.environ.get("ENRICHMENT_CACHE_BUCKET") or ""
         ),
         c5_enabled=args.c5_enabled or _env_bool("C5_ENABLED"),
+        total_row_limit=total_row_limit,
     )
 
 
@@ -423,6 +436,15 @@ def main(argv=None) -> int:
 
         fname = local_input.name.lower()
         df_in = pd.read_csv(local_input) if fname.endswith(".csv") else pd.read_excel(local_input)
+        if cfg.total_row_limit:
+            # Every task independently reads the same original file and
+            # applies this same deterministic head-truncation BEFORE sharding,
+            # so all tasks agree on the same (smaller) total_rows and end up
+            # with proportionally smaller shards -- e.g. TOTAL_ROW_LIMIT=100
+            # with TASK_COUNT=50 gives every task ~2 rows, not ~10 (the full
+            # file's share). This is distinct from MAX_ROWS/--max-rows below,
+            # which instead caps rows WITHIN one task's already-computed shard.
+            df_in = df_in.iloc[: int(cfg.total_row_limit)].copy()
         total_rows = len(df_in)
         df_in = add_row_index_column(df_in)
 

@@ -105,6 +105,43 @@ def build_download_command(src_glob: str, local_dir: str, project: str) -> list[
     return [_gcloud_executable(), "storage", "cp", src_glob, local_dir, "--project", project]
 
 
+def build_list_command(glob_pattern: str, project: str) -> list[str]:
+    return [_gcloud_executable(), "storage", "ls", glob_pattern, "--project", project]
+
+
+_STATUS_SUFFIXES = (("_done.json", "done"), ("_failed.json", "failed"), ("_running.json", "running"))
+
+
+def count_task_statuses(listing_output: str) -> dict:
+    """Classify ``gcloud storage ls .../status/*.json`` output lines into
+    per-TASK final state, then tally those states.
+
+    cloud_job_runner.py never deletes a task's ``_running.json`` once it
+    writes the matching ``_done.json``/``_failed.json`` (see its ``main()``),
+    so both files coexist for every finished task — counting raw file
+    suffixes would count every finished task as "still running" forever.
+    Instead this groups lines by task label (the filename with the status
+    suffix stripped) and lets ``done``/``failed`` (terminal) win over a
+    leftover ``running`` marker for the same task, regardless of listing
+    order. Ignores non-matching/blank lines (e.g. gcloud's "no matches"
+    message on an empty/not-yet-existing prefix) so this never raises on a
+    run that hasn't written anything yet.
+    """
+    task_state: dict[str, str] = {}
+    for line in listing_output.splitlines():
+        name = line.strip().rsplit("/", 1)[-1]
+        for suffix, state in _STATUS_SUFFIXES:
+            if name.endswith(suffix):
+                label = name[: -len(suffix)]
+                if state != "running" or label not in task_state:
+                    task_state[label] = state
+                break
+    counts = {"running": 0, "done": 0, "failed": 0}
+    for state in task_state.values():
+        counts[state] += 1
+    return counts
+
+
 # =============================================================================
 # Subprocess runners
 # =============================================================================
@@ -134,7 +171,9 @@ def _reader_thread(stream, q) -> None:
         q.put(None)
 
 
-def run_streaming(cmd: list[str], on_chunk=None, timeout_seconds: Optional[float] = None) -> int:
+def run_streaming(
+    cmd: list[str], on_chunk=None, timeout_seconds: Optional[float] = None, on_tick=None,
+) -> int:
     """Run cmd, calling on_chunk(str) with each raw output chunk (stdout+stderr)
     as it arrives — one character at a time, NOT line-buffered.
 
@@ -144,6 +183,16 @@ def run_streaming(cmd: list[str], on_chunk=None, timeout_seconds: Optional[float
     then dumps it all at once — from the UI it looks completely frozen for
     the exact phase that takes longest. Char-by-char reading makes each dot
     show up live instead.
+
+    Once the job execution actually starts, gcloud itself goes silent until
+    the whole execution finishes — no output at all, for however long that
+    takes — so ``on_chunk`` alone leaves the UI with zero visibility into
+    per-task progress during exactly the phase that takes longest. ``on_tick``
+    (if given) is called on every poll-loop wake-up (~5x/second) regardless of
+    whether a chunk arrived, so a caller can poll something else (e.g. the
+    run's GCS status/ folder) on its own, self-throttled cadence — see
+    ``main()``'s status-panel use below. A raising ``on_tick`` never breaks
+    the run; exceptions are swallowed.
 
     Kills the process and raises ProcessTimeout if timeout_seconds elapses
     without the process finishing — including if it produces NO output at
@@ -174,6 +223,11 @@ def run_streaming(cmd: list[str], on_chunk=None, timeout_seconds: Optional[float
                 break
             if chunk and on_chunk is not None:
                 on_chunk(chunk)
+            if on_tick is not None:
+                try:
+                    on_tick()
+                except Exception:
+                    pass
             if timeout_seconds is not None and (time.monotonic() - start) > timeout_seconds:
                 proc.kill()
                 proc.wait()
@@ -254,10 +308,12 @@ def main() -> None:  # pragma: no cover - exercised only under `streamlit run`
         )
         st.caption(_RUN_MODE_HELP.get(mode, ""))
 
-        row_limit_per_task = st.number_input(
-            "Row limit per taak (0 = alle rijen)", min_value=0, value=0, step=1,
-            help="Testlimiet: elke Cloud Run-taak verwerkt hooguit dit aantal rijen "
-                 "uit zijn eigen shard (bv. voor een snelle smoke test). 0 = geen limiet.",
+        total_row_limit = st.number_input(
+            "Row limit (totaal, 0 = alle rijen)", min_value=0, value=0, step=1,
+            help="Verwerk alleen de eerste N rijen van het bestand — dit gebeurt "
+                 "VOORDAT het over de taken wordt verdeeld, dus N wordt evenredig "
+                 "gespreid over 'Task count' hierboven (bv. 100 rijen / 50 taken = "
+                 "~2 rijen per taak). 0 = het hele bestand.",
         )
 
         st.divider()
@@ -383,10 +439,12 @@ def main() -> None:  # pragma: no cover - exercised only under `streamlit run`
 
         st.subheader("Job-executie")
         elapsed_placeholder = st.empty()
+        status_placeholder = st.empty()
         log_placeholder = st.empty()
         buf: list[str] = []
-        state = {"last_update": 0.0, "start": time.monotonic()}
+        state = {"last_update": 0.0, "start": time.monotonic(), "last_status_poll": 0.0}
         MIN_UPDATE_INTERVAL = 0.3  # seconds — avoid hammering the UI on every single character
+        STATUS_POLL_INTERVAL = 15.0  # seconds — gcloud storage ls is a real subprocess call
 
         def _on_chunk(chunk: str) -> None:
             buf.append(chunk)
@@ -396,6 +454,26 @@ def main() -> None:  # pragma: no cover - exercised only under `streamlit run`
             state["last_update"] = now
             elapsed_placeholder.caption(f"⏱️ bezig: {now - state['start']:.0f}s")
             log_placeholder.code("".join(buf)[-4000:])
+
+        def _on_tick() -> None:
+            # gcloud run jobs execute --wait goes silent for the entire
+            # execution phase (the part that takes longest) — this is the
+            # ONLY live signal the UI has during that phase, pulled straight
+            # from the same status/ JSON files the Cloud Console reads.
+            now = time.monotonic()
+            if now - state["last_status_poll"] < STATUS_POLL_INTERVAL:
+                return
+            state["last_status_poll"] = now
+            rc_ls, listing = run_capture(build_list_command(
+                join_path(output_dir, "status", "*.json"), project))
+            if rc_ls != 0:
+                return  # normal early on: the status/ prefix may not exist yet
+            counts = count_task_statuses(listing)
+            reported = counts["done"] + counts["failed"] + counts["running"]
+            status_placeholder.info(
+                f"📊 Taken: {counts['done']} klaar, {counts['failed']} gefaald, "
+                f"{counts['running']} bezig ({reported}/{int(task_count)} gerapporteerd)"
+            )
 
         extra_env = {
             "COMPOSE_CALLER_CONTENT": str(bool(compose_caller_content)).lower(),
@@ -408,8 +486,8 @@ def main() -> None:  # pragma: no cover - exercised only under `streamlit run`
             "DEEP_DIVE_ON_FOREIGN_HQ": str(bool(deep_dive_on_foreign_hq)).lower(),
             "C5_ENABLED": str(bool(c5_enabled)).lower(),
         }
-        if row_limit_per_task:
-            extra_env["MAX_ROWS"] = str(int(row_limit_per_task))
+        if total_row_limit:
+            extra_env["TOTAL_ROW_LIMIT"] = str(int(total_row_limit))
 
         job_timeout_seconds = 3600  # 1 uur — ruim boven de verwachte duur, voorkomt een oneindige hang
         try:
@@ -420,6 +498,7 @@ def main() -> None:  # pragma: no cover - exercised only under `streamlit run`
                 ),
                 on_chunk=_on_chunk,
                 timeout_seconds=job_timeout_seconds,
+                on_tick=_on_tick,
             )
         except ProcessTimeout as exc:
             st.error(

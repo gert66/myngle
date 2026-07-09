@@ -17,7 +17,9 @@ from cloud_run_streamlit_app import (
     _gcloud_executable,
     build_download_command,
     build_execute_command,
+    build_list_command,
     build_upload_command,
+    count_task_statuses,
     gcs_incoming_uri,
     gcs_output_dir,
     run_streaming,
@@ -93,6 +95,55 @@ def test_build_download_command_targets_local_dir():
     ]
 
 
+def test_build_list_command_targets_glob():
+    cmd = build_list_command("gs://b/runs/run123/status/*.json", "proj-1")
+    assert cmd == [
+        _gcloud_executable(), "storage", "ls", "gs://b/runs/run123/status/*.json",
+        "--project", "proj-1",
+    ]
+
+
+# ── count_task_statuses: classify status/ listing output ────────────────────
+
+def test_count_task_statuses_classifies_by_suffix():
+    listing = (
+        "gs://b/runs/r/status/part_0000_done.json\n"
+        "gs://b/runs/r/status/part_0001_done.json\n"
+        "gs://b/runs/r/status/part_0002_failed.json\n"
+        "gs://b/runs/r/status/part_0003_running.json\n"
+    )
+    assert count_task_statuses(listing) == {"done": 2, "failed": 1, "running": 1}
+
+
+def test_count_task_statuses_empty_listing_returns_zeros():
+    assert count_task_statuses("") == {"done": 0, "failed": 0, "running": 0}
+
+
+def test_count_task_statuses_ignores_unrelated_lines():
+    listing = "No matches for pattern.\ngs://b/runs/r/status/part_0000_done.json\n"
+    assert count_task_statuses(listing) == {"done": 1, "failed": 0, "running": 0}
+
+
+def test_count_task_statuses_finished_task_not_double_counted_as_running():
+    # part_0000 has BOTH a running and a done status file (cloud_job_runner.py
+    # never deletes the running one once the task finishes) -- the finished
+    # task must be counted as done only, not also as still-running.
+    listing = (
+        "gs://b/runs/r/status/part_0000_running.json\n"
+        "gs://b/runs/r/status/part_0000_done.json\n"
+    )
+    assert count_task_statuses(listing) == {"done": 1, "failed": 0, "running": 0}
+
+
+def test_count_task_statuses_order_independent_for_same_task():
+    # done listed BEFORE running for the same task label -- still wins.
+    listing = (
+        "gs://b/runs/r/status/part_0000_done.json\n"
+        "gs://b/runs/r/status/part_0000_running.json\n"
+    )
+    assert count_task_statuses(listing) == {"done": 1, "failed": 0, "running": 0}
+
+
 # ── Regression: gcloud is a .cmd wrapper on Windows ──────────────────────────
 #
 # subprocess.run(["gcloud", ...]) without shell=True raises FileNotFoundError
@@ -147,6 +198,27 @@ def test_run_streaming_delivers_output_without_a_trailing_newline_incrementally(
 def test_run_streaming_returns_process_returncode():
     rc = run_streaming([sys.executable, "-c", "import sys; sys.exit(3)"])
     assert rc == 3
+
+
+def test_run_streaming_calls_on_tick_repeatedly_even_without_new_output():
+    # on_tick must fire on every poll-loop wake-up (~5x/second), independent
+    # of whether the subprocess produced any output -- this is the only live
+    # signal available during gcloud's silent "Starting execution...." phase.
+    ticks: list[None] = []
+    rc = run_streaming(
+        [sys.executable, "-c", "import time; time.sleep(0.5)"],
+        on_tick=lambda: ticks.append(None),
+    )
+    assert rc == 0
+    assert len(ticks) >= 2
+
+
+def test_run_streaming_on_tick_exception_never_breaks_the_run():
+    def _broken_tick():
+        raise RuntimeError("boom")
+
+    rc = run_streaming([sys.executable, "-c", "import sys; sys.exit(0)"], on_tick=_broken_tick)
+    assert rc == 0
 
 
 def test_run_streaming_kills_process_and_raises_on_timeout():
