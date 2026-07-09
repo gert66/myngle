@@ -371,9 +371,19 @@ de merge worden de niet-buitenlandse rijen eruit gefilterd. Je betaalt dus
 voor de hele batch, ook voor de bedrijven die achteraf toch wegvallen.
 
 Zet `GATE_FULL_ENRICHMENT_ON_FOREIGN_HQ=true` (CLI: `--gate-full-enrichment-`
-`on-foreign-hq`; Streamlit-checkbox "Alleen bedrijven met buitenlands HQ
-volledig verrijken") om dat om te draaien, met de bestaande `mode=full` (of
-elke andere mode):
+`on-foreign-hq`; Streamlit — kies "Alleen buitenlands HQ" bij de "Scope"-vraag)
+om dat om te draaien, met de bestaande `mode=full` (of elke andere mode):
+
+> **Scope is één keuze, geen twee losse vinkjes.** De Streamlit-app had
+> hiervoor twee onafhankelijke instellingen: de kostengate hierboven én een
+> apart "Foreign-HQ-only export"-vinkje bij de Lovable-export. Die konden uit
+> elkaar lopen — bv. de gate aan (dus goedkoop screenen + alleen buitenlandse
+> rijen volledig verrijken) maar de export-filter uit, waardoor bevestigd
+> *binnenlandse* bedrijven (bv. "Molins") alsnog in de gepubliceerde
+> `current/`-lijst terechtkwamen. De "Scope"-radio ("Alle bedrijven" /
+> "Alleen buitenlands HQ") stuurt nu beide tegelijk aan: `foreign_hq_only_`
+> `export` wordt rechtstreeks van dezelfde keuze afgeleid, dus de gate en de
+> export-filter kunnen niet meer los van elkaar staan.
 
 1. **Fase 1/2 — screening**: elke rij krijgt een goedkope HQ-only check (1
    Serper-call per bedrijf), net als `mode=hq_only`. Staat `C5_ENABLED`/
@@ -508,8 +518,13 @@ gebeurt er vóórdat de Cloud Run Job start:
    domein wordt nooit overgeslagen, uit voorzichtigheid.
 4. Het invoerbestand dat daadwerkelijk naar Cloud Run gaat bevat dus alleen
    nog de nieuwe/nog-niet-verrijkte rijen — de Streamlit-app toont vooraf
-   hoeveel rijen zijn overgeslagen en hoeveel er verwerkt worden. Zijn het
-   er nul, dan wordt de Cloud Run Job niet eens gestart.
+   hoeveel rijen zijn overgeslagen en hoeveel er verwerkt worden. Staat er
+   ook een "Row limit (totaal)" ingesteld, dan houdt deze melding daar
+   rekening mee: **die rijlimiet wordt pas ná deze upload, server-side in
+   de Cloud Run Job zelf toegepast**, dus het getoonde aantal is het
+   werkelijke aantal ná die limiet, niet het (soms veel hogere) aantal
+   onbekende rijen vóór de limiet. Zijn het er nul, dan wordt de Cloud Run
+   Job niet eens gestart.
 5. Ná de run vult de gewone merge-stap de overgeslagen bedrijven gewoon
    weer aan vanuit de bestaande `current/`-data (ze komen niet voor in de
    nieuwe run z'n output, dus ze vallen in de "alleen aan de oude kant"-tak

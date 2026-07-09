@@ -543,21 +543,31 @@ def main() -> None:  # pragma: no cover - exercised only under `streamlit run`
         )
 
         st.divider()
-        st.subheader("Kostenbesparing")
-        gate_full_enrichment_on_foreign_hq = st.checkbox(
-            "Alleen bedrijven met buitenlands HQ volledig verrijken", value=False,
-            help="Screent EERST elk bedrijf goedkoop op HQ (1 Serper-call per "
-                 "bedrijf); de volledige v2-pipeline (non-HQ evidence via "
-                 "Firecrawl/Serper + AI-signalen + score + caller-content, "
-                 "~4 extra Serper-calls + Firecrawl/Anthropic-kosten per rij) "
-                 "draait daarna ALLEEN nog voor rijen met bevestigd buitenlands "
-                 "HQ. Rijen zonder buitenlands HQ blijven in de output staan "
-                 "(enrichment_skipped=True) maar kosten verder niets. Werkt met "
-                 "elke Mode hierboven — dit is de goedkoopste manier om alleen "
-                 "een foreign-HQ-lijst te bouwen, in plaats van iedereen volledig "
-                 "verrijken en pas bij de Lovable-export filteren. Zet ook "
-                 "'Foreign-HQ-only export' hieronder aan om de niet-buitenlandse "
-                 "rijen ook uit de uiteindelijke lijst te weren.")
+        st.subheader("Scope")
+        # ONE choice drives both the enrichment gate AND the export filter --
+        # deliberately not two separate checkboxes. Having them as two
+        # independently-toggleable settings is exactly what let a run
+        # fully-enrich AND publish confirmed-domestic companies (e.g.
+        # "Molins", "Confirmed domestic") into the live Lovable app: the
+        # cost gate was on, but the separate "Foreign-HQ-only export"
+        # checkbox was left off, so nothing filtered them out of current/.
+        # Tying them to one variable makes that mismatch structurally
+        # impossible instead of relying on remembering to check both.
+        scope_choice = st.radio(
+            "Welke bedrijven wil je verwerken en publiceren?",
+            options=["Alle bedrijven", "Alleen buitenlands HQ"],
+            index=0,
+            help="**Alle bedrijven**: iedereen krijgt de volledige v2-pipeline "
+                 "en iedereen komt ook in de Lovable-lijst — simpelste optie, "
+                 "duurste. **Alleen buitenlands HQ**: goedkope HQ-screening "
+                 "voor iedereen eerst; de dure volledige pipeline "
+                 "(Firecrawl/Anthropic-signalen/score/caller-content) draait "
+                 "daarna ALLEEN nog voor bevestigd-buitenlandse bedrijven, en "
+                 "ALLEEN die komen ook in de Lovable-lijst terecht. Deze ene "
+                 "keuze stuurt zowel de kostengate als de Lovable-export-"
+                 "filter tegelijk.",
+        )
+        gate_full_enrichment_on_foreign_hq = scope_choice == "Alleen buitenlands HQ"
 
         st.divider()
         st.subheader("Inhoud & AI-opties")
@@ -622,7 +632,9 @@ def main() -> None:  # pragma: no cover - exercised only under `streamlit run`
             "Na afloop automatisch Lovable JSON exporteren", value=True)
         export_country = ""
         cold_callers_raw = DEFAULT_COLD_CALLERS_TEXT
-        foreign_hq_only_export = False
+        # Derived from the "Scope" choice above, not a separate checkbox --
+        # see the comment there for why these two must never drift apart.
+        foreign_hq_only_export = gate_full_enrichment_on_foreign_hq
         bucket_size = 500
         content_language = lovable_export.DEFAULT_CONTENT_LANGUAGE
         auto_gcs_upload_enabled = True
@@ -650,9 +662,13 @@ def main() -> None:  # pragma: no cover - exercised only under `streamlit run`
                      "— leeg laten stuurt de export naar .../unknown/.")
             cold_callers_raw = st.text_input(
                 "Cold callers (comma-separated)", value=DEFAULT_COLD_CALLERS_TEXT)
-            fc1, fc2 = st.columns(2)
-            foreign_hq_only_export = fc1.checkbox("Foreign-HQ-only export", value=False)
-            bucket_size = fc2.number_input("Bucket size", min_value=1, value=500, step=50)
+            st.caption(
+                "Foreign-HQ-only export: "
+                f"**{'aan' if foreign_hq_only_export else 'uit'}** "
+                "(afgeleid van de Scope-keuze hierboven — "
+                f"“{scope_choice}”)."
+            )
+            bucket_size = st.number_input("Bucket size", min_value=1, value=500, step=50)
             content_language = st.selectbox(
                 "Lovable content language", list(lovable_export.SUPPORTED_CONTENT_LANGUAGES),
                 index=list(lovable_export.SUPPORTED_CONTENT_LANGUAGES).index(
@@ -842,11 +858,27 @@ def main() -> None:  # pragma: no cover - exercised only under `streamlit run`
                         f" (waarvan {len(known_domestic)} bekend-binnenlands uit de "
                         "gescreende-domeinen-ledger)" if known_domestic else ""
                     )
+                    # "Row limit (totaal)" hierboven wordt pas SERVER-SIDE
+                    # toegepast, in de Cloud Run Job zelf, ná deze upload --
+                    # zonder deze correctie meldde dit bijvoorbeeld "5038
+                    # rij(en) worden verwerkt" terwijl de job er door de
+                    # rijlimiet daadwerkelijk maar 300 verwerkte (bevestigd
+                    # door de merge-telling erna). Toon dus het werkelijke
+                    # aantal, niet het aantal vóór die limiet.
+                    effective_to_process = len(to_process)
+                    row_limit_note = ""
+                    if total_row_limit and len(to_process) > int(total_row_limit):
+                        effective_to_process = int(total_row_limit)
+                        row_limit_note = (
+                            f" (van deze {len(to_process)} onbekende rijen verwerkt de "
+                            f"job er, door de Row limit hierboven, uiteindelijk "
+                            f"maximaal {effective_to_process})"
+                        )
                     st.info(
                         f"Skip-filter: {len(skipped_rows)} van {len(df_prefilter)} rijen "
                         f"al bekend (volledig verrijkt in current/, of definitief "
                         f"binnenlands){domestic_note}, overgeslagen. "
-                        f"{len(to_process)} rij(en) worden verwerkt."
+                        f"{effective_to_process} rij(en) worden verwerkt{row_limit_note}."
                     )
                     if len(to_process) == 0:
                         st.success(
