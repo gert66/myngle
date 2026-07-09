@@ -20,13 +20,22 @@ Run with:
 
 from __future__ import annotations
 
+import math
 from typing import Optional
 
 import pandas as pd
 
+from caller_range_assignment import (
+    CallerRange,
+    RANGE_MODES,
+    assign_callers_by_ranges,
+    caller_ranges_coverage,
+    even_count_ranges,
+    resolve_range_bounds,
+)
 from reallocate_callers_from_gcs import (
     assign_callers,
-    build_reallocated_run,
+    build_reallocated_run_from_assignment,
     caller_distribution,
     default_reallocate_run_folder,
     download_current_run,
@@ -85,6 +94,43 @@ def movers_dataframe(
 ) -> pd.DataFrame:
     """Table of companies whose caller changed, for display."""
     return pd.DataFrame(reallocation_movers(original_list_items, assignment))
+
+
+def default_range_settings(callers: list[str], total: int) -> dict:
+    """Seed the range-mode editor with equal, contiguous ``"count"`` blocks
+    (via ``even_count_ranges``) — a sane starting point an admin then adjusts
+    per caller. Keyed by caller name; each value is the flat dict shape the
+    Streamlit widgets read/write (``mode``, ``start``, ``end``,
+    ``cohort_size``)."""
+    settings: dict = {}
+    for cr in even_count_ranges(callers, total):
+        settings[cr.caller] = {
+            "mode": "count", "start": cr.start, "end": cr.end, "cohort_size": 100,
+        }
+    return settings
+
+
+def caller_ranges_from_settings(
+    callers: list[str], settings: dict,
+) -> list[CallerRange]:
+    """Build the ordered ``CallerRange`` list the assignment/coverage
+    functions expect, from the per-caller settings dict the Streamlit
+    widgets maintain. Callers missing from ``settings`` (e.g. just added to
+    the pool) are skipped rather than raising — they show up as gaps in the
+    coverage check until the admin configures them."""
+    ranges = []
+    for caller in callers:
+        cfg = settings.get(caller)
+        if not cfg:
+            continue
+        ranges.append(CallerRange(
+            caller=caller,
+            mode=cfg["mode"],
+            start=cfg["start"],
+            end=cfg["end"],
+            cohort_size=cfg.get("cohort_size") if cfg["mode"] == "cohort" else None,
+        ))
+    return ranges
 
 
 # =============================================================================
@@ -195,10 +241,116 @@ def main() -> None:  # pragma: no cover - exercised only under `streamlit run`
     st.write("Nieuwe pool:", " · ".join(f"`{c}`" for c in new_callers))
 
     # ---------------------------------------------------------------------
+    # Toewijzingsmethode: round-robin, of expliciete ranges per caller
+    # ---------------------------------------------------------------------
+    st.subheader("3. Toewijzingsmethode")
+    mode = st.radio(
+        "Hoe worden bedrijven aan callers toegewezen?",
+        options=["round_robin", "ranges"],
+        format_func=lambda v: (
+            "Round-robin (gelijk verdeeld over de scorerangorde)" if v == "round_robin"
+            else "Ranges per caller (aantal / percentiel / cohort)"
+        ),
+        key="_assignment_mode",
+        horizontal=True,
+    )
+
+    total_companies = len(original_list_items)
+    now_iso = pd.Timestamp.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ")
+
+    if mode == "round_robin":
+        assignment = assign_callers(original_list_items, new_callers, rerank_by_score=rerank)
+    else:
+        settings_key = f"_range_settings::{country_folder}"
+        settings = st.session_state.get(settings_key)
+        if not settings or set(settings) - set(new_callers):
+            # Reseed when the caller pool changed (new/removed caller) so
+            # every caller in the pool always has a starting range.
+            settings = default_range_settings(new_callers, total_companies)
+            st.session_state[settings_key] = settings
+
+        st.caption(
+            "Elke caller krijgt een expliciete range op de scorerangorde "
+            "(rang 1 = hoogste score). Ranges kunnen per caller in een "
+            "andere eenheid worden opgegeven; ze werken samen op dezelfde "
+            "onderliggende rangorde. Bij overlap wint de laatste caller in "
+            "de lijst hierboven."
+        )
+        for caller in new_callers:
+            cfg = settings.setdefault(
+                caller, {"mode": "count", "start": 1, "end": total_companies, "cohort_size": 100})
+            with st.expander(f"Range voor **{caller}**", expanded=True):
+                col_mode, col_range = st.columns([1, 3])
+                range_mode = col_mode.selectbox(
+                    "Eenheid", options=list(RANGE_MODES),
+                    index=list(RANGE_MODES).index(cfg["mode"]),
+                    format_func=lambda v: {
+                        "count": "Aantal (rangnummer)",
+                        "percentile": "Percentiel (%)",
+                        "cohort": "Cohort",
+                    }[v],
+                    key=f"_range_mode::{country_folder}::{caller}",
+                )
+                cfg["mode"] = range_mode
+                if range_mode == "count":
+                    start, end = col_range.slider(
+                        "Rangbereik", min_value=1, max_value=max(1, total_companies),
+                        value=(int(cfg["start"]), int(min(cfg["end"], total_companies))),
+                        key=f"_range_count::{country_folder}::{caller}",
+                    )
+                    cfg["start"], cfg["end"] = start, end
+                elif range_mode == "percentile":
+                    start, end = col_range.slider(
+                        "Percentielbereik (%)", min_value=0.0, max_value=100.0,
+                        value=(float(cfg["start"]), float(cfg["end"])), step=1.0,
+                        key=f"_range_pct::{country_folder}::{caller}",
+                    )
+                    cfg["start"], cfg["end"] = start, end
+                else:  # cohort
+                    size_col, range_col = col_range.columns([1, 2])
+                    cohort_size = size_col.number_input(
+                        "Cohortgrootte", min_value=1, value=int(cfg.get("cohort_size") or 100),
+                        key=f"_range_cohort_size::{country_folder}::{caller}",
+                    )
+                    cfg["cohort_size"] = cohort_size
+                    max_cohort = max(1, math.ceil(total_companies / cohort_size))
+                    start, end = range_col.slider(
+                        "Cohortbereik", min_value=1, max_value=max_cohort,
+                        value=(
+                            min(int(cfg["start"]), max_cohort),
+                            min(int(cfg["end"]), max_cohort),
+                        ),
+                        key=f"_range_cohort_idx::{country_folder}::{caller}",
+                    )
+                    cfg["start"], cfg["end"] = start, end
+                bounds_preview = CallerRange(
+                    caller=caller, mode=cfg["mode"], start=cfg["start"], end=cfg["end"],
+                    cohort_size=cfg.get("cohort_size") if cfg["mode"] == "cohort" else None,
+                )
+                start_rank, end_rank = resolve_range_bounds(bounds_preview, total_companies)
+                n_in_range = max(0, end_rank - start_rank + 1)
+                st.caption(f"→ rang {start_rank}–{end_rank} ({n_in_range} bedrijven).")
+
+        ranges = caller_ranges_from_settings(new_callers, settings)
+        coverage = caller_ranges_coverage(ranges, total_companies)
+        if coverage["gaps"]:
+            st.warning(
+                f"{len(coverage['gaps'])} bedrijven vallen buiten elke range "
+                "(rang " + ", ".join(str(r) for r in coverage["gaps"][:10]) +
+                (", …" if len(coverage["gaps"]) > 10 else "") +
+                ") en blijven onbeheerd totdat een range ze dekt."
+            )
+        if coverage["overlaps"]:
+            st.info(
+                f"{len(coverage['overlaps'])} bedrijven vallen in meerdere ranges — "
+                "de laatst genoemde caller hierboven wint per bedrijf."
+            )
+        assignment = assign_callers_by_ranges(
+            original_list_items, ranges, rerank_by_score=rerank)
+
+    # ---------------------------------------------------------------------
     # Live preview
     # ---------------------------------------------------------------------
-    now_iso = pd.Timestamp.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ")
-    assignment = assign_callers(original_list_items, new_callers, rerank_by_score=rerank)
     new_list_items = [
         {**it, **_moved(assignment, it)} for it in original_list_items
     ]
@@ -227,7 +379,7 @@ def main() -> None:  # pragma: no cover - exercised only under `streamlit run`
     # Apply & upload
     # ---------------------------------------------------------------------
     st.divider()
-    st.subheader("3. Uploaden naar GCS")
+    st.subheader("4. Uploaden naar GCS")
     st.caption(
         "Schrijft naar een NIEUWE run-folder — current/ en bestaande runs "
         "blijven ongewijzigd. De live Company Hub ziet deze toewijzing pas na "
@@ -246,8 +398,8 @@ def main() -> None:  # pragma: no cover - exercised only under `streamlit run`
             write_reallocated_run,
         )
         try:
-            reallocated_run = build_reallocated_run(
-                current, new_callers, country_folder=country_folder,
+            reallocated_run = build_reallocated_run_from_assignment(
+                current, assignment, new_callers, country_folder=country_folder,
                 run_folder=run_folder, now_iso=now_iso, rerank_by_score=rerank,
             )
             out_dir = write_reallocated_run(
@@ -273,7 +425,7 @@ def main() -> None:  # pragma: no cover - exercised only under `streamlit run`
     # live in the Company Hub.
     # ---------------------------------------------------------------------
     st.divider()
-    st.subheader("4. Promoveer naar current")
+    st.subheader("5. Promoveer naar current")
     st.caption(
         "De live Company Hub leest alleen uit current/. Zolang je hier niet "
         "expliciet promoveert, blijft de zojuist geüploade run onzichtbaar "
