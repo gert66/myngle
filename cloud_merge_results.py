@@ -38,13 +38,28 @@ from cloud_job_runner import (
 
 DEFAULT_FINAL_OUTPUT_NAME = "lead_prioritizer_final.xlsx"
 
-# Must match lead_prioritizer_batch_core._SHEET_NAMES["enriched_leads"] /
-# export_lead_prioritizer_to_lovable_json.ENRICHED_SHEET: every part file
-# lead_prioritizer_batch_cli.py writes has its data under a sheet with this
-# exact name, and export_workbook_to_lovable_json() (the Cloud Run Lovable
-# auto-export step) requires this exact sheet name to be present in the
-# merged final workbook, not just "whichever sheet happens to be first".
+# Must match lead_prioritizer_batch_core._SHEET_NAMES / DEEP_DIVE_SHEET_NAME —
+# every part file lead_prioritizer_batch_cli.py writes has its data under
+# sheets with these exact names, and export_workbook_to_lovable_json() (the
+# Cloud Run Lovable auto-export step) requires "Enriched Leads" to be
+# present, plus reads Evidence/Signals/Run Summary/Deep Dive when present.
 ENRICHED_LEADS_SHEET_NAME = "Enriched Leads"
+EVIDENCE_SHEET_NAME = "Evidence"
+SIGNALS_SHEET_NAME = "Signals"
+RUN_SUMMARY_SHEET_NAME = "Run Summary"
+DEEP_DIVE_SHEET_NAME = "Deep Dive"
+
+# lead_prioritizer_batch_core.flatten_result_for_excel/flatten_evidence_for_excel/
+# flatten_signals_for_excel/flatten_deep_dive_for_excel all stamp this column
+# from the pandas index of lead_prioritizer_batch_cli.py's OWN input read —
+# which, for a Cloud Run task, is a fresh 0-based RangeIndex LOCAL to that
+# one task's row-shard (the shard was written with index=False, so nothing
+# about the original file's row position survives except the separate
+# ROW_INDEX_COL column cloud_job_runner.py adds). Concatenating Evidence/
+# Signals/Deep Dive rows across tasks WITHOUT remapping this column would
+# silently collide -- task 0's source_index=0 and task 7's source_index=0
+# both claim "row 0", but are different companies. See merge_workbook_sheets.
+SOURCE_INDEX_COL = "source_index"
 
 
 def _now_iso() -> str:
@@ -136,6 +151,87 @@ def merge_part_dataframes(local_part_paths: list[Path]) -> pd.DataFrame:
     return merged
 
 
+def _remap_source_index(df: pd.DataFrame, index_map: dict) -> pd.DataFrame:
+    """Rewrite df[SOURCE_INDEX_COL] through index_map (local -> run-wide id),
+    leaving any value with no mapping entry untouched rather than raising —
+    a row this defensive lookup can't place is still worth keeping."""
+    if df.empty or SOURCE_INDEX_COL not in df.columns or not index_map:
+        return df
+    df = df.copy()
+    df[SOURCE_INDEX_COL] = df[SOURCE_INDEX_COL].map(
+        lambda v: index_map.get(int(v), v) if pd.notna(v) else v)
+    return df
+
+
+def merge_workbook_sheets(local_part_paths: list[Path]) -> dict[str, pd.DataFrame]:
+    """Merge EVERY sheet lead_prioritizer_batch_cli.py writes (Enriched
+    Leads, Evidence, Signals, Run Summary, Deep Dive) across all part files —
+    not just Enriched Leads, which merge_part_dataframes/the pre-existing
+    behavior handled alone. Without this, export_workbook_to_lovable_json()
+    (the Cloud Run "auto-export to Lovable" step) always saw an empty/missing
+    Signals sheet, so every non-HQ Commercial Fit Driver showed "Not
+    evidenced" regardless of the real sig_*_score values -- confirmed live
+    against a real run (Excelian | Luxoft: sig_international_profile_score=2
+    etc. with real reason text, yet the Lovable export showed all four
+    non-HQ drivers as unevidenced).
+
+    Also remaps SOURCE_INDEX_COL in Evidence/Signals/Deep Dive from each
+    part's own locally-0-based value onto the run-wide-unique ROW_INDEX_COL
+    every Enriched Leads row already carries (see SOURCE_INDEX_COL's
+    docstring above) -- required for export_lead_prioritizer_to_lovable_json.py's
+    source_index-keyed row matching to still link the right Evidence/Signals
+    rows to the right company once multiple tasks' rows sit in one sheet.
+    """
+    enriched_frames: list[pd.DataFrame] = []
+    evidence_frames: list[pd.DataFrame] = []
+    signal_frames: list[pd.DataFrame] = []
+    summary_frames: list[pd.DataFrame] = []
+    deep_dive_frames: list[pd.DataFrame] = []
+
+    for path in local_part_paths:
+        with pd.ExcelFile(path) as xls:
+            sheet_names = set(xls.sheet_names)
+            if ENRICHED_LEADS_SHEET_NAME not in sheet_names:
+                continue  # defensive; every real part file has this sheet
+            enriched_part = xls.parse(ENRICHED_LEADS_SHEET_NAME)
+
+            index_map: dict = {}
+            if SOURCE_INDEX_COL in enriched_part.columns and ROW_INDEX_COL in enriched_part.columns:
+                for local_idx, global_idx in zip(
+                        enriched_part[SOURCE_INDEX_COL], enriched_part[ROW_INDEX_COL]):
+                    if pd.notna(local_idx) and pd.notna(global_idx):
+                        index_map[int(local_idx)] = int(global_idx)
+                # Canonicalize: source_index becomes the same run-wide id
+                # Evidence/Signals/Deep Dive rows get remapped onto below, so
+                # every sheet agrees on one id scheme after the merge.
+                enriched_part[SOURCE_INDEX_COL] = enriched_part[ROW_INDEX_COL]
+            enriched_frames.append(enriched_part)
+
+            if EVIDENCE_SHEET_NAME in sheet_names:
+                evidence_frames.append(_remap_source_index(xls.parse(EVIDENCE_SHEET_NAME), index_map))
+            if SIGNALS_SHEET_NAME in sheet_names:
+                signal_frames.append(_remap_source_index(xls.parse(SIGNALS_SHEET_NAME), index_map))
+            if DEEP_DIVE_SHEET_NAME in sheet_names:
+                deep_dive_frames.append(_remap_source_index(xls.parse(DEEP_DIVE_SHEET_NAME), index_map))
+            if RUN_SUMMARY_SHEET_NAME in sheet_names:
+                summary_frames.append(xls.parse(RUN_SUMMARY_SHEET_NAME))
+
+    def _concat(frames: list[pd.DataFrame]) -> pd.DataFrame:
+        return pd.concat(frames, ignore_index=True) if frames else pd.DataFrame()
+
+    enriched = _concat(enriched_frames)
+    if ROW_INDEX_COL in enriched.columns:
+        enriched = enriched.sort_values(ROW_INDEX_COL, kind="stable").reset_index(drop=True)
+
+    return {
+        "enriched_leads": enriched,
+        "evidence": _concat(evidence_frames),
+        "signals": _concat(signal_frames),
+        "run_summary": _concat(summary_frames),
+        "deep_dive": _concat(deep_dive_frames),
+    }
+
+
 def main(argv=None) -> int:
     cfg = resolve_merge_config(argv)
     started_at = _now_iso()
@@ -194,15 +290,25 @@ def main(argv=None) -> int:
         local_paths.append(_download_to_local(loc, local_target))
 
     try:
-        merged_df = merge_part_dataframes(local_paths)
+        merged_sheets = merge_workbook_sheets(local_paths)
     except Exception as exc:
         err_msg = f"{type(exc).__name__}: {exc}"
         print(f"[cloud_merge_results] ERROR: could not merge part files: {err_msg}", file=sys.stderr)
         _write_manifest_failed(manifest_uri, cfg, started_at, err_msg)
         return 1
+    merged_df = merged_sheets["enriched_leads"]
 
     local_final = tmp_dir / final_name
-    merged_df.to_excel(local_final, sheet_name=ENRICHED_LEADS_SHEET_NAME, index=False)
+    with pd.ExcelWriter(local_final, engine="openpyxl") as writer:
+        merged_df.to_excel(writer, sheet_name=ENRICHED_LEADS_SHEET_NAME, index=False)
+        merged_sheets["evidence"].to_excel(writer, sheet_name=EVIDENCE_SHEET_NAME, index=False)
+        merged_sheets["signals"].to_excel(writer, sheet_name=SIGNALS_SHEET_NAME, index=False)
+        merged_sheets["run_summary"].to_excel(writer, sheet_name=RUN_SUMMARY_SHEET_NAME, index=False)
+        # Match lead_prioritizer_batch_core.build_excel_workbook_bytes: an
+        # empty Deep Dive sheet is omitted entirely rather than written blank
+        # (most runs never enable --deep-dive at all).
+        if not merged_sheets["deep_dive"].empty:
+            merged_sheets["deep_dive"].to_excel(writer, sheet_name=DEEP_DIVE_SHEET_NAME, index=False)
     print(f"[cloud_merge_results] Uploading final Excel -> {final_output_uri}", flush=True)
     upload_output_file(local_final, final_output_uri)
 

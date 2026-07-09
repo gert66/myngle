@@ -37,6 +37,35 @@ def _write_part(path: Path, names: list[str], indices: list[int]) -> None:
         path, sheet_name=cmr.ENRICHED_LEADS_SHEET_NAME, index=False)
 
 
+def _write_full_part(
+    path: Path, companies: list[str], global_indices: list[int],
+    signal_name: str = "international_profile", signal_score: int = 2,
+    signal_reason: str = "Operates in 9 countries",
+) -> None:
+    """Mirror a REAL lead_prioritizer_batch_cli.py part file: Enriched Leads
+    carries both ROW_INDEX_COL (run-wide, from cloud_job_runner.py) and its
+    own "source_index" column (local 0..N-1 within THIS part, per
+    lead_prioritizer_batch_core.flatten_result_for_excel) -- plus a Signals
+    sheet whose rows reference that same LOCAL source_index (per
+    flatten_signals_for_excel), exactly like real Cloud Run part files."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    local_source_index = list(range(len(companies)))
+    enriched = pd.DataFrame({
+        "company_name": companies,
+        ROW_INDEX_COL: global_indices,
+        cmr.SOURCE_INDEX_COL: local_source_index,
+    })
+    signals = pd.DataFrame({
+        cmr.SOURCE_INDEX_COL: local_source_index,
+        "signal_name": [signal_name] * len(companies),
+        "signal_score": [signal_score] * len(companies),
+        "signal_reason": [signal_reason] * len(companies),
+    })
+    with pd.ExcelWriter(path, engine="openpyxl") as writer:
+        enriched.to_excel(writer, sheet_name=cmr.ENRICHED_LEADS_SHEET_NAME, index=False)
+        signals.to_excel(writer, sheet_name=cmr.SIGNALS_SHEET_NAME, index=False)
+
+
 def _write_status(output_dir: Path, task_index: int, status: str) -> None:
     """Mirror what cloud_job_runner.py actually writes: a status/*_{done,failed}.json
     for every task, whether or not that task produced a parts/*.xlsx (a task with an
@@ -93,7 +122,7 @@ def test_final_output_has_enriched_leads_sheet_name(tmp_path):
     assert rc == 0
     final_path = output_dir / "final" / cmr.DEFAULT_FINAL_OUTPUT_NAME
     with pd.ExcelFile(final_path) as xls:
-        assert xls.sheet_names == [cmr.ENRICHED_LEADS_SHEET_NAME]
+        assert xls.sheet_names[0] == cmr.ENRICHED_LEADS_SHEET_NAME
 
 
 def test_final_output_name_is_honored_and_xlsx_suffix_is_added(tmp_path):
@@ -244,3 +273,89 @@ def test_merge_part_dataframes_sorts_by_row_index(tmp_path):
 def test_merge_part_dataframes_empty_list_returns_empty_dataframe():
     merged = cmr.merge_part_dataframes([])
     assert merged.empty
+
+
+# ---------------------------------------------------------------------------
+# merge_workbook_sheets — Evidence/Signals/Run Summary/Deep Dive, not just
+# Enriched Leads (regression: the Cloud Run "auto-export to Lovable" step
+# always saw an empty Signals sheet, so every non-HQ Commercial Fit Driver
+# showed "Not evidenced" regardless of the real sig_*_score values).
+# ---------------------------------------------------------------------------
+
+def test_merge_workbook_sheets_carries_signals_across_parts(tmp_path):
+    p1 = tmp_path / "part_0000.xlsx"
+    p2 = tmp_path / "part_0001.xlsx"
+    _write_full_part(p1, ["Acme"], [0])
+    _write_full_part(p2, ["Beta"], [1])
+
+    merged = cmr.merge_workbook_sheets([p1, p2])
+
+    assert list(merged["enriched_leads"]["company_name"]) == ["Acme", "Beta"]
+    assert len(merged["signals"]) == 2
+    assert set(merged["signals"]["signal_name"]) == {"international_profile"}
+
+
+def test_merge_workbook_sheets_remaps_source_index_to_avoid_cross_task_collisions(tmp_path):
+    """The critical regression: two Cloud Run tasks each locally number their
+    own rows source_index=0 (lead_prioritizer_batch_cli.py has no idea it's
+    one of several parallel tasks) -- after merging, "Signals" rows must
+    still point at the correct company via the run-wide ROW_INDEX_COL, not
+    collide because two different companies both had local source_index=0."""
+    p1 = tmp_path / "part_0000.xlsx"
+    p2 = tmp_path / "part_0001.xlsx"
+    # Both parts' own local source_index starts at 0 -- exactly what real
+    # Cloud Run tasks produce (each is its own lead_prioritizer_batch_cli.py
+    # invocation with a fresh 0-based read).
+    _write_full_part(p1, ["Acme"], global_indices=[5], signal_reason="Acme evidence")
+    _write_full_part(p2, ["Beta"], global_indices=[12], signal_reason="Beta evidence")
+
+    merged = cmr.merge_workbook_sheets([p1, p2])
+
+    enriched = merged["enriched_leads"]
+    signals = merged["signals"]
+    # source_index in Enriched Leads is canonicalized to the run-wide id.
+    assert dict(zip(enriched["company_name"], enriched[cmr.SOURCE_INDEX_COL])) == {
+        "Acme": 5, "Beta": 12,
+    }
+    # Signals rows must be remapped onto that SAME run-wide id, not the
+    # local 0 both parts started with -- otherwise both would say
+    # source_index=0 and a downstream reader could attribute Beta's
+    # evidence to Acme (or vice versa) after the merge.
+    signals_by_index = dict(zip(signals[cmr.SOURCE_INDEX_COL], signals["signal_reason"]))
+    assert signals_by_index == {5: "Acme evidence", 12: "Beta evidence"}
+
+
+def test_merge_workbook_sheets_part_without_optional_sheets_is_fine(tmp_path):
+    p1 = tmp_path / "part_0000.xlsx"
+    _write_part(p1, ["Acme"], [0])  # no Signals/Evidence sheet at all
+
+    merged = cmr.merge_workbook_sheets([p1])
+
+    assert list(merged["enriched_leads"]["company_name"]) == ["Acme"]
+    assert merged["signals"].empty
+    assert merged["evidence"].empty
+
+
+def test_merge_workbook_sheets_empty_list_returns_empty_frames():
+    merged = cmr.merge_workbook_sheets([])
+    assert all(df.empty for df in merged.values())
+    assert set(merged) == {"enriched_leads", "evidence", "signals", "run_summary", "deep_dive"}
+
+
+def test_main_writes_signals_sheet_reachable_from_final_workbook(tmp_path):
+    """End-to-end: main() must produce a final workbook whose Signals sheet
+    export_lead_prioritizer_to_lovable_json.py can actually read (not just an
+    Enriched Leads sheet, which was the pre-fix behavior)."""
+    output_dir = tmp_path / "out"
+    _write_full_part(output_dir / "parts" / "part_0000.xlsx", ["Acme"], [0])
+    _write_status(output_dir, 0, "done")
+
+    rc = cmr.main(["--output-dir", str(output_dir), "--run-id", "signals-e2e", "--expected-task-count", "1"])
+
+    assert rc == 0
+    final_path = output_dir / "final" / cmr.DEFAULT_FINAL_OUTPUT_NAME
+    with pd.ExcelFile(final_path) as xls:
+        assert cmr.SIGNALS_SHEET_NAME in xls.sheet_names
+        signals = xls.parse(cmr.SIGNALS_SHEET_NAME)
+    assert len(signals) == 1
+    assert signals.iloc[0]["signal_score"] == 2

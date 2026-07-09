@@ -276,7 +276,14 @@ python cloud_merge_results.py \
 - Part-outputs: `gs://<runs-bucket>/runs/<run_id>/parts/part_XXXX.xlsx`
 - Status per task: `gs://<runs-bucket>/runs/<run_id>/status/part_XXXX_{running,done,failed}.json`
 - Finale Excel: `gs://<runs-bucket>/runs/<run_id>/final/lead_prioritizer_final.xlsx`
-  (of de naam die je via `FINAL_OUTPUT_NAME`/`--final-output-name` opgeeft)
+  (of de naam die je via `FINAL_OUTPUT_NAME`/`--final-output-name` opgeeft) —
+  bevat alle bladen die elke task ook al had (Enriched Leads, Evidence,
+  Signals, Run Summary, en Deep Dive indien niet leeg), niet alleen Enriched
+  Leads. `source_index` in Evidence/Signals/Deep Dive wordt bij het mergen
+  herschreven naar de run-brede `_cloud_original_row_index`, zodat die rijen
+  na het samenvoegen van meerdere tasks nog steeds bij het juiste bedrijf
+  horen — anders begint elke task lokaal weer bij `source_index=0` en zou de
+  Lovable-export (die op `source_index` matcht) door elkaar lopen.
 - Merge-manifest: `gs://<runs-bucket>/runs/<run_id>/final/manifest_done.json`
 
 ## Gecombineerd API-verbruik + cache-hitrapport
