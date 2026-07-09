@@ -424,17 +424,24 @@ C5-pass (geen dubbele C5-run).
   Storage" (beide in de sidebar) aanstaan — current/ helemaal overslaan kan
   alleen nog door die laatste checkbox uit te zetten (schakelt dan ook het
   archief-uploaden uit).
-- **Lovable-export archief (`runs/<run_folder>/`, standaard `YYYY-MM-DD_`
-  `<mode>`)**: dit IS bedoeld als permanent historisch record (altijd de
-  onvermengde export van precies déze run, ook als current/ op Merge staat).
-  Vóór de Streamlit-app de dure Cloud Run Job start, checkt hij nu of die
-  archiefmap al bestanden bevat (bv. een eerdere run van hetzelfde
-  land/dezelfde mode, dezelfde dag) en toont dan een waarschuwing met de
-  bestandslijst plus een bevestig-checkbox ("Ja, ik wil de bestaande
-  archiefdata overschrijven") — pas na aanvinken start de run. Zonder
-  conflict verandert er niets (geen extra klik nodig). Deze check zit alleen
-  in de Streamlit-app (waar een mens de vraag kan beantwoorden), niet in de
-  dispatcher/Eventarc-flow, die headless draait.
+- **Lovable-export archief (`runs/<run_folder>/`)**: dit IS bedoeld als
+  permanent historisch record (altijd de onvermengde export van precies
+  déze run, ook als current/ op Merge staat). Het "GCS run folder"-veld in
+  de sidebar staat standaard op `<datum>_<mode>_<tijd>` — de tijd (HHMMSS)
+  is bewust toegevoegd bovenop `lovable_gcs_upload.default_gcs_run_folder()`'s
+  eigen `<datum>_<mode>` (dat blijft de standaard voor de lokale batch-app,
+  hier niet aangepast), zodat twee runs op dezelfde dag/mode NOOIT meer
+  automatisch naar dezelfde archiefmap wijzen. Vóór de Streamlit-app de dure
+  Cloud Run Job start, checkt hij nog steeds of de (eventueel handmatig
+  aangepaste) archiefmap al bestanden bevat, en toont dan een waarschuwing
+  met de bestandslijst plus een bevestig-checkbox ("Ja, ik wil de bestaande
+  archiefdata overschrijven") — pas na aanvinken start de run. Door de
+  standaard-uniek-per-run-naam komt dit nu vrijwel alleen nog voor als je
+  het veld zelf bewust hergebruikt (bv. om meerdere deelruns van dezelfde
+  dag in één archiefmap te bundelen). Zonder conflict verandert er niets
+  (geen extra klik nodig). Deze check zit alleen in de Streamlit-app (waar
+  een mens de vraag kan beantwoorden), niet in de dispatcher/Eventarc-flow,
+  die headless draait.
 
 ## current/ mergen in plaats van overschrijven
 
@@ -483,9 +490,12 @@ bedrijven door de hele pipeline gehaald, niet 100 "gratis" hergebruikt.
 ### Skip-filter: al verrijkte bedrijven vooraf overslaan
 
 Om wél kosten te besparen op een herhaalde run, staat er — alleen zichtbaar
-bij **Mergen** — een extra checkbox: "Bedrijven die al volledig verrijkt in
-current/ staan overslaan". Staat die aan, dan gebeurt er vóórdat de Cloud
-Run Job start:
+bij **Mergen**, en daar standaard AAN — een extra checkbox: "Bedrijven die
+al volledig verrijkt in current/ staan overslaan" (bewust default aan: een
+Mergen-run zonder deze filter verwerkt gewoon alle rijen opnieuw, inclusief
+bedrijven die al in `current/` stonden — dat overkwam de gebruiker
+herhaaldelijk toen de checkbox nog default uit stond). Staat die aan, dan
+gebeurt er vóórdat de Cloud Run Job start:
 
 1. De bestaande `current/companies.list.json` wordt gedownload.
 2. Elk bedrijf daarin met `enrichment_skipped=False` (dus écht volledig
