@@ -283,6 +283,20 @@ def main() -> None:  # pragma: no cover - exercised only under `streamlit run`
         "voor de architectuur; dit is een UI bovenop dezelfde stappen."
     )
 
+    # Read BEFORE the sidebar (even though it visually renders in the main
+    # area, via st.file_uploader not st.sidebar.file_uploader) so the
+    # sidebar's "Export country"/"GCS prefix" defaults below can actually use
+    # the filename-based guess. Doing this the other way around silently
+    # exported every run to gs://<bucket>/unknown/current/ instead of e.g.
+    # .../switzerland/current/ -- the guess was computed, just never fed back
+    # into the GCS-prefix widget, which had already rendered by then.
+    uploaded = st.file_uploader("Input-Excel (.xlsx)", type=["xlsx"])
+    _guessed_export_country = (
+        suggest_country_from_filename(uploaded.name, SUPPORTED_DEFAULT_INPUT_COUNTRIES)
+        if uploaded is not None else ""
+    )
+    _uploaded_key = uploaded.name if uploaded is not None else "none"
+
     with st.sidebar:
         st.header("Instellingen")
         project = st.text_input("GCP-project", value=DEFAULT_PROJECT)
@@ -381,10 +395,22 @@ def main() -> None:  # pragma: no cover - exercised only under `streamlit run`
         upload_current = True
         upload_archive = True
         if auto_lovable_export_enabled:
+            _country_options = [""] + list(SUPPORTED_DEFAULT_INPUT_COUNTRIES)
+            _guessed_index = (
+                _country_options.index(_guessed_export_country)
+                if _guessed_export_country in _country_options else 0
+            )
             export_country = st.selectbox(
-                "Export country", options=[""] + list(SUPPORTED_DEFAULT_INPUT_COUNTRIES),
-                index=0,
-                help="Leeg = geprobeerd te raden uit de bestandsnaam bij het starten van de run.")
+                "Export country", options=_country_options,
+                index=_guessed_index,
+                # Keyed by the uploaded filename so a NEW file re-triggers the
+                # guessed default instead of sticking to whatever an earlier
+                # file's widget state was (Streamlit keeps widget state across
+                # reruns once a user has interacted with it).
+                key=f"export_country_{_uploaded_key}",
+                help="Automatisch geraden uit de bestandsnaam; pas aan indien nodig. "
+                     "Bepaalt ook het GCS-pad hieronder (gs://<bucket>/<dit land>/...) "
+                     "— leeg laten stuurt de export naar .../unknown/.")
             cold_callers_raw = st.text_input(
                 "Cold callers (comma-separated)", value=DEFAULT_COLD_CALLERS_TEXT)
             fc1, fc2 = st.columns(2)
@@ -402,15 +428,19 @@ def main() -> None:  # pragma: no cover - exercised only under `streamlit run`
                     "GCS bucket (Lovable-export)", value=lovable_gcs.DEFAULT_GCS_BUCKET)
                 export_gcs_prefix = st.text_input(
                     "GCS prefix/pad (bv. <land>)",
-                    value=default_gcs_country_prefix(export_country))
+                    value=default_gcs_country_prefix(export_country),
+                    # Keyed like "Export country" above -- without this, a
+                    # different Export country on a later run (e.g. a second
+                    # test with a different input file) would NOT refresh
+                    # this field, since Streamlit text_input keeps whatever
+                    # the user/previous default already put here.
+                    key=f"export_gcs_prefix_{_uploaded_key}_{export_country}")
                 export_gcs_run_folder = st.text_input(
                     "GCS run folder",
                     value=lovable_gcs.default_gcs_run_folder(mode))
                 uc1, uc2 = st.columns(2)
                 upload_current = uc1.checkbox("Overwrite current/", value=True)
                 upload_archive = uc2.checkbox("Archive naar runs/<run_folder>/", value=True)
-
-    uploaded = st.file_uploader("Input-Excel (.xlsx)", type=["xlsx"])
 
     if uploaded is not None and st.button("🚀 Start Cloud Run", type="primary"):
         work_dir = Path(tempfile.mkdtemp(prefix="cloud_run_streamlit_"))
