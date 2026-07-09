@@ -81,6 +81,7 @@ __all__ = [
     "reallocation_movers",
     "build_reallocate_manifest",
     "build_reallocated_run",
+    "build_reallocated_run_from_assignment",
     "default_reallocate_run_folder",
     "write_reallocated_run",
     "upload_reallocated_run",
@@ -367,8 +368,9 @@ def default_reallocate_run_folder(now: "datetime | None" = None) -> str:
     return f"{now.strftime('%Y-%m-%d')}_reallocate"
 
 
-def build_reallocated_run(
+def build_reallocated_run_from_assignment(
     current: dict,
+    assignment: dict,
     cold_callers: list[str],
     *,
     country_folder: str,
@@ -376,22 +378,20 @@ def build_reallocated_run(
     now_iso: str,
     rerank_by_score: bool = False,
 ) -> dict:
-    """Pure, no-I/O core of a reallocation: turn an already-loaded ``current``
-    bundle (the ``dict`` returned by ``download_current_run`` — or an
-    equivalent one built in memory) into the new run's
+    """Pure, no-I/O core of a reallocation from an ALREADY-COMPUTED
+    ``company_id -> (caller, rank)`` assignment (e.g. from ``assign_callers``
+    for round-robin, or ``caller_range_assignment.assign_callers_by_ranges``
+    for range/percentile/cohort-based assignment). Turns an already-loaded
+    ``current`` bundle (the ``dict`` returned by ``download_current_run`` —
+    or an equivalent one built in memory) into the new run's
     ``{"list_items", "detail_files", "manifest"}``.
 
-    Kept separate from ``reallocate_country`` so an interactive tool can
-    re-run it on every caller-list edit without re-hitting GCS.
+    ``cold_callers`` is recorded in the manifest as the caller pool label
+    only — it does not have to match every caller name appearing in
+    ``assignment`` (e.g. an ``unassigned_label`` placeholder from a partial
+    range rollout).
     """
-    callers = normalize_cold_callers(cold_callers)
-    if not callers:
-        raise ValueError("At least one cold caller is required.")
-
     original_list_items = current["list_items"]
-    assignment = assign_callers(
-        original_list_items, callers, rerank_by_score=rerank_by_score)
-
     new_list_items = reassign_list_items(original_list_items, assignment)
     new_detail_files = {
         filename: reassign_details_bucket(
@@ -405,7 +405,7 @@ def build_reallocated_run(
         run_folder=run_folder,
         original_list_items=original_list_items,
         rescaled_list_items=new_list_items,
-        new_cold_callers=callers,
+        new_cold_callers=cold_callers,
         rerank_by_score=rerank_by_score,
         generated_at=now_iso,
         assignment=assignment,
@@ -415,6 +415,38 @@ def build_reallocated_run(
         "detail_files": new_detail_files,
         "manifest": manifest,
     }
+
+
+def build_reallocated_run(
+    current: dict,
+    cold_callers: list[str],
+    *,
+    country_folder: str,
+    run_folder: str,
+    now_iso: str,
+    rerank_by_score: bool = False,
+) -> dict:
+    """Pure, no-I/O core of a round-robin reallocation: turn an already-loaded
+    ``current`` bundle (the ``dict`` returned by ``download_current_run`` —
+    or an equivalent one built in memory) into the new run's
+    ``{"list_items", "detail_files", "manifest"}``.
+
+    Kept separate from ``reallocate_country`` so an interactive tool can
+    re-run it on every caller-list edit without re-hitting GCS. For
+    range/percentile/cohort-based assignment, compute the assignment with
+    ``caller_range_assignment.assign_callers_by_ranges`` and call
+    ``build_reallocated_run_from_assignment`` directly instead.
+    """
+    callers = normalize_cold_callers(cold_callers)
+    if not callers:
+        raise ValueError("At least one cold caller is required.")
+
+    assignment = assign_callers(
+        current["list_items"], callers, rerank_by_score=rerank_by_score)
+    return build_reallocated_run_from_assignment(
+        current, assignment, callers, country_folder=country_folder,
+        run_folder=run_folder, now_iso=now_iso, rerank_by_score=rerank_by_score,
+    )
 
 
 # =============================================================================
