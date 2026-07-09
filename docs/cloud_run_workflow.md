@@ -108,7 +108,7 @@ gezet zijn (dat doet het platform automatisch); anders vallen we terug op
 |---|---|
 | `RUN_ID` | run-identifier |
 | `OUTPUT_GCS_DIR` | zelfde `runs/<run_id>` map als de tasks |
-| `EXPECTED_TASK_COUNT` | verwacht aantal part-bestanden (fail-fast bij mismatch) |
+| `EXPECTED_TASK_COUNT` | verwacht aantal tasks (fail-fast bij mismatch); dit is het aantal tasks dat een status-JSON moet hebben geschreven, **niet** het aantal part-bestanden — een task met een leeg rijblok (`TASK_COUNT` > aantal rijen) schrijft een `done`-status maar nooit een part-bestand, en telt hier gewoon mee |
 | `FINAL_OUTPUT_NAME` | optioneel, default `lead_prioritizer_final.xlsx` |
 
 ### `cloud_dispatcher.py` (service)
@@ -217,7 +217,11 @@ gcloud run jobs execute myngle-lead-prioritizer \
   --update-env-vars INPUT_GCS_URI=gs://myngle-input/incoming/klant.xlsx,OUTPUT_GCS_DIR=gs://myngle-runs/runs/20260101_120000_klant,RUN_ID=20260101_120000_klant,TASK_COUNT=25
 ```
 
-Dispatcher als Cloud Run **service** deployen:
+Dispatcher als Cloud Run **service** deployen (het service-account waaronder
+dit draait heeft `roles/run.developer`, of een rol met minimaal
+`run.jobs.run`, nodig — anders faalt `start_cloud_run_job_execution()` in
+`cloud_dispatcher.py` met een permission-error zodra hij een job probeert te
+starten):
 
 ```bash
 gcloud run deploy myngle-dispatcher \
@@ -266,9 +270,12 @@ python cloud_merge_results.py \
 - Cloud Run Jobs kan losse gefaalde tasks automatisch retrien
   (`--max-retries`); dankzij de idempotentie-check hierboven verwerkt een
   retry nooit dubbel als de part al klaar staat.
-- `cloud_merge_results.py` faalt expliciet en duidelijk als het aantal
-  gevonden part-bestanden niet overeenkomt met `EXPECTED_TASK_COUNT` — dat is
-  het signaal om losse tasks opnieuw te draaien voordat je merget.
+- `cloud_merge_results.py` faalt expliciet en duidelijk als het aantal tasks
+  dat een status-JSON heeft geschreven (`done` + `failed` samen) niet
+  overeenkomt met `EXPECTED_TASK_COUNT`, of als er één of meer `failed`-
+  statussen tussen zitten — dat is het signaal om losse tasks opnieuw te
+  draaien voordat je merget. Tasks met een leeg rijblok (`done`, geen part-
+  bestand) tellen gewoon mee als "gerapporteerd" en blokkeren de merge niet.
 
 ## Eerste veilige instellingen
 
@@ -313,10 +320,15 @@ python cloud_merge_results.py \
 - Geen Kubernetes.
 - Geen wijziging aan de bestaande scoringlogica in `commercial_fit_scoring.py`.
 - Streamlit (`streamlit_app.py`) blijft ongewijzigd bestaan en werken.
-- De dispatcher's Cloud Run Job execution-call is geïmplementeerd met de
-  `google-cloud-run` v2 client, maar is nooit end-to-end getest tegen een echte
-  Cloud Run Job in dit project — de eerste echte cloud-test gebeurt later
-  handmatig.
+- De dispatcher's Cloud Run Job execution-call (`google-cloud-run` v2 client)
+  is inmiddels end-to-end getest: `cloud_dispatcher.py` gedeployed als
+  authenticated Cloud Run service, aangeroepen met een gesimuleerd GCS
+  "object finalized"-event, en die triggerde succesvol een echte Cloud Run
+  Job execution (10 tasks, 3 rijen, 0 errors/429's, merge geslaagd). Vereist
+  wel dat het service-account van de dispatcher `roles/run.developer` (of
+  gelijkwaardig, incl. `run.jobs.run`) heeft — dat stond niet standaard aan.
+  Het Eventarc-triggerpad zelf (Cloud Storage "object finalized" → dispatcher)
+  is nog niet end-to-end getest, alleen de directe HTTP-aanroep.
 - Geen gedeelde/distributed concurrency-cap over Cloud Run-tasks heen — alleen
   per-call 429-retry/backoff (zie Rate-limit notities). Bij een te hoge
   `TASK_COUNT` t.o.v. de Firecrawl-tier leidt dat tot herhaalde, uiteindelijk
@@ -338,3 +350,10 @@ python cloud_merge_results.py \
 - Firecrawl/Serper 429's worden nu een paar keer met backoff geretried in
   plaats van de crawl voor die lead meteen als hard failure af te schrijven
   (zie Rate-limit notities hierboven).
+- `cloud_merge_results.py` telt sinds de eerste echte end-to-end-test tegen
+  Cloud Run status-bestanden (`done`/`failed`) in plaats van part-bestanden
+  om `EXPECTED_TASK_COUNT` te verifiëren. Met de eerdere part-telling faalde
+  elke merge zodra `TASK_COUNT` groter was dan het aantal rijen (bv. de
+  aanbevolen `TASK_COUNT=10` tegen een testbestand van een paar rijen) — een
+  taak met een leeg rijblok schrijft namelijk nooit een part-bestand, alleen
+  een `done`-status.
