@@ -22,6 +22,7 @@ from cloud_run_streamlit_app import (
     count_task_statuses,
     gcs_incoming_uri,
     gcs_output_dir,
+    list_existing_gcs_files,
     run_streaming,
 )
 
@@ -142,6 +143,36 @@ def test_count_task_statuses_order_independent_for_same_task():
         "gs://b/runs/r/status/part_0000_running.json\n"
     )
     assert count_task_statuses(listing) == {"done": 1, "failed": 0, "running": 0}
+
+
+# ── list_existing_gcs_files: archive-folder overwrite pre-flight check ──────
+
+def test_list_existing_gcs_files_extracts_gs_uris():
+    listing = (
+        "gs://b/spain/runs/2026-07-09_full/companies.list.json\n"
+        "gs://b/spain/runs/2026-07-09_full/company-details-0001.json\n"
+    )
+    assert list_existing_gcs_files(listing) == [
+        "gs://b/spain/runs/2026-07-09_full/companies.list.json",
+        "gs://b/spain/runs/2026-07-09_full/company-details-0001.json",
+    ]
+
+
+def test_list_existing_gcs_files_ignores_no_matches_message():
+    # gcloud's own "nothing here" message on an empty/not-yet-existing
+    # prefix -- must never be mistaken for a real object.
+    listing = "ERROR: (gcloud.storage.ls) One or more URLs matched no objects.\n"
+    assert list_existing_gcs_files(listing) == []
+
+
+def test_list_existing_gcs_files_empty_output_returns_empty_list():
+    assert list_existing_gcs_files("") == []
+
+
+def test_list_existing_gcs_files_strips_whitespace():
+    listing = "  gs://b/spain/runs/2026-07-09_full/companies.list.json  \n"
+    assert list_existing_gcs_files(listing) == [
+        "gs://b/spain/runs/2026-07-09_full/companies.list.json"]
 
 
 # ── Regression: gcloud is a .cmd wrapper on Windows ──────────────────────────

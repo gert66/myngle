@@ -403,6 +403,31 @@ hoeveel er daadwerkelijk bespaard is. Staat C5 ook aan, dan krijg je
 daarnaast de gebruikelijke `c5_*`-tellingen, gebaseerd op dezelfde Fase 1/2
 C5-pass (geen dubbele C5-run).
 
+## Opnieuw draaien van hetzelfde bestand — wat overschrijft, wat niet
+
+- **Cloud Run-output (`runs/<run_id>/...`)**: nooit een botsing. Elke klik op
+  "Start Cloud Run" genereert een nieuwe `run_id` op basis van het huidige
+  tijdstip (`build_run_id`), dus elke run krijgt zijn eigen map — een
+  herhaalde run van hetzelfde bestand overschrijft nooit een eerdere run z'n
+  part-/status-/final-bestanden.
+- **`incoming/<bestand>.xlsx`**: wordt bij elke upload stilzwijgend
+  overschreven (`gcloud storage cp`, geen check). Onschuldig voor de
+  Streamlit-app zelf (die het lokale bestand direct gebruikt, niet de
+  GCS-kopie), maar relevant voor het Eventarc/dispatcher-pad.
+- **Lovable-export `current/`**: wordt met opzet bij élke run overschreven —
+  dat is de hele bedoeling (altijd de nieuwste stand). Hier zit dus bewust
+  geen bevestigingsvraag.
+- **Lovable-export archief (`runs/<run_folder>/`, standaard `YYYY-MM-DD_`
+  `<mode>`)**: dit IS bedoeld als permanent historisch record. Vóór de
+  Streamlit-app de dure Cloud Run Job start, checkt hij nu of die archiefmap
+  al bestanden bevat (bv. een eerdere run van hetzelfde land/dezelfde mode,
+  dezelfde dag) en toont dan een waarschuwing met de bestandslijst plus een
+  bevestig-checkbox ("Ja, ik wil de bestaande archiefdata overschrijven") —
+  pas na aanvinken start de run. Zonder conflict verandert er niets (geen
+  extra klik nodig). Deze check zit alleen in de Streamlit-app (waar een
+  mens de vraag kan beantwoorden), niet in de dispatcher/Eventarc-flow, die
+  headless draait.
+
 ## Gedeelde enrichment-cache in cloud-runs
 
 De opt-in Serper/Firecrawl-cache (`USE_ENRICHMENT_CACHE` +

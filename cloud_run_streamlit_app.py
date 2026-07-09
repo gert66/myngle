@@ -109,6 +109,21 @@ def build_list_command(glob_pattern: str, project: str) -> list[str]:
     return [_gcloud_executable(), "storage", "ls", glob_pattern, "--project", project]
 
 
+def list_existing_gcs_files(listing_output: str) -> list[str]:
+    """Parse ``gcloud storage ls`` output into existing ``gs://`` object URIs.
+
+    Ignores blank lines and gcloud's own "No matches" message on an empty/
+    not-yet-existing prefix (a non-``gs://`` line is never a real object), so
+    this returns ``[]`` — not a crash — for the common "nothing there yet"
+    case. Callers should also treat a non-zero exit code as "nothing there"
+    (gcloud exits non-zero on a glob with zero matches).
+    """
+    return [
+        line.strip() for line in listing_output.splitlines()
+        if line.strip().startswith("gs://")
+    ]
+
+
 _STATUS_SUFFIXES = (("_done.json", "done"), ("_failed.json", "failed"), ("_running.json", "running"))
 
 
@@ -467,7 +482,46 @@ def main() -> None:  # pragma: no cover - exercised only under `streamlit run`
                 upload_current = uc1.checkbox("Overwrite current/", value=True)
                 upload_archive = uc2.checkbox("Archive naar runs/<run_folder>/", value=True)
 
+    # ---- Pre-flight: warn if the Lovable ARCHIVE folder already has data ---
+    # current/ is intentionally always overwritten with the latest run (that
+    # IS its purpose) so it is never checked here. The archive folder
+    # (runs/<run_folder>/, keyed by date+mode by default) is meant to be a
+    # per-run historical record -- a second run of the same country/mode on
+    # the same day would otherwise silently overwrite an earlier run's
+    # archived export with no warning at all. Runs this check on every
+    # rerun (not just on click) so the warning is visible BEFORE the user
+    # commits to starting an expensive Cloud Run Job, not only at upload
+    # time at the very end of the pipeline.
+    archive_conflict_files: list[str] = []
+    overwrite_confirmed = True
+    if (uploaded is not None and auto_lovable_export_enabled
+            and auto_gcs_upload_enabled and upload_archive):
+        gcs_bucket_norm = export_gcs_bucket.strip()
+        gcs_prefix_norm = lovable_gcs.normalize_gcs_prefix(export_gcs_prefix)
+        gcs_run_folder_norm = lovable_gcs.normalize_gcs_prefix(export_gcs_run_folder)
+        if gcs_bucket_norm and gcs_prefix_norm and gcs_run_folder_norm:
+            archive_glob = f"gs://{gcs_bucket_norm}/{gcs_prefix_norm}/runs/{gcs_run_folder_norm}/*"
+            rc_ls, listing = run_capture(build_list_command(archive_glob, project))
+            archive_conflict_files = list_existing_gcs_files(listing) if rc_ls == 0 else []
+        if archive_conflict_files:
+            st.warning(
+                f"⚠️ Er staat al Lovable-archiefdata in `{gcs_prefix_norm}/runs/"
+                f"{gcs_run_folder_norm}/` ({len(archive_conflict_files)} bestand(en)) — "
+                "waarschijnlijk van een eerdere run van dit land/deze mode, vandaag. "
+                "Een nieuwe run overschrijft die archiefdata."
+            )
+            with st.expander("Bestaande archiefbestanden"):
+                for f in archive_conflict_files:
+                    st.code(f)
+            overwrite_confirmed = st.checkbox(
+                "Ja, ik wil de bestaande archiefdata overschrijven",
+                key=f"overwrite_confirmed_{archive_glob}",
+            )
+
     if uploaded is not None and st.button("🚀 Start Cloud Run", type="primary"):
+        if archive_conflict_files and not overwrite_confirmed:
+            st.error("Vink eerst de bevestiging hierboven aan om door te gaan.")
+            st.stop()
         work_dir = Path(tempfile.mkdtemp(prefix="cloud_run_streamlit_"))
         local_input = work_dir / uploaded.name
         local_input.write_bytes(uploaded.getvalue())
