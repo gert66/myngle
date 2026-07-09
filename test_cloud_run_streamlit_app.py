@@ -61,6 +61,24 @@ def test_build_execute_command_sets_all_env_vars_and_waits():
     assert "MODE=full" in env_vars
 
 
+def test_build_execute_command_appends_extra_env_vars():
+    cmd = build_execute_command(
+        job_name="myngle-lead-prioritizer",
+        project="proj-1",
+        region="europe-west4",
+        input_uri="gs://b/incoming/leads.xlsx",
+        output_dir="gs://b/runs/run123",
+        run_id="run123",
+        task_count=10,
+        mode="full",
+        extra_env={"DEEP_DIVE": "true", "C5_ENABLED": "true"},
+    )
+    env_vars = cmd[cmd.index("--update-env-vars") + 1]
+    assert "RUN_ID=run123" in env_vars
+    assert "DEEP_DIVE=true" in env_vars
+    assert "C5_ENABLED=true" in env_vars
+
+
 def test_build_download_command_targets_local_dir():
     cmd = build_download_command("gs://b/runs/run123/parts/*.xlsx", "C:\\out\\parts\\", "proj-1")
     assert cmd == [

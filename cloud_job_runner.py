@@ -214,9 +214,15 @@ class RunConfig:
     company_column: Optional[str] = None
     domain_column: Optional[str] = None
     input_country_column: Optional[str] = None
+    compose_caller_content: bool = False
     deep_dive: bool = False
+    deep_dive_min_score: float = 8.0
+    deep_dive_on_foreign_hq: bool = True
     rich_icp_context: bool = False
     ai_signal_scoring: bool = False
+    use_enrichment_cache: bool = False
+    enrichment_cache_bucket: str = ""
+    c5_enabled: bool = False
 
 
 def build_arg_parser() -> argparse.ArgumentParser:
@@ -241,12 +247,25 @@ def build_arg_parser() -> argparse.ArgumentParser:
                          help="Domain column (default: auto-detected).")
     parser.add_argument("--input-country-column", default=None,
                          help="Optional per-row input country column (default: auto-detected).")
+    parser.add_argument("--compose-caller-content", action="store_true",
+                         help="Opt-in Step 3 (default: off; env COMPOSE_CALLER_CONTENT).")
     parser.add_argument("--deep-dive", action="store_true",
                          help="Opt-in Step B (default: off; env DEEP_DIVE).")
+    parser.add_argument("--deep-dive-min-score", type=float, default=None,
+                         help="Deep Dive score trigger threshold (default: 8.0; env DEEP_DIVE_MIN_SCORE).")
+    parser.add_argument("--no-deep-dive-on-foreign-hq", action="store_true",
+                         help="Disable the confirmed-foreign-HQ Deep Dive trigger "
+                              "(default: trigger stays on; env DEEP_DIVE_ON_FOREIGN_HQ=false).")
     parser.add_argument("--rich-icp-context", action="store_true",
                          help="Opt-in rich ICP context (default: off; env RICH_ICP_CONTEXT).")
     parser.add_argument("--ai-signal-scoring", action="store_true",
                          help="Opt-in AI signal scoring (default: off; env AI_SIGNAL_SCORING).")
+    parser.add_argument("--use-enrichment-cache", action="store_true",
+                         help="Opt-in shared GCS enrichment cache (default: off; env USE_ENRICHMENT_CACHE).")
+    parser.add_argument("--enrichment-cache-bucket", default=None,
+                         help="GCS bucket for --use-enrichment-cache (env ENRICHMENT_CACHE_BUCKET).")
+    parser.add_argument("--c5-enabled", action="store_true",
+                         help="Opt-in C5 Sonnet HQ adjudication (default: off; env C5_ENABLED).")
     return parser
 
 
@@ -290,9 +309,23 @@ def resolve_config(argv=None) -> RunConfig:
         input_country_column=(
             args.input_country_column or os.environ.get("INPUT_COUNTRY_COLUMN") or None
         ),
+        compose_caller_content=args.compose_caller_content or _env_bool("COMPOSE_CALLER_CONTENT"),
         deep_dive=args.deep_dive or _env_bool("DEEP_DIVE"),
+        deep_dive_min_score=(
+            args.deep_dive_min_score if args.deep_dive_min_score is not None
+            else float(os.environ.get("DEEP_DIVE_MIN_SCORE", "8.0"))
+        ),
+        deep_dive_on_foreign_hq=(
+            not args.no_deep_dive_on_foreign_hq
+            and _env_bool("DEEP_DIVE_ON_FOREIGN_HQ", default=True)
+        ),
         rich_icp_context=args.rich_icp_context or _env_bool("RICH_ICP_CONTEXT"),
         ai_signal_scoring=args.ai_signal_scoring or _env_bool("AI_SIGNAL_SCORING"),
+        use_enrichment_cache=args.use_enrichment_cache or _env_bool("USE_ENRICHMENT_CACHE"),
+        enrichment_cache_bucket=(
+            args.enrichment_cache_bucket or os.environ.get("ENRICHMENT_CACHE_BUCKET") or ""
+        ),
+        c5_enabled=args.c5_enabled or _env_bool("C5_ENABLED"),
     )
 
 
@@ -431,12 +464,20 @@ def main(argv=None) -> int:
         ]
         if country_col:
             cmd += ["--input-country-column", country_col]
+        if cfg.compose_caller_content:
+            cmd += ["--compose-caller-content"]
         if cfg.deep_dive:
-            cmd += ["--deep-dive"]
+            cmd += ["--deep-dive", "--deep-dive-min-score", str(cfg.deep_dive_min_score)]
+            if not cfg.deep_dive_on_foreign_hq:
+                cmd += ["--no-deep-dive-on-foreign-hq"]
         if cfg.rich_icp_context:
             cmd += ["--rich-icp-context"]
         if cfg.ai_signal_scoring:
             cmd += ["--ai-signal-scoring"]
+        if cfg.use_enrichment_cache:
+            cmd += ["--use-enrichment-cache", "--enrichment-cache-bucket", cfg.enrichment_cache_bucket]
+        if cfg.c5_enabled:
+            cmd += ["--c5-enabled"]
 
         env = os.environ.copy()
         if cfg.anthropic_key:

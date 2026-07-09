@@ -81,11 +81,18 @@ class TestArgParsing:
         assert args.deep_dive_max_pages == 6
         assert args.no_verify_quotes is False
         assert args.no_auto_correct_quotes is False
+        assert args.no_deep_dive_on_foreign_hq is False
+        assert args.use_enrichment_cache is False
+        assert args.enrichment_cache_bucket == ""
+        assert args.c5_enabled is False
         cfg = config_from_args(args)
         assert cfg.verify_quotes is True
         assert cfg.auto_correct_quotes is True
         assert cfg.ai_signal_scoring is False
         assert cfg.legacy_enrichment_mode is False
+        assert cfg.deep_dive_on_foreign_hq is True
+        assert cfg.use_enrichment_cache is False
+        assert cfg.enrichment_cache_bucket == ""
 
     def test_compose_caller_content_flag_parses(self):
         args = build_arg_parser().parse_args(
@@ -168,6 +175,31 @@ class TestArgParsing:
         assert cfg.deep_dive is True
         assert cfg.deep_dive_min_score == 6.5
         assert cfg.deep_dive_max_pages == 4
+
+    def test_no_deep_dive_on_foreign_hq_flag_parses(self):
+        args = build_arg_parser().parse_args(
+            ["--input", "x.xlsx", "--company-column", "c", "--domain-column", "d",
+             "--deep-dive", "--no-deep-dive-on-foreign-hq"])
+        assert args.no_deep_dive_on_foreign_hq is True
+        cfg = config_from_args(args)
+        assert cfg.deep_dive_on_foreign_hq is False
+        assert cfg.deep_dive is True
+
+    def test_use_enrichment_cache_flag_parses(self):
+        args = build_arg_parser().parse_args(
+            ["--input", "x.xlsx", "--company-column", "c", "--domain-column", "d",
+             "--use-enrichment-cache", "--enrichment-cache-bucket", "my-bucket"])
+        assert args.use_enrichment_cache is True
+        assert args.enrichment_cache_bucket == "my-bucket"
+        cfg = config_from_args(args)
+        assert cfg.use_enrichment_cache is True
+        assert cfg.enrichment_cache_bucket == "my-bucket"
+
+    def test_c5_enabled_flag_parses(self):
+        args = build_arg_parser().parse_args(
+            ["--input", "x.xlsx", "--company-column", "c", "--domain-column", "d",
+             "--c5-enabled"])
+        assert args.c5_enabled is True
 
     def test_no_verify_quotes_flag_parses(self):
         args = build_arg_parser().parse_args(
@@ -392,6 +424,61 @@ class TestMain:
         # keys passed through to core but never written to disk output
         assert captured["serper"] == "SK" and captured["anthropic"] == "AK"
         assert out_path.read_bytes() == b"BYTES"
+
+    def test_c5_enabled_runs_adjudication_and_records_summary(self, tmp_path):
+        p = tmp_path / "in.xlsx"
+        _write_xlsx(p, {"Sheet1": _LEADS})
+        out_path = tmp_path / "result.xlsx"
+        captured = {}
+
+        def _fake_c5(enriched_rows, **kwargs):
+            captured["c5_kwargs"] = kwargs
+            return [{"company_name": "Co0", "run_success": True, "c5_touched": True}], {
+                "c5_rows_attempted": 1, "c5_success_count": 1,
+            }
+
+        def _fake_summary(run_summary, **kwargs):
+            captured["summary_kwargs"] = kwargs
+            return run_summary
+
+        with patch("lead_prioritizer_batch_cli.load_api_keys", return_value=_KEYS_OK), \
+             patch("lead_prioritizer_batch_cli.run_batch_dataframe", return_value=_fake_tables()), \
+             patch("lead_prioritizer_batch_cli.build_excel_workbook_bytes", return_value=b"BYTES") as m_build, \
+             patch("lead_prioritizer_batch_core.apply_c5_adjudication", side_effect=_fake_c5), \
+             patch("lead_prioritizer_batch_core.add_c5_summary_fields", side_effect=_fake_summary):
+            argv = self._base_argv(p, **{"--output": str(out_path)})
+            argv.append("--c5-enabled")
+            rc = main(argv)
+
+        assert rc == 0
+        assert captured["c5_kwargs"]["scoring_behavior"] == "conservative_adjustment"
+        assert captured["c5_kwargs"]["scope"] == "score_3_or_manual_review"
+        assert captured["c5_kwargs"]["model_tier"] == "sonnet"
+        assert captured["summary_kwargs"]["c5_enabled"] is True
+        assert captured["summary_kwargs"]["c5_scoring_behavior"] == "conservative_adjustment"
+        # the C5-adjudicated rows replace enriched_leads before the workbook is built
+        tables_written = m_build.call_args[0][0]
+        assert bool(tables_written["enriched_leads"].iloc[0]["c5_touched"]) is True
+
+    def test_c5_disabled_still_records_summary_flag(self, tmp_path):
+        p = tmp_path / "in.xlsx"
+        _write_xlsx(p, {"Sheet1": _LEADS})
+        out_path = tmp_path / "result.xlsx"
+        captured = {}
+
+        def _fake_summary(run_summary, **kwargs):
+            captured["summary_kwargs"] = kwargs
+            return run_summary
+
+        with patch("lead_prioritizer_batch_cli.load_api_keys", return_value=_KEYS_OK), \
+             patch("lead_prioritizer_batch_cli.run_batch_dataframe", return_value=_fake_tables()), \
+             patch("lead_prioritizer_batch_cli.build_excel_workbook_bytes", return_value=b"BYTES"), \
+             patch("lead_prioritizer_batch_core.add_c5_summary_fields", side_effect=_fake_summary):
+            rc = main(self._base_argv(p, **{"--output": str(out_path)}))
+
+        assert rc == 0
+        assert captured["summary_kwargs"]["c5_enabled"] is False
+        assert captured["summary_kwargs"]["c5_scoring_behavior"] == ""
 
     def test_rich_icp_context_passthrough_independent_of_compose_caller_content(self, tmp_path):
         p = tmp_path / "in.xlsx"

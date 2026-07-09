@@ -76,11 +76,15 @@ def build_upload_command(local_path: str, dest_uri: str, project: str) -> list[s
 def build_execute_command(
     job_name: str, project: str, region: str,
     input_uri: str, output_dir: str, run_id: str, task_count: int, mode: str,
+    extra_env: Optional[dict] = None,
 ) -> list[str]:
-    env_vars = (
-        f"INPUT_GCS_URI={input_uri},OUTPUT_GCS_DIR={output_dir},"
-        f"RUN_ID={run_id},TASK_COUNT={task_count},MODE={mode}"
-    )
+    env_pairs = [
+        f"INPUT_GCS_URI={input_uri}", f"OUTPUT_GCS_DIR={output_dir}",
+        f"RUN_ID={run_id}", f"TASK_COUNT={task_count}", f"MODE={mode}",
+    ]
+    for key, value in (extra_env or {}).items():
+        env_pairs.append(f"{key}={value}")
+    env_vars = ",".join(env_pairs)
     return [
         _gcloud_executable(), "run", "jobs", "execute", job_name,
         "--project", project,
@@ -186,11 +190,29 @@ def run_capture(cmd: list[str]) -> tuple[int, str]:
 # Streamlit UI
 # =============================================================================
 
+_RUN_MODE_HELP = {
+    "full": "Volledige v2-pipeline: HQ + non-HQ evidence/signalen + score + caller-app-velden.",
+    "hq_only": "Alleen HQ-detectie (goedkoop screenen, geen scoring).",
+    "evidence_only": "HQ + non-HQ evidence verzamelen, geen signalen/score.",
+    "signals_no_score": "HQ + evidence + signalen + app-samenvatting, geen commercial-fit-score.",
+    "full_no_score": "Alles behalve de commercial-fit-score (wel caller-app-velden).",
+}
+
+
 def main() -> None:  # pragma: no cover - exercised only under `streamlit run`
     import pandas as pd
     import streamlit as st
 
     import cloud_merge_results as cmr
+    import export_lead_prioritizer_to_lovable_json as lovable_export
+    import lovable_gcs_upload as lovable_gcs
+    from lead_prioritizer_batch_app import (
+        DEFAULT_COLD_CALLERS_TEXT,
+        default_gcs_country_prefix,
+        parse_cold_callers,
+        suggest_country_from_filename,
+        SUPPORTED_DEFAULT_INPUT_COUNTRIES,
+    )
 
     st.set_page_config(page_title="Lead Prioritizer — Cloud Run", page_icon="☁️", layout="wide")
     st.title("☁️ Lead Prioritizer — Cloud Run Jobs")
@@ -218,7 +240,106 @@ def main() -> None:  # pragma: no cover - exercised only under `streamlit run`
             mode_options = sorted(SUPPORTED_RUN_MODES)
         except Exception:
             mode_options = ["full", "hq_only", "evidence_only", "signals_no_score", "full_no_score"]
-        mode = st.selectbox("Mode", options=mode_options, index=mode_options.index("full") if "full" in mode_options else 0)
+        mode = st.selectbox(
+            "Mode", options=mode_options,
+            index=mode_options.index("full") if "full" in mode_options else 0,
+            help=_RUN_MODE_HELP.get(mode_options[0], ""),
+        )
+        st.caption(_RUN_MODE_HELP.get(mode, ""))
+
+        row_limit_per_task = st.number_input(
+            "Row limit per taak (0 = alle rijen)", min_value=0, value=0, step=1,
+            help="Testlimiet: elke Cloud Run-taak verwerkt hooguit dit aantal rijen "
+                 "uit zijn eigen shard (bv. voor een snelle smoke test). 0 = geen limiet.",
+        )
+
+        st.divider()
+        st.subheader("Inhoud & AI-opties")
+        compose_caller_content = st.checkbox(
+            "Compose caller content via AI (Step 3)", value=True,
+            help="why_relevant/what_is_hot/cold_caller_summary/caller_angle/call_starter "
+                 "via Anthropic i.p.v. deterministische templates.")
+        rich_icp_context = st.checkbox("Rijkere ICP-context via AI", value=True)
+        ai_signal_scoring = st.checkbox(
+            "AI-signaalscoring (opt-in) — verandert scores", value=True,
+            help="Vervangt de deterministische keyword-signaalscoring door een "
+                 "AI-oordeel; dit is de enige optie hier die final_commercial_fit_score "
+                 "kan laten afwijken van de standaardmodus.")
+
+        st.divider()
+        use_enrichment_cache = st.checkbox(
+            "Gebruik gedeelde enrichment-cache (GCS, per land)", value=True)
+        enrichment_cache_bucket = st.text_input(
+            "GCS bucket voor enrichment-cache",
+            value=lovable_gcs.DEFAULT_GCS_BUCKET,
+            disabled=not use_enrichment_cache,
+        )
+
+        st.divider()
+        deep_dive = st.checkbox("Deep dive voor top-leads (opt-in)", value=True)
+        deep_dive_min_score = 0.0
+        deep_dive_on_foreign_hq = True
+        if deep_dive:
+            deep_dive_min_score = st.number_input(
+                "Deep dive score threshold", value=0.0, step=0.5, format="%.2f")
+            deep_dive_on_foreign_hq = st.checkbox(
+                "Also trigger on confirmed foreign HQ", value=True)
+
+        st.divider()
+        c5_enabled = st.checkbox(
+            "Use C5 Sonnet adjudication", value=True,
+            help="Vaste instellingen (zoals de lokale app dagelijks gebruikt): "
+                 "conservative_adjustment, rows=score_3_or_manual_review, "
+                 "model tier=Sonnet, geen model-override.")
+
+        st.divider()
+        st.subheader("Lovable JSON-export + GCS-upload (na afloop)")
+        st.caption(
+            "Draait één keer na de merge, op het volledige samengevoegde "
+            "eindresultaat — net als de lokale app."
+        )
+        auto_lovable_export_enabled = st.checkbox(
+            "Na afloop automatisch Lovable JSON exporteren", value=True)
+        export_country = ""
+        cold_callers_raw = DEFAULT_COLD_CALLERS_TEXT
+        foreign_hq_only_export = False
+        bucket_size = 500
+        content_language = lovable_export.DEFAULT_CONTENT_LANGUAGE
+        auto_gcs_upload_enabled = True
+        export_gcs_bucket = lovable_gcs.DEFAULT_GCS_BUCKET
+        export_gcs_prefix = ""
+        export_gcs_run_folder = ""
+        upload_current = True
+        upload_archive = True
+        if auto_lovable_export_enabled:
+            export_country = st.selectbox(
+                "Export country", options=[""] + list(SUPPORTED_DEFAULT_INPUT_COUNTRIES),
+                index=0,
+                help="Leeg = geprobeerd te raden uit de bestandsnaam bij het starten van de run.")
+            cold_callers_raw = st.text_input(
+                "Cold callers (comma-separated)", value=DEFAULT_COLD_CALLERS_TEXT)
+            fc1, fc2 = st.columns(2)
+            foreign_hq_only_export = fc1.checkbox("Foreign-HQ-only export", value=False)
+            bucket_size = fc2.number_input("Bucket size", min_value=1, value=500, step=50)
+            content_language = st.selectbox(
+                "Lovable content language", list(lovable_export.SUPPORTED_CONTENT_LANGUAGES),
+                index=list(lovable_export.SUPPORTED_CONTENT_LANGUAGES).index(
+                    lovable_export.DEFAULT_CONTENT_LANGUAGE),
+            )
+            auto_gcs_upload_enabled = st.checkbox(
+                "Na Lovable JSON-export uploaden naar Google Cloud Storage", value=True)
+            if auto_gcs_upload_enabled:
+                export_gcs_bucket = st.text_input(
+                    "GCS bucket (Lovable-export)", value=lovable_gcs.DEFAULT_GCS_BUCKET)
+                export_gcs_prefix = st.text_input(
+                    "GCS prefix/pad (bv. <land>)",
+                    value=default_gcs_country_prefix(export_country))
+                export_gcs_run_folder = st.text_input(
+                    "GCS run folder",
+                    value=lovable_gcs.default_gcs_run_folder(mode))
+                uc1, uc2 = st.columns(2)
+                upload_current = uc1.checkbox("Overwrite current/", value=True)
+                upload_archive = uc2.checkbox("Archive naar runs/<run_folder>/", value=True)
 
     uploaded = st.file_uploader("Input-Excel (.xlsx)", type=["xlsx"])
 
@@ -230,6 +351,8 @@ def main() -> None:  # pragma: no cover - exercised only under `streamlit run`
         run_id = build_run_id(uploaded.name)
         input_uri = gcs_incoming_uri(bucket, uploaded.name)
         output_dir = gcs_output_dir(bucket, run_id)
+        resolved_export_country = export_country or suggest_country_from_filename(
+            uploaded.name, SUPPORTED_DEFAULT_INPUT_COUNTRIES)
 
         st.info(f"Run-ID: `{run_id}`")
 
@@ -261,12 +384,26 @@ def main() -> None:  # pragma: no cover - exercised only under `streamlit run`
             elapsed_placeholder.caption(f"⏱️ bezig: {now - state['start']:.0f}s")
             log_placeholder.code("".join(buf)[-4000:])
 
+        extra_env = {
+            "COMPOSE_CALLER_CONTENT": str(bool(compose_caller_content)).lower(),
+            "RICH_ICP_CONTEXT": str(bool(rich_icp_context)).lower(),
+            "AI_SIGNAL_SCORING": str(bool(ai_signal_scoring)).lower(),
+            "USE_ENRICHMENT_CACHE": str(bool(use_enrichment_cache)).lower(),
+            "ENRICHMENT_CACHE_BUCKET": enrichment_cache_bucket if use_enrichment_cache else "",
+            "DEEP_DIVE": str(bool(deep_dive)).lower(),
+            "DEEP_DIVE_MIN_SCORE": str(deep_dive_min_score),
+            "DEEP_DIVE_ON_FOREIGN_HQ": str(bool(deep_dive_on_foreign_hq)).lower(),
+            "C5_ENABLED": str(bool(c5_enabled)).lower(),
+        }
+        if row_limit_per_task:
+            extra_env["MAX_ROWS"] = str(int(row_limit_per_task))
+
         job_timeout_seconds = 3600  # 1 uur — ruim boven de verwachte duur, voorkomt een oneindige hang
         try:
             rc = run_streaming(
                 build_execute_command(
                     job_name, project, region, input_uri, output_dir,
-                    run_id, int(task_count), mode,
+                    run_id, int(task_count), mode, extra_env=extra_env,
                 ),
                 on_chunk=_on_chunk,
                 timeout_seconds=job_timeout_seconds,
@@ -327,7 +464,83 @@ def main() -> None:  # pragma: no cover - exercised only under `streamlit run`
         run_capture(build_upload_command(
             str(final_local), join_path(output_dir, "final", FINAL_OUTPUT_NAME), project))
 
-        # ---- 6. Preview + download ------------------------------------------
+        # ---- 6. Optional: Lovable JSON export + GCS upload, once, on the ---
+        # full merged result (same shape as the local app's after-run export).
+        if auto_lovable_export_enabled:
+            export_dir = local_run_dir / "lovable_export"
+            cold_callers = parse_cold_callers(cold_callers_raw)
+            export_error = None
+            if not resolved_export_country:
+                export_error = (
+                    "Lovable-export: geen export country ingevuld en kon er geen "
+                    "raden uit de bestandsnaam."
+                )
+            elif not cold_callers:
+                export_error = "Lovable-export: minimaal één cold caller is verplicht."
+            if export_error:
+                st.error(export_error)
+            else:
+                manifest = None
+                try:
+                    with st.spinner("Lovable JSON exporteren…"):
+                        manifest = lovable_export.export_workbook_to_lovable_json(
+                            input_xlsx=final_local,
+                            output_dir=export_dir,
+                            export_country=resolved_export_country,
+                            cold_callers=cold_callers,
+                            foreign_hq_only=bool(foreign_hq_only_export),
+                            bucket_size=int(bucket_size),
+                            content_language=content_language,
+                        )
+                    st.success(
+                        f"Lovable JSON-export voltooid: "
+                        f"{len(manifest.get('output_files', []))} bestand(en)."
+                    )
+                except Exception as exc:
+                    st.error(f"Lovable JSON-export mislukt: {exc}")
+
+                if manifest is not None and auto_gcs_upload_enabled:
+                    validation = manifest.get("validation_summary", {}) or {}
+                    validation_ok = (
+                        validation.get("status") == "ok"
+                        and int(validation.get("structural_errors", 0) or 0) == 0
+                    )
+                    gcs_bucket_norm = export_gcs_bucket.strip()
+                    gcs_prefix_norm = lovable_gcs.normalize_gcs_prefix(export_gcs_prefix)
+                    gcs_run_folder_norm = lovable_gcs.normalize_gcs_prefix(export_gcs_run_folder)
+                    can_upload = (
+                        validation_ok and bool(gcs_bucket_norm) and bool(gcs_prefix_norm)
+                        and (upload_current or upload_archive)
+                    )
+                    if not can_upload:
+                        st.warning(
+                            "GCS-upload overgeslagen: exportvalidatie of bucket/prefix-"
+                            "instellingen waren niet in orde. De Lovable JSON staat wel "
+                            "lokaal klaar."
+                        )
+                    else:
+                        output_filenames = sorted(
+                            {Path(p).name for p in manifest.get("output_files", [])})
+                        jobs = lovable_gcs.build_upload_plan(
+                            export_dir, output_filenames, gcs_bucket_norm, gcs_prefix_norm,
+                            gcs_run_folder_norm,
+                            upload_current=upload_current, upload_archive=upload_archive,
+                        )
+                        with st.spinner("Lovable JSON uploaden naar Google Cloud Storage…"):
+                            upload_results = lovable_gcs.run_upload_plan(jobs)
+                        failures = [r for r in upload_results if not r["success"]]
+                        if failures:
+                            st.error(
+                                f"GCS-upload: {len(failures)} van {len(upload_results)} "
+                                "uploads mislukt."
+                            )
+                            for r in failures:
+                                st.code(f"{r['destination']}: {r.get('error') or r.get('stderr') or ''}")
+                        else:
+                            st.success(
+                                f"GCS-upload voltooid: {len(upload_results)} bestand(en).")
+
+        # ---- 7. Preview + download ------------------------------------------
         df = pd.read_excel(final_local)
         st.subheader(f"Resultaat — {len(df)} rijen")
         preview_cols = [c for c in ["company_name", "domain", "run_success", "final_commercial_fit_score"] if c in df.columns]
