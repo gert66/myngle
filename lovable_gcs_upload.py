@@ -379,6 +379,147 @@ def upload_file(tool_cmd: list[str], local_path: str, destination: str) -> dict:
     }
 
 
+def download_file(tool_cmd: list[str], source: str, local_path: str) -> dict:
+    """Download one GCS object via subprocess (mirrors ``upload_file``'s
+    shape, source/destination reversed — ``gcloud storage cp``/``gsutil cp``
+    take the same argv shape either direction).
+
+    Never raises. A missing/non-existent remote object — the normal "nothing
+    uploaded here yet" case for a first-ever merge — comes back as
+    ``{"success": False, ...}`` exactly like any other failure, so a merge
+    caller can treat it as "start from empty" without special-casing.
+    """
+    Path(local_path).parent.mkdir(parents=True, exist_ok=True)
+    cmd = [*tool_cmd, source, local_path]
+    try:
+        proc = subprocess.run(cmd, capture_output=True, text=True, timeout=120)
+    except Exception as exc:
+        return {
+            "success": False, "source": source, "local_path": local_path,
+            "error": f"{type(exc).__name__}: {exc}",
+        }
+    return {
+        "success": proc.returncode == 0 and Path(local_path).exists(),
+        "source": source,
+        "local_path": local_path,
+        "returncode": proc.returncode,
+        "stdout": proc.stdout[-2000:],
+        "stderr": proc.stderr[-2000:],
+    }
+
+
+# ---------------------------------------------------------------------------
+# Merging a fresh export into the existing current/ company set
+# ---------------------------------------------------------------------------
+#
+# current/ is meant to be the CUMULATIVE latest-known state across runs, not
+# just this run's rows -- re-running the same (or an updated) input file
+# should be able to ADD new companies and refresh existing ones without
+# losing companies only a PREVIOUS run covered. company_id is domain-based
+# (see make_company_id in export_lead_prioritizer_to_lovable_json.py) and
+# therefore stable across separate export runs, which is what makes merging
+# by company_id meaningful instead of just concatenating and de-duplicating
+# blindly.
+
+def merge_company_records(
+    existing_list_items: list[dict],
+    existing_details: dict[str, dict],
+    new_list_items: list[dict],
+    new_details: dict[str, dict],
+) -> tuple[list[dict], dict[str, dict]]:
+    """Merge a freshly-exported company set into an existing one, keyed by
+    ``company_id``.
+
+    Conflict rule (same company_id on both sides): the NEW record wins
+    UNLESS it is ``enrichment_skipped`` (thin -- e.g. skipped by the
+    foreign-HQ cost gate, or from a cheaper run mode) while the EXISTING
+    record is not (fully enriched) -- in that case the richer existing
+    record is kept, so a smaller/cheaper/gated run can never silently
+    downgrade a company a previous run fully enriched. A company present on
+    only one side is always kept.
+
+    Ordering: existing companies keep their original list position (updated
+    in place when the new record wins); genuinely new companies are
+    appended in their new-run order. This keeps ``detail_bucket`` assignment
+    for every PRE-EXISTING company stable across merges (see
+    ``rebucket_company_details``) -- only the newly appended tail changes
+    bucket boundaries. ``assigned_cold_caller``/``assigned_cold_caller_rank``
+    are deliberately left exactly as they are on whichever record wins —
+    merging never reassigns a company already on a caller's list to someone
+    else.
+
+    Never mutates its arguments. Returns ``(merged_list_items,
+    merged_details)`` — NOT yet re-bucketed; call ``rebucket_company_details``
+    on the result before writing/uploading.
+    """
+    new_by_id = {item["company_id"]: item for item in new_list_items}
+    merged_details = dict(existing_details)
+    merged_list_items: list[dict] = []
+    seen_ids: set[str] = set()
+
+    for old_item in existing_list_items:
+        cid = old_item["company_id"]
+        seen_ids.add(cid)
+        new_item = new_by_id.get(cid)
+        if new_item is None:
+            merged_list_items.append(old_item)
+            continue
+        new_skipped = bool(new_item.get("enrichment_skipped"))
+        old_skipped = bool(old_item.get("enrichment_skipped"))
+        new_wins = (not new_skipped) or old_skipped
+        if new_wins:
+            merged_list_items.append(new_item)
+            if cid in new_details:
+                merged_details[cid] = new_details[cid]
+        else:
+            merged_list_items.append(old_item)
+
+    for new_item in new_list_items:
+        cid = new_item["company_id"]
+        if cid in seen_ids:
+            continue
+        seen_ids.add(cid)
+        merged_list_items.append(new_item)
+        if cid in new_details:
+            merged_details[cid] = new_details[cid]
+
+    return merged_list_items, merged_details
+
+
+def rebucket_company_details(
+    list_items: list[dict], details_by_id: dict[str, dict], bucket_size: int,
+) -> tuple[list[dict], dict[str, dict]]:
+    """Re-assign ``detail_bucket`` across a merged company set, in
+    ``list_items`` order — see ``merge_company_records``'s ordering
+    guarantee: pre-existing companies keep their position, so as long as
+    ``bucket_size`` is unchanged between runs, every PRE-EXISTING company
+    keeps the exact same bucket file across merges; only the newly appended
+    tail creates/extends buckets.
+
+    Never mutates its arguments. Returns ``(list_items, buckets)`` — new
+    list_items with ``detail_bucket`` set, and
+    ``{bucket_filename: {company_id: detail}}`` with ``detail_bucket`` set
+    on each detail record too (matching ``export_workbook_to_lovable_json``'s
+    own bucket-writing shape).
+    """
+    if bucket_size < 1:
+        raise ValueError("bucket_size must be >= 1.")
+    updated_items: list[dict] = []
+    buckets: dict[str, dict] = {}
+    for i, item in enumerate(list_items):
+        cid = item["company_id"]
+        bucket_file = f"company-details-{i // bucket_size:03d}.json"
+        updated_item = dict(item)
+        updated_item["detail_bucket"] = bucket_file
+        updated_items.append(updated_item)
+        detail = details_by_id.get(cid)
+        if detail is not None:
+            detail = dict(detail)
+            detail["detail_bucket"] = bucket_file
+            buckets.setdefault(bucket_file, {})[cid] = detail
+    return updated_items, buckets
+
+
 def run_upload_plan(jobs: list[dict]) -> list[dict]:
     """Execute every job from ``build_upload_plan`` and return per-file results.
 

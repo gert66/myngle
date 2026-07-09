@@ -414,19 +414,57 @@ C5-pass (geen dubbele C5-run).
   overschreven (`gcloud storage cp`, geen check). Onschuldig voor de
   Streamlit-app zelf (die het lokale bestand direct gebruikt, niet de
   GCS-kopie), maar relevant voor het Eventarc/dispatcher-pad.
-- **Lovable-export `current/`**: wordt met opzet bij élke run overschreven —
-  dat is de hele bedoeling (altijd de nieuwste stand). Hier zit dus bewust
-  geen bevestigingsvraag.
+- **Lovable-export `current/`**: kiesbaar via de radiobutton "current/-gedrag"
+  in de sidebar — **Overwrite** (current/ volledig vervangen door alleen
+  deze run, het oude gedrag), **Merge** (samenvoegen met wat er al staat,
+  zie hieronder) of **Niet uploaden**. Default blijft Overwrite, dus
+  bestaand gedrag verandert niet vanzelf.
 - **Lovable-export archief (`runs/<run_folder>/`, standaard `YYYY-MM-DD_`
-  `<mode>`)**: dit IS bedoeld als permanent historisch record. Vóór de
-  Streamlit-app de dure Cloud Run Job start, checkt hij nu of die archiefmap
-  al bestanden bevat (bv. een eerdere run van hetzelfde land/dezelfde mode,
-  dezelfde dag) en toont dan een waarschuwing met de bestandslijst plus een
-  bevestig-checkbox ("Ja, ik wil de bestaande archiefdata overschrijven") —
-  pas na aanvinken start de run. Zonder conflict verandert er niets (geen
-  extra klik nodig). Deze check zit alleen in de Streamlit-app (waar een
-  mens de vraag kan beantwoorden), niet in de dispatcher/Eventarc-flow, die
-  headless draait.
+  `<mode>`)**: dit IS bedoeld als permanent historisch record (altijd de
+  onvermengde export van precies déze run, ook als current/ op Merge staat).
+  Vóór de Streamlit-app de dure Cloud Run Job start, checkt hij nu of die
+  archiefmap al bestanden bevat (bv. een eerdere run van hetzelfde
+  land/dezelfde mode, dezelfde dag) en toont dan een waarschuwing met de
+  bestandslijst plus een bevestig-checkbox ("Ja, ik wil de bestaande
+  archiefdata overschrijven") — pas na aanvinken start de run. Zonder
+  conflict verandert er niets (geen extra klik nodig). Deze check zit alleen
+  in de Streamlit-app (waar een mens de vraag kan beantwoorden), niet in de
+  dispatcher/Eventarc-flow, die headless draait.
+
+## current/ mergen in plaats van overschrijven
+
+Met "current/-gedrag" op **Merge** wordt de bestaande `current/`-data eerst
+gedownload en samengevoegd met de output van deze run, in plaats van
+vervangen:
+
+1. `companies.list.json` + alle `company-details-*.json` uit
+   `gs://<bucket>/<land>/current/` worden gedownload (ontbreken ze nog —
+   eerste run voor dit land — dan start de merge gewoon vanaf leeg, geen
+   foutmelding).
+2. Per bedrijf (`company_id`, domein-gebaseerd en dus stabiel over runs
+   heen — zie `make_company_id`) geldt: de NIEUWE run wint, BEHALVE als de
+   nieuwe rij `enrichment_skipped` is (bv. door de foreign-HQ-kostengate of
+   een goedkopere mode) terwijl de bestaande rij dat niet was — dan blijft
+   de rijkere bestaande versie staan. Zo kan een kleine/goedkope testrun
+   nooit per ongeluk een eerder volledig verrijkt bedrijf downgraden.
+   Bedrijven die maar aan één kant voorkomen blijven altijd staan.
+3. `assigned_cold_caller`/`assigned_cold_caller_rank` worden NOOIT aangepast
+   tijdens een merge — een bedrijf dat al bij een caller stond, blijft daar
+   staan, ook als de rest van zijn data wordt bijgewerkt.
+4. Bestaande bedrijven behouden hun positie in de lijst (inhoud wordt
+   ge-update, niet verplaatst); nieuwe bedrijven worden achteraan
+   toegevoegd. Daardoor blijft elk al-bestaand bedrijf in hetzelfde
+   `company-details-XXX.json`-bucketbestand zitten na een merge (zolang de
+   bucket size niet verandert) — alleen de laatste, aangroeiende bucket en
+   eventuele nieuwe buckets wijzigen.
+5. Het geüploade `export_manifest.json` in `current/` krijgt er een
+   `merge_summary`-blok bij: `added` / `updated` / `kept_richer_existing` /
+   `companies_before` / `total_after`, ook zichtbaar in de Streamlit-app
+   direct na de merge.
+
+Het archief (`runs/<run_folder>/`) gebruikt hierbij altijd de onvermengde
+export van déze run — nooit de gemergde current/-set — zodat elke
+archiefmap precies weergeeft wat die ene run zelf heeft opgeleverd.
 
 ## Gedeelde enrichment-cache in cloud-runs
 
