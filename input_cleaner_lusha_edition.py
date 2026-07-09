@@ -607,6 +607,12 @@ def _write_sheet(
                 val = ""
             val = _sanitize_cell_value(val)
             cell = ws.cell(row=ri, column=ci, value=val)
+            if isinstance(val, str):
+                # Force plain-string type: openpyxl auto-detects a leading
+                # "=" as a formula, and scraped company text (ASCII art,
+                # etc.) can legitimately start with one, producing a
+                # malformed <f> tag that Excel then reports as corrupt.
+                cell.data_type = "s"
             cell.alignment = Alignment(wrap_text=False, vertical="top")
             if fill is not None:
                 cell.fill = fill
