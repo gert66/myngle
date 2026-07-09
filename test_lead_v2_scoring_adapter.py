@@ -56,6 +56,19 @@ class TestInputMapping:
             row["lusha_employee_range"], row["lusha_api_employee_range"],
         )
 
+    def test_lusha_employees_maps_to_lusha_employee_range(self):
+        r = _result(lusha_employees="201 - 500")
+        row = build_score_company_input_from_v2_result(r)
+        assert row["lusha_employee_range"] == "201 - 500"
+        # the other three size fields stay untouched
+        assert row["employee_range"] == ""
+        assert row["company_size"] == ""
+        assert row["lusha_api_employee_range"] == ""
+
+    def test_missing_lusha_employees_leaves_size_blank(self):
+        row = build_score_company_input_from_v2_result(_result(lusha_employees=None))
+        assert row["lusha_employee_range"] == ""
+
     def test_rapid_growth_is_zero(self):
         row = build_score_company_input_from_v2_result(_result())
         assert row["sig_rapid_growth_score"] == 0.0
@@ -128,6 +141,25 @@ class TestScoreLeadV2Result:
         assert out["commercial_tier"]
         # Audit input echoes the mapped HQ score.
         assert out["score_input_foreign_hq"] == 3.0
+
+    def test_real_lusha_employees_changes_size_component_under_default_profile(self):
+        # score_lead_v2_result always pins scoring_profile="italy_register_icp_only",
+        # which sets size_weight=0.0 -- so the mapped lusha_employee_range has NO
+        # effect on ITS output by design (see commercial_fit_scoring.SCORING_PROFILES).
+        # This test instead confirms the mapping itself is real by feeding the built
+        # row straight into score_company under the "default" profile (size_weight
+        # 25%), so a future/alternate caller that does want size-aware scoring gets
+        # a genuinely size-sensitive company_size_score instead of the old constant
+        # "unknown" fallback (5.5) for every company.
+        from commercial_fit_scoring import score_company
+
+        small_row = build_score_company_input_from_v2_result(_result(
+            sig_foreign_hq_score_for_next_scoring=3.0, lusha_employees="1 - 10"))
+        large_row = build_score_company_input_from_v2_result(_result(
+            sig_foreign_hq_score_for_next_scoring=3.0, lusha_employees="10001 - 100000"))
+        small = score_company(small_row, params={"scoring_profile": "default"})
+        large = score_company(large_row, params={"scoring_profile": "default"})
+        assert large["final_commercial_fit_score"] > small["final_commercial_fit_score"]
 
 
 # ---------------------------------------------------------------------------
