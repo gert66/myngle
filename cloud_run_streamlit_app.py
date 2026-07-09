@@ -28,6 +28,7 @@ import json
 import shutil
 import subprocess
 import tempfile
+from datetime import datetime
 from pathlib import Path
 from typing import Optional
 
@@ -673,7 +674,18 @@ def main() -> None:  # pragma: no cover - exercised only under `streamlit run`
                     key=f"export_gcs_prefix_{_uploaded_key}_{export_country}")
                 export_gcs_run_folder = st.text_input(
                     "GCS run folder",
-                    value=lovable_gcs.default_gcs_run_folder(mode))
+                    # Includes the time, not just the date -- default_gcs_run_folder()
+                    # alone is <date>_<mode> (e.g. "2026-07-09_full"), so a second
+                    # run of the same country/mode on the same day would target the
+                    # SAME archive folder and trigger the overwrite-confirmation
+                    # warning below every time. Appending HHMMSS makes each run's
+                    # default archive folder unique, so that warning only fires when
+                    # someone deliberately reuses a folder name (edit this field
+                    # yourself to bundle several runs into one archive folder).
+                    value=(
+                        f"{lovable_gcs.default_gcs_run_folder(mode)}_"
+                        f"{datetime.now().strftime('%H%M%S')}"
+                    ))
                 # current/ zelf altijd uploaden zodra Lovable-export + GCS-
                 # upload allebei aanstaan -- de vraag is niet "wel of niet",
                 # maar "overschrijven of mergen", en die keuze staat expliciet
