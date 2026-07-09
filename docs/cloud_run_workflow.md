@@ -279,6 +279,21 @@ python cloud_merge_results.py \
   (of de naam die je via `FINAL_OUTPUT_NAME`/`--final-output-name` opgeeft)
 - Merge-manifest: `gs://<runs-bucket>/runs/<run_id>/final/manifest_done.json`
 
+## Gecombineerd API-verbruik + cache-hitrapport
+
+Elke task's `lead_prioritizer_batch_cli.py`-subprocess schrijft zijn eigen
+`usage_tracker`-snapshot (Serper/Anthropic/Firecrawl-calls, tokens,
+cache-hits/misses, geschatte kosten) als JSON weg via `--usage-output`;
+`cloud_job_runner.py` leest dat bestand en voegt het toe onder `"usage"` in
+de `status/part_XXXX_done.json` van die task. De Cloud Run Streamlit-pagina
+telt na de merge alle `_done.json`-bestanden bij elkaar op
+(`usage_tracker.merge_snapshots`) en toont één samengevoegd rapport — inclusief
+de cache-hitrate per bron (`serper`/`firecrawl`), zodat je in één oogopslag
+ziet hoeveel credits een herhaalde run daadwerkelijk heeft bespaard. Ontbreekt
+`"usage"` voor een task (bv. een ouder gedeployed image zonder
+`--usage-output`-ondersteuning), dan wordt die task's data gewoon overgeslagen
+in plaats van de rest van het rapport te breken.
+
 ## Hoe retries werken
 
 - Elke task is idempotent: als `parts/part_XXXX.xlsx` al bestaat en

@@ -48,13 +48,16 @@ def _write_synthetic_excel(path: Path, n_rows: int) -> None:
     df.to_excel(path, index=False)
 
 
-def _fake_batch_cli_subprocess(returncode: int = 0, write_output: bool = True):
+def _fake_batch_cli_subprocess(returncode: int = 0, write_output: bool = True, write_usage: bool = True):
     """Stand-in for subprocess.run(["python", "lead_prioritizer_batch_cli.py", ...]).
 
     Never runs the real CLI. On a "successful" call it writes an output Excel
     at the ``--output`` path, exactly like lead_prioritizer_batch_cli.py would,
     so the runner's post-subprocess logic (locate output, upload) can still be
-    exercised without any live enrichment.
+    exercised without any live enrichment. ``write_usage`` (default True,
+    matching real behavior) also writes a small usage_tracker-shaped JSON at
+    ``--usage-output``; set False to simulate an old deployed image that
+    predates the --usage-output flag.
     """
     calls: list[list[str]] = []
 
@@ -67,6 +70,11 @@ def _fake_batch_cli_subprocess(returncode: int = 0, write_output: bool = True):
             df["final_commercial_fit_score"] = 1  # stand-in for a real enrichment column
             output_path.parent.mkdir(parents=True, exist_ok=True)
             df.to_excel(output_path, index=False)
+        if returncode == 0 and write_usage and "--usage-output" in cmd:
+            usage_path = Path(cmd[cmd.index("--usage-output") + 1])
+            usage_path.parent.mkdir(parents=True, exist_ok=True)
+            usage_path.write_text(
+                json.dumps({"serper_total": 3, "anthropic_calls": 2}), encoding="utf-8")
         return SimpleNamespace(returncode=returncode)
 
     _fake_run.calls = calls
@@ -184,6 +192,52 @@ def test_max_rows_caps_rows_processed_but_not_rows_requested(tmp_path, monkeypat
 
     cmd = fake_run.calls[0]
     assert cmd[cmd.index("--row-limit") + 1] == "3"
+
+
+def test_usage_output_flag_forwarded_and_folded_into_done_status(tmp_path, monkeypatch):
+    input_path = tmp_path / "input.xlsx"
+    _write_synthetic_excel(input_path, 5)
+    output_dir = tmp_path / "out"
+
+    fake_run = _fake_batch_cli_subprocess()
+    monkeypatch.setattr(cjr.subprocess, "run", fake_run)
+
+    rc = cjr.main([
+        "--input", str(input_path),
+        "--output-dir", str(output_dir),
+        "--task-index", "0",
+        "--task-count", "1",
+        "--run-id", "usage-report",
+    ])
+
+    assert rc == 0
+    cmd = fake_run.calls[0]
+    assert "--usage-output" in cmd
+    status = json.loads((output_dir / "status" / "part_0000_done.json").read_text(encoding="utf-8"))
+    assert status["usage"] == {"serper_total": 3, "anthropic_calls": 2}
+
+
+def test_missing_usage_output_leaves_usage_none_without_failing_task(tmp_path, monkeypatch):
+    """An old deployed image without --usage-output support (or any other
+    reason the file never appears) must not fail an otherwise-successful task."""
+    input_path = tmp_path / "input.xlsx"
+    _write_synthetic_excel(input_path, 5)
+    output_dir = tmp_path / "out"
+
+    fake_run = _fake_batch_cli_subprocess(write_usage=False)
+    monkeypatch.setattr(cjr.subprocess, "run", fake_run)
+
+    rc = cjr.main([
+        "--input", str(input_path),
+        "--output-dir", str(output_dir),
+        "--task-index", "0",
+        "--task-count", "1",
+        "--run-id", "no-usage-report",
+    ])
+
+    assert rc == 0
+    status = json.loads((output_dir / "status" / "part_0000_done.json").read_text(encoding="utf-8"))
+    assert status["usage"] is None
 
 
 def test_total_row_limit_shrinks_shards_before_sharding(tmp_path, monkeypatch):

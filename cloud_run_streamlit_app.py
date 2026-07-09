@@ -552,6 +552,36 @@ def main() -> None:  # pragma: no cover - exercised only under `streamlit run`
         final_local = local_run_dir / "final" / cmr.DEFAULT_FINAL_OUTPUT_NAME
         st.success(f"Merge voltooid: {final_local.name}")
 
+        # ---- 4b. Combined API-usage + cache-hit report across every task ---
+        # Each task's own lead_prioritizer_batch_cli.py subprocess tracks its
+        # own usage (usage_tracker.py, one process = one tracker) and folds a
+        # JSON snapshot into its own _done.json (cloud_job_runner.py); this
+        # just sums all of those already-downloaded status files into one
+        # run-wide report — no extra GCS calls.
+        import json as _json
+        import usage_tracker
+
+        task_snapshots = []
+        for status_path in sorted(local_status.glob("*_done.json")):
+            try:
+                payload = _json.loads(status_path.read_text(encoding="utf-8"))
+            except Exception:
+                continue
+            if payload.get("usage"):
+                task_snapshots.append(payload["usage"])
+        if task_snapshots:
+            combined_usage = usage_tracker.merge_snapshots(task_snapshots)
+            with st.expander(
+                f"📊 API-verbruik + cache-hitrate — {len(task_snapshots)}/"
+                f"{int(task_count)} taken rapporteerden dit"
+            ):
+                st.code(usage_tracker.format_summary_text(combined_usage))
+        else:
+            st.caption(
+                "Geen API-verbruiksdata gevonden in de status-bestanden "
+                "(oudere image zonder --usage-output-ondersteuning?)."
+            )
+
         # ---- 5. Push the final Excel back to GCS for consistency -----------
         run_capture(build_upload_command(
             str(final_local), join_path(output_dir, "final", FINAL_OUTPUT_NAME), project))
