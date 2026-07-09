@@ -13,6 +13,7 @@ written to output.
 from __future__ import annotations
 
 import argparse
+import json
 import os
 import sys
 from datetime import datetime
@@ -175,6 +176,13 @@ def build_arg_parser() -> argparse.ArgumentParser:
                         "--enrichment-cache-bucket (default: off).")
     p.add_argument("--enrichment-cache-bucket", default="",
                    help="GCS bucket for --use-enrichment-cache.")
+    p.add_argument("--usage-output", default=None,
+                   help="Optional path to write the per-run usage_tracker "
+                        "snapshot as JSON (in addition to the printed "
+                        "summary) — used by cloud_job_runner.py to fold "
+                        "one task's usage into its status JSON so the Cloud "
+                        "Run orchestrator can report combined usage/cache "
+                        "stats across all tasks.")
     p.add_argument("--c5-enabled", action="store_true",
                    help="Opt-in Step C5: after normal batch processing, run "
                         "Sonnet HQ adjudication over score-3/manual-review "
@@ -387,6 +395,10 @@ def main(argv: Optional[list[str]] = None) -> int:
         companies=summary.get("processed_rows") or selected_count,
         snapshot=usage_snapshot)
     print(f"(usage appended to {history_path})")
+
+    if args.usage_output:
+        Path(args.usage_output).write_text(
+            json.dumps(usage_snapshot, default=str), encoding="utf-8")
     return 0
 
 

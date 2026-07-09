@@ -106,6 +106,84 @@ def test_format_summary_text_is_ascii_only():
     assert "API usage" in text and "TOTAL" in text
 
 
+def test_format_summary_text_omits_cache_section_when_empty():
+    _seed_basic()
+    text = ut.format_summary_text()
+    assert "enrichment cache" not in text
+
+
+def test_format_summary_text_shows_cache_hit_rate():
+    ut.reset()
+    ut.record_cache_hit("serper")
+    ut.record_cache_hit("serper")
+    ut.record_cache_hit("serper")
+    ut.record_cache_miss("serper")
+    text = ut.format_summary_text()
+    assert "enrichment cache" in text
+    assert "3 hit / 1 miss" in text
+    assert "75%" in text
+
+
+# ---------------------------------------------------------------------------
+# merge_snapshots — combining per-Cloud-Run-task snapshots into one report
+# ---------------------------------------------------------------------------
+
+def test_merge_snapshots_sums_counters_across_tasks():
+    ut.reset()
+    ut.record_serper_call("hq")
+    ut.record_anthropic_call("claude-haiku-4-5-20251001", 1000, 200)
+    ut.record_firecrawl_call()
+    ut.record_cache_hit("serper")
+    snap_a = ut.snapshot()
+
+    ut.reset()
+    ut.record_serper_call("hq")
+    ut.record_serper_call("non_hq")
+    ut.record_anthropic_call("claude-haiku-4-5-20251001", 3000, 400)
+    ut.record_cache_miss("serper")
+    snap_b = ut.snapshot()
+
+    merged = ut.merge_snapshots([snap_a, snap_b])
+
+    assert merged["serper_total"] == 3
+    assert merged["serper_by_kind"] == {"hq": 2, "non_hq": 1}
+    assert merged["anthropic_calls"] == 2
+    assert merged["anthropic_input_tokens"] == 4000
+    assert merged["anthropic_output_tokens"] == 600
+    assert merged["firecrawl_calls"] == 1
+    assert merged["cache_hits"] == {"serper": 1}
+    assert merged["cache_misses"] == {"serper": 1}
+    # cost re-derived from the summed raw counters, not averaged estimates
+    assert merged["estimated_anthropic_usd"] == round((4000 * 1 + 600 * 5) / 1e6, 6)
+
+
+def test_merge_snapshots_skips_malformed_entries_without_raising():
+    ut.reset()
+    ut.record_serper_call("hq")
+    good = ut.snapshot()
+
+    merged = ut.merge_snapshots([good, None, "not-a-dict", {}, {"serper_by_kind": None}])
+
+    assert merged["serper_total"] == 1
+
+
+def test_merge_snapshots_empty_list_returns_zeroed_snapshot():
+    merged = ut.merge_snapshots([])
+    assert merged["serper_total"] == 0
+    assert merged["anthropic_calls"] == 0
+    assert merged["estimated_total_usd"] == 0.0
+
+
+def test_merge_snapshots_output_is_renderable():
+    ut.reset()
+    ut.record_serper_call("hq")
+    ut.record_cache_hit("serper")
+    snap = ut.snapshot()
+    text = ut.format_summary_text(ut.merge_snapshots([snap, snap]))
+    text.encode("ascii")
+    assert "2 hit / 0 miss" in text
+
+
 def test_render_usage_summary_smoke(monkeypatch):
     # Stub streamlit so the app's render function runs without a real UI.
     from lead_prioritizer_batch_app import render_usage_summary

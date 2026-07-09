@@ -347,6 +347,7 @@ def _status_payload(
     row_start: Optional[int], row_end: Optional[int],
     rows_requested: int, rows_processed: int,
     status: str, started_at: str, finished_at: Optional[str], error: Optional[str],
+    usage: Optional[dict] = None,
 ) -> dict:
     return {
         "run_id": cfg.run_id,
@@ -362,6 +363,12 @@ def _status_payload(
         "started_at": started_at,
         "finished_at": finished_at,
         "error": error,
+        # usage_tracker.snapshot() dict from this task's lead_prioritizer_batch_cli.py
+        # subprocess (see --usage-output), or None when unavailable -- e.g. an old
+        # deployed image that doesn't support the flag yet. The Cloud Run
+        # orchestrator (cloud_run_streamlit_app.py) sums these across every task's
+        # _done.json via usage_tracker.merge_snapshots() for one combined report.
+        "usage": usage,
     }
 
 
@@ -471,6 +478,7 @@ def main(argv=None) -> int:
         task_output_dir = tmp_dir / "output"
         task_output_dir.mkdir(parents=True, exist_ok=True)
         local_output_path = task_output_dir / f"{task_label}.xlsx"
+        usage_output_path = task_output_dir / f"{task_label}_usage.json"
 
         cmd = [
             sys.executable, str(BATCH_CLI_SCRIPT),
@@ -482,6 +490,7 @@ def main(argv=None) -> int:
             # all of it (0 = no limit), except in a --max-rows smoke test.
             "--row-limit", str(cfg.max_rows) if cfg.max_rows else "0",
             "--output", str(local_output_path),
+            "--usage-output", str(usage_output_path),
             "--yes",
         ]
         if country_col:
@@ -528,10 +537,19 @@ def main(argv=None) -> int:
         # truncation), so the actually-processed count can be lower than the shard size.
         rows_processed = min(rows_in_part, cfg.max_rows) if cfg.max_rows else rows_in_part
 
+        usage = None
+        try:
+            if usage_output_path.exists():
+                usage = json.loads(usage_output_path.read_text(encoding="utf-8"))
+        except Exception as exc:
+            # Never let a usage-reporting hiccup fail an otherwise-successful task.
+            print(f"[cloud_job_runner] WARNING: could not read usage output "
+                  f"({type(exc).__name__}: {exc})", flush=True)
+
         finished_at = _now_iso()
         write_status_json(
             status_done_uri,
-            _status_payload(cfg, part_output_uri, row_start, row_end, rows_in_part, rows_processed, "done", started_at, finished_at, None),
+            _status_payload(cfg, part_output_uri, row_start, row_end, rows_in_part, rows_processed, "done", started_at, finished_at, None, usage=usage),
         )
         print(f"[cloud_job_runner] Task {cfg.task_index} done. rows_processed={rows_processed}", flush=True)
         return 0

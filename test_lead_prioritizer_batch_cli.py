@@ -6,6 +6,7 @@ no live APIs and no real keys.
 
 from __future__ import annotations
 
+import json
 from datetime import datetime
 from pathlib import Path
 from unittest.mock import patch
@@ -424,6 +425,38 @@ class TestMain:
         # keys passed through to core but never written to disk output
         assert captured["serper"] == "SK" and captured["anthropic"] == "AK"
         assert out_path.read_bytes() == b"BYTES"
+
+    def test_usage_output_writes_snapshot_json(self, tmp_path):
+        p = tmp_path / "in.xlsx"
+        _write_xlsx(p, {"Sheet1": _LEADS})
+        out_path = tmp_path / "result.xlsx"
+        usage_path = tmp_path / "usage.json"
+
+        with patch("lead_prioritizer_batch_cli.load_api_keys", return_value=_KEYS_OK), \
+             patch("lead_prioritizer_batch_cli.run_batch_dataframe", return_value=_fake_tables()), \
+             patch("lead_prioritizer_batch_cli.build_excel_workbook_bytes", return_value=b"BYTES"):
+            argv = self._base_argv(p, **{
+                "--output": str(out_path), "--usage-output": str(usage_path),
+            })
+            rc = main(argv)
+
+        assert rc == 0
+        assert usage_path.exists()
+        snapshot = json.loads(usage_path.read_text(encoding="utf-8"))
+        assert "serper_total" in snapshot and "anthropic_calls" in snapshot
+
+    def test_no_usage_output_flag_writes_no_file(self, tmp_path):
+        p = tmp_path / "in.xlsx"
+        _write_xlsx(p, {"Sheet1": _LEADS})
+        out_path = tmp_path / "result.xlsx"
+
+        with patch("lead_prioritizer_batch_cli.load_api_keys", return_value=_KEYS_OK), \
+             patch("lead_prioritizer_batch_cli.run_batch_dataframe", return_value=_fake_tables()), \
+             patch("lead_prioritizer_batch_cli.build_excel_workbook_bytes", return_value=b"BYTES"):
+            rc = main(self._base_argv(p, **{"--output": str(out_path)}))
+
+        assert rc == 0
+        assert not (tmp_path / "usage.json").exists()
 
     def test_c5_enabled_runs_adjudication_and_records_summary(self, tmp_path):
         p = tmp_path / "in.xlsx"

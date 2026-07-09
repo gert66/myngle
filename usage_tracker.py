@@ -231,6 +231,76 @@ def snapshot() -> dict:
     }
 
 
+def merge_snapshots(snapshots: list) -> dict:
+    """Combine multiple ``snapshot()``-shaped dicts (e.g. one per Cloud Run
+    task, each running in its own subprocess/container with its own
+    in-memory tracker) into one aggregate of the same shape, so
+    ``format_summary_text`` can render a single run-wide report exactly like
+    it does for one process. Non-dict/malformed entries are skipped rather
+    than raising — a single corrupt task's usage file must never break the
+    report for every other task. Recomputes averages/costs from the summed
+    raw counters rather than averaging the per-task estimates, so this is
+    exact, not an approximation.
+    """
+    serper: dict = defaultdict(int)
+    by_model: dict = defaultdict(lambda: {"calls": 0, "input_tokens": 0, "output_tokens": 0})
+    anthropic_calls = 0
+    firecrawl_calls = 0
+    cache_hits: dict = defaultdict(int)
+    cache_misses: dict = defaultdict(int)
+
+    for snap in snapshots or []:
+        if not isinstance(snap, dict):
+            continue
+        for kind, count in (snap.get("serper_by_kind") or {}).items():
+            serper[kind] += int(count or 0)
+        for model, entry in (snap.get("anthropic_by_model") or {}).items():
+            if not isinstance(entry, dict):
+                continue
+            dest = by_model[model]
+            dest["calls"] += int(entry.get("calls") or 0)
+            dest["input_tokens"] += int(entry.get("input_tokens") or 0)
+            dest["output_tokens"] += int(entry.get("output_tokens") or 0)
+        anthropic_calls += int(snap.get("anthropic_calls") or 0)
+        firecrawl_calls += int(snap.get("firecrawl_calls") or 0)
+        for source, count in (snap.get("cache_hits") or {}).items():
+            cache_hits[source] += int(count or 0)
+        for source, count in (snap.get("cache_misses") or {}).items():
+            cache_misses[source] += int(count or 0)
+
+    serper = dict(serper)
+    by_model = {m: dict(e) for m, e in by_model.items()}
+    serper_total = sum(serper.values())
+    in_tok = sum(e["input_tokens"] for e in by_model.values())
+    out_tok = sum(e["output_tokens"] for e in by_model.values())
+
+    anthropic_usd = _estimate_anthropic_usd(by_model)
+    serper_usd = round(serper_total * SERPER_USD_PER_CALL, 6)
+    firecrawl_usd = round(firecrawl_calls * FIRECRAWL_USD_PER_CALL, 6)
+    total_usd = (anthropic_usd or 0.0) + serper_usd + firecrawl_usd
+    total_eur = round(total_usd * USD_TO_EUR, 4)
+
+    return {
+        "serper_total": serper_total,
+        "serper_by_kind": serper,
+        "anthropic_calls": anthropic_calls,
+        "anthropic_input_tokens": in_tok,
+        "anthropic_output_tokens": out_tok,
+        "anthropic_total_tokens": in_tok + out_tok,
+        "anthropic_avg_input_tokens": round(in_tok / anthropic_calls, 1) if anthropic_calls else 0,
+        "anthropic_avg_output_tokens": round(out_tok / anthropic_calls, 1) if anthropic_calls else 0,
+        "anthropic_by_model": by_model,
+        "firecrawl_calls": firecrawl_calls,
+        "estimated_anthropic_usd": anthropic_usd,
+        "estimated_serper_usd": serper_usd,
+        "estimated_firecrawl_usd": firecrawl_usd,
+        "estimated_total_usd": round(total_usd, 6),
+        "estimated_total_eur": total_eur,
+        "cache_hits": dict(cache_hits),
+        "cache_misses": dict(cache_misses),
+    }
+
+
 def format_summary_text(snap: Optional[dict] = None) -> str:
     """Compact, human-readable usage table for the CLI."""
     s = snap if snap is not None else snapshot()
@@ -239,6 +309,9 @@ def format_summary_text(snap: Optional[dict] = None) -> str:
     kind_str = ", ".join(f"{k}={kinds[k]}" for k in SERPER_KINDS if kinds.get(k)) or "-"
     a_usd = s["estimated_anthropic_usd"]
     a_usd_str = f"${a_usd:.4f}" if a_usd is not None else "n/a (unpriced model)"
+    cache_hits = s.get("cache_hits") or {}
+    cache_misses = s.get("cache_misses") or {}
+    cache_sources = sorted(set(cache_hits) | set(cache_misses))
     # ASCII-only: this is printed to the CLI, which may run on a Windows cp1252
     # console that cannot encode box-drawing chars, the euro sign, or "~=".
     bar = "-" * 52
@@ -251,6 +324,17 @@ def format_summary_text(snap: Optional[dict] = None) -> str:
         f"    input tokens    : {s['anthropic_input_tokens']:,}  (avg {s['anthropic_avg_input_tokens']}/call)",
         f"    output tokens   : {s['anthropic_output_tokens']:,}  (avg {s['anthropic_avg_output_tokens']}/call)",
         f"  Firecrawl scrapes : {s['firecrawl_calls']}",
+    ]
+    if cache_sources:
+        lines.append("  -- shared enrichment cache --")
+        for source in cache_sources:
+            hits = cache_hits.get(source, 0)
+            misses = cache_misses.get(source, 0)
+            total = hits + misses
+            rate = f"{100 * hits / total:.0f}%" if total else "n/a"
+            lines.append(
+                f"    {source:<9} : {hits} hit / {misses} miss  (hit rate {rate})")
+    lines += [
         "  -- estimated cost --",
         f"    Anthropic       : {a_usd_str}",
         f"    Serper          : ${s['estimated_serper_usd']:.4f}",
