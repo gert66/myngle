@@ -29,8 +29,12 @@ def _clean_cloud_env(monkeypatch):
 
 
 def _write_part(path: Path, names: list[str], indices: list[int]) -> None:
+    """Mirror what lead_prioritizer_batch_cli.py actually writes: the data
+    lives under a sheet literally named "Enriched Leads" (cloud_merge_results
+    reads/writes that exact sheet name, not just "whichever sheet is first")."""
     path.parent.mkdir(parents=True, exist_ok=True)
-    pd.DataFrame({"company_name": names, ROW_INDEX_COL: indices}).to_excel(path, index=False)
+    pd.DataFrame({"company_name": names, ROW_INDEX_COL: indices}).to_excel(
+        path, sheet_name=cmr.ENRICHED_LEADS_SHEET_NAME, index=False)
 
 
 def _write_status(output_dir: Path, task_index: int, status: str) -> None:
@@ -71,6 +75,25 @@ def test_merge_restores_original_row_order_from_out_of_order_parts(tmp_path):
     assert manifest["parts_merged"] == 2
     assert manifest["row_count"] == 5
     assert manifest["error"] is None
+
+
+def test_final_output_has_enriched_leads_sheet_name(tmp_path):
+    """Regression: the merged workbook must expose its data under a sheet
+    literally named "Enriched Leads", not a generic default ("Sheet1") --
+    export_lead_prioritizer_to_lovable_json.export_workbook_to_lovable_json()
+    (the Cloud Run auto-export-to-Lovable step) hard-requires that exact
+    sheet name and previously failed with "Required sheet 'Enriched Leads'
+    not found... Sheets present: ['Sheet1']" against the merge's output."""
+    output_dir = tmp_path / "out"
+    _write_part(output_dir / "parts" / "part_0000.xlsx", ["A"], [0])
+    _write_status(output_dir, 0, "done")
+
+    rc = cmr.main(["--output-dir", str(output_dir), "--run-id", "sheet-name", "--expected-task-count", "1"])
+
+    assert rc == 0
+    final_path = output_dir / "final" / cmr.DEFAULT_FINAL_OUTPUT_NAME
+    with pd.ExcelFile(final_path) as xls:
+        assert xls.sheet_names == [cmr.ENRICHED_LEADS_SHEET_NAME]
 
 
 def test_final_output_name_is_honored_and_xlsx_suffix_is_added(tmp_path):
@@ -175,7 +198,8 @@ def test_merge_tolerates_zero_row_part_file(tmp_path):
     output_dir = tmp_path / "out"
     _write_part(output_dir / "parts" / "part_0000.xlsx", ["A", "B"], [0, 1])
     pd.DataFrame({"company_name": [], ROW_INDEX_COL: []}).to_excel(
-        output_dir / "parts" / "part_0001.xlsx", index=False
+        output_dir / "parts" / "part_0001.xlsx",
+        sheet_name=cmr.ENRICHED_LEADS_SHEET_NAME, index=False,
     )
     _write_status(output_dir, 0, "done")
     _write_status(output_dir, 1, "done")
