@@ -414,11 +414,16 @@ C5-pass (geen dubbele C5-run).
   overschreven (`gcloud storage cp`, geen check). Onschuldig voor de
   Streamlit-app zelf (die het lokale bestand direct gebruikt, niet de
   GCS-kopie), maar relevant voor het Eventarc/dispatcher-pad.
-- **Lovable-export `current/`**: kiesbaar via de radiobutton "current/-gedrag"
-  in de sidebar — **Overwrite** (current/ volledig vervangen door alleen
-  deze run, het oude gedrag), **Merge** (samenvoegen met wat er al staat,
-  zie hieronder) of **Niet uploaden**. Default blijft Overwrite, dus
-  bestaand gedrag verandert niet vanzelf.
+- **Lovable-export `current/`**: expliciete keuze in het hoofdveld (niet de
+  sidebar) vlak vóór de "Start Cloud Run"-knop, zodat hij niet gemist kan
+  worden — **Overschrijven** (current/ volledig vervangen door alleen deze
+  run, het oude gedrag) of **Mergen** (samenvoegen met wat er al staat, zie
+  hieronder). Default blijft Overschrijven, dus bestaand gedrag verandert
+  niet vanzelf. Alleen zichtbaar zodra én "Na afloop automatisch Lovable
+  JSON exporteren" én "Na Lovable JSON-export uploaden naar Google Cloud
+  Storage" (beide in de sidebar) aanstaan — current/ helemaal overslaan kan
+  alleen nog door die laatste checkbox uit te zetten (schakelt dan ook het
+  archief-uploaden uit).
 - **Lovable-export archief (`runs/<run_folder>/`, standaard `YYYY-MM-DD_`
   `<mode>`)**: dit IS bedoeld als permanent historisch record (altijd de
   onvermengde export van precies déze run, ook als current/ op Merge staat).
@@ -433,9 +438,9 @@ C5-pass (geen dubbele C5-run).
 
 ## current/ mergen in plaats van overschrijven
 
-Met "current/-gedrag" op **Merge** wordt de bestaande `current/`-data eerst
-gedownload en samengevoegd met de output van deze run, in plaats van
-vervangen:
+Kies je in het hoofdveld voor **Mergen**, dan wordt de bestaande
+`current/`-data eerst gedownload en samengevoegd met de output van deze
+run, in plaats van vervangen:
 
 1. `companies.list.json` + alle `company-details-*.json` uit
    `gs://<bucket>/<land>/current/` worden gedownload (ontbreken ze nog —
