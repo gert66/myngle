@@ -190,6 +190,21 @@ def build_arg_parser() -> argparse.ArgumentParser:
                         "behavior, Sonnet model tier, no explicit model "
                         "override — the same defaults the local Streamlit "
                         "batch app uses day to day). Default: off.")
+    p.add_argument("--gate-full-enrichment-on-foreign-hq", action="store_true",
+                   help="Opt-in cost gate: run cheap HQ-only screening (1 "
+                        "Serper call) for every row first, then run the full "
+                        "non-HQ enrichment/scoring/caller-content pipeline "
+                        "ONLY for rows confirmed foreign-HQ (HQ score == 3). "
+                        "Non-confirmed rows are kept with "
+                        "enrichment_skipped=True instead of paying the "
+                        "~4 extra Serper calls + Firecrawl/Anthropic cost "
+                        "for a row you were going to filter out anyway. "
+                        "Works with every --mode. KNOWN LIMITATION when "
+                        "combined with --c5-enabled: C5 runs AFTER this gate "
+                        "decision as a flat post-step, so a row C5 later "
+                        "confirms as foreign-HQ does NOT get pulled back "
+                        "into full enrichment -- it only gets C5's own "
+                        "fields. Default: off.")
     return p
 
 
@@ -256,6 +271,23 @@ def config_from_args(args: argparse.Namespace) -> BatchRunConfig:
         auto_correct_quotes=not args.no_auto_correct_quotes,
         use_enrichment_cache=args.use_enrichment_cache,
         enrichment_cache_bucket=args.enrichment_cache_bucket,
+        gate_full_enrichment_on_foreign_hq=args.gate_full_enrichment_on_foreign_hq,
+    )
+
+
+def gate_c5_combo_warning(gate_enabled: bool, c5_enabled: bool) -> Optional[str]:
+    """Warning text for the untested gate+C5 combination, or ``None`` when
+    it doesn't apply. Pure/testable so the CLI's print behavior can be
+    asserted without capturing stdout."""
+    if not (gate_enabled and c5_enabled):
+        return None
+    return (
+        "WARNING: --gate-full-enrichment-on-foreign-hq + --c5-enabled: C5 "
+        "runs AFTER the foreign-HQ gate decision, so a row C5 later confirms "
+        "as foreign-HQ stays enrichment_skipped=True (no full non-HQ "
+        "enrichment) -- C5 only adds its own fields to whichever rows the "
+        "plain HQ-score screening already selected. See "
+        "lead_prioritizer_batch_cli.py --help for details."
     )
 
 
@@ -317,8 +349,13 @@ def main(argv: Optional[list[str]] = None) -> int:
     print(f"Sheet         : {sheet}")
     print(f"Row count     : {len(df)}")
     print(f"Run mode      : {args.mode}")
+    print(f"Foreign-HQ gate: {'on' if args.gate_full_enrichment_on_foreign_hq else 'off'}")
     print(f"Selected rows : {selected_count}")
     print(f"Output path   : {output_path}")
+
+    warning = gate_c5_combo_warning(args.gate_full_enrichment_on_foreign_hq, args.c5_enabled)
+    if warning:
+        print(warning, file=sys.stderr)
 
     # ── Safety confirmation for large runs ────────────────────────────────────
     if selected_count > _CONFIRM_THRESHOLD and not args.yes:
@@ -385,6 +422,10 @@ def main(argv: Optional[list[str]] = None) -> int:
     print(f"Processed rows: {summary.get('processed_rows')}")
     print(f"Success count : {summary.get('success_count')}")
     print(f"Error count   : {summary.get('error_count')}")
+    if args.gate_full_enrichment_on_foreign_hq:
+        print(f"Gate: full-enriched {summary.get('gated_full_enrichment_attempted_count')}, "
+              f"skipped (not confirmed foreign-HQ) {summary.get('gated_full_enrichment_skipped_count')} "
+              f"(~{summary.get('gated_estimated_serper_calls_saved')} Serper calls saved)")
     print(f"Output written: {output_path}")
 
     # ── Per-run API usage + estimated cost ────────────────────────────────────

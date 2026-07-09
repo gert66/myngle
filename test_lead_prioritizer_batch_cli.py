@@ -17,6 +17,7 @@ import pytest
 import lead_prioritizer_batch_cli as cli
 from lead_prioritizer_batch_cli import (
     build_arg_parser,
+    gate_c5_combo_warning,
     generate_output_path,
     resolve_sheet,
     check_required_columns,
@@ -201,6 +202,37 @@ class TestArgParsing:
             ["--input", "x.xlsx", "--company-column", "c", "--domain-column", "d",
              "--c5-enabled"])
         assert args.c5_enabled is True
+
+    def test_gate_full_enrichment_on_foreign_hq_flag_parses_and_defaults_off(self):
+        args = build_arg_parser().parse_args(
+            ["--input", "x.xlsx", "--company-column", "c", "--domain-column", "d"])
+        assert args.gate_full_enrichment_on_foreign_hq is False
+        cfg = config_from_args(args)
+        assert cfg.gate_full_enrichment_on_foreign_hq is False
+
+        args = build_arg_parser().parse_args(
+            ["--input", "x.xlsx", "--company-column", "c", "--domain-column", "d",
+             "--gate-full-enrichment-on-foreign-hq"])
+        assert args.gate_full_enrichment_on_foreign_hq is True
+        cfg = config_from_args(args)
+        assert cfg.gate_full_enrichment_on_foreign_hq is True
+
+
+class TestGateC5ComboWarning:
+    def test_no_warning_when_gate_off(self):
+        assert gate_c5_combo_warning(False, True) is None
+
+    def test_no_warning_when_c5_off(self):
+        assert gate_c5_combo_warning(True, False) is None
+
+    def test_no_warning_when_both_off(self):
+        assert gate_c5_combo_warning(False, False) is None
+
+    def test_warns_when_both_on(self):
+        warning = gate_c5_combo_warning(True, True)
+        assert warning is not None
+        assert "C5" in warning
+        assert "gate" in warning.lower()
 
     def test_no_verify_quotes_flag_parses(self):
         args = build_arg_parser().parse_args(
