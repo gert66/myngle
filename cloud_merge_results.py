@@ -38,6 +38,14 @@ from cloud_job_runner import (
 
 DEFAULT_FINAL_OUTPUT_NAME = "lead_prioritizer_final.xlsx"
 
+# Must match lead_prioritizer_batch_core._SHEET_NAMES["enriched_leads"] /
+# export_lead_prioritizer_to_lovable_json.ENRICHED_SHEET: every part file
+# lead_prioritizer_batch_cli.py writes has its data under a sheet with this
+# exact name, and export_workbook_to_lovable_json() (the Cloud Run Lovable
+# auto-export step) requires this exact sheet name to be present in the
+# merged final workbook, not just "whichever sheet happens to be first".
+ENRICHED_LEADS_SHEET_NAME = "Enriched Leads"
+
 
 def _now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
@@ -110,10 +118,16 @@ def _download_to_local(uri_or_path: str, local_path: Path) -> Path:
 
 
 def merge_part_dataframes(local_part_paths: list[Path]) -> pd.DataFrame:
-    """Read and concatenate all part Excel files, sorted by original row index when present."""
+    """Read and concatenate all part Excel files, sorted by original row index when present.
+
+    Reads the "Enriched Leads" sheet explicitly rather than relying on it
+    being sheet 0 -- true today only because of insertion order in
+    lead_prioritizer_batch_core._SHEET_NAMES, and a fragile thing to depend
+    on implicitly.
+    """
     frames = []
     for path in local_part_paths:
-        frames.append(pd.read_excel(path))
+        frames.append(pd.read_excel(path, sheet_name=ENRICHED_LEADS_SHEET_NAME))
     if not frames:
         return pd.DataFrame()
     merged = pd.concat(frames, ignore_index=True)
@@ -188,7 +202,7 @@ def main(argv=None) -> int:
         return 1
 
     local_final = tmp_dir / final_name
-    merged_df.to_excel(local_final, index=False)
+    merged_df.to_excel(local_final, sheet_name=ENRICHED_LEADS_SHEET_NAME, index=False)
     print(f"[cloud_merge_results] Uploading final Excel -> {final_output_uri}", flush=True)
     upload_output_file(local_final, final_output_uri)
 
