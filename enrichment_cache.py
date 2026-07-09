@@ -43,9 +43,21 @@ Only the RAW response is ever stored (the full Serper JSON payload, or the
 Firecrawl scrape result dict) — never a derived score or signal — so cached
 evidence stays traceable exactly like a live call's evidence.
 
-No new dependency: uploads/downloads reuse the exact same ``gcloud storage
-cp`` / ``gsutil cp`` subprocess pattern as ``lovable_gcs_upload.py``
-(``resolve_gcs_upload_tool`` / ``upload_file``) — no Python GCS SDK.
+Two transports, Python client first, CLI subprocess as fallback
+------------------------------------------------------------------
+A Cloud Run Job container (see ``Dockerfile``) only ever has the
+``google-cloud-storage`` Python package installed — no ``gcloud``/``gsutil``
+CLI — but DOES have Application Default Credentials automatically (the
+job's attached service account), so the ``google.cloud.storage`` client
+"just works" there with zero setup. A local dev machine is the opposite:
+it typically has ``gcloud auth login`` (CLI credentials) but not
+``gcloud auth application-default login`` (ADC), so the Python client
+often can't authenticate there, while the same ``gcloud storage cp`` /
+``gsutil cp`` subprocess pattern ``lovable_gcs_upload.py`` already uses
+does work. Every download/upload therefore tries the Python client first
+and falls back to the CLI subprocess on any failure (missing package,
+missing ADC, ...) — this is what actually makes the shared cache work
+inside a deployed Cloud Run Job, not just on a local machine.
 """
 
 from __future__ import annotations
@@ -184,31 +196,64 @@ def put_cached(index: dict, source: str, *parts: str, response: dict) -> None:
 
 
 # ---------------------------------------------------------------------------
-# GCS download / upload — ONE subprocess call each, at the start/end of a run.
+# GCS download / upload — ONE call each, at the start/end of a run. Python
+# client tried first (works in Cloud Run via ADC), CLI subprocess as fallback
+# (works on a local machine with ``gcloud auth login`` but no ADC).
 # ---------------------------------------------------------------------------
 
 def _cache_index_filename(country_slug: str) -> str:
     return f"{country_slug}_cache_index.json"
 
 
+def _cache_index_blob_name(country_slug: str) -> str:
+    return f"{_CACHE_INDEX_GCS_PREFIX}/{_cache_index_filename(country_slug)}"
+
+
 def _cache_index_gcs_path(bucket: str, country_slug: str) -> str:
-    return f"gs://{bucket}/{_CACHE_INDEX_GCS_PREFIX}/{_cache_index_filename(country_slug)}"
+    return f"gs://{bucket}/{_cache_index_blob_name(country_slug)}"
 
 
-def load_cache_index(bucket: str, country_slug: str) -> dict:
-    """Download the shared per-country cache index into memory.
+def _storage_client():
+    """Lazily construct a ``google.cloud.storage.Client``, or ``None`` when
+    the package is missing or Application Default Credentials aren't
+    available here. Never raises — every caller treats ``None`` as "fall
+    back to the gcloud/gsutil CLI subprocess" rather than a hard failure."""
+    try:
+        from google.cloud import storage
+        return storage.Client()
+    except Exception:
+        return None
 
-    Returns ``{}`` (never raises) when: the bucket/country slug is blank, no
-    ``gcloud``/``gsutil`` is on ``PATH``, the download fails (including the
-    normal "doesn't exist yet" case on the very first run for a country), or
-    the downloaded file is not valid JSON. Every failure path prints a short,
-    secret-free warning so a silent cache-miss run is still visible in logs.
-    """
-    bucket = str(bucket or "").strip()
-    country_slug = str(country_slug or "").strip()
-    if not bucket or not country_slug:
-        return {}
 
+def _load_cache_index_via_client(bucket: str, country_slug: str) -> Optional[dict]:
+    """Try the Python ``google-cloud-storage`` client. Returns ``None`` (not
+    ``{}``) to mean "client unusable, try the CLI fallback instead" — as
+    opposed to ``{}``, which means "client worked, index just doesn't exist
+    yet" (the normal first-run-for-this-country case)."""
+    client = _storage_client()
+    if client is None:
+        return None
+    try:
+        blob = client.bucket(bucket).blob(_cache_index_blob_name(country_slug))
+        if not blob.exists():
+            print(f"[enrichment_cache] No existing cache index for "
+                  f"{country_slug!r} yet -- starting with an empty cache.")
+            return {}
+        try:
+            data = json.loads(blob.download_as_text())
+        except Exception as exc:
+            print(f"[enrichment_cache] Could not parse cache index for "
+                  f"{country_slug!r} ({type(exc).__name__}) -- starting empty.")
+            return {}
+        return data if isinstance(data, dict) else {}
+    except Exception as exc:
+        print(f"[enrichment_cache] google-cloud-storage download failed for "
+              f"{country_slug!r} ({type(exc).__name__}) -- falling back to "
+              f"the gcloud/gsutil CLI.")
+        return None
+
+
+def _load_cache_index_via_cli(bucket: str, country_slug: str) -> dict:
     tool_cmd = resolve_gcs_upload_tool()
     if tool_cmd is None:
         print(f"[enrichment_cache] No gcloud/gsutil on PATH -- running "
@@ -244,28 +289,59 @@ def load_cache_index(bucket: str, country_slug: str) -> dict:
         return {}
 
 
-def save_cache_index(bucket: str, country_slug: str, index: dict) -> dict:
-    """Write the index locally and upload it back to GCS via the same
-    ``upload_file()`` pattern as ``lovable_gcs_upload.py``.
+def load_cache_index(bucket: str, country_slug: str) -> dict:
+    """Download the shared per-country cache index into memory.
 
-    Returns a result dict in the exact same shape as ``upload_file()``
-    (``{"success": bool, ...}``) — never raises. A failed upload only means
-    this run's cache updates are lost, never that the run itself failed.
+    Tries the Python ``google-cloud-storage`` client first (this is what
+    makes the cache actually work inside a Cloud Run Job, which has ADC via
+    its service account but no ``gcloud``/``gsutil`` CLI installed), and
+    falls back to the ``gcloud storage cp`` / ``gsutil cp`` CLI subprocess
+    (for a local machine with CLI credentials but no ADC configured).
+
+    Returns ``{}`` (never raises) when: the bucket/country slug is blank,
+    neither transport is usable, the download fails (including the normal
+    "doesn't exist yet" case on the very first run for a country), or the
+    downloaded file is not valid JSON. Every failure path prints a short,
+    secret-free warning so a silent cache-miss run is still visible in logs.
     """
     bucket = str(bucket or "").strip()
     country_slug = str(country_slug or "").strip()
     if not bucket or not country_slug:
-        return {"success": False, "error": "bucket and country_slug are required."}
-    if not isinstance(index, dict):
-        return {"success": False, "error": "index must be a dict."}
+        return {}
 
+    via_client = _load_cache_index_via_client(bucket, country_slug)
+    if via_client is not None:
+        return via_client
+    return _load_cache_index_via_cli(bucket, country_slug)
+
+
+def _save_cache_index_via_client(bucket: str, country_slug: str, index: dict) -> Optional[dict]:
+    """Try the Python client. Returns ``None`` (try the CLI fallback) when
+    the client itself is unusable; returns a result dict on any outcome
+    once the client was actually usable (including a genuine upload failure
+    — that's a real result, not "try something else")."""
+    client = _storage_client()
+    if client is None:
+        return None
+    try:
+        blob = client.bucket(bucket).blob(_cache_index_blob_name(country_slug))
+        blob.upload_from_string(
+            json.dumps(index, ensure_ascii=False), content_type="application/json")
+        return {"success": True, "destination": _cache_index_gcs_path(bucket, country_slug)}
+    except Exception as exc:
+        print(f"[enrichment_cache] google-cloud-storage upload failed for "
+              f"{country_slug!r} ({type(exc).__name__}) -- falling back to "
+              f"the gcloud/gsutil CLI.")
+        return None
+
+
+def _save_cache_index_via_cli(bucket: str, country_slug: str, index: dict) -> dict:
     tool_cmd = resolve_gcs_upload_tool()
     if tool_cmd is None:
         return {
             "success": False,
-            "error": "Neither gcloud nor gsutil was found on PATH. Install "
-                     "or authenticate the Google Cloud SDK to persist the "
-                     "shared cache.",
+            "error": "Neither the google-cloud-storage client nor gcloud/"
+                     "gsutil could persist the shared cache.",
         }
 
     remote_path = _cache_index_gcs_path(bucket, country_slug)
@@ -277,3 +353,28 @@ def save_cache_index(bucket: str, country_slug: str, index: dict) -> dict:
             return upload_file(tool_cmd, str(local_path), remote_path)
     except Exception as exc:
         return {"success": False, "error": f"{type(exc).__name__}: {exc}"}
+
+
+def save_cache_index(bucket: str, country_slug: str, index: dict) -> dict:
+    """Upload the updated index back to GCS.
+
+    Tries the Python ``google-cloud-storage`` client first (works inside a
+    Cloud Run Job via ADC), falls back to the ``gcloud``/``gsutil`` CLI
+    subprocess otherwise (the same pattern ``lovable_gcs_upload.py`` uses
+    for a local machine's CLI credentials).
+
+    Returns a result dict (``{"success": bool, ...}``) — never raises. A
+    failed upload only means this run's cache updates are lost, never that
+    the run itself failed.
+    """
+    bucket = str(bucket or "").strip()
+    country_slug = str(country_slug or "").strip()
+    if not bucket or not country_slug:
+        return {"success": False, "error": "bucket and country_slug are required."}
+    if not isinstance(index, dict):
+        return {"success": False, "error": "index must be a dict."}
+
+    via_client = _save_cache_index_via_client(bucket, country_slug, index)
+    if via_client is not None:
+        return via_client
+    return _save_cache_index_via_cli(bucket, country_slug, index)
