@@ -471,6 +471,46 @@ Het archief (`runs/<run_folder>/`) gebruikt hierbij altijd de onvermengde
 export van déze run — nooit de gemergde current/-set — zodat elke
 archiefmap precies weergeeft wat die ene run zelf heeft opgeleverd.
 
+**Belangrijk: mergen bespaart op zichzelf geen enkele API-kost.** De Cloud
+Run Job verwerkt gewoon alle rijen uit het geüploade invoerbestand door de
+volledige pipeline (Serper/Anthropic/Firecrawl) — die stap weet niets van
+wat er al in `current/` staat. De `merge_summary`-cijfers (`added`/
+`updated`) beschrijven alleen hoe de output van déze run zich verhoudt tot
+wat er al gepubliceerd was, niet hoeveel er dit keer daadwerkelijk
+verrijkt is — een run met `updated: 100` heeft dus gewoon opnieuw 100
+bedrijven door de hele pipeline gehaald, niet 100 "gratis" hergebruikt.
+
+### Skip-filter: al verrijkte bedrijven vooraf overslaan
+
+Om wél kosten te besparen op een herhaalde run, staat er — alleen zichtbaar
+bij **Mergen** — een extra checkbox: "Bedrijven die al volledig verrijkt in
+current/ staan overslaan". Staat die aan, dan gebeurt er vóórdat de Cloud
+Run Job start:
+
+1. De bestaande `current/companies.list.json` wordt gedownload.
+2. Elk bedrijf daarin met `enrichment_skipped=False` (dus écht volledig
+   verrijkt, geen dunne foreign-HQ-gate-rij) levert een bekende
+   `company_id` op (domein-gebaseerd, dezelfde normalisatie als
+   `make_company_id`/`slugify`).
+3. Rijen in het invoerbestand wiens domein al bij een bekende `company_id`
+   hoort, worden VOOR de upload uit het bestand gefilterd — die rijen gaan
+   dus nooit door Serper/Anthropic/Firecrawl. Een rij zonder (herkenbare)
+   domein wordt nooit overgeslagen, uit voorzichtigheid.
+4. Het invoerbestand dat daadwerkelijk naar Cloud Run gaat bevat dus alleen
+   nog de nieuwe/nog-niet-verrijkte rijen — de Streamlit-app toont vooraf
+   hoeveel rijen zijn overgeslagen en hoeveel er verwerkt worden. Zijn het
+   er nul, dan wordt de Cloud Run Job niet eens gestart.
+5. Ná de run vult de gewone merge-stap de overgeslagen bedrijven gewoon
+   weer aan vanuit de bestaande `current/`-data (ze komen niet voor in de
+   nieuwe run z'n output, dus ze vallen in de "alleen aan de oude kant"-tak
+   van de merge en blijven ongewijzigd staan).
+
+Dit is de daadwerkelijke kostenbesparing bij een herhaalde run — niet de
+merge op zich. Wil je juist een bedrijf dat eerder door de foreign-HQ-gate
+is overgeslagen alsnog een nieuwe kans geven, dan gebeurt dat automatisch:
+alleen `enrichment_skipped=False`-bedrijven tellen als "al verrijkt", dus
+een eerder dunne entry wordt gewoon weer meegenomen.
+
 ## Gedeelde enrichment-cache in cloud-runs
 
 De opt-in Serper/Firecrawl-cache (`USE_ENRICHMENT_CACHE` +

@@ -13,6 +13,7 @@ import sys
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
+import pandas as pd
 import pytest
 
 from cloud_run_streamlit_app import (
@@ -27,8 +28,10 @@ from cloud_run_streamlit_app import (
     count_task_statuses,
     gcs_incoming_uri,
     gcs_output_dir,
+    known_enriched_company_ids,
     list_existing_gcs_files,
     run_streaming,
+    split_rows_by_existing_enrichment,
 )
 
 
@@ -319,6 +322,73 @@ class TestMergeExportIntoExistingCurrent:
         }
         merged_list = json.loads((merged_dir / "companies.list.json").read_text(encoding="utf-8"))
         assert [i["company_id"] for i in merged_list] == ["acme-com"]
+
+
+# ── Skip-already-enriched pre-filter (cheaper reruns with Mergen) ───────────
+
+class TestKnownEnrichedCompanyIds:
+    def test_only_non_skipped_ids_included(self):
+        items = [
+            {"company_id": "acme-com", "enrichment_skipped": False},
+            {"company_id": "beta-com", "enrichment_skipped": True},
+            {"company_id": "gamma-com"},  # missing key treated as not-skipped
+        ]
+        assert known_enriched_company_ids(items) == {"acme-com", "gamma-com"}
+
+    def test_empty_list_returns_empty_set(self):
+        assert known_enriched_company_ids([]) == set()
+
+    def test_ignores_malformed_entries(self):
+        items = [{"company_id": "acme-com", "enrichment_skipped": False}, "not-a-dict", {}]
+        assert known_enriched_company_ids(items) == {"acme-com"}
+
+
+class TestSplitRowsByExistingEnrichment:
+    def test_known_domains_split_to_already_enriched(self):
+        df = pd.DataFrame({
+            "company_name": ["Acme", "Beta", "Gamma"],
+            "domain": ["acme.com", "beta.com", "gamma.com"],
+        })
+        known_ids = {"acme-com", "gamma-com"}  # slugify("acme.com") == "acme-com"
+        to_process, skipped = split_rows_by_existing_enrichment(df, "domain", known_ids)
+        assert list(to_process["company_name"]) == ["Beta"]
+        assert list(skipped["company_name"]) == ["Acme", "Gamma"]
+
+    def test_blank_domain_always_goes_to_process(self):
+        df = pd.DataFrame({"company_name": ["NoDomain"], "domain": [""]})
+        to_process, skipped = split_rows_by_existing_enrichment(df, "domain", {"acme-com"})
+        assert len(to_process) == 1
+        assert len(skipped) == 0
+
+    def test_nan_domain_always_goes_to_process(self):
+        df = pd.DataFrame({"company_name": ["NoDomain"], "domain": [float("nan")]})
+        to_process, skipped = split_rows_by_existing_enrichment(df, "domain", {"acme-com"})
+        assert len(to_process) == 1
+        assert len(skipped) == 0
+
+    def test_no_known_ids_keeps_everything_in_to_process(self):
+        df = pd.DataFrame({"domain": ["acme.com", "beta.com"]})
+        to_process, skipped = split_rows_by_existing_enrichment(df, "domain", set())
+        assert len(to_process) == 2
+        assert len(skipped) == 0
+
+    def test_never_mutates_input_dataframe(self):
+        df = pd.DataFrame({"domain": ["acme.com"]})
+        df_copy = df.copy()
+        split_rows_by_existing_enrichment(df, "domain", {"acme-com"})
+        pd.testing.assert_frame_equal(df, df_copy)
+
+    def test_matches_make_company_id_slugify_normalization(self):
+        # www./scheme are NOT stripped by slugify (matches
+        # export_lead_prioritizer_to_lovable_json.make_company_id's actual
+        # basis -- normalized_domain is never set in practice, so it always
+        # falls back to the raw domain column value) -- a differently-cased
+        # domain still matches since slugify lowercases.
+        df = pd.DataFrame({"domain": ["ACME.com", "https://www.beta.com"]})
+        known_ids = {"acme-com", "https-www-beta-com"}
+        to_process, skipped = split_rows_by_existing_enrichment(df, "domain", known_ids)
+        assert len(to_process) == 0
+        assert len(skipped) == 2
 
 
 # ── Regression: gcloud is a .cmd wrapper on Windows ──────────────────────────

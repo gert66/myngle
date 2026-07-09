@@ -398,6 +398,51 @@ def _merge_export_into_existing_current(
 
 
 # =============================================================================
+# Skip-already-enriched pre-filter: cheaper reruns when merging (only
+# processes rows whose company isn't already fully enriched in current/,
+# instead of re-running the whole pipeline every time and merging after the
+# fact). Pure/unit-tested; no GCS access here -- callers pass in the
+# already-downloaded current/ list items.
+# =============================================================================
+
+def known_enriched_company_ids(existing_list_items: list[dict]) -> set[str]:
+    """``company_id``s from an existing current/ export that are NOT
+    ``enrichment_skipped`` — i.e. actually fully enriched, safe to skip
+    re-processing. A thin/gate-skipped existing entry is deliberately
+    excluded so it keeps getting retried by future runs instead of staying
+    permanently thin."""
+    return {
+        item["company_id"] for item in existing_list_items
+        if isinstance(item, dict) and item.get("company_id")
+        and not item.get("enrichment_skipped")
+    }
+
+
+def split_rows_by_existing_enrichment(
+    df, domain_column: str, known_company_ids: set[str],
+):
+    """Split ``df`` into ``(to_process, already_enriched)`` based on whether
+    each row's domain — run through the exact same
+    ``export_lead_prioritizer_to_lovable_json.slugify`` normalization
+    ``make_company_id`` uses — is already in ``known_company_ids``.
+
+    A row with a blank/missing domain always goes to ``to_process`` (never
+    silently dropped just because its id can't be determined). Never
+    mutates ``df``.
+    """
+    import export_lead_prioritizer_to_lovable_json as lovable_export
+
+    def _row_known(value) -> bool:
+        text = str(value if value is not None else "").strip()
+        if not text or text.lower() == "nan":
+            return False
+        return lovable_export.slugify(text) in known_company_ids
+
+    mask = df[domain_column].apply(_row_known)
+    return df[~mask].copy(), df[mask].copy()
+
+
+# =============================================================================
 # Streamlit UI
 # =============================================================================
 
@@ -630,6 +675,7 @@ def main() -> None:  # pragma: no cover - exercised only under `streamlit run`
     # check below) since it's a real decision on every run, not just an
     # edge case.
     merge_current = False
+    skip_already_enriched = False
     if uploaded is not None and auto_lovable_export_enabled and auto_gcs_upload_enabled:
         st.subheader("current/-gedrag")
         current_choice = st.radio(
@@ -648,6 +694,21 @@ def main() -> None:  # pragma: no cover - exercised only under `streamlit run`
                  "die al bestonden blijven ongewijzigd.",
         )
         merge_current = current_choice.startswith("Mergen")
+        if merge_current:
+            skip_already_enriched = st.checkbox(
+                "Bedrijven die al volledig verrijkt in current/ staan overslaan "
+                "(goedkoper: alleen nieuwe/nog-niet-verrijkte rijen verwerken)",
+                value=False,
+                help="Vóór de Cloud Run Job start: download current/, en "
+                     "verwijder uit het invoerbestand elke rij waarvan het "
+                     "bedrijf (op domein) al in current/ staat MET "
+                     "enrichment_skipped=False (dus echt volledig verrijkt, "
+                     "niet eerder door de foreign-HQ-gate overgeslagen — zo'n "
+                     "dunne entry wordt gewoon opnieuw geprobeerd). Bespaart "
+                     "Serper/Firecrawl/Anthropic-kosten voor bedrijven die al "
+                     "goed staan. De overgeslagen bedrijven blijven na de "
+                     "merge gewoon in current/ staan, ongewijzigd.",
+            )
 
     # ---- Pre-flight: warn if the Lovable ARCHIVE folder already has data ---
     # The archive folder (runs/<run_folder>/, keyed by date+mode by default)
@@ -691,6 +752,56 @@ def main() -> None:  # pragma: no cover - exercised only under `streamlit run`
         work_dir = Path(tempfile.mkdtemp(prefix="cloud_run_streamlit_"))
         local_input = work_dir / uploaded.name
         local_input.write_bytes(uploaded.getvalue())
+
+        # ---- 0b. Optional pre-flight: skip rows already fully enriched -----
+        # Only relevant together with Mergen -- a skipped row is never
+        # touched by this run and is simply carried over as-is from current/
+        # by the merge step later, so nothing is lost by not re-processing
+        # it. This is what actually SAVES Serper/Firecrawl/Anthropic cost on
+        # a rerun; the merge step by itself only avoids losing companies
+        # from current/, it doesn't reduce what the Cloud Run Job processes.
+        if merge_current and skip_already_enriched:
+            gcs_bucket_norm_prefilter = export_gcs_bucket.strip()
+            gcs_prefix_norm_prefilter = lovable_gcs.normalize_gcs_prefix(export_gcs_prefix)
+            if gcs_bucket_norm_prefilter and gcs_prefix_norm_prefilter:
+                with st.spinner(
+                    "Bestaande current/-data checken op al volledig verrijkte bedrijven…"
+                ):
+                    existing_list_items, _ = _download_existing_current_export(
+                        gcs_bucket_norm_prefilter, gcs_prefix_norm_prefilter, project,
+                        work_dir / "lovable_current_existing_prefilter",
+                    )
+                    known_ids = known_enriched_company_ids(existing_list_items)
+                fname_lower = uploaded.name.lower()
+                df_prefilter = (
+                    pd.read_csv(local_input) if fname_lower.endswith(".csv")
+                    else pd.read_excel(local_input)
+                )
+                from lead_prioritizer_batch_app import DOMAIN_CANDIDATES, resolve_default_column
+                domain_col = resolve_default_column(df_prefilter.columns, DOMAIN_CANDIDATES)
+                if not domain_col:
+                    st.caption(
+                        "Skip-filter overgeslagen: kon de domeinkolom niet automatisch "
+                        "herkennen in het invoerbestand."
+                    )
+                elif known_ids:
+                    to_process, skipped_rows = split_rows_by_existing_enrichment(
+                        df_prefilter, domain_col, known_ids)
+                    st.info(
+                        f"Skip-filter: {len(skipped_rows)} van {len(df_prefilter)} rijen "
+                        f"al volledig verrijkt in current/, overgeslagen. "
+                        f"{len(to_process)} rij(en) worden verwerkt."
+                    )
+                    if len(to_process) == 0:
+                        st.success(
+                            "Alle bedrijven in dit bestand staan al volledig verrijkt "
+                            "in current/ — niets nieuws om te verwerken."
+                        )
+                        st.stop()
+                    if fname_lower.endswith(".csv"):
+                        to_process.to_csv(local_input, index=False)
+                    else:
+                        to_process.to_excel(local_input, index=False)
 
         run_id = build_run_id(uploaded.name)
         input_uri = gcs_incoming_uri(bucket, uploaded.name)
