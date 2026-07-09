@@ -483,9 +483,12 @@ bedrijven door de hele pipeline gehaald, niet 100 "gratis" hergebruikt.
 ### Skip-filter: al verrijkte bedrijven vooraf overslaan
 
 Om wél kosten te besparen op een herhaalde run, staat er — alleen zichtbaar
-bij **Mergen** — een extra checkbox: "Bedrijven die al volledig verrijkt in
-current/ staan overslaan". Staat die aan, dan gebeurt er vóórdat de Cloud
-Run Job start:
+bij **Mergen**, en daar standaard AAN — een extra checkbox: "Bedrijven die
+al volledig verrijkt in current/ staan overslaan" (bewust default aan: een
+Mergen-run zonder deze filter verwerkt gewoon alle rijen opnieuw, inclusief
+bedrijven die al in `current/` stonden — dat overkwam de gebruiker
+herhaaldelijk toen de checkbox nog default uit stond). Staat die aan, dan
+gebeurt er vóórdat de Cloud Run Job start:
 
 1. De bestaande `current/companies.list.json` wordt gedownload.
 2. Elk bedrijf daarin met `enrichment_skipped=False` (dus écht volledig

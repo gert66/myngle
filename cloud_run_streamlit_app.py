@@ -714,7 +714,7 @@ def main() -> None:  # pragma: no cover - exercised only under `streamlit run`
             skip_already_enriched = st.checkbox(
                 "Bedrijven die al volledig verrijkt in current/ staan overslaan "
                 "(goedkoper: alleen nieuwe/nog-niet-verrijkte rijen verwerken)",
-                value=False,
+                value=True,
                 help="Vóór de Cloud Run Job start: download current/, en "
                      "verwijder uit het invoerbestand elke rij waarvan het "
                      "bedrijf (op domein) al in current/ staat MET "
