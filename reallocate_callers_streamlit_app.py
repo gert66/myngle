@@ -35,7 +35,7 @@ from reallocate_callers_from_gcs import (
     normalize_cold_callers,
     reallocation_movers,
 )
-from rescore_from_gcs import DEFAULT_GCS_BUCKET
+from rescore_from_gcs import DEFAULT_GCS_BUCKET, promote_run_to_current
 
 
 # =============================================================================
@@ -263,9 +263,53 @@ def main() -> None:  # pragma: no cover - exercised only under `streamlit run`
                     f"{len(results)} bestanden geüpload naar "
                     f"gs://{bucket}/{country_folder}/runs/{run_folder}/"
                 )
+                st.session_state["_last_uploaded_run_folder"] = run_folder
             st.dataframe(pd.DataFrame(results), use_container_width=True, hide_index=True)
         except Exception as exc:
             st.error(f"Upload mislukt: {exc}")
+
+    # ---------------------------------------------------------------------
+    # Promote to current — the deliberate, separate step that makes a run
+    # live in the Company Hub.
+    # ---------------------------------------------------------------------
+    st.divider()
+    st.subheader("4. Promoveer naar current")
+    st.caption(
+        "De live Company Hub leest alleen uit current/. Zolang je hier niet "
+        "expliciet promoveert, blijft de zojuist geüploade run onzichtbaar "
+        "voor de Hub — precies zoals hierboven staat."
+    )
+    promote_run_folder = st.text_input(
+        "Te promoveren run-folder",
+        value=st.session_state.get("_last_uploaded_run_folder", run_folder),
+        key="_promote_run_folder",
+    )
+    promote_confirmed = st.checkbox(
+        f"Ik begrijp dat dit gs://{bucket}/{country_folder}/runs/"
+        f"{promote_run_folder}/ overschrijft naar gs://{bucket}/{country_folder}/"
+        f"current/ (de live Company Hub gaat dit direct tonen).",
+        key="_promote_confirmed",
+    )
+    if st.button(
+        "🚀 Promoveer naar current", type="primary", disabled=not promote_confirmed,
+    ):
+        try:
+            with st.spinner(f"Promoveren van {promote_run_folder} naar current/…"):
+                promote_result = promote_run_to_current(
+                    bucket, country_folder, promote_run_folder)
+            promote_results = promote_result["results"]
+            n_failed = sum(1 for r in promote_results if not r["success"])
+            if n_failed:
+                st.error(f"{n_failed} van {len(promote_results)} bestanden niet gepromoveerd.")
+            else:
+                st.success(
+                    f"{len(promote_results)} bestanden gepromoveerd naar "
+                    f"gs://{bucket}/{country_folder}/current/ — de Company Hub "
+                    "toont deze toewijzing nu direct."
+                )
+            st.dataframe(pd.DataFrame(promote_results), use_container_width=True, hide_index=True)
+        except Exception as exc:
+            st.error(f"Promoveren mislukt: {exc}")
 
 
 def _moved(assignment: dict, item: dict) -> dict:

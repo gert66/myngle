@@ -26,6 +26,8 @@ from rescore_from_gcs import (
     gcs_run_dir,
     list_country_folders,
     list_current_files,
+    list_run_files,
+    promote_run_to_current,
     rehydrate_scoring_row,
     rescore_all_countries,
     rescore_country,
@@ -665,3 +667,92 @@ class TestRescoreAllCountries:
 
         assert results["brazil"]["companies_rescored"] == 2
         assert "error" in results["italy"]
+
+
+class TestListRunFiles:
+    def test_lists_filenames_under_run_folder(self, tmp_path):
+        remote_root = tmp_path / "remote"
+        _write_fixture_current_run(remote_root / "brazil" / "runs" / "2026-07-08_reallocate")
+
+        with patch("rescore_from_gcs.resolve_gcs_tool", return_value=["gcloud", "storage"]), \
+             patch("rescore_from_gcs.subprocess.run", side_effect=_fake_gcs_tool_for_local_dir(remote_root)):
+            names = list_run_files("bucket-a", "brazil", "2026-07-08_reallocate")
+
+        assert set(names) == {
+            LIST_FILENAME, CURRENT_MANIFEST_FILENAME, "company-details-000.json"}
+
+    def test_no_tool_returns_empty_list(self):
+        with patch("rescore_from_gcs.resolve_gcs_tool", return_value=None):
+            assert list_run_files("bucket-a", "brazil", "run1") == []
+
+    def test_missing_run_folder_returns_empty_list(self, tmp_path):
+        remote_root = tmp_path / "remote"
+        with patch("rescore_from_gcs.resolve_gcs_tool", return_value=["gcloud", "storage"]), \
+             patch("rescore_from_gcs.subprocess.run", side_effect=_fake_gcs_tool_for_local_dir(remote_root)):
+            assert list_run_files("bucket-a", "brazil", "does-not-exist") == []
+
+
+class TestPromoteRunToCurrent:
+    def test_copies_run_files_into_current_and_stamps_manifest(self, tmp_path):
+        remote_root = tmp_path / "remote"
+        _write_fixture_current_run(remote_root / "brazil" / "runs" / "2026-07-08_reallocate")
+
+        with patch("rescore_from_gcs.resolve_gcs_tool", return_value=["gcloud", "storage"]), \
+             patch("rescore_from_gcs.subprocess.run", side_effect=_fake_gcs_tool_for_local_dir(remote_root)):
+            result = promote_run_to_current(
+                "bucket-a", "brazil", "2026-07-08_reallocate",
+                now=datetime(2026, 7, 9, 13, 41, tzinfo=timezone.utc),
+            )
+
+        assert all(r["success"] for r in result["results"])
+        destinations = {r["destination"] for r in result["results"]}
+        assert destinations == {
+            f"gs://bucket-a/brazil/current/{name}"
+            for name in (LIST_FILENAME, CURRENT_MANIFEST_FILENAME, "company-details-000.json")
+        }
+
+        current_dir = remote_root / "brazil" / "current"
+        promoted_manifest = json.loads((current_dir / CURRENT_MANIFEST_FILENAME).read_text())
+        assert promoted_manifest["promoted_to_current"] is True
+        assert promoted_manifest["promoted_from_run_folder"] == "2026-07-08_reallocate"
+        assert promoted_manifest["promoted_at"] == "2026-07-09T13:41:00Z"
+
+        promoted_list = json.loads((current_dir / LIST_FILENAME).read_text())
+        assert len(promoted_list) == 2
+
+        # The source run folder itself must be untouched.
+        source_manifest = json.loads(
+            (remote_root / "brazil" / "runs" / "2026-07-08_reallocate" /
+             CURRENT_MANIFEST_FILENAME).read_text())
+        assert "promoted_to_current" not in source_manifest
+
+    def test_no_tool_raises_clear_error(self, tmp_path):
+        with patch("rescore_from_gcs.resolve_gcs_tool", return_value=None):
+            with pytest.raises(RuntimeError, match="gcloud"):
+                promote_run_to_current("bucket-a", "brazil", "run1")
+
+    def test_missing_run_folder_raises(self, tmp_path):
+        remote_root = tmp_path / "remote"
+        with patch("rescore_from_gcs.resolve_gcs_tool", return_value=["gcloud", "storage"]), \
+             patch("rescore_from_gcs.subprocess.run", side_effect=_fake_gcs_tool_for_local_dir(remote_root)):
+            with pytest.raises(RuntimeError, match="No promotable files"):
+                promote_run_to_current("bucket-a", "brazil", "does-not-exist")
+
+    def test_existing_current_is_overwritten(self, tmp_path):
+        remote_root = tmp_path / "remote"
+        _write_fixture_current_run(remote_root / "brazil" / "current")
+        _write_fixture_current_run(remote_root / "brazil" / "runs" / "2026-07-08_reallocate")
+        # Mutate the run's list so it's distinguishable from the stale current/.
+        run_list_path = (
+            remote_root / "brazil" / "runs" / "2026-07-08_reallocate" / LIST_FILENAME)
+        run_list = json.loads(run_list_path.read_text())
+        run_list[0]["assigned_cold_caller"] = "Ernie"
+        run_list_path.write_text(json.dumps(run_list), encoding="utf-8")
+
+        with patch("rescore_from_gcs.resolve_gcs_tool", return_value=["gcloud", "storage"]), \
+             patch("rescore_from_gcs.subprocess.run", side_effect=_fake_gcs_tool_for_local_dir(remote_root)):
+            promote_run_to_current("bucket-a", "brazil", "2026-07-08_reallocate")
+
+        current_list = json.loads(
+            (remote_root / "brazil" / "current" / LIST_FILENAME).read_text())
+        assert current_list[0]["assigned_cold_caller"] == "Ernie"
