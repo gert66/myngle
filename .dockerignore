@@ -1,0 +1,13 @@
+# Keep the Cloud Run image lean: COPY . . should only ship the code the
+# worker/dispatcher actually import, not repo history or local artifacts.
+.git
+.gitignore
+.dockerignore
+__pycache__
+*.pyc
+.pytest_cache
+debug_traces/
+icp_compare_*/
+cloud_smoke_output/
+*.png
+test.csv

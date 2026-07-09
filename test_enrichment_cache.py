@@ -128,34 +128,68 @@ class TestGetPutCached:
 # ---------------------------------------------------------------------------
 
 class _FakeBlob:
-    def __init__(self, store: dict, name: str):
+    """Generation-aware fake: mirrors the tiny slice of google-cloud-storage's
+    Blob that enrichment_cache uses, including ``if_generation_match``
+    semantics (0 = must not exist) so the compare-and-swap save is testable.
+    Like the real client, a blob returned by ``get_blob`` snapshots its
+    ``generation`` at fetch time (``frozen_generation``) while the store
+    itself can move on — that's exactly the stale-read window CAS closes."""
+
+    def __init__(self, store: dict, generations: dict, name: str,
+                 frozen_generation=None):
         self._store = store
+        self._generations = generations
         self.name = name
+        self._frozen_generation = frozen_generation
+
+    @property
+    def generation(self):
+        if self._frozen_generation is not None:
+            return self._frozen_generation
+        return self._generations.get(self.name)
 
     def exists(self) -> bool:
         return self.name in self._store
 
-    def download_as_text(self) -> str:
+    def download_as_text(self, if_generation_match=None) -> str:
+        if if_generation_match is not None and \
+                self._generations.get(self.name, 0) != if_generation_match:
+            from google.api_core import exceptions as gcs_exceptions
+            raise gcs_exceptions.PreconditionFailed("generation mismatch")
         return self._store[self.name]
 
-    def upload_from_string(self, data, content_type=None):
+    def upload_from_string(self, data, content_type=None, if_generation_match=None):
+        if if_generation_match is not None and \
+                self._generations.get(self.name, 0) != if_generation_match:
+            from google.api_core import exceptions as gcs_exceptions
+            raise gcs_exceptions.PreconditionFailed("generation mismatch")
         self._store[self.name] = data
+        self._generations[self.name] = self._generations.get(self.name, 0) + 1
 
 
 class _FakeBucket:
-    def __init__(self, store: dict):
+    def __init__(self, store: dict, generations: dict):
         self._store = store
+        self._generations = generations
 
     def blob(self, name: str) -> _FakeBlob:
-        return _FakeBlob(self._store, name)
+        return _FakeBlob(self._store, self._generations, name)
+
+    def get_blob(self, name: str):
+        if name not in self._store:
+            return None
+        return _FakeBlob(self._store, self._generations, name,
+                         frozen_generation=self._generations.get(name, 0))
 
 
 class _FakeClient:
-    def __init__(self, store: dict):
+    def __init__(self, store: dict, generations: dict = None):
         self._store = store
+        self._generations = generations if generations is not None else \
+            {name: 1 for name in store}
 
     def bucket(self, name: str) -> _FakeBucket:
-        return _FakeBucket(self._store)
+        return _FakeBucket(self._store, self._generations)
 
 
 class TestLoadCacheIndexViaClient:
@@ -218,10 +252,100 @@ class TestSaveCacheIndexViaClient:
         with patch("enrichment_cache._storage_client", return_value=_BrokenClient()), \
              patch("enrichment_cache.resolve_gcs_upload_tool",
                    return_value=["gcloud", "storage", "cp"]), \
+             patch("subprocess.run", side_effect=OSError("no cli download")), \
              patch("enrichment_cache.upload_file", return_value={"success": True}) as m_upload:
             result = ec.save_cache_index("bucket", "italy", {"a": 1})
         assert result == {"success": True}
         m_upload.assert_called_once()
+
+    def test_save_merges_with_remote_instead_of_overwriting(self):
+        # The lost-write scenario of parallel Cloud Run tasks: another task
+        # already saved its entries; our save must ADD ours, not erase theirs.
+        theirs = {"serper|other.com|hq": {
+            "fetched_at": datetime.now(timezone.utc).isoformat(), "response": {"o": 1}}}
+        ours = {"serper|acme.com|hq": {
+            "fetched_at": datetime.now(timezone.utc).isoformat(), "response": {"a": 1}}}
+        store = {"_enrichment_cache/italy_cache_index.json": json.dumps(theirs)}
+        with patch("enrichment_cache._storage_client", return_value=_FakeClient(store)):
+            result = ec.save_cache_index("bucket", "italy", ours)
+        assert result["success"] is True
+        saved = json.loads(store["_enrichment_cache/italy_cache_index.json"])
+        assert set(saved) == {"serper|other.com|hq", "serper|acme.com|hq"}
+
+    def test_save_retries_on_generation_mismatch_and_succeeds(self):
+        # A concurrent task writes right after our read: the first attempt's
+        # frozen generation is stale, the precondition fails, the retry
+        # re-reads (picking up the other task's entries) and succeeds.
+        blob_name = "_enrichment_cache/italy_cache_index.json"
+        store = {blob_name: json.dumps({})}
+        generations = {blob_name: 1}
+        client = _FakeClient(store, generations)
+        real_get_blob = _FakeBucket.get_blob
+        state = {"raced": False}
+
+        def _racing_get_blob(bucket_self, name):
+            blob = real_get_blob(bucket_self, name)  # snapshots the generation
+            if not state["raced"]:
+                state["raced"] = True
+                # Another task's save lands after our read, before our write.
+                store[name] = json.dumps({"serper|other.com|hq": {
+                    "fetched_at": datetime.now(timezone.utc).isoformat(),
+                    "response": {}}})
+                generations[name] += 1
+            return blob
+
+        ours = {"serper|acme.com|hq": {
+            "fetched_at": datetime.now(timezone.utc).isoformat(), "response": {}}}
+        with patch("enrichment_cache._storage_client", return_value=client), \
+             patch.object(_FakeBucket, "get_blob", _racing_get_blob), \
+             patch("enrichment_cache.time.sleep") as m_sleep:
+            result = ec.save_cache_index("bucket", "italy", ours)
+        assert result["success"] is True
+        m_sleep.assert_called()  # the stale first attempt really happened
+        saved = json.loads(store[blob_name])
+        # Both the concurrent writer's entry and ours survived the retry.
+        assert set(saved) == {"serper|other.com|hq", "serper|acme.com|hq"}
+
+    def test_save_prunes_entries_older_than_max_ttl(self):
+        stale = {"serper|old.com|hq": {
+            "fetched_at": (datetime.now(timezone.utc)
+                           - timedelta(days=ec.max_ttl_days() + 1)).isoformat(),
+            "response": {}}}
+        fresh = {"serper|acme.com|hq": {
+            "fetched_at": datetime.now(timezone.utc).isoformat(), "response": {}}}
+        store = {"_enrichment_cache/italy_cache_index.json": json.dumps(stale)}
+        with patch("enrichment_cache._storage_client", return_value=_FakeClient(store)):
+            result = ec.save_cache_index("bucket", "italy", fresh)
+        assert result["success"] is True
+        saved = json.loads(store["_enrichment_cache/italy_cache_index.json"])
+        assert set(saved) == {"serper|acme.com|hq"}
+
+
+class TestMergeCacheIndexes:
+    def test_union_of_disjoint_keys(self):
+        a = {"k1": {"fetched_at": "2026-01-01T00:00:00+00:00", "response": {}}}
+        b = {"k2": {"fetched_at": "2026-01-02T00:00:00+00:00", "response": {}}}
+        assert set(ec.merge_cache_indexes(a, b)) == {"k1", "k2"}
+
+    def test_newest_fetched_at_wins_on_collision(self):
+        older = {"k": {"fetched_at": "2026-01-01T00:00:00+00:00", "response": {"v": "old"}}}
+        newer = {"k": {"fetched_at": "2026-06-01T00:00:00+00:00", "response": {"v": "new"}}}
+        assert ec.merge_cache_indexes(older, newer)["k"]["response"] == {"v": "new"}
+        assert ec.merge_cache_indexes(newer, older)["k"]["response"] == {"v": "new"}
+
+    def test_valid_timestamp_beats_malformed_entry(self):
+        malformed = {"k": "not-a-dict"}
+        valid = {"k": {"fetched_at": "2026-01-01T00:00:00+00:00", "response": {}}}
+        assert ec.merge_cache_indexes(malformed, valid)["k"] == valid["k"]
+        assert ec.merge_cache_indexes(valid, malformed)["k"] == valid["k"]
+
+    def test_never_mutates_arguments_and_tolerates_non_dicts(self):
+        base = {"k1": {"fetched_at": "2026-01-01T00:00:00+00:00", "response": {}}}
+        base_copy = dict(base)
+        ec.merge_cache_indexes(base, {"k2": {}})
+        assert base == base_copy
+        assert ec.merge_cache_indexes(None, base) == base
+        assert ec.merge_cache_indexes(base, None) == base
 
 
 # ---------------------------------------------------------------------------
@@ -316,6 +440,7 @@ class TestSaveCacheIndex:
         with patch("enrichment_cache._storage_client", return_value=None), \
              patch("enrichment_cache.resolve_gcs_upload_tool",
                    return_value=["gcloud", "storage", "cp"]), \
+             patch("subprocess.run", side_effect=OSError("no cli download")), \
              patch("enrichment_cache.upload_file",
                    return_value={"success": False, "error": "network unreachable"}):
             result = ec.save_cache_index("bucket", "italy", {"a": 1})
@@ -332,16 +457,50 @@ class TestSaveCacheIndex:
         with patch("enrichment_cache._storage_client", return_value=None), \
              patch("enrichment_cache.resolve_gcs_upload_tool",
                    return_value=["gcloud", "storage", "cp"]), \
+             patch("subprocess.run", side_effect=OSError("no cli download")), \
              patch("enrichment_cache.upload_file", side_effect=_fake_upload):
             result = ec.save_cache_index("bucket", "italy", {"a": 1})
         assert result == {"success": True}
         assert captured["destination"] == \
             "gs://bucket/_enrichment_cache/italy_cache_index.json"
 
+    def test_cli_save_merges_with_remote_index_first(self):
+        # Same lost-write protection as the client path, best-effort: the
+        # remote index is downloaded and merged in before the CLI upload.
+        theirs = {"serper|other.com|hq": {
+            "fetched_at": datetime.now(timezone.utc).isoformat(), "response": {}}}
+
+        def _fake_download(cmd, capture_output, text, timeout):
+            from pathlib import Path
+            Path(cmd[-1]).write_text(json.dumps(theirs), encoding="utf-8")
+
+            class _Proc:
+                returncode = 0
+            return _Proc()
+
+        uploaded = {}
+
+        def _fake_upload(tool_cmd, local_path, destination):
+            from pathlib import Path
+            uploaded.update(json.loads(Path(local_path).read_text(encoding="utf-8")))
+            return {"success": True}
+
+        ours = {"serper|acme.com|hq": {
+            "fetched_at": datetime.now(timezone.utc).isoformat(), "response": {}}}
+        with patch("enrichment_cache._storage_client", return_value=None), \
+             patch("enrichment_cache.resolve_gcs_upload_tool",
+                   return_value=["gcloud", "storage", "cp"]), \
+             patch("subprocess.run", side_effect=_fake_download), \
+             patch("enrichment_cache.upload_file", side_effect=_fake_upload):
+            result = ec.save_cache_index("bucket", "italy", ours)
+        assert result == {"success": True}
+        assert set(uploaded) == {"serper|other.com|hq", "serper|acme.com|hq"}
+
     def test_unexpected_exception_returns_failure_dict(self):
         with patch("enrichment_cache._storage_client", return_value=None), \
              patch("enrichment_cache.resolve_gcs_upload_tool",
                    return_value=["gcloud", "storage", "cp"]), \
+             patch("subprocess.run", side_effect=OSError("no cli download")), \
              patch("enrichment_cache.upload_file", side_effect=RuntimeError("boom")):
             result = ec.save_cache_index("bucket", "italy", {"a": 1})
         assert result["success"] is False
