@@ -511,6 +511,45 @@ is overgeslagen alsnog een nieuwe kans geven, dan gebeurt dat automatisch:
 alleen `enrichment_skipped=False`-bedrijven tellen als "al verrijkt", dus
 een eerder dunne entry wordt gewoon weer meegenomen.
 
+### Het "binnenlands bedrijf"-gat, en de screened_domains-ledger
+
+Met "Foreign-HQ-only export" aan komt een bedrijf met een **binnenlands**
+HQ nooit in `current/` terecht — `detect_foreign_hq_for_export` filtert
+het er sowieso uit, of het nu door de gate goedkoop is gescreend
+(`enrichment_skipped=True`) óf zelfs volledig verrijkt is maar gewoon
+binnenlands bleek. De skip-filter hierboven, die alléén `current/` leest,
+heeft dus **geen enkel record** van zulke bedrijven — ze worden bij elke
+herhaalde run gewoon weer opnieuw gescreend (een nieuwe Serper-call plus
+een nieuwe Anthropic HQ-interpretatiecall, geen van beide gedekt door
+`enrichment_cache.py`, dat bewust nooit een afgeleid verdict opslaat, alleen
+ruwe responses).
+
+`screened_domains_ledger.py` lost dit apart op: een eigen, altijd-compleet
+GCS-bestand per land (`gs://<bucket>/<land>/_screened_domains/`), volledig
+los van wat er uiteindelijk in `current/` belandt:
+
+- **Bijwerken**: na elke merge (stap 4c) worden alle rijen uit het
+  samengevoegde "Enriched Leads"-sheet doorgelopen — ongeacht of deze run
+  de skip-filter gebruikt, en ongeacht `foreign_hq_only_export`. Alleen
+  rijen met een **definitief settled, ondubbelzinnig binnenlands** verdict
+  worden vastgelegd (`is_clearly_domestic`: score exact 0, geen
+  `needs_manual_review`/`hq_positive_score_suppressed_for_review`, en als
+  C5 heeft meegedraaid alleen bij een expliciete
+  `c5_adjudication="domestic_confirmed"` — een "unclear"/gefaalde
+  C5-uitkomst of een score van 1/2 telt bewust niet als settled, zodat een
+  latere run (met C5 aan, of verse evidence) het bedrijf alsnog een eerlijke
+  kans geeft). Geen TTL — een HQ-locatie veroudert in de praktijk niet.
+- **Raadplegen**: de skip-filter downloadt deze ledger ALLEEN als
+  "Foreign-HQ-only export" voor déze run ook aanstaat (anders hoort een
+  binnenlands bedrijf gewoon in de output, en moet het gewoon verwerkt
+  worden), en telt een match daarin mee als "al bekend, overslaan" —
+  bovenop de bestaande `current/`-gebaseerde check.
+- Zelfde GCS-transport en concurrency-veiligheid als `enrichment_cache.py`
+  (Python-client eerst, CLI-fallback, read-merge-write met een
+  generation-precondition) — maar bewust een APART bestand/module, om
+  `enrichment_cache.py`'s "nooit een afgeleid verdict, alleen ruwe
+  responses"-contract niet te doorbreken.
+
 ## Gedeelde enrichment-cache in cloud-runs
 
 De opt-in Serper/Firecrawl-cache (`USE_ENRICHMENT_CACHE` +
