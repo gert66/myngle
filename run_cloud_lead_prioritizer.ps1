@@ -67,9 +67,14 @@ if ($LASTEXITCODE -ne 0) { Write-Error "Upload mislukt."; exit 1 }
 
 Write-Host "[2/4] Cloud Run Job starten ($JobName, $TaskCount tasks) ..." -ForegroundColor Yellow
 $envVars = "INPUT_GCS_URI=$incomingUri,OUTPUT_GCS_DIR=$outputDir,RUN_ID=$runId,TASK_COUNT=$TaskCount,MODE=$Mode"
+# --tasks bepaalt het echte aantal tasks van deze executie; de TASK_COUNT env
+# var alleen is niet genoeg (Cloud Run zet CLOUD_RUN_TASK_COUNT op de
+# deploy-waarde en die wint in de runner) — zonder --tasks draaide elke run
+# het deploy-aantal en faalde de merge bij elke andere -TaskCount.
 gcloud run jobs execute $JobName `
     --project $Project `
     --region $Region `
+    --tasks $TaskCount `
     --update-env-vars $envVars `
     --wait
 if ($LASTEXITCODE -ne 0) {

@@ -14,7 +14,11 @@ or the job/region/project isn't set), the manifest is still written and the
 response reports the execution error — see docs/cloud_run_workflow.md for
 the exact `gcloud run jobs execute` equivalent and required env vars:
   CLOUD_RUN_JOB_NAME, CLOUD_RUN_REGION, CLOUD_RUN_PROJECT, RUNS_GCS_DIR,
-  DEFAULT_TASK_COUNT, DEFAULT_PARALLELISM
+  DEFAULT_TASK_COUNT
+
+Parallelism is NOT configurable here: the Cloud Run v2 RunJobRequest
+overrides support task_count but not parallelism, so an execution always
+runs with the job's deploy-time --parallelism setting.
 """
 
 from __future__ import annotations
@@ -41,7 +45,12 @@ EXCEL_SUFFIXES = (".xlsx", ".xls")
 
 def pick_task_count(row_count: Optional[int]) -> int:
     if row_count is None:
-        return int(os.environ.get("DEFAULT_TASK_COUNT", "50"))
+        # Row counting only fails on an odd/broken input — pick the SAFEST
+        # tier then (Firecrawl concurrency is the bottleneck), not the
+        # heaviest: an oversized task count on a small file merely means
+        # empty shards, but 50 tasks on an unknown file can exhaust the
+        # Firecrawl tier. See "Rate-limit notities" in the workflow doc.
+        return int(os.environ.get("DEFAULT_TASK_COUNT", "10"))
     if row_count <= 100:
         return 10
     if row_count <= 500:

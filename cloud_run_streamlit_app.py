@@ -30,7 +30,7 @@ import tempfile
 from pathlib import Path
 from typing import Optional
 
-from cloud_dispatcher import build_run_id, pick_task_count
+from cloud_dispatcher import build_run_id
 from cloud_job_runner import join_path
 
 DEFAULT_PROJECT = "project-979d7166-1016-40ce-94c"
@@ -89,6 +89,13 @@ def build_execute_command(
         _gcloud_executable(), "run", "jobs", "execute", job_name,
         "--project", project,
         "--region", region,
+        # --tasks is what actually sets the number of tasks for THIS
+        # execution. The TASK_COUNT env var alone does not: Cloud Run sets
+        # CLOUD_RUN_TASK_COUNT to the job's deploy-time task count, and the
+        # runner gives that precedence — without --tasks the job always ran
+        # its deployed count (and the merge's --expected-task-count check
+        # then failed for any other value chosen in the sidebar).
+        "--tasks", str(task_count),
         "--update-env-vars", env_vars,
         "--wait",
     ]
@@ -277,11 +284,17 @@ def main() -> None:  # pragma: no cover - exercised only under `streamlit run`
 
         st.divider()
         deep_dive = st.checkbox("Deep dive voor top-leads (opt-in)", value=True)
-        deep_dive_min_score = 0.0
+        deep_dive_min_score = 8.0
         deep_dive_on_foreign_hq = True
         if deep_dive:
             deep_dive_min_score = st.number_input(
-                "Deep dive score threshold", value=0.0, step=0.5, format="%.2f")
+                "Deep dive score threshold", value=8.0, step=0.5, format="%.2f",
+                help="Alleen rijen met final_commercial_fit_score op of boven "
+                     "deze drempel krijgen een deep dive (tot 6 extra "
+                     "Firecrawl-pagina's per lead). 0 = álle rijen — in een "
+                     "cloud-run met 10-50 parallelle tasks loopt dat hard "
+                     "tegen de Firecrawl-rate-limits en de task-timeout aan; "
+                     "8.0 is de default van de cloud-runner.")
             deep_dive_on_foreign_hq = st.checkbox(
                 "Also trigger on confirmed foreign HQ", value=True)
 

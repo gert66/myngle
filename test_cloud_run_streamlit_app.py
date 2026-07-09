@@ -6,6 +6,7 @@ needed)."""
 
 from __future__ import annotations
 
+import shutil
 import subprocess
 import sys
 
@@ -52,6 +53,11 @@ def test_build_execute_command_sets_all_env_vars_and_waits():
     )
     assert cmd[:5] == [_gcloud_executable(), "run", "jobs", "execute", "myngle-lead-prioritizer"]
     assert "--wait" in cmd
+    # --tasks must be passed explicitly: the TASK_COUNT env var alone doesn't
+    # change the execution's task count (Cloud Run's own CLOUD_RUN_TASK_COUNT
+    # — the deploy-time count — takes precedence in the runner), so without
+    # this flag the sidebar's task count silently did nothing.
+    assert cmd[cmd.index("--tasks") + 1] == "10"
     env_index = cmd.index("--update-env-vars") + 1
     env_vars = cmd[env_index]
     assert "INPUT_GCS_URI=gs://b/incoming/leads.xlsx" in env_vars
@@ -97,6 +103,11 @@ def test_build_download_command_targets_local_dir():
 # shutil.which(), which IS PATHEXT-aware. This test invokes it for real (no
 # mocking) to prove the resolved path is actually invocable via subprocess.
 
+@pytest.mark.skipif(
+    shutil.which("gcloud") is None,
+    reason="gcloud CLI not installed here (CI/sandbox); the PATHEXT "
+           "regression this guards against only exists where gcloud is.",
+)
 def test_gcloud_executable_is_actually_invocable_via_subprocess():
     result = subprocess.run(
         [_gcloud_executable(), "--version"], capture_output=True, text=True,

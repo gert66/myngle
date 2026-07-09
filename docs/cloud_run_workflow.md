@@ -97,6 +97,12 @@ alleen `set`/`missing` per key, nooit de waarde zelf.
 | `COMPANY_COLUMN` / `DOMAIN_COLUMN` | optioneel; anders auto-detectie (zelfde candidate-lijsten als de Streamlit-app) |
 | `INPUT_COUNTRY_COLUMN` | optioneel; anders auto-detectie, en anders geen (per-rij land wordt dan aan `default_input_country` overgelaten) |
 | `DEEP_DIVE` / `RICH_ICP_CONTEXT` / `AI_SIGNAL_SCORING` | optionele opt-in feature-vlaggen, allemaal standaard uit |
+| `DEEP_DIVE_MIN_SCORE` | score-drempel voor de Deep Dive-trigger (default 8.0; alleen relevant als `DEEP_DIVE` aanstaat) |
+| `DEEP_DIVE_ON_FOREIGN_HQ` | `false` om de confirmed-foreign-HQ Deep Dive-trigger uit te zetten (default aan) |
+| `COMPOSE_CALLER_CONTENT` | opt-in Step 3 caller content via AI (default uit) |
+| `C5_ENABLED` | opt-in C5 Sonnet HQ-adjudicatie (default uit) |
+| `USE_ENRICHMENT_CACHE` | opt-in gedeelde GCS enrichment-cache (default uit) — zie "Gedeelde enrichment-cache" hieronder |
+| `ENRICHMENT_CACHE_BUCKET` | GCS-bucket voor de enrichment-cache (verplicht als `USE_ENRICHMENT_CACHE` aanstaat) |
 
 `CLOUD_RUN_TASK_INDEX`/`CLOUD_RUN_TASK_COUNT` hebben voorrang zodra beide
 gezet zijn (dat doet het platform automatisch); anders vallen we terug op
@@ -119,8 +125,11 @@ gezet zijn (dat doet het platform automatisch); anders vallen we terug op
 | `CLOUD_RUN_REGION` | bv. `europe-west1` |
 | `CLOUD_RUN_PROJECT` | GCP project-id |
 | `RUNS_GCS_DIR` | `gs://<runs-bucket>` (default: dezelfde bucket als de input) |
-| `DEFAULT_TASK_COUNT` | fallback task count als rijen niet geteld konden worden (default 50) |
-| `DEFAULT_PARALLELISM` | max gelijktijdige tasks bij het starten van de job |
+| `DEFAULT_TASK_COUNT` | fallback task count als rijen niet geteld konden worden (default 10 — de veiligste tier, want als tellen faalt is het bestand al verdacht) |
+
+Parallelism is bewust géén dispatcher-instelling: de Cloud Run v2
+execution-overrides ondersteunen wel `task_count` maar geen `parallelism` —
+een executie draait dus altijd met de `--parallelism` van de job-deploy.
 
 ## Lokale testcommando's
 
@@ -204,8 +213,15 @@ gcloud run jobs deploy myngle-lead-prioritizer \
   --tasks 10 \
   --parallelism 10 \
   --max-retries 1 \
-  --task-timeout 3600
+  --task-timeout 3600 \
+  --memory 2Gi
 ```
+
+`--memory 2Gi` is bewust ruimer dan de Cloud Run-default (512Mi): elke task
+draait pandas + openpyxl in de runner én een tweede Python-proces
+(`lead_prioritizer_batch_cli.py`) met de volledige pipeline er bovenop —
+houd het werkelijke verbruik in de metrics in de gaten voordat je dit
+verlaagt.
 
 Cloud Run Job execution starten met task count en parallelism (handmatige test,
 of wat de dispatcher automatisch doet via de `google-cloud-run` client):
@@ -282,7 +298,14 @@ python cloud_merge_results.py \
 - `TASK_COUNT=10` voor de eerste test.
 - `TASK_COUNT=25` voor de tweede test.
 - `TASK_COUNT=50` voor een productieachtige test.
-- `PARALLELISM` gelijk aan `TASK_COUNT`, tot maximaal 50.
+- Parallelism staat vast op de `--parallelism` van de job-deploy (executies
+  kunnen hem niet overriden); zet hem bij deploy gelijk aan het hoogste
+  `TASK_COUNT` dat je van plan bent, tot maximaal 50.
+- Let op: het aantal tasks van een executie bepaal je met `--tasks` op
+  `gcloud run jobs execute` (dat doen `run_cloud_lead_prioritizer.ps1` en de
+  Cloud Run Streamlit-app inmiddels ook). Alleen de `TASK_COUNT` env var
+  zetten is niet genoeg: Cloud Run zet zelf `CLOUD_RUN_TASK_COUNT` op het
+  deploy-aantal en dat heeft voorrang in de runner.
 
 ## Rate-limit notities
 
@@ -312,6 +335,39 @@ python cloud_merge_results.py \
   `TASK_COUNT` t.o.v. de Firecrawl-tier: er is geen gedeelde/verdeelde
   rate-limiter over tasks heen, dus een structureel te hoge `TASK_COUNT`
   leidt gewoon tot herhaalde 429's die alsnog uitputten.
+
+## Gedeelde enrichment-cache in cloud-runs
+
+De opt-in Serper/Firecrawl-cache (`USE_ENRICHMENT_CACHE` +
+`ENRICHMENT_CACHE_BUCKET`, zie `enrichment_cache.py`) is één JSON-index per
+land op GCS. In een cloud-run draaien 10–50 tasks parallel dezelfde
+load→use→save-cyclus op diezelfde index; daarom overschrijft een save
+nooit blind, maar merget hij met de actuele remote index (per key wint de
+nieuwste `fetched_at`) en schrijft hij met een GCS
+generation-preconditie (compare-and-swap met retries). Twee parallelle
+tasks kunnen elkaars entries dus niet meer wissen. Kanttekening: tasks
+binnen één run profiteren nauwelijks van elkaars *nieuwe* entries (ze
+laden de index allemaal bij hun start) — de winst zit in volgende runs
+over dezelfde bedrijven/landen.
+
+## Twee ingangen, twee default-profielen
+
+Let op het verschil in feature-defaults tussen de twee manieren om een run
+te starten:
+
+- **Eventarc → dispatcher**: de job-executie krijgt alleen
+  `INPUT_GCS_URI`/`OUTPUT_GCS_DIR`/`RUN_ID`/`TASK_COUNT` als override; alle
+  feature-vlaggen komen uit de env-config van de job-deploy. Zonder daar iets
+  te zetten draait dit pad dus met alles uit (geen caller content, geen
+  rich ICP, geen AI-signaalscoring, geen C5, geen cache, mode `full`).
+- **Streamlit-app / PowerShell-script**: de Streamlit-app zet expliciete
+  overrides mee en heeft de meeste opties standaard áán (zoals de lokale
+  batch-app); het PowerShell-script geeft alleen `MODE` mee.
+
+Hetzelfde bestand via `incoming/`-upload versus via de Streamlit-app kan
+daardoor andere output (en kosten) opleveren. Wil je het Eventarc-pad
+gelijktrekken, bak de gewenste vlaggen dan in de job-deploy
+(`--set-env-vars` bij `gcloud run jobs deploy`).
 
 ## Bekende beperkingen (v1)
 

@@ -58,14 +58,31 @@ does work. Every download/upload therefore tries the Python client first
 and falls back to the CLI subprocess on any failure (missing package,
 missing ADC, ...) — this is what actually makes the shared cache work
 inside a deployed Cloud Run Job, not just on a local machine.
+
+Concurrent writers — merge on save, never blind-overwrite
+------------------------------------------------------------
+A Cloud Run Jobs run executes 10–50 tasks in PARALLEL, each running this
+module's load→use→save cycle against the SAME per-country index. A blind
+"upload my in-memory dict" save would be last-writer-wins: every task
+started from the same initial index, so the final upload would erase all
+other tasks' new entries. ``save_cache_index`` therefore never overwrites
+blindly: it re-downloads the current index, merges it with the local one
+(per key, newest ``fetched_at`` wins — see ``merge_cache_indexes``), and
+uploads the merged result with a GCS generation precondition
+(``if_generation_match``), retrying a few times when another task got in
+between. The CLI fallback path merges too but has no precondition — that's
+acceptable because the CLI path only runs on local machines, where runs are
+sequential; parallel Cloud Run tasks always have the Python client.
 """
 
 from __future__ import annotations
 
 import json
+import random
 import re
 import subprocess
 import tempfile
+import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Optional
@@ -195,6 +212,66 @@ def put_cached(index: dict, source: str, *parts: str, response: dict) -> None:
     }
 
 
+def _entry_fetched_dt(entry) -> Optional[datetime]:
+    """Parsed, tz-aware ``fetched_at`` of a cache entry, or ``None`` for a
+    malformed entry / missing / unparseable timestamp."""
+    if not isinstance(entry, dict):
+        return None
+    try:
+        dt = datetime.fromisoformat(str(entry.get("fetched_at") or ""))
+    except (TypeError, ValueError):
+        return None
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return dt
+
+
+def merge_cache_indexes(base: dict, updates: dict) -> dict:
+    """Union of two cache indexes; on a key collision the entry with the
+    newest ``fetched_at`` wins (an entry without a parseable ``fetched_at``
+    always loses to one with a valid timestamp; ``updates`` wins ties and
+    both-invalid collisions). Never mutates its arguments, never raises —
+    non-dict input is treated as empty."""
+    if not isinstance(base, dict):
+        base = {}
+    if not isinstance(updates, dict):
+        return dict(base)
+    merged = dict(base)
+    for key, entry in updates.items():
+        current = merged.get(key)
+        if current is None:
+            merged[key] = entry
+            continue
+        current_dt = _entry_fetched_dt(current)
+        update_dt = _entry_fetched_dt(entry)
+        if current_dt is None or (update_dt is not None and update_dt >= current_dt):
+            merged[key] = entry
+    return merged
+
+
+def max_ttl_days() -> int:
+    """The longest configured TTL across all source types — anything older
+    can never be a cache hit again for any source."""
+    return max(*SERPER_TTL_DAYS.values(), FIRECRAWL_TTL_DAYS)
+
+
+def _prune_expired_entries(index: dict) -> dict:
+    """Drop entries whose ``fetched_at`` parses AND is older than the longest
+    configured TTL. Since ``save_cache_index`` merges instead of overwriting,
+    the index would otherwise grow forever — expired entries would never
+    leave. Entries with an unparseable timestamp are deliberately kept
+    (conservative: they're dead weight for ``get_cached``, but pruning must
+    never eat an entry a future format change could still read)."""
+    horizon = timedelta(days=max_ttl_days())
+    now = datetime.now(timezone.utc)
+    pruned = {}
+    for key, entry in index.items():
+        fetched_dt = _entry_fetched_dt(entry)
+        if fetched_dt is None or now - fetched_dt <= horizon:
+            pruned[key] = entry
+    return pruned
+
+
 # ---------------------------------------------------------------------------
 # GCS download / upload — ONE call each, at the start/end of a run. Python
 # client tried first (works in Cloud Run via ADC), CLI subprocess as fallback
@@ -315,19 +392,66 @@ def load_cache_index(bucket: str, country_slug: str) -> dict:
     return _load_cache_index_via_cli(bucket, country_slug)
 
 
+# How often a compare-and-swap save re-reads and retries after another
+# writer got in between. With up to ~50 tasks whose saves are spread across
+# a long run this is plenty; a save that still loses only costs that one
+# task's new entries (cache stays an optimization, never a dependency).
+_SAVE_CAS_ATTEMPTS = 4
+
+
 def _save_cache_index_via_client(bucket: str, country_slug: str, index: dict) -> Optional[dict]:
     """Try the Python client. Returns ``None`` (try the CLI fallback) when
     the client itself is unusable; returns a result dict on any outcome
     once the client was actually usable (including a genuine upload failure
-    — that's a real result, not "try something else")."""
+    — that's a real result, not "try something else").
+
+    Read-merge-write with a GCS generation precondition: parallel Cloud Run
+    tasks all save the same country index, so a plain upload would be
+    last-writer-wins and erase every other task's entries. Each attempt
+    re-downloads the current index, merges the local one in, and uploads
+    with ``if_generation_match`` — when another task wrote in between, the
+    precondition fails and we re-read and retry."""
     client = _storage_client()
     if client is None:
         return None
     try:
-        blob = client.bucket(bucket).blob(_cache_index_blob_name(country_slug))
-        blob.upload_from_string(
-            json.dumps(index, ensure_ascii=False), content_type="application/json")
-        return {"success": True, "destination": _cache_index_gcs_path(bucket, country_slug)}
+        from google.api_core import exceptions as gcs_exceptions
+
+        bucket_obj = client.bucket(bucket)
+        blob_name = _cache_index_blob_name(country_slug)
+        for attempt in range(_SAVE_CAS_ATTEMPTS):
+            try:
+                current_blob = bucket_obj.get_blob(blob_name)
+                if current_blob is None:
+                    # if_generation_match=0 means "only if it doesn't exist yet".
+                    generation = 0
+                    current: dict = {}
+                else:
+                    generation = current_blob.generation
+                    text = current_blob.download_as_text(if_generation_match=generation)
+                    try:
+                        data = json.loads(text)
+                    except Exception:
+                        data = {}  # corrupt remote index: replace with merged
+                    current = data if isinstance(data, dict) else {}
+                merged = _prune_expired_entries(merge_cache_indexes(current, index))
+                bucket_obj.blob(blob_name).upload_from_string(
+                    json.dumps(merged, ensure_ascii=False),
+                    content_type="application/json",
+                    if_generation_match=generation,
+                )
+                return {"success": True,
+                        "destination": _cache_index_gcs_path(bucket, country_slug)}
+            except (gcs_exceptions.PreconditionFailed, gcs_exceptions.NotFound):
+                # Another task wrote (or deleted) the index between our read
+                # and write — back off briefly and re-read.
+                time.sleep(random.uniform(0.1, 0.4) * (attempt + 1))
+        return {
+            "success": False,
+            "error": f"Gave up after {_SAVE_CAS_ATTEMPTS} attempts: concurrent "
+                     "writers kept updating the cache index. This run's new "
+                     "cache entries are lost; the run itself is unaffected.",
+        }
     except Exception as exc:
         print(f"[enrichment_cache] google-cloud-storage upload failed for "
               f"{country_slug!r} ({type(exc).__name__}) -- falling back to "
@@ -344,24 +468,36 @@ def _save_cache_index_via_cli(bucket: str, country_slug: str, index: dict) -> di
                      "gsutil could persist the shared cache.",
         }
 
+    # Best-effort merge with the current remote index before uploading. The
+    # CLI has no generation preconditions (no compare-and-swap), so a truly
+    # simultaneous writer can still win — acceptable, because the CLI path
+    # only runs on local machines where runs are sequential; parallel Cloud
+    # Run tasks always use the Python-client path above.
+    current = _load_cache_index_via_cli(bucket, country_slug)
+    merged = _prune_expired_entries(merge_cache_indexes(current, index))
+
     remote_path = _cache_index_gcs_path(bucket, country_slug)
     try:
         with tempfile.TemporaryDirectory() as tmp:
             local_path = Path(tmp) / _cache_index_filename(country_slug)
             local_path.write_text(
-                json.dumps(index, ensure_ascii=False), encoding="utf-8")
+                json.dumps(merged, ensure_ascii=False), encoding="utf-8")
             return upload_file(tool_cmd, str(local_path), remote_path)
     except Exception as exc:
         return {"success": False, "error": f"{type(exc).__name__}: {exc}"}
 
 
 def save_cache_index(bucket: str, country_slug: str, index: dict) -> dict:
-    """Upload the updated index back to GCS.
+    """Merge the updated index into the shared one on GCS (never a blind
+    overwrite — see "Concurrent writers" in the module docstring): the
+    current remote index is re-read and merged in (newest ``fetched_at``
+    wins per key, entries older than the longest TTL are pruned), so
+    parallel Cloud Run tasks can't erase each other's entries.
 
     Tries the Python ``google-cloud-storage`` client first (works inside a
-    Cloud Run Job via ADC), falls back to the ``gcloud``/``gsutil`` CLI
-    subprocess otherwise (the same pattern ``lovable_gcs_upload.py`` uses
-    for a local machine's CLI credentials).
+    Cloud Run Job via ADC; uses an ``if_generation_match`` compare-and-swap
+    with retries), falls back to the ``gcloud``/``gsutil`` CLI subprocess
+    otherwise (merge without precondition — local runs are sequential).
 
     Returns a result dict (``{"success": bool, ...}``) — never raises. A
     failed upload only means this run's cache updates are lost, never that
