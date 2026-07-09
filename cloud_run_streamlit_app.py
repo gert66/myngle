@@ -420,23 +420,38 @@ def known_enriched_company_ids(existing_list_items: list[dict]) -> set[str]:
 
 def split_rows_by_existing_enrichment(
     df, domain_column: str, known_company_ids: set[str],
+    known_domestic_domains: Optional[set] = None,
 ):
-    """Split ``df`` into ``(to_process, already_enriched)`` based on whether
-    each row's domain — run through the exact same
-    ``export_lead_prioritizer_to_lovable_json.slugify`` normalization
-    ``make_company_id`` uses — is already in ``known_company_ids``.
+    """Split ``df`` into ``(to_process, already_enriched)``.
+
+    A row is already-known (goes to the second frame) when its domain
+    matches EITHER:
+      - ``known_company_ids`` — run through the exact same
+        ``export_lead_prioritizer_to_lovable_json.slugify`` normalization
+        ``make_company_id`` uses (a company already fully enriched in
+        current/), or
+      - ``known_domestic_domains`` — run through
+        ``screened_domains_ledger.normalize_domain`` (a company already
+        settled as definitely NOT foreign-HQ; only meaningful/passed by
+        the caller when this run also excludes non-foreign companies from
+        the export — see cloud_run_streamlit_app.main).
 
     A row with a blank/missing domain always goes to ``to_process`` (never
     silently dropped just because its id can't be determined). Never
     mutates ``df``.
     """
     import export_lead_prioritizer_to_lovable_json as lovable_export
+    from screened_domains_ledger import normalize_domain
+
+    known_domestic_domains = known_domestic_domains or set()
 
     def _row_known(value) -> bool:
         text = str(value if value is not None else "").strip()
         if not text or text.lower() == "nan":
             return False
-        return lovable_export.slugify(text) in known_company_ids
+        if lovable_export.slugify(text) in known_company_ids:
+            return True
+        return normalize_domain(text) in known_domestic_domains
 
     mask = df[domain_column].apply(_row_known)
     return df[~mask].copy(), df[mask].copy()
@@ -462,6 +477,7 @@ def main() -> None:  # pragma: no cover - exercised only under `streamlit run`
     import cloud_merge_results as cmr
     import export_lead_prioritizer_to_lovable_json as lovable_export
     import lovable_gcs_upload as lovable_gcs
+    import screened_domains_ledger
     from lead_prioritizer_batch_app import (
         DEFAULT_COLD_CALLERS_TEXT,
         default_gcs_country_prefix,
@@ -707,7 +723,14 @@ def main() -> None:  # pragma: no cover - exercised only under `streamlit run`
                      "dunne entry wordt gewoon opnieuw geprobeerd). Bespaart "
                      "Serper/Firecrawl/Anthropic-kosten voor bedrijven die al "
                      "goed staan. De overgeslagen bedrijven blijven na de "
-                     "merge gewoon in current/ staan, ongewijzigd.",
+                     "merge gewoon in current/ staan, ongewijzigd. Staat "
+                     "'Foreign-HQ-only export' hieronder ook aan, dan worden "
+                     "daarnaast bedrijven overgeslagen die in een vorige run "
+                     "al definitief als NIET-buitenlands zijn vastgesteld "
+                     "(uit een aparte, altijd-complete ledger — die bedrijven "
+                     "komen bij 'Foreign-HQ-only export' toch nooit in "
+                     "current/ terecht, dus current/ alleen zou ze steeds "
+                     "opnieuw laten screenen).",
             )
 
     # ---- Pre-flight: warn if the Lovable ARCHIVE folder already has data ---
@@ -772,6 +795,22 @@ def main() -> None:  # pragma: no cover - exercised only under `streamlit run`
                         work_dir / "lovable_current_existing_prefilter",
                     )
                     known_ids = known_enriched_company_ids(existing_list_items)
+
+                    # Companies confirmed NOT foreign in a past run never
+                    # land in current/ when foreign_hq_only_export is on
+                    # (they get filtered out at export time), so known_ids
+                    # alone can never "see" them -- the screened_domains_
+                    # ledger is a separate, always-complete record of
+                    # settled verdicts, independent of export filtering.
+                    # Only useful here when THIS run also excludes non-
+                    # foreign companies -- otherwise a domestic company
+                    # still belongs in the output and must be (re)processed.
+                    known_domestic: set = set()
+                    if foreign_hq_only_export:
+                        ledger = screened_domains_ledger.load_ledger(
+                            gcs_bucket_norm_prefilter, gcs_prefix_norm_prefilter)
+                        known_domestic = screened_domains_ledger.known_domestic_domains(ledger)
+
                 fname_lower = uploaded.name.lower()
                 df_prefilter = (
                     pd.read_csv(local_input) if fname_lower.endswith(".csv")
@@ -784,18 +823,23 @@ def main() -> None:  # pragma: no cover - exercised only under `streamlit run`
                         "Skip-filter overgeslagen: kon de domeinkolom niet automatisch "
                         "herkennen in het invoerbestand."
                     )
-                elif known_ids:
+                elif known_ids or known_domestic:
                     to_process, skipped_rows = split_rows_by_existing_enrichment(
-                        df_prefilter, domain_col, known_ids)
+                        df_prefilter, domain_col, known_ids, known_domestic)
+                    domestic_note = (
+                        f" (waarvan {len(known_domestic)} bekend-binnenlands uit de "
+                        "gescreende-domeinen-ledger)" if known_domestic else ""
+                    )
                     st.info(
                         f"Skip-filter: {len(skipped_rows)} van {len(df_prefilter)} rijen "
-                        f"al volledig verrijkt in current/, overgeslagen. "
+                        f"al bekend (volledig verrijkt in current/, of definitief "
+                        f"binnenlands){domestic_note}, overgeslagen. "
                         f"{len(to_process)} rij(en) worden verwerkt."
                     )
                     if len(to_process) == 0:
                         st.success(
-                            "Alle bedrijven in dit bestand staan al volledig verrijkt "
-                            "in current/ — niets nieuws om te verwerken."
+                            "Alle bedrijven in dit bestand zijn al bekend (verrijkt of "
+                            "definitief binnenlands) — niets nieuws om te verwerken."
                         )
                         st.stop()
                     if fname_lower.endswith(".csv"):
@@ -968,6 +1012,34 @@ def main() -> None:  # pragma: no cover - exercised only under `streamlit run`
                 "Geen API-verbruiksdata gevonden in de status-bestanden "
                 "(oudere image zonder --usage-output-ondersteuning?)."
             )
+
+        # ---- 4c. Update the screened-domains ledger (all HQ-screened rows) --
+        # Independent of Lovable export/foreign_hq_only_export filtering --
+        # every row this run screened for HQ (gated or not) is a candidate,
+        # so a future run's skip-filter can recognize a settled-domestic
+        # company even though it never lands in current/. Always attempted
+        # whenever GCS export is configured, regardless of whether THIS run
+        # itself uses the skip-filter -- future runs benefit either way.
+        if auto_lovable_export_enabled and auto_gcs_upload_enabled:
+            gcs_bucket_norm_ledger = export_gcs_bucket.strip()
+            gcs_prefix_norm_ledger = lovable_gcs.normalize_gcs_prefix(export_gcs_prefix)
+            if gcs_bucket_norm_ledger and gcs_prefix_norm_ledger:
+                try:
+                    enriched_rows = pd.read_excel(
+                        final_local, sheet_name=cmr.ENRICHED_LEADS_SHEET_NAME
+                    ).to_dict("records")
+                except Exception:
+                    enriched_rows = []
+                ledger_updates = screened_domains_ledger.build_ledger_updates(enriched_rows)
+                if ledger_updates:
+                    save_result = screened_domains_ledger.save_ledger(
+                        gcs_bucket_norm_ledger, gcs_prefix_norm_ledger, ledger_updates)
+                    if save_result.get("success"):
+                        st.caption(
+                            f"Gescreende-domeinen-ledger bijgewerkt: "
+                            f"{len(ledger_updates)} definitief-binnenlands bedrijf/"
+                            "bedrijven vastgelegd."
+                        )
 
         # ---- 5. Push the final Excel back to GCS for consistency -----------
         run_capture(build_upload_command(

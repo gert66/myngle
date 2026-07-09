@@ -390,6 +390,36 @@ class TestSplitRowsByExistingEnrichment:
         assert len(to_process) == 0
         assert len(skipped) == 2
 
+    def test_known_domestic_domains_also_skipped(self):
+        df = pd.DataFrame({
+            "company_name": ["Acme", "DomesticCo", "NewCo"],
+            "domain": ["acme.com", "domestic.com", "newco.com"],
+        })
+        to_process, skipped = split_rows_by_existing_enrichment(
+            df, "domain", known_company_ids={"acme-com"},
+            known_domestic_domains={"domestic.com"},
+        )
+        assert list(to_process["company_name"]) == ["NewCo"]
+        assert sorted(skipped["company_name"]) == ["Acme", "DomesticCo"]
+
+    def test_domestic_domain_matching_uses_screened_domains_ledger_normalization(self):
+        # normalize_domain strips scheme/www (unlike slugify, which keeps
+        # them as literal hyphens) -- this proves the domestic-domain check
+        # uses its own normalizer, not make_company_id's slugify.
+        df = pd.DataFrame({"domain": ["https://www.domestic.com/"]})
+        to_process, skipped = split_rows_by_existing_enrichment(
+            df, "domain", known_company_ids=set(),
+            known_domestic_domains={"domestic.com"},
+        )
+        assert len(skipped) == 1
+        assert len(to_process) == 0
+
+    def test_no_known_domestic_domains_defaults_to_no_extra_skips(self):
+        df = pd.DataFrame({"domain": ["acme.com"]})
+        to_process, skipped = split_rows_by_existing_enrichment(df, "domain", set())
+        assert len(to_process) == 1
+        assert len(skipped) == 0
+
 
 # ── Regression: gcloud is a .cmd wrapper on Windows ──────────────────────────
 #
