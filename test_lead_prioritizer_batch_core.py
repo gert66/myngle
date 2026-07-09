@@ -2122,6 +2122,70 @@ class TestGatedFullEnrichmentInRunBatchDataframe:
             out = run_batch_dataframe(self._df, cfg, "S", "A")
         assert len(out["enriched_leads"]) == 2
 
+    def test_gate_plus_c5_rescues_a_c5_confirmed_row_into_full_enrichment(self):
+        # Mirrors TestForeignHQOnlyMode.test_c5_confirmed_score0_row_is_now_enriched:
+        # plain HQ score 0, but C5 confirms a foreign parent (target match
+        # yes, High confidence -> recommended score 3). C5 runs INSIDE Phase
+        # 1/2 (before the Phase 3 eligibility decision), so this row must be
+        # pulled into full enrichment here too -- not left
+        # enrichment_skipped=True with only C5 fields, which is what an
+        # earlier version of this function (C5 as a flat post-step AFTER the
+        # gate decision) would have done.
+        fake = _fake_prioritize_for_foreign_hq(
+            {"Confirmed Foreign Co": 3.0, "Local Domestic Co": 0.0})
+        cfg = self._cfg(gate_full_enrichment_on_foreign_hq=True)
+        with patch("lead_prioritizer_batch_core.prioritize_single_lead", side_effect=fake), \
+             _patch_adjudicator(_mk_result("foreign_parent_confirmed", "High", "yes")):
+            out = run_batch_dataframe(
+                self._df, cfg, "S", "A",
+                c5_enabled=True, c5_scoring_behavior="conservative_adjustment",
+                c5_scope="all_rows", c5_model_used="claude-sonnet-5", c5_model_tier="sonnet",
+            )
+        rows = out["enriched_leads"].set_index("company_name")
+        row = rows.loc["Local Domestic Co"]
+        assert row["enrichment_skipped"] == False  # noqa: E712
+        assert row["full_enrichment_gate_reason"] == \
+            "Confirmed by C5 foreign-parent adjudication"
+        assert row["final_commercial_fit_score"] == 99.0
+        # The screening score itself is never rewritten by the gate.
+        assert row["sig_foreign_hq_score_for_next_scoring"] == 0.0
+        summary = out["run_summary"].iloc[0].to_dict()
+        assert summary["c5_enabled"] is True
+        assert summary["c5_foreign_parent_confirmed_count"] == 2
+        assert summary["gated_full_enrichment_attempted_count"] == 2
+        assert summary["gated_full_enrichment_skipped_count"] == 0
+
+    def test_gate_plus_c5_only_runs_c5_once(self):
+        # A single Phase-1/2 C5 pass must serve BOTH the eligibility decision
+        # and the run_summary counts -- no second, redundant apply_c5_adjudication
+        # call for the same batch.
+        fake = _fake_prioritize_for_foreign_hq(
+            {"Confirmed Foreign Co": 3.0, "Local Domestic Co": 0.0})
+        cfg = self._cfg(gate_full_enrichment_on_foreign_hq=True)
+        with patch("lead_prioritizer_batch_core.prioritize_single_lead", side_effect=fake), \
+             patch("lead_prioritizer_batch_core.apply_c5_adjudication",
+                   wraps=apply_c5_adjudication) as m_c5:
+            run_batch_dataframe(
+                self._df, cfg, "S", "A",
+                c5_enabled=True, c5_scoring_behavior="append_only",
+                c5_scope="all_rows", c5_model_used="claude-sonnet-5", c5_model_tier="sonnet",
+            )
+        assert m_c5.call_count == 1
+
+    def test_gate_without_c5_ignores_c5_kwargs_entirely(self):
+        # gate on, c5_enabled left at its default False: c5 kwargs passed to
+        # run_batch_dataframe (if any) must have zero effect -- no c5_*
+        # columns, matching the pre-existing gate-only contract.
+        fake = _fake_prioritize_for_foreign_hq(
+            {"Confirmed Foreign Co": 3.0, "Local Domestic Co": 0.0})
+        cfg = self._cfg(gate_full_enrichment_on_foreign_hq=True)
+        with patch("lead_prioritizer_batch_core.prioritize_single_lead", side_effect=fake):
+            out = run_batch_dataframe(self._df, cfg, "S", "A")
+        summary = out["run_summary"].iloc[0].to_dict()
+        assert summary["c5_enabled"] is False
+        rows = out["enriched_leads"].set_index("company_name")
+        assert rows.loc["Local Domestic Co", "enrichment_skipped"] == True  # noqa: E712
+
     def test_gate_on_reuses_full_ai_kwargs_not_a_stripped_down_call(self):
         # Unlike run_batch_foreign_hq_only's minimal run_full_v2_pipeline=True
         # call, the gated run_batch_dataframe path must pass the SAME
@@ -2411,6 +2475,33 @@ class TestGateFullEnrichmentOnForeignHqParallelConsistency:
                 seq_rows.loc[name, "enrichment_skipped"]
             assert par_rows.loc[name, "enrichment_skip_reason"] == \
                 seq_rows.loc[name, "enrichment_skip_reason"]
+
+    def test_run_single_batch_unit_gate_plus_c5_runs_c5_once_inside_the_gate(self):
+        # run_single_batch_unit is what the local Streamlit app's parallel
+        # runner calls per chunk; it used to always apply C5 as its own flat
+        # post-step. With gate+C5 both on, C5 must now run INSIDE
+        # run_batch_dataframe's gated Phase 1/2 (so it can rescue a
+        # borderline row into full enrichment), and the post-step must be
+        # skipped entirely -- not a second, redundant C5 pass.
+        fake = _fake_prioritize_for_foreign_hq(
+            {"Confirmed Foreign Co": 3.0, "Local Domestic Co": 0.0})
+        with patch("lead_prioritizer_batch_core.prioritize_single_lead", side_effect=fake), \
+             patch("lead_prioritizer_batch_core.apply_c5_adjudication",
+                   wraps=apply_c5_adjudication) as m_c5, \
+             _patch_adjudicator(_mk_result("foreign_parent_confirmed", "High", "yes")):
+            out = run_single_batch_unit(
+                self._df, self._cfg, "S", "A",
+                c5_enabled=True, c5_scoring_behavior="conservative_adjustment",
+                c5_scope="all_rows", c5_model_used="claude-sonnet-5", c5_model_tier="sonnet",
+            )
+        assert m_c5.call_count == 1
+        rows = out["enriched_leads"].set_index("company_name")
+        row = rows.loc["Local Domestic Co"]
+        assert row["enrichment_skipped"] == False  # noqa: E712
+        assert row["final_commercial_fit_score"] == 99.0
+        summary = out["run_summary"].iloc[0].to_dict()
+        assert summary["c5_enabled"] is True
+        assert summary["gated_full_enrichment_attempted_count"] == 2
 
 
 # ---------------------------------------------------------------------------

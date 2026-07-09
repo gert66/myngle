@@ -392,13 +392,12 @@ def main() -> None:  # pragma: no cover - exercised only under `streamlit run`
                  "conservative_adjustment, rows=score_3_or_manual_review, "
                  "model tier=Sonnet, geen model-override.")
         if gate_full_enrichment_on_foreign_hq and c5_enabled:
-            st.warning(
+            st.caption(
                 "'Alleen buitenlands HQ volledig verrijken' + C5 samen: C5 "
-                "draait NA de HQ-gate-beslissing, dus een rij die C5 alsnog als "
-                "buitenlands HQ bevestigt, wordt niet met terugwerkende kracht "
-                "alsnog volledig verrijkt — C5 voegt dan alleen zijn eigen "
-                "velden toe aan een enrichment_skipped-rij. Bekende beperking, "
-                "zie docs/cloud_run_workflow.md."
+                "draait bij deze combinatie VÓÓR de HQ-gate-beslissing, dus "
+                "een grensgeval dat C5 als buitenlands HQ bevestigt, wordt "
+                "alsnog volledig verrijkt in plaats van te blijven steken op "
+                "enrichment_skipped=True."
             )
 
         st.divider()

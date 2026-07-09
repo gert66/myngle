@@ -199,12 +199,11 @@ def build_arg_parser() -> argparse.ArgumentParser:
                         "enrichment_skipped=True instead of paying the "
                         "~4 extra Serper calls + Firecrawl/Anthropic cost "
                         "for a row you were going to filter out anyway. "
-                        "Works with every --mode. KNOWN LIMITATION when "
-                        "combined with --c5-enabled: C5 runs AFTER this gate "
-                        "decision as a flat post-step, so a row C5 later "
-                        "confirms as foreign-HQ does NOT get pulled back "
-                        "into full enrichment -- it only gets C5's own "
-                        "fields. Default: off.")
+                        "Works with every --mode. Combined with --c5-enabled, "
+                        "C5 runs INSIDE this gate's screening phase (before "
+                        "the eligibility decision), so a row C5 confirms as "
+                        "foreign-HQ is pulled into full enrichment too, not "
+                        "just given C5's own fields. Default: off.")
     return p
 
 
@@ -275,22 +274,6 @@ def config_from_args(args: argparse.Namespace) -> BatchRunConfig:
     )
 
 
-def gate_c5_combo_warning(gate_enabled: bool, c5_enabled: bool) -> Optional[str]:
-    """Warning text for the untested gate+C5 combination, or ``None`` when
-    it doesn't apply. Pure/testable so the CLI's print behavior can be
-    asserted without capturing stdout."""
-    if not (gate_enabled and c5_enabled):
-        return None
-    return (
-        "WARNING: --gate-full-enrichment-on-foreign-hq + --c5-enabled: C5 "
-        "runs AFTER the foreign-HQ gate decision, so a row C5 later confirms "
-        "as foreign-HQ stays enrichment_skipped=True (no full non-HQ "
-        "enrichment) -- C5 only adds its own fields to whichever rows the "
-        "plain HQ-score screening already selected. See "
-        "lead_prioritizer_batch_cli.py --help for details."
-    )
-
-
 # ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
@@ -345,17 +328,18 @@ def main(argv: Optional[list[str]] = None) -> int:
     output_path = Path(args.output) if args.output else generate_output_path(
         input_path, args.mode, datetime.now())
 
+    gated_with_c5 = args.gate_full_enrichment_on_foreign_hq and args.c5_enabled
+    gate_status = "off"
+    if args.gate_full_enrichment_on_foreign_hq:
+        gate_status = "on (C5 integrated into screening)" if gated_with_c5 else "on"
+
     print(f"Input path    : {input_path}")
     print(f"Sheet         : {sheet}")
     print(f"Row count     : {len(df)}")
     print(f"Run mode      : {args.mode}")
-    print(f"Foreign-HQ gate: {'on' if args.gate_full_enrichment_on_foreign_hq else 'off'}")
+    print(f"Foreign-HQ gate: {gate_status}")
     print(f"Selected rows : {selected_count}")
     print(f"Output path   : {output_path}")
-
-    warning = gate_c5_combo_warning(args.gate_full_enrichment_on_foreign_hq, args.c5_enabled)
-    if warning:
-        print(warning, file=sys.stderr)
 
     # ── Safety confirmation for large runs ────────────────────────────────────
     if selected_count > _CONFIRM_THRESHOLD and not args.yes:
@@ -374,45 +358,68 @@ def main(argv: Optional[list[str]] = None) -> int:
     import usage_tracker
     usage_tracker.reset()
 
-    tables = run_batch_dataframe(df, config, serper, anthropic, firecrawl_api_key=firecrawl)
-
-    # ── Optional C5 Sonnet HQ adjudication (after normal batch processing) ────
-    # Fixed conservative_adjustment/score_3_or_manual_review/sonnet defaults —
-    # the same choices the local Streamlit batch app uses day to day; not
+    # C5 model resolution happens up-front (needed either way: as an input to
+    # the gated path below, or to the post-step further down) — fixed
+    # conservative_adjustment/score_3_or_manual_review/sonnet defaults, the
+    # same choices the local Streamlit batch app uses day to day; not
     # exposed as separate flags to keep the cloud/CLI surface small.
     c5_model_used = ""
-    c5_counts: dict = {}
     if args.c5_enabled:
-        from lead_prioritizer_batch_core import apply_c5_adjudication
         from run_hq_sonnet_adjudication_probe import resolve_c5_model
 
         c5_model_used, c5_model_error = resolve_c5_model("sonnet", "")
         if c5_model_error:
             print(f"ERROR: {c5_model_error}", file=sys.stderr)
             return 2
-        c5_rows, c5_counts = apply_c5_adjudication(
-            tables["enriched_leads"],
-            anthropic_api_key=anthropic,
-            model_used=c5_model_used,
-            model_tier="sonnet",
-            scoring_behavior="conservative_adjustment",
-            scope="score_3_or_manual_review",
-            include_raw=args.include_raw_ai_json,
-        )
-        tables["enriched_leads"] = pd.DataFrame(c5_rows)
 
-    # Always record the c5_enabled flag (and settings, when on) in the run
-    # summary, matching the local Streamlit batch app's non-parallel path.
-    from lead_prioritizer_batch_core import add_c5_summary_fields
-    tables["run_summary"] = add_c5_summary_fields(
-        tables["run_summary"],
-        c5_enabled=args.c5_enabled,
-        c5_scoring_behavior="conservative_adjustment" if args.c5_enabled else "",
-        c5_scope="score_3_or_manual_review" if args.c5_enabled else "",
-        c5_model_tier="sonnet" if args.c5_enabled else "",
-        c5_model_used=c5_model_used if args.c5_enabled else "",
-        counts=c5_counts,
+    tables = run_batch_dataframe(
+        df, config, serper, anthropic, firecrawl_api_key=firecrawl,
+        **(
+            dict(c5_enabled=True, c5_scoring_behavior="conservative_adjustment",
+                 c5_scope="score_3_or_manual_review",
+                 c5_model_used=c5_model_used, c5_model_tier="sonnet")
+            if gated_with_c5 else {}
+        ),
     )
+
+    if gated_with_c5:
+        # C5 already ran INSIDE the gate's Phase 1/2 (see
+        # lead_prioritizer_batch_core._run_batch_dataframe_gated): a
+        # borderline row C5 confirms as foreign-HQ was pulled into full
+        # enrichment there, instead of staying enrichment_skipped=True with
+        # only C5's own fields added by a flat post-step. run_summary
+        # already carries the C5 settings/counts columns — running C5 again
+        # below would be a redundant second pass.
+        pass
+    else:
+        # ── Optional C5 Sonnet HQ adjudication (after normal batch processing) ──
+        from lead_prioritizer_batch_core import apply_c5_adjudication
+
+        c5_counts: dict = {}
+        if args.c5_enabled:
+            c5_rows, c5_counts = apply_c5_adjudication(
+                tables["enriched_leads"],
+                anthropic_api_key=anthropic,
+                model_used=c5_model_used,
+                model_tier="sonnet",
+                scoring_behavior="conservative_adjustment",
+                scope="score_3_or_manual_review",
+                include_raw=args.include_raw_ai_json,
+            )
+            tables["enriched_leads"] = pd.DataFrame(c5_rows)
+
+        # Always record the c5_enabled flag (and settings, when on) in the run
+        # summary, matching the local Streamlit batch app's non-parallel path.
+        from lead_prioritizer_batch_core import add_c5_summary_fields
+        tables["run_summary"] = add_c5_summary_fields(
+            tables["run_summary"],
+            c5_enabled=args.c5_enabled,
+            c5_scoring_behavior="conservative_adjustment" if args.c5_enabled else "",
+            c5_scope="score_3_or_manual_review" if args.c5_enabled else "",
+            c5_model_tier="sonnet" if args.c5_enabled else "",
+            c5_model_used=c5_model_used if args.c5_enabled else "",
+            counts=c5_counts,
+        )
 
     data = build_excel_workbook_bytes(tables)
     output_path.write_bytes(data)

@@ -375,41 +375,33 @@ Zet `GATE_FULL_ENRICHMENT_ON_FOREIGN_HQ=true` (CLI: `--gate-full-enrichment-`
 volledig verrijken") om dat om te draaien, met de bestaande `mode=full` (of
 elke andere mode):
 
-1. **Fase 1 — screening**: elke rij krijgt een goedkope HQ-only check (1
-   Serper-call per bedrijf), net als `mode=hq_only`.
-2. **Fase 2 — volledige enrichment**: alleen rijen met een bevestigd
-   buitenlands HQ (HQ-score == 3) doorlopen de rest van de pipeline (de
-   overige ~4 Serper-calls plus Firecrawl/Anthropic). Niet-bevestigde rijen
+1. **Fase 1/2 — screening**: elke rij krijgt een goedkope HQ-only check (1
+   Serper-call per bedrijf), net als `mode=hq_only`. Staat `C5_ENABLED`/
+   `--c5-enabled` óók aan, dan draait C5 Sonnet-adjudicatie HIER al — vóór de
+   gate-beslissing, exact zoals in de losse `full_foreign_hq_only`-modus —
+   over dezelfde score-3/manual-review-rijen als normaal (geen extra
+   API-kosten t.o.v. C5 los aanzetten).
+2. **Fase 3 — volledige enrichment**: alleen rijen die confirmed foreign-HQ
+   zijn (plain HQ-score == 3, óf — als C5 aanstaat — een C5-bevestigde
+   buitenlandse parent) doorlopen de rest van de pipeline (de overige ~4
+   Serper-calls plus Firecrawl/Anthropic). Omdat C5 al in Fase 1/2 heeft
+   meegewogen, wordt een grensgeval dat de plain HQ-score alleen niet had
+   herkend, maar dat C5 wél als buitenlands bevestigt, gewoon volledig
+   verrijkt — niet alleen van C5-velden voorzien. Niet-bevestigde rijen
    blijven in de output staan met `enrichment_skipped=True` en een
    `enrichment_skip_reason`, maar kosten verder niets.
 
-Dit is dezelfde tweefasige aanpak als de losse `full_foreign_hq_only`-modus
-in de lokale Streamlit-app, maar dan als opt-in bovenop de gewone
-`SUPPORTED_RUN_MODES` — dus bruikbaar op het Cloud Run-pad, waar
-`full_foreign_hq_only` zelf niet beschikbaar is.
+Dit is dezelfde tweefasige aanpak (inclusief C5-plek) als de losse
+`full_foreign_hq_only`-modus in de lokale Streamlit-app, maar dan als opt-in
+bovenop de gewone `SUPPORTED_RUN_MODES` — dus bruikbaar op het Cloud
+Run-pad, waar `full_foreign_hq_only` zelf niet beschikbaar is.
 
 De run-summary krijgt met deze gate drie extra kolommen:
 `gated_full_enrichment_attempted_count`, `gated_full_enrichment_skipped_count`
 en `gated_estimated_serper_calls_saved` (skipped × 4) — zo zie je per run
-hoeveel er daadwerkelijk bespaard is.
-
-**Bekende beperking — combinatie met C5 Sonnet-adjudicatie
-(`C5_ENABLED`/`--c5-enabled`):** C5 draait als losse nabewerkingsstap ÁCHTER
-de gate-beslissing van Fase 2, over de al samengestelde `enriched_leads`.
-Een rij die de plain HQ-score als "niet bevestigd buitenlands" wegzette maar
-die C5 vervolgens (bij een grensgeval) alsnog als `foreign_parent_confirmed`
-beoordeelt, wordt NIET met terugwerkende kracht alsnog volledig verrijkt —
-die rij blijft `enrichment_skipped=True` en krijgt alleen C5's eigen velden
-erbij. Met andere woorden: C5 kan zo'n rij nog wel corrigeren in HQ-
-classificatie, maar mist dan de non-HQ evidence/signalen/score/caller-content
-die een normale foreign-HQ-rij wel heeft. Zowel de CLI (`--gate-full-`
-`enrichment-on-foreign-hq --c5-enabled` samen print een waarschuwing naar
-stderr) als de Streamlit-app (toont een `st.warning`) melden dit expliciet
-als beide tegelijk aanstaan. Voor nu: zet C5 uit zolang je deze gate
-gebruikt, of accepteer dat C5 in dit pad alleen classificatie-informatie
-toevoegt, geen volledige enrichment triggert. Fase 2 vóór de gate-beslissing
-laten meewegen (zoals `run_batch_foreign_hq_only` al wel doet) is een
-mogelijke vervolgstap, niet iets dat deze wijziging al oplost.
+hoeveel er daadwerkelijk bespaard is. Staat C5 ook aan, dan krijg je
+daarnaast de gebruikelijke `c5_*`-tellingen, gebaseerd op dezelfde Fase 1/2
+C5-pass (geen dubbele C5-run).
 
 ## Gedeelde enrichment-cache in cloud-runs
 
