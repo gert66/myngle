@@ -32,6 +32,7 @@ from export_lead_prioritizer_to_lovable_json import (
     SUPPORTED_CONTENT_LANGUAGES,
     DEFAULT_CONTENT_LANGUAGE,
 )
+from lovable_gcs_merge import fetch_existing_flat_export, prepare_merge
 from lovable_gcs_upload import (
     DEFAULT_GCS_BUCKET,
     build_flat_upload_plan,
@@ -477,24 +478,87 @@ def main() -> None:
                     f"({manifest_output_dir})."
                 )
 
+            # ── Check whether something is already published at this
+            # prefix, so a second batch (e.g. the rest of a large list
+            # after a 1,000-row test) doesn't silently wipe out the first
+            # one. Only checked once bucket/prefix are valid, to avoid a
+            # pointless network call on every keystroke.
+            existing_check = None
+            if not bucket_error and gcloud_info["available"]:
+                with st.spinner("Checking for an existing export at this location..."):
+                    existing_check = fetch_existing_flat_export(
+                        gcs_bucket.strip(), gcs_prefix)
+                if existing_check["exists"] is None:
+                    st.warning(
+                        "Could not check for an existing export at this "
+                        f"location: {existing_check['error']}. Proceeding "
+                        "will overwrite whatever is there."
+                    )
+                elif existing_check["exists"]:
+                    st.info(
+                        f"An export with "
+                        f"{len(existing_check['list_items'] or [])} companies "
+                        "is already published at this location."
+                    )
+
+            existing_found = bool(existing_check and existing_check["exists"])
+            upload_mode = "overwrite"
+            if existing_found:
+                upload_mode = st.radio(
+                    "This location already has published data. What do you want to do?",
+                    options=["merge", "overwrite"],
+                    format_func=lambda v: (
+                        "Merge — add/update companies from this batch, keep "
+                        "everything already published"
+                        if v == "merge" else
+                        "Overwrite — replace the published export with this batch only"
+                    ),
+                    index=0,
+                    key="lovable_gcs_upload_mode",
+                )
+
             upload_disabled = bool(bucket_error) or not export_files
-            if st.button("Upload JSON to GCS", key="lovable_gcs_upload_button",
+            button_label = (
+                "Merge into GCS" if upload_mode == "merge" else "Upload JSON to GCS"
+            )
+            if st.button(button_label, key="lovable_gcs_upload_button",
                         disabled=upload_disabled):
-                jobs = build_flat_upload_plan(
-                    manifest_output_dir, export_files, gcs_bucket.strip(), gcs_prefix)
-                with st.spinner("Uploading to Google Cloud Storage..."):
-                    results = run_upload_plan(jobs)
-                failures = [r for r in results if not r["success"]]
-                if failures:
-                    st.error(f"{len(failures)} of {len(results)} uploads failed.")
-                    for r in failures:
-                        st.code(f"{r['destination']}: "
-                               f"{r.get('error') or r.get('stderr') or ''}")
+                if upload_mode == "merge":
+                    with st.spinner("Merging with the existing export..."):
+                        merge_result = prepare_merge(
+                            manifest_output_dir, gcs_bucket.strip(), gcs_prefix)
+                    if merge_result["fetch_error"]:
+                        st.error(
+                            "Could not fetch the existing export to merge with: "
+                            f"{merge_result['fetch_error']}"
+                        )
+                        jobs = None
+                    else:
+                        jobs = merge_result["jobs"]
+                        stats = merge_result["stats"]
+                        st.caption(
+                            f"Merge: {stats['added']} new, {stats['updated']} "
+                            f"updated, {stats['kept_from_existing']} kept "
+                            "unchanged from the existing export."
+                        )
                 else:
-                    st.success(f"Uploaded {len(results)} file(s) to Google Cloud Storage.")
-                    st.markdown("**Public URLs**")
-                    for filename in export_files:
-                        st.write(public_url_flat(gcs_bucket.strip(), gcs_prefix, filename))
+                    jobs = build_flat_upload_plan(
+                        manifest_output_dir, export_files, gcs_bucket.strip(), gcs_prefix)
+
+                if jobs:
+                    with st.spinner("Uploading to Google Cloud Storage..."):
+                        results = run_upload_plan(jobs)
+                    failures = [r for r in results if not r["success"]]
+                    if failures:
+                        st.error(f"{len(failures)} of {len(results)} uploads failed.")
+                        for r in failures:
+                            st.code(f"{r['destination']}: "
+                                   f"{r.get('error') or r.get('stderr') or ''}")
+                    else:
+                        st.success(f"Uploaded {len(results)} file(s) to Google Cloud Storage.")
+                        st.markdown("**Public URLs**")
+                        for filename in export_files:
+                            st.write(public_url_flat(gcs_bucket.strip(), gcs_prefix, filename))
         else:
             st.caption(
                 "GCS upload is off by default. Check the box above to "

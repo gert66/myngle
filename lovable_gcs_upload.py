@@ -192,6 +192,65 @@ def resolve_gcs_upload_tool() -> Optional[list[str]]:
     return None
 
 
+def resolve_gcs_cat_tool() -> Optional[list[str]]:
+    """Base argv prefix for reading a small GCS object's contents: prefers
+    ``gcloud storage cat``, falls back to ``gsutil cat``. Returns ``None`` if
+    neither is on ``PATH`` (same resolution as ``resolve_gcs_upload_tool``,
+    kept separate since the subcommand differs)."""
+    gcloud_path = shutil.which("gcloud")
+    if gcloud_path:
+        return [gcloud_path, "storage", "cat"]
+    gsutil_path = shutil.which("gsutil")
+    if gsutil_path:
+        return [gsutil_path, "cat"]
+    return None
+
+
+_GCS_NOT_FOUND_RE = re.compile(
+    r"No URLs matched|No such object|not found|NotFoundException|404",
+    re.IGNORECASE,
+)
+
+
+def fetch_gcs_text(destination: str) -> dict:
+    """Read one small GCS object's text contents (no ``shell=True``), e.g. to
+    check whether a previous export is already published at a prefix before
+    deciding to overwrite or merge.
+
+    Returns ``{"success", "exists", "text", "error"}``. A simply-absent
+    object is ``{"success": False, "exists": False, "error": None}`` — the
+    normal "nothing published here yet" case, not a failure callers need to
+    report. Any other failure (missing CLI, auth, network) comes back as
+    ``exists=None`` with an ``error`` message, so callers can tell
+    "definitely absent" apart from "could not check" and avoid silently
+    treating the latter as an empty bucket.
+    """
+    tool_cmd = resolve_gcs_cat_tool()
+    if tool_cmd is None:
+        return {
+            "success": False, "exists": None, "text": None,
+            "error": "Neither gcloud nor gsutil was found on PATH. Install "
+                     "or authenticate the Google Cloud SDK and try again.",
+        }
+    cmd = [*tool_cmd, destination]
+    try:
+        proc = subprocess.run(cmd, capture_output=True, text=True, timeout=60)
+    except Exception as exc:
+        return {
+            "success": False, "exists": None, "text": None,
+            "error": f"{type(exc).__name__}: {exc}",
+        }
+    if proc.returncode == 0:
+        return {"success": True, "exists": True, "text": proc.stdout, "error": None}
+    stderr = (proc.stderr or "").strip()
+    if _GCS_NOT_FOUND_RE.search(stderr):
+        return {"success": False, "exists": False, "text": None, "error": None}
+    return {
+        "success": False, "exists": None, "text": None,
+        "error": stderr[-2000:] or f"cat exited with code {proc.returncode}",
+    }
+
+
 def normalize_gcs_prefix(value: str) -> str:
     """Normalize a user-entered GCS path segment: no leading/trailing slash,
     no doubled slashes. Never raises on blank/odd input."""

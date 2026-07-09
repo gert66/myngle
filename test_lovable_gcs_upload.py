@@ -16,6 +16,7 @@ from lovable_gcs_upload import (
     country_folder_slug,
     default_gcs_run_folder,
     describe_gcloud_environment,
+    fetch_gcs_text,
     gcs_current_path,
     gcs_archive_path,
     gcs_flat_path,
@@ -24,6 +25,7 @@ from lovable_gcs_upload import (
     public_manifest_url,
     public_url,
     public_url_flat,
+    resolve_gcs_cat_tool,
     resolve_gcs_upload_tool,
     select_lovable_export_files,
     validate_gcs_bucket,
@@ -463,3 +465,75 @@ class TestFlatPlanRunsWithoutRealGcloud:
         assert all(r["success"] is False for r in results)
         assert all("Google Cloud SDK" in r["error"] for r in results)
         mock_run.assert_not_called()
+
+
+class TestResolveGcsCatTool:
+    def test_prefers_gcloud_when_both_present(self):
+        with patch("lovable_gcs_upload.shutil.which", side_effect=lambda x: f"/usr/bin/{x}"):
+            assert resolve_gcs_cat_tool() == ["/usr/bin/gcloud", "storage", "cat"]
+
+    def test_falls_back_to_gsutil(self):
+        def _which(name):
+            return "/usr/bin/gsutil" if name == "gsutil" else None
+        with patch("lovable_gcs_upload.shutil.which", side_effect=_which):
+            assert resolve_gcs_cat_tool() == ["/usr/bin/gsutil", "cat"]
+
+    def test_none_when_neither_present(self):
+        with patch("lovable_gcs_upload.shutil.which", return_value=None):
+            assert resolve_gcs_cat_tool() is None
+
+
+class TestFetchGcsText:
+    def test_missing_tool_fails_without_subprocess(self):
+        with patch("lovable_gcs_upload.resolve_gcs_cat_tool", return_value=None), \
+             patch("lovable_gcs_upload.subprocess.run") as mock_run:
+            result = fetch_gcs_text("gs://b/f.json")
+        assert result == {
+            "success": False, "exists": None, "text": None,
+            "error": (
+                "Neither gcloud nor gsutil was found on PATH. Install or "
+                "authenticate the Google Cloud SDK and try again."
+            ),
+        }
+        mock_run.assert_not_called()
+
+    def test_existing_object_returns_text(self):
+        mock_proc = MagicMock(returncode=0, stdout='[{"a": 1}]', stderr="")
+        with patch("lovable_gcs_upload.resolve_gcs_cat_tool",
+                   return_value=["gcloud", "storage", "cat"]), \
+             patch("lovable_gcs_upload.subprocess.run", return_value=mock_proc) as mock_run:
+            result = fetch_gcs_text("gs://b/companies.list.json")
+        assert result == {
+            "success": True, "exists": True, "text": '[{"a": 1}]', "error": None,
+        }
+        args, kwargs = mock_run.call_args
+        assert args[0] == ["gcloud", "storage", "cat", "gs://b/companies.list.json"]
+        assert "shell" not in kwargs or kwargs["shell"] is False
+
+    def test_absent_object_is_not_an_error(self):
+        mock_proc = MagicMock(
+            returncode=1, stdout="", stderr="ERROR: (gcloud.storage.cat) No URLs matched")
+        with patch("lovable_gcs_upload.resolve_gcs_cat_tool",
+                   return_value=["gcloud", "storage", "cat"]), \
+             patch("lovable_gcs_upload.subprocess.run", return_value=mock_proc):
+            result = fetch_gcs_text("gs://b/companies.list.json")
+        assert result == {"success": False, "exists": False, "text": None, "error": None}
+
+    def test_other_failure_surfaces_error_with_unknown_existence(self):
+        mock_proc = MagicMock(returncode=1, stdout="", stderr="AccessDenied")
+        with patch("lovable_gcs_upload.resolve_gcs_cat_tool",
+                   return_value=["gcloud", "storage", "cat"]), \
+             patch("lovable_gcs_upload.subprocess.run", return_value=mock_proc):
+            result = fetch_gcs_text("gs://b/companies.list.json")
+        assert result["success"] is False
+        assert result["exists"] is None
+        assert result["error"] == "AccessDenied"
+
+    def test_subprocess_exception_does_not_raise(self):
+        with patch("lovable_gcs_upload.resolve_gcs_cat_tool",
+                   return_value=["gcloud", "storage", "cat"]), \
+             patch("lovable_gcs_upload.subprocess.run", side_effect=OSError("boom")):
+            result = fetch_gcs_text("gs://b/companies.list.json")
+        assert result["success"] is False
+        assert result["exists"] is None
+        assert "boom" in result["error"]
