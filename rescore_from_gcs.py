@@ -301,6 +301,32 @@ def list_current_files(bucket: str, country_folder: str) -> list[str]:
     return names
 
 
+def list_run_files(bucket: str, country_folder: str, run_folder: str) -> list[str]:
+    """Filenames present in ``<country_folder>/runs/<run_folder>/`` right
+    now. Returns an empty list (never raises) if no CLI tool is on PATH or
+    the listing fails — mirrors ``list_current_files``."""
+    tool = resolve_gcs_tool()
+    if tool is None:
+        return []
+    run_dir = gcs_run_dir(bucket, country_folder, run_folder)
+    try:
+        proc = subprocess.run(
+            [*tool, "ls", f"{run_dir}/"],
+            capture_output=True, text=True, timeout=60,
+        )
+    except Exception:
+        return []
+    if proc.returncode != 0:
+        return []
+    prefix = f"{run_dir}/"
+    names = []
+    for line in proc.stdout.splitlines():
+        line = line.strip()
+        if line.startswith(prefix) and not line.endswith("/"):
+            names.append(line[len(prefix):])
+    return names
+
+
 def download_file(tool: list[str], source: str, local_path: str) -> dict:
     """Download one GCS object via subprocess (no ``shell=True``). Never
     raises — any failure comes back as ``{"success": False, ...}``."""
@@ -498,6 +524,88 @@ def upload_rescored_run(
         upload_file(tool, str(path), f"{run_dir}/{path.name}")
         for path in sorted(out_dir.iterdir())
     ]
+
+
+def promote_run_to_current(
+    bucket: str,
+    country_folder: str,
+    run_folder: str,
+    *,
+    work_dir: "str | Path | None" = None,
+    now: "datetime | None" = None,
+) -> dict:
+    """Copy every file from ``<country_folder>/runs/<run_folder>/`` to
+    ``<country_folder>/current/`` — the deliberate, explicit "make it live"
+    step that a re-score or reallocation run deliberately never takes on its
+    own (see both modules' docstrings), so the live Company Hub only shows a
+    run once an operator has reviewed it.
+
+    Downloads each file locally and re-uploads it to ``current/``, reusing
+    the exact same ``download_file``/``upload_file`` plumbing (and error
+    handling) as the rest of this module, rather than a server-side
+    GCS-to-GCS copy. If the run's manifest is among the promoted files, it
+    is stamped with ``promoted_to_current: True`` (plus ``promoted_from_run_folder``
+    and ``promoted_at``) before being uploaded, so ``current/``'s manifest
+    always reflects reality. Never touches any other run folder.
+
+    Raises ``RuntimeError`` if no GCS CLI tool is available or the run
+    folder has no promotable files (e.g. a missing/misspelled run folder) —
+    a silent no-op promotion would be worse than a loud failure.
+    """
+    tool = resolve_gcs_tool()
+    if tool is None:
+        raise RuntimeError(
+            "Neither gcloud nor gsutil was found on PATH. "
+            "Install/authenticate the Google Cloud SDK and try again."
+        )
+
+    run_dir = gcs_run_dir(bucket, country_folder, run_folder)
+    filenames = list_run_files(bucket, country_folder, run_folder)
+    relevant = [
+        f for f in filenames
+        if f in (CURRENT_MANIFEST_FILENAME, LIST_FILENAME) or _DETAIL_FILENAME_RE.match(f)
+    ]
+    if not relevant:
+        raise RuntimeError(
+            f"No promotable files found under {run_dir}/ — check that "
+            f"{run_folder!r} is a valid, already-uploaded run folder."
+        )
+
+    now = now or datetime.now(timezone.utc)
+    now_iso = now.strftime("%Y-%m-%dT%H:%M:%SZ")
+    current_dir = gcs_current_dir(bucket, country_folder)
+
+    cleanup = work_dir is None
+    staging = Path(work_dir) if work_dir else Path(
+        tempfile.mkdtemp(prefix="promote_to_current_"))
+    try:
+        results = []
+        for filename in relevant:
+            local_path = staging / filename
+            download_result = download_file(tool, f"{run_dir}/{filename}", str(local_path))
+            if not download_result["success"]:
+                results.append({**download_result, "target": "current", "phase": "download"})
+                continue
+            if filename == CURRENT_MANIFEST_FILENAME:
+                manifest = json.loads(local_path.read_text(encoding="utf-8"))
+                manifest["promoted_to_current"] = True
+                manifest["promoted_from_run_folder"] = run_folder
+                manifest["promoted_at"] = now_iso
+                local_path.write_text(
+                    json.dumps(manifest, ensure_ascii=False, indent=2, default=str),
+                    encoding="utf-8")
+            upload_result = upload_file(tool, str(local_path), f"{current_dir}/{filename}")
+            results.append({**upload_result, "target": "current", "phase": "upload"})
+        return {
+            "country_folder": country_folder,
+            "run_folder": run_folder,
+            "promoted_at": now_iso,
+            "promoted_files": relevant,
+            "results": results,
+        }
+    finally:
+        if cleanup:
+            shutil.rmtree(staging, ignore_errors=True)
 
 
 def rescore_country(
