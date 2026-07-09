@@ -24,6 +24,7 @@ from rescore_streamlit_app import (
     TIER_LABELS,
     biggest_movers_dataframe,
     build_multi_country_preview,
+    build_multi_country_rescored_runs,
     default_params,
     employee_range_options,
     multi_country_summary_dataframe,
@@ -242,6 +243,60 @@ class TestBuildMultiCountryPreview:
     def test_empty_input_returns_empty_dicts(self):
         preview = build_multi_country_preview({}, default_params(), now_iso="2026-01-01T00:00:00Z")
         assert preview == {"original_by_id": {}, "rescored_by_id": {}}
+
+
+class TestBuildMultiCountryRescoredRuns:
+    def _detail(self, employee_range: str) -> dict:
+        return {
+            "commercial_fit_score": 5.0,
+            "commercial_tier": "🥉 Cool",
+            "scoring_inputs": {
+                "employee_range": employee_range,
+                "signals": {f: 3 for f in LEAN_COEFFICIENTS},
+            },
+        }
+
+    def _current(self, company_id: str, employee_range: str) -> dict:
+        detail = self._detail(employee_range)
+        return {
+            "detail_files": {"d1.json": {company_id: detail}},
+            "list_items": [{"company_id": company_id, **detail}],
+            "manifest": {"country_folder": "placeholder"},
+        }
+
+    def test_ids_stay_unprefixed_per_country(self):
+        current_by_country = {
+            "nl": self._current("c1", "1 - 10"),
+            "be": self._current("c1", "100001 - 10000000"),
+        }
+        runs = build_multi_country_rescored_runs(
+            current_by_country, default_params(),
+            run_folder="2026-01-01_rescore", now_iso="2026-01-01T00:00:00Z",
+        )
+        assert set(runs) == {"nl", "be"}
+        nl_ids = set(runs["nl"]["detail_files"]["d1.json"])
+        be_ids = set(runs["be"]["detail_files"]["d1.json"])
+        assert nl_ids == {"c1"}
+        assert be_ids == {"c1"}
+        # Different company size per country -> different rescored score,
+        # same unprefixed id "c1" in both — the shape write_rescored_run/
+        # upload_rescored_run expect for a single country.
+        assert runs["nl"]["detail_files"]["d1.json"]["c1"]["commercial_fit_score"] != \
+            runs["be"]["detail_files"]["d1.json"]["c1"]["commercial_fit_score"]
+
+    def test_manifest_run_folder_matches_requested(self):
+        current_by_country = {"nl": self._current("c1", "1 - 10")}
+        runs = build_multi_country_rescored_runs(
+            current_by_country, default_params(),
+            run_folder="2026-02-02_rescore", now_iso="2026-01-01T00:00:00Z",
+        )
+        assert runs["nl"]["manifest"]["run_folder"] == "2026-02-02_rescore"
+        assert runs["nl"]["manifest"]["country_folder"] == "nl"
+
+    def test_empty_input_returns_empty_dict(self):
+        runs = build_multi_country_rescored_runs(
+            {}, default_params(), run_folder="r", now_iso="2026-01-01T00:00:00Z")
+        assert runs == {}
 
 
 class TestMultiCountrySummaryDataframe:
