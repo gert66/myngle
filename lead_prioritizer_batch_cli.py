@@ -163,6 +163,25 @@ def build_arg_parser() -> argparse.ArgumentParser:
                         "original text instead of being corrected to the "
                         "real page text, and 'not_found' quotes never get "
                         "a re-extraction attempt.")
+    p.add_argument("--no-deep-dive-on-foreign-hq", action="store_true",
+                   help="Disable the confirmed-foreign-HQ Deep Dive trigger "
+                        "(on by default, only meaningful with --deep-dive): "
+                        "leaves --deep-dive-min-score as the only trigger.")
+    p.add_argument("--use-enrichment-cache", action="store_true",
+                   help="Opt-in: consult/update the shared, GCS-backed "
+                        "Serper/Firecrawl enrichment cache (one index per "
+                        "country present in the batch) instead of every run "
+                        "starting cold. See enrichment_cache.py. Requires "
+                        "--enrichment-cache-bucket (default: off).")
+    p.add_argument("--enrichment-cache-bucket", default="",
+                   help="GCS bucket for --use-enrichment-cache.")
+    p.add_argument("--c5-enabled", action="store_true",
+                   help="Opt-in Step C5: after normal batch processing, run "
+                        "Sonnet HQ adjudication over score-3/manual-review "
+                        "rows (fixed conservative_adjustment scoring "
+                        "behavior, Sonnet model tier, no explicit model "
+                        "override — the same defaults the local Streamlit "
+                        "batch app uses day to day). Default: off.")
     return p
 
 
@@ -223,9 +242,12 @@ def config_from_args(args: argparse.Namespace) -> BatchRunConfig:
         legacy_enrichment_mode=args.legacy_enrichment_mode,
         deep_dive=args.deep_dive,
         deep_dive_min_score=args.deep_dive_min_score,
+        deep_dive_on_foreign_hq=not args.no_deep_dive_on_foreign_hq,
         deep_dive_max_pages=args.deep_dive_max_pages,
         verify_quotes=not args.no_verify_quotes,
         auto_correct_quotes=not args.no_auto_correct_quotes,
+        use_enrichment_cache=args.use_enrichment_cache,
+        enrichment_cache_bucket=args.enrichment_cache_bucket,
     )
 
 
@@ -308,6 +330,45 @@ def main(argv: Optional[list[str]] = None) -> int:
     usage_tracker.reset()
 
     tables = run_batch_dataframe(df, config, serper, anthropic, firecrawl_api_key=firecrawl)
+
+    # ── Optional C5 Sonnet HQ adjudication (after normal batch processing) ────
+    # Fixed conservative_adjustment/score_3_or_manual_review/sonnet defaults —
+    # the same choices the local Streamlit batch app uses day to day; not
+    # exposed as separate flags to keep the cloud/CLI surface small.
+    c5_model_used = ""
+    c5_counts: dict = {}
+    if args.c5_enabled:
+        from lead_prioritizer_batch_core import apply_c5_adjudication
+        from run_hq_sonnet_adjudication_probe import resolve_c5_model
+
+        c5_model_used, c5_model_error = resolve_c5_model("sonnet", "")
+        if c5_model_error:
+            print(f"ERROR: {c5_model_error}", file=sys.stderr)
+            return 2
+        c5_rows, c5_counts = apply_c5_adjudication(
+            tables["enriched_leads"],
+            anthropic_api_key=anthropic,
+            model_used=c5_model_used,
+            model_tier="sonnet",
+            scoring_behavior="conservative_adjustment",
+            scope="score_3_or_manual_review",
+            include_raw=args.include_raw_ai_json,
+        )
+        tables["enriched_leads"] = pd.DataFrame(c5_rows)
+
+    # Always record the c5_enabled flag (and settings, when on) in the run
+    # summary, matching the local Streamlit batch app's non-parallel path.
+    from lead_prioritizer_batch_core import add_c5_summary_fields
+    tables["run_summary"] = add_c5_summary_fields(
+        tables["run_summary"],
+        c5_enabled=args.c5_enabled,
+        c5_scoring_behavior="conservative_adjustment" if args.c5_enabled else "",
+        c5_scope="score_3_or_manual_review" if args.c5_enabled else "",
+        c5_model_tier="sonnet" if args.c5_enabled else "",
+        c5_model_used=c5_model_used if args.c5_enabled else "",
+        counts=c5_counts,
+    )
+
     data = build_excel_workbook_bytes(tables)
     output_path.write_bytes(data)
 

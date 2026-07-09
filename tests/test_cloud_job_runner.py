@@ -28,7 +28,9 @@ _CLOUD_ENV_VARS = [
     "ANTHROPIC_API_KEY", "SERPER_API_KEY", "FIRECRAWL_API_KEY",
     "MAX_ROWS", "FORCE_RERUN", "MODE",
     "COMPANY_COLUMN", "DOMAIN_COLUMN", "INPUT_COUNTRY_COLUMN",
-    "DEEP_DIVE", "RICH_ICP_CONTEXT", "AI_SIGNAL_SCORING",
+    "COMPOSE_CALLER_CONTENT", "DEEP_DIVE", "DEEP_DIVE_MIN_SCORE",
+    "DEEP_DIVE_ON_FOREIGN_HQ", "RICH_ICP_CONTEXT", "AI_SIGNAL_SCORING",
+    "USE_ENRICHMENT_CACHE", "ENRICHMENT_CACHE_BUCKET", "C5_ENABLED",
 ]
 
 
@@ -221,6 +223,73 @@ def test_mode_and_column_overrides_are_forwarded(tmp_path, monkeypatch):
     assert "--deep-dive" in cmd
     assert "--rich-icp-context" in cmd
     assert "--ai-signal-scoring" in cmd
+
+
+def test_new_opt_in_flags_are_forwarded(tmp_path, monkeypatch):
+    """compose-caller-content / deep-dive tuning / enrichment cache / C5 all
+    reach the lead_prioritizer_batch_cli.py subprocess command unchanged."""
+    input_path = tmp_path / "input.xlsx"
+    df = pd.DataFrame({
+        "Company Name": ["Acme"],
+        "Website": ["acme.example.com"],
+    })
+    df.to_excel(input_path, index=False)
+    output_dir = tmp_path / "out"
+
+    fake_run = _fake_batch_cli_subprocess()
+    monkeypatch.setattr(cjr.subprocess, "run", fake_run)
+
+    rc = cjr.main([
+        "--input", str(input_path),
+        "--output-dir", str(output_dir),
+        "--task-index", "0",
+        "--task-count", "1",
+        "--run-id", "new-flags",
+        "--company-column", "Company Name",
+        "--domain-column", "Website",
+        "--compose-caller-content",
+        "--deep-dive",
+        "--deep-dive-min-score", "0",
+        "--no-deep-dive-on-foreign-hq",
+        "--use-enrichment-cache",
+        "--enrichment-cache-bucket", "my-bucket",
+        "--c5-enabled",
+    ])
+
+    assert rc == 0
+    cmd = fake_run.calls[0]
+    assert "--compose-caller-content" in cmd
+    assert cmd[cmd.index("--deep-dive-min-score") + 1] == "0.0"
+    assert "--no-deep-dive-on-foreign-hq" in cmd
+    assert "--use-enrichment-cache" in cmd
+    assert cmd[cmd.index("--enrichment-cache-bucket") + 1] == "my-bucket"
+    assert "--c5-enabled" in cmd
+
+
+def test_deep_dive_on_foreign_hq_stays_on_by_default(tmp_path, monkeypatch):
+    input_path = tmp_path / "input.xlsx"
+    df = pd.DataFrame({"Company Name": ["Acme"], "Website": ["acme.example.com"]})
+    df.to_excel(input_path, index=False)
+    output_dir = tmp_path / "out"
+
+    fake_run = _fake_batch_cli_subprocess()
+    monkeypatch.setattr(cjr.subprocess, "run", fake_run)
+
+    rc = cjr.main([
+        "--input", str(input_path),
+        "--output-dir", str(output_dir),
+        "--task-index", "0",
+        "--task-count", "1",
+        "--run-id", "default-foreign-hq-trigger",
+        "--company-column", "Company Name",
+        "--domain-column", "Website",
+        "--deep-dive",
+    ])
+
+    assert rc == 0
+    cmd = fake_run.calls[0]
+    assert "--no-deep-dive-on-foreign-hq" not in cmd
+    assert cmd[cmd.index("--deep-dive-min-score") + 1] == "8.0"
 
 
 def test_unresolvable_columns_fail_before_subprocess(tmp_path, monkeypatch):
