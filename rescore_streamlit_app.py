@@ -295,6 +295,29 @@ def build_multi_country_preview(
     return {"original_by_id": original_by_id, "rescored_by_id": rescored_by_id}
 
 
+def build_multi_country_rescored_runs(
+    current_by_country: dict[str, dict], params: dict, *, run_folder: str, now_iso: str,
+) -> dict[str, dict]:
+    """Re-score every already-loaded country against the same ``params`` and
+    target ``run_folder``, purely in memory. Unlike ``build_multi_country_preview``
+    (which prefixes ids for the aggregate charts), each country's result here
+    keeps its own unprefixed company ids — exactly the shape
+    ``write_rescored_run``/``upload_rescored_run`` expect for a single
+    country — so the bulk-upload button can write+upload one country's
+    result at a time straight from this dict, same as the single-country
+    "Toepassen & uploaden" flow does for one already-loaded country.
+
+    Returns ``{country_folder: rescored_run}`` where each ``rescored_run``
+    is a ``build_rescored_run`` result (``{"list_items", "detail_files",
+    "manifest"}``)."""
+    return {
+        country: build_rescored_run(
+            current, params, country_folder=country, run_folder=run_folder, now_iso=now_iso,
+        )
+        for country, current in current_by_country.items()
+    }
+
+
 def multi_country_summary_dataframe(original_by_id: dict, rescored_by_id: dict) -> pd.DataFrame:
     """``(country_folder, n_bedrijven, n_tier_gewijzigd)`` per country, from
     the country-prefixed ids ``build_multi_country_preview`` produces — the
@@ -445,10 +468,12 @@ def main() -> None:  # pragma: no cover - exercised only under `streamlit run`
                 st.error(f"Laden mislukt: {exc}")
 
         st.divider()
-        st.header("2. Alle landen (alleen preview)")
+        st.header("2. Alle landen (preview & bulk-upload)")
         st.caption(
-            "Laadt meerdere land-folders tegelijk voor de tab '🌍 Alle landen'. "
-            "Uploaden gebeurt altijd nog per land, via '🚀 Toepassen & uploaden'."
+            "Laadt meerdere land-folders tegelijk voor de tab '🌍 Alle "
+            "landen', waar je ze ook in bulk kunt uploaden. Wil je maar één "
+            "land? Gebruik dan '📥 Huidige run laden' hierboven en "
+            "'🚀 Toepassen & uploaden'."
         )
         preview_countries = st.multiselect(
             "Landen om te previewen", options=countries, default=countries,
@@ -689,13 +714,13 @@ def main() -> None:  # pragma: no cover - exercised only under `streamlit run`
                 st.dataframe(
                     signal_split_summary(split_df), use_container_width=True, hide_index=True)
 
-    # ── All countries — preview only ──────────────────────────────────────────
+    # ── All countries — preview + bulk upload ───────────────────────────────
     with tab_all:
-        st.subheader("Alle landen — preview (geen upload)")
+        st.subheader("Alle landen — preview & bulk-upload")
         st.caption(
-            "Geaggregeerd over alle geladen land-folders. Uploaden gebeurt "
-            "nog steeds per land — via de tab '🚀 Toepassen & uploaden' — dit "
-            "hier schrijft niets weg."
+            "Geaggregeerd over alle geladen land-folders. Er wordt pas "
+            "geschreven naar GCS als je onderaan expliciet op 'Upload naar "
+            "GCS — alle landen' klikt; tot dan is dit alleen een preview."
         )
         all_countries_current = st.session_state.get("_all_countries_current")
         if not all_countries_current:
@@ -728,6 +753,73 @@ def main() -> None:  # pragma: no cover - exercised only under `streamlit run`
                 st.dataframe(summary_df, use_container_width=True, hide_index=True)
 
             render_before_after(p_original, p_rescored)
+
+            st.divider()
+            st.subheader("Uploaden naar GCS — alle landen")
+            st.caption(
+                "Schrijft, per geladen land, naar een NIEUWE run-folder met "
+                "dezelfde naam — current/ en bestaande runs blijven overal "
+                "ongewijzigd. Eén land dat mislukt houdt de andere landen "
+                "niet tegen; het resultaat per land staat in de tabel "
+                "hieronder."
+            )
+            all_run_folder = st.text_input(
+                "Run-folder (voor alle landen)", value=default_rescore_run_folder(),
+                key="_all_run_folder_preview")
+            all_confirmed = st.checkbox(
+                f"Ik begrijp dat dit naar gs://{bucket}/<land>/runs/"
+                f"{all_run_folder}/ schrijft voor elk van de "
+                f"{len(all_countries_current)} geladen landen "
+                "(current/ blijft onaangeroerd).",
+                key="_all_upload_confirmed",
+            )
+            if st.button(
+                "📤 Upload naar GCS — alle landen", type="primary",
+                disabled=not all_confirmed,
+            ):
+                all_dir = st.session_state["_all_countries_work_dir"]
+                _now_iso_upload = pd.Timestamp.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ")
+                per_country_runs = build_multi_country_rescored_runs(
+                    all_countries_current, params,
+                    run_folder=all_run_folder, now_iso=_now_iso_upload,
+                )
+                progress = st.progress(0.0)
+                result_rows = []
+                for i, (country, run) in enumerate(per_country_runs.items()):
+                    try:
+                        out_dir = write_rescored_run(run, f"{all_dir}/{country}/out")
+                        upload_results = upload_rescored_run(
+                            out_dir, bucket, country, all_run_folder)
+                        n_failed = sum(1 for r in upload_results if not r["success"])
+                        result_rows.append({
+                            "country_folder": country,
+                            "bedrijven_herscoord": run["manifest"]["companies_rescored"],
+                            "bestanden_geupload": len(upload_results),
+                            "mislukt": n_failed,
+                            "status": "✅ OK" if n_failed == 0 else f"⚠️ {n_failed} upload(s) mislukt",
+                        })
+                    except Exception as exc:
+                        result_rows.append({
+                            "country_folder": country,
+                            "bedrijven_herscoord": 0,
+                            "bestanden_geupload": 0,
+                            "mislukt": None,
+                            "status": f"❌ {exc}",
+                        })
+                    progress.progress((i + 1) / len(per_country_runs))
+                result_df = pd.DataFrame(result_rows)
+                n_ok = (result_df["status"] == "✅ OK").sum() if not result_df.empty else 0
+                if n_ok == len(result_df) and not result_df.empty:
+                    st.success(
+                        f"Alle {len(result_df)} landen succesvol geüpload naar "
+                        f"gs://{bucket}/<land>/runs/{all_run_folder}/."
+                    )
+                else:
+                    st.error(
+                        f"{len(result_df) - n_ok} van {len(result_df)} landen hadden "
+                        "problemen — zie de tabel hieronder."
+                    )
+                st.dataframe(result_df, use_container_width=True, hide_index=True)
 
     # ── Apply & upload ────────────────────────────────────────────────────────
     with tab_apply:
