@@ -105,6 +105,7 @@ alleen `set`/`missing` per key, nooit de waarde zelf.
 | `USE_ENRICHMENT_CACHE` | opt-in gedeelde GCS enrichment-cache (default uit) — zie "Gedeelde enrichment-cache" hieronder |
 | `ENRICHMENT_CACHE_BUCKET` | GCS-bucket voor de enrichment-cache (verplicht als `USE_ENRICHMENT_CACHE` aanstaat) |
 | `GATE_FULL_ENRICHMENT_ON_FOREIGN_HQ` | opt-in kostengate: goedkope HQ-only screening voor elke rij, volledige v2-enrichment alleen voor bevestigd-buitenlandse HQ's (default uit) — zie "Goedkoper: alleen buitenlandse HQ volledig verrijken" hieronder |
+| `CHECKPOINT_EVERY_ROWS` | crash-protectie: elke N verwerkte rijen wordt de tussenstand van déze task geüpload naar `status/part_XXXX_checkpoint.json` (default `5`; `0` zet het uit) — zie "Crash-protectie: tussentijdse checkpoints" hieronder |
 
 `CLOUD_RUN_TASK_INDEX`/`CLOUD_RUN_TASK_COUNT` hebben voorrang zodra beide
 gezet zijn (dat doet het platform automatisch); anders vallen we terug op
@@ -316,6 +317,35 @@ in plaats van de rest van het rapport te breken.
   statussen tussen zitten — dat is het signaal om losse tasks opnieuw te
   draaien voordat je merget. Tasks met een leeg rijblok (`done`, geen part-
   bestand) tellen gewoon mee als "gerapporteerd" en blokkeren de merge niet.
+
+## Crash-protectie: tussentijdse checkpoints
+
+Zonder checkpoints verwerkt elke task zijn hele rijblok volledig in het
+geheugen en schrijft pas ÉÉN keer, aan het eind, een outputbestand. Crasht de
+task halverwege (OOM-kill, onverwachte exception) dan is ALLES wat die task
+al verwerkt had verloren — niet alleen de rij die het probleem veroorzaakte.
+Bij bv. 3000 rijen / 50 tasks (~60 rijen/task, zie "Hoe sharding werkt")
+betekent dat in het slechtste geval maximaal ~60 bedrijven kwijt, niet de
+hele 3000 — maar zonder checkpoints was zelfs die ~60 volledig weg.
+
+Met `CHECKPOINT_EVERY_ROWS` (default `5`, zet op `0` om uit te schakelen)
+schrijft `lead_prioritizer_batch_cli.py` elke N verwerkte rijen de tussenstand
+lokaal weg (`batch_checkpoint.py`, atomisch — nooit een corrupt half-geschreven
+bestand). `cloud_job_runner.py` uploadt die tussenstand op zijn beurt periodiek
+(elke ~20 seconden, alleen als het bestand gewijzigd is) naar
+`status/part_XXXX_checkpoint.json`, plus altijd nog één laatste keer meteen
+nadat de subprocess stopt (succes of fout) — dus ook een checkpoint die net
+vlak vóór het einde geschreven werd, wordt niet gemist.
+
+Bij een crash bevat `status/part_XXXX_failed.json` een `checkpoint_uri`-veld
+met de locatie van de laatst geüploade checkpoint (of `null` als er nog geen
+enkele rij verwerkt was). Dat bestand bevat de tot dan toe verwerkte
+`enriched_rows`/`evidence_rows`/`signal_rows` als platte JSON — geen kant-en-
+klaar Excel-bestand, en de merge-stap gebruikt het (nog) niet automatisch.
+Voor nu is het vooral bedoeld om handmatig te kunnen inspecteren wat een
+gecrashte task al had verwerkt, in plaats van dat die data spoorloos
+verdwijnt; automatisch salvagen in `cloud_merge_results.py` is een mogelijke
+vervolgstap.
 
 ## Eerste veilige instellingen
 

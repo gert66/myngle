@@ -31,7 +31,7 @@ _CLOUD_ENV_VARS = [
     "COMPOSE_CALLER_CONTENT", "DEEP_DIVE", "DEEP_DIVE_MIN_SCORE",
     "DEEP_DIVE_ON_FOREIGN_HQ", "RICH_ICP_CONTEXT", "AI_SIGNAL_SCORING",
     "USE_ENRICHMENT_CACHE", "ENRICHMENT_CACHE_BUCKET", "C5_ENABLED",
-    "GATE_FULL_ENRICHMENT_ON_FOREIGN_HQ",
+    "GATE_FULL_ENRICHMENT_ON_FOREIGN_HQ", "CHECKPOINT_EVERY_ROWS",
 ]
 
 
@@ -651,3 +651,160 @@ def test_missing_output_after_subprocess_success_writes_failed_status(tmp_path, 
     status = json.loads((output_dir / "status" / "part_0000_failed.json").read_text(encoding="utf-8"))
     assert status["status"] == "failed"
     assert "No output written" in status["error"]
+
+
+# ── Checkpoint crash-protection ────────────────────────────────────────────
+
+def test_checkpoint_flags_forwarded_by_default(tmp_path, monkeypatch):
+    """checkpoint_every_rows defaults to 5 (not 0), so an unattended cloud
+    run gets crash protection without anyone opting in explicitly."""
+    input_path = tmp_path / "input.xlsx"
+    _write_synthetic_excel(input_path, 10)
+    output_dir = tmp_path / "out"
+
+    fake_run = _fake_batch_cli_subprocess()
+    monkeypatch.setattr(cjr.subprocess, "run", fake_run)
+
+    rc = cjr.main([
+        "--input", str(input_path),
+        "--output-dir", str(output_dir),
+        "--task-index", "0",
+        "--task-count", "1",
+        "--run-id", "checkpoint-default",
+    ])
+
+    assert rc == 0
+    cmd = fake_run.calls[0]
+    assert "--checkpoint-path" in cmd
+    assert cmd[cmd.index("--checkpoint-every-rows") + 1] == "5"
+
+
+def test_checkpoint_every_rows_zero_disables_flag(tmp_path, monkeypatch):
+    input_path = tmp_path / "input.xlsx"
+    _write_synthetic_excel(input_path, 10)
+    output_dir = tmp_path / "out"
+
+    fake_run = _fake_batch_cli_subprocess()
+    monkeypatch.setattr(cjr.subprocess, "run", fake_run)
+
+    rc = cjr.main([
+        "--input", str(input_path),
+        "--output-dir", str(output_dir),
+        "--task-index", "0",
+        "--task-count", "1",
+        "--run-id", "checkpoint-off",
+        "--checkpoint-every-rows", "0",
+    ])
+
+    assert rc == 0
+    cmd = fake_run.calls[0]
+    assert "--checkpoint-path" not in cmd
+    assert "--checkpoint-every-rows" not in cmd
+
+
+def test_checkpoint_every_rows_env_var_override(tmp_path, monkeypatch):
+    input_path = tmp_path / "input.xlsx"
+    _write_synthetic_excel(input_path, 10)
+    output_dir = tmp_path / "out"
+
+    fake_run = _fake_batch_cli_subprocess()
+    monkeypatch.setattr(cjr.subprocess, "run", fake_run)
+    monkeypatch.setenv("CHECKPOINT_EVERY_ROWS", "3")
+
+    rc = cjr.main([
+        "--input", str(input_path),
+        "--output-dir", str(output_dir),
+        "--task-index", "0",
+        "--task-count", "1",
+        "--run-id", "checkpoint-env",
+    ])
+
+    assert rc == 0
+    cmd = fake_run.calls[0]
+    assert cmd[cmd.index("--checkpoint-every-rows") + 1] == "3"
+
+
+def test_checkpoint_uploaded_and_salvageable_after_crash(tmp_path, monkeypatch):
+    """The core crash-recovery promise: if the batch subprocess wrote a
+    checkpoint before failing, that checkpoint ends up uploaded to GCS
+    (here, a local dir) and its location is recorded on the failed status --
+    not just silently lost along with the rest of the shard's progress."""
+    input_path = tmp_path / "input.xlsx"
+    _write_synthetic_excel(input_path, 10)
+    output_dir = tmp_path / "out"
+
+    def _fake_run(cmd, env=None, **kwargs):
+        # Simulate lead_prioritizer_batch_cli.py having written a checkpoint
+        # for a few processed rows before crashing (non-zero exit, no
+        # final output written -- exactly the "died partway through" case).
+        checkpoint_path = Path(cmd[cmd.index("--checkpoint-path") + 1])
+        checkpoint_path.parent.mkdir(parents=True, exist_ok=True)
+        checkpoint_path.write_text(
+            json.dumps({"processed": 4, "enriched_rows": [{"company_name": "X"}] * 4}),
+            encoding="utf-8",
+        )
+        return SimpleNamespace(returncode=1)
+
+    monkeypatch.setattr(cjr.subprocess, "run", _fake_run)
+
+    rc = cjr.main([
+        "--input", str(input_path),
+        "--output-dir", str(output_dir),
+        "--task-index", "0",
+        "--task-count", "1",
+        "--run-id", "checkpoint-crash",
+    ])
+
+    assert rc == 1
+    status = json.loads((output_dir / "status" / "part_0000_failed.json").read_text(encoding="utf-8"))
+    assert status["status"] == "failed"
+    assert status["checkpoint_uri"] is not None
+
+    uploaded = Path(status["checkpoint_uri"])
+    assert uploaded.exists()
+    data = json.loads(uploaded.read_text(encoding="utf-8"))
+    assert data["processed"] == 4
+
+
+def test_no_checkpoint_written_leaves_checkpoint_uri_none(tmp_path, monkeypatch):
+    """The ordinary failure case (subprocess never got far enough to write a
+    checkpoint at all) must not claim a checkpoint exists."""
+    input_path = tmp_path / "input.xlsx"
+    _write_synthetic_excel(input_path, 10)
+    output_dir = tmp_path / "out"
+
+    fake_run = _fake_batch_cli_subprocess(returncode=1)
+    monkeypatch.setattr(cjr.subprocess, "run", fake_run)
+
+    rc = cjr.main([
+        "--input", str(input_path),
+        "--output-dir", str(output_dir),
+        "--task-index", "0",
+        "--task-count", "1",
+        "--run-id", "checkpoint-none",
+    ])
+
+    assert rc == 1
+    status = json.loads((output_dir / "status" / "part_0000_failed.json").read_text(encoding="utf-8"))
+    assert status["checkpoint_uri"] is None
+
+
+def test_successful_run_done_status_has_no_checkpoint_uri(tmp_path, monkeypatch):
+    input_path = tmp_path / "input.xlsx"
+    _write_synthetic_excel(input_path, 10)
+    output_dir = tmp_path / "out"
+
+    fake_run = _fake_batch_cli_subprocess()
+    monkeypatch.setattr(cjr.subprocess, "run", fake_run)
+
+    rc = cjr.main([
+        "--input", str(input_path),
+        "--output-dir", str(output_dir),
+        "--task-index", "0",
+        "--task-count", "1",
+        "--run-id", "checkpoint-success",
+    ])
+
+    assert rc == 0
+    status = json.loads((output_dir / "status" / "part_0000_done.json").read_text(encoding="utf-8"))
+    assert status["checkpoint_uri"] is None
