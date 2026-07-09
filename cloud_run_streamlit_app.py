@@ -24,6 +24,7 @@ Run with:
 from __future__ import annotations
 
 import functools
+import re
 import shutil
 import subprocess
 import tempfile
@@ -98,6 +99,47 @@ def build_execute_command(
         "--tasks", str(task_count),
         "--update-env-vars", env_vars,
         "--wait",
+    ]
+
+
+def build_describe_job_command(job_name: str, project: str, region: str) -> list[str]:
+    """gcloud command to fetch a Cloud Run Job's full YAML description, used
+    to read back its current (deploy-time) parallelism -- there is no
+    per-execution override for parallelism (see build_execute_command's
+    comment on --tasks), so this always reflects what the NEXT execution
+    will actually use, never the currently-running one."""
+    return [
+        _gcloud_executable(), "run", "jobs", "describe", job_name,
+        "--project", project, "--region", region, "--format", "yaml",
+    ]
+
+
+_PARALLELISM_RE = re.compile(r"^\s*parallelism:\s*(\d+)\s*$", re.MULTILINE)
+
+
+def parse_parallelism_from_yaml(yaml_text: str) -> Optional[int]:
+    """Extract the ``parallelism`` value from ``gcloud run jobs describe
+    --format yaml`` output. A plain regex search (not a YAML parser) is
+    deliberate: it's robust to exactly which nesting level gcloud's output
+    uses across versions, and "parallelism" as a key is not expected to
+    appear anywhere else in a Job's YAML. Returns None (never raises) when
+    the field isn't found, e.g. describe failed and ``yaml_text`` is
+    actually an error message."""
+    match = _PARALLELISM_RE.search(yaml_text or "")
+    return int(match.group(1)) if match else None
+
+
+def build_update_parallelism_command(
+    job_name: str, project: str, region: str, parallelism: int,
+) -> list[str]:
+    """gcloud command to change a Cloud Run Job's deploy-time parallelism.
+    Takes effect for the NEXT execution only -- an execution already running
+    keeps whatever parallelism it started with (same reason a running
+    execution's task count can't be changed either)."""
+    return [
+        _gcloud_executable(), "run", "jobs", "update", job_name,
+        "--project", project, "--region", region,
+        "--parallelism", str(parallelism),
     ]
 
 
@@ -310,6 +352,47 @@ def main() -> None:  # pragma: no cover - exercised only under `streamlit run`
                  "instellingen' in de doc. Hoger = sneller maar zwaardere "
                  "Firecrawl/Serper-belasting.",
         )
+
+        with st.expander("Parallelism (gelijktijdige taken)"):
+            st.caption(
+                "Dit is een instelling van de Cloud Run Job zelf, niet van "
+                "'Task count' hierboven — 'Task count' bepaalt hoeveel taken "
+                "een run in TOTAAL heeft, parallelism bepaalt hoeveel daarvan "
+                "TEGELIJK draaien. Een wijziging hier geldt pas voor de "
+                "VOLGENDE run die je start; een run die al loopt houdt de "
+                "parallelism waarmee hij is gestart."
+            )
+            if st.button("Huidige parallelism ophalen", key="fetch_parallelism"):
+                rc, output = run_capture(
+                    build_describe_job_command(job_name, project, region))
+                if rc != 0:
+                    st.error(f"Kon job-configuratie niet ophalen:\n{output[-2000:]}")
+                else:
+                    current = parse_parallelism_from_yaml(output)
+                    st.session_state["current_parallelism"] = current
+                    if current is None:
+                        st.warning("Kon 'parallelism' niet in de job-configuratie vinden.")
+                    else:
+                        st.info(f"Huidige parallelism: {current}")
+
+            new_parallelism = st.number_input(
+                "Nieuwe parallelism", min_value=1, max_value=50,
+                value=st.session_state.get("current_parallelism") or 10, step=1,
+                help="Zet gelijk aan 'Task count' hierboven om alle taken in "
+                     "één keer te laten draaien in plaats van in golven.",
+            )
+            if st.button("Parallelism bijwerken", key="update_parallelism"):
+                rc, output = run_capture(build_update_parallelism_command(
+                    job_name, project, region, int(new_parallelism)))
+                if rc != 0:
+                    st.error(f"Bijwerken mislukt:\n{output[-2000:]}")
+                else:
+                    st.success(
+                        f"Parallelism bijgewerkt naar {int(new_parallelism)} — "
+                        "geldt vanaf de volgende run."
+                    )
+                    st.session_state["current_parallelism"] = int(new_parallelism)
+
         try:
             from lead_prioritizer_batch_core import SUPPORTED_RUN_MODES
             mode_options = sorted(SUPPORTED_RUN_MODES)

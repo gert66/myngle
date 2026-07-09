@@ -15,13 +15,16 @@ import pytest
 from cloud_run_streamlit_app import (
     ProcessTimeout,
     _gcloud_executable,
+    build_describe_job_command,
     build_download_command,
     build_execute_command,
     build_list_command,
+    build_update_parallelism_command,
     build_upload_command,
     count_task_statuses,
     gcs_incoming_uri,
     gcs_output_dir,
+    parse_parallelism_from_yaml,
     run_streaming,
 )
 
@@ -117,6 +120,55 @@ def test_count_task_statuses_classifies_by_suffix():
 
 def test_count_task_statuses_empty_listing_returns_zeros():
     assert count_task_statuses("") == {"done": 0, "failed": 0, "running": 0}
+
+
+# ── Parallelism: read back and update a Cloud Run Job's deploy-time setting ──
+
+def test_build_describe_job_command_uses_yaml_format():
+    cmd = build_describe_job_command("myngle-lead-prioritizer", "proj-1", "europe-west4")
+    assert cmd == [
+        _gcloud_executable(), "run", "jobs", "describe", "myngle-lead-prioritizer",
+        "--project", "proj-1", "--region", "europe-west4", "--format", "yaml",
+    ]
+
+
+def test_build_update_parallelism_command():
+    cmd = build_update_parallelism_command(
+        "myngle-lead-prioritizer", "proj-1", "europe-west4", 50)
+    assert cmd == [
+        _gcloud_executable(), "run", "jobs", "update", "myngle-lead-prioritizer",
+        "--project", "proj-1", "--region", "europe-west4",
+        "--parallelism", "50",
+    ]
+
+
+class TestParseParallelismFromYaml:
+    def test_extracts_top_level_parallelism(self):
+        yaml_text = "apiVersion: run.googleapis.com/v1\nkind: Job\nparallelism: 10\n"
+        assert parse_parallelism_from_yaml(yaml_text) == 10
+
+    def test_extracts_nested_parallelism(self):
+        yaml_text = (
+            "spec:\n"
+            "  template:\n"
+            "    spec:\n"
+            "      parallelism: 50\n"
+            "      taskCount: 50\n"
+        )
+        assert parse_parallelism_from_yaml(yaml_text) == 50
+
+    def test_missing_field_returns_none(self):
+        assert parse_parallelism_from_yaml("kind: Job\ntaskCount: 50\n") is None
+
+    def test_blank_input_returns_none_without_raising(self):
+        assert parse_parallelism_from_yaml("") is None
+        assert parse_parallelism_from_yaml(None) is None
+
+    def test_ignores_non_matching_line_containing_word(self):
+        # e.g. an error message that happens to mention "parallelism" in
+        # prose, not as a YAML key -- must not be mistaken for a value.
+        text = "ERROR: could not update parallelism setting for job"
+        assert parse_parallelism_from_yaml(text) is None
 
 
 def test_count_task_statuses_ignores_unrelated_lines():
