@@ -224,6 +224,7 @@ class RunConfig:
     enrichment_cache_bucket: str = ""
     c5_enabled: bool = False
     total_row_limit: Optional[int] = None
+    gate_full_enrichment_on_foreign_hq: bool = False
 
 
 def build_arg_parser() -> argparse.ArgumentParser:
@@ -275,6 +276,13 @@ def build_arg_parser() -> argparse.ArgumentParser:
                          help="GCS bucket for --use-enrichment-cache (env ENRICHMENT_CACHE_BUCKET).")
     parser.add_argument("--c5-enabled", action="store_true",
                          help="Opt-in C5 Sonnet HQ adjudication (default: off; env C5_ENABLED).")
+    parser.add_argument("--gate-full-enrichment-on-foreign-hq", action="store_true",
+                         help="Opt-in cost gate: cheap HQ-only screening for every "
+                              "row, full non-HQ enrichment only for confirmed "
+                              "foreign-HQ rows (default: off; env "
+                              "GATE_FULL_ENRICHMENT_ON_FOREIGN_HQ). See "
+                              "lead_prioritizer_batch_cli.py --help for the C5 "
+                              "interaction caveat.")
     return parser
 
 
@@ -339,6 +347,10 @@ def resolve_config(argv=None) -> RunConfig:
         ),
         c5_enabled=args.c5_enabled or _env_bool("C5_ENABLED"),
         total_row_limit=total_row_limit,
+        gate_full_enrichment_on_foreign_hq=(
+            args.gate_full_enrichment_on_foreign_hq
+            or _env_bool("GATE_FULL_ENRICHMENT_ON_FOREIGN_HQ")
+        ),
     )
 
 
@@ -509,6 +521,8 @@ def main(argv=None) -> int:
             cmd += ["--use-enrichment-cache", "--enrichment-cache-bucket", cfg.enrichment_cache_bucket]
         if cfg.c5_enabled:
             cmd += ["--c5-enabled"]
+        if cfg.gate_full_enrichment_on_foreign_hq:
+            cmd += ["--gate-full-enrichment-on-foreign-hq"]
 
         env = os.environ.copy()
         if cfg.anthropic_key:

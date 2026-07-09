@@ -104,6 +104,7 @@ alleen `set`/`missing` per key, nooit de waarde zelf.
 | `C5_ENABLED` | opt-in C5 Sonnet HQ-adjudicatie (default uit) |
 | `USE_ENRICHMENT_CACHE` | opt-in gedeelde GCS enrichment-cache (default uit) — zie "Gedeelde enrichment-cache" hieronder |
 | `ENRICHMENT_CACHE_BUCKET` | GCS-bucket voor de enrichment-cache (verplicht als `USE_ENRICHMENT_CACHE` aanstaat) |
+| `GATE_FULL_ENRICHMENT_ON_FOREIGN_HQ` | opt-in kostengate: goedkope HQ-only screening voor elke rij, volledige v2-enrichment alleen voor bevestigd-buitenlandse HQ's (default uit) — zie "Goedkoper: alleen buitenlandse HQ volledig verrijken" hieronder |
 
 `CLOUD_RUN_TASK_INDEX`/`CLOUD_RUN_TASK_COUNT` hebben voorrang zodra beide
 gezet zijn (dat doet het platform automatisch); anders vallen we terug op
@@ -358,6 +359,49 @@ in plaats van de rest van het rapport te breken.
   `TASK_COUNT` t.o.v. de Firecrawl-tier: er is geen gedeelde/verdeelde
   rate-limiter over tasks heen, dus een structureel te hoge `TASK_COUNT`
   leidt gewoon tot herhaalde 429's die alsnog uitputten.
+
+## Goedkoper: alleen buitenlandse HQ volledig verrijken
+
+Als het doel van een run is "geef me alleen bedrijven met een buitenlands
+hoofdkantoor" (bv. per land een foreign-HQ-lijst), is de default `mode=full`
++ "Foreign-HQ-only export" combinatie duurder dan nodig: elke rij doorloopt
+dan de VOLLEDIGE v2-pipeline (HQ + non-HQ evidence via Serper/Firecrawl +
+AI-signalen + score + caller-content), en pas bij de Lovable-JSON-export ná
+de merge worden de niet-buitenlandse rijen eruit gefilterd. Je betaalt dus
+voor de hele batch, ook voor de bedrijven die achteraf toch wegvallen.
+
+Zet `GATE_FULL_ENRICHMENT_ON_FOREIGN_HQ=true` (CLI: `--gate-full-enrichment-`
+`on-foreign-hq`; Streamlit-checkbox "Alleen bedrijven met buitenlands HQ
+volledig verrijken") om dat om te draaien, met de bestaande `mode=full` (of
+elke andere mode):
+
+1. **Fase 1/2 — screening**: elke rij krijgt een goedkope HQ-only check (1
+   Serper-call per bedrijf), net als `mode=hq_only`. Staat `C5_ENABLED`/
+   `--c5-enabled` óók aan, dan draait C5 Sonnet-adjudicatie HIER al — vóór de
+   gate-beslissing, exact zoals in de losse `full_foreign_hq_only`-modus —
+   over dezelfde score-3/manual-review-rijen als normaal (geen extra
+   API-kosten t.o.v. C5 los aanzetten).
+2. **Fase 3 — volledige enrichment**: alleen rijen die confirmed foreign-HQ
+   zijn (plain HQ-score == 3, óf — als C5 aanstaat — een C5-bevestigde
+   buitenlandse parent) doorlopen de rest van de pipeline (de overige ~4
+   Serper-calls plus Firecrawl/Anthropic). Omdat C5 al in Fase 1/2 heeft
+   meegewogen, wordt een grensgeval dat de plain HQ-score alleen niet had
+   herkend, maar dat C5 wél als buitenlands bevestigt, gewoon volledig
+   verrijkt — niet alleen van C5-velden voorzien. Niet-bevestigde rijen
+   blijven in de output staan met `enrichment_skipped=True` en een
+   `enrichment_skip_reason`, maar kosten verder niets.
+
+Dit is dezelfde tweefasige aanpak (inclusief C5-plek) als de losse
+`full_foreign_hq_only`-modus in de lokale Streamlit-app, maar dan als opt-in
+bovenop de gewone `SUPPORTED_RUN_MODES` — dus bruikbaar op het Cloud
+Run-pad, waar `full_foreign_hq_only` zelf niet beschikbaar is.
+
+De run-summary krijgt met deze gate drie extra kolommen:
+`gated_full_enrichment_attempted_count`, `gated_full_enrichment_skipped_count`
+en `gated_estimated_serper_calls_saved` (skipped × 4) — zo zie je per run
+hoeveel er daadwerkelijk bespaard is. Staat C5 ook aan, dan krijg je
+daarnaast de gebruikelijke `c5_*`-tellingen, gebaseerd op dezelfde Fase 1/2
+C5-pass (geen dubbele C5-run).
 
 ## Gedeelde enrichment-cache in cloud-runs
 

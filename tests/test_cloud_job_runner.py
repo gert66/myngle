@@ -31,6 +31,7 @@ _CLOUD_ENV_VARS = [
     "COMPOSE_CALLER_CONTENT", "DEEP_DIVE", "DEEP_DIVE_MIN_SCORE",
     "DEEP_DIVE_ON_FOREIGN_HQ", "RICH_ICP_CONTEXT", "AI_SIGNAL_SCORING",
     "USE_ENRICHMENT_CACHE", "ENRICHMENT_CACHE_BUCKET", "C5_ENABLED",
+    "GATE_FULL_ENRICHMENT_ON_FOREIGN_HQ",
 ]
 
 
@@ -357,6 +358,7 @@ def test_new_opt_in_flags_are_forwarded(tmp_path, monkeypatch):
         "--use-enrichment-cache",
         "--enrichment-cache-bucket", "my-bucket",
         "--c5-enabled",
+        "--gate-full-enrichment-on-foreign-hq",
     ])
 
     assert rc == 0
@@ -367,6 +369,54 @@ def test_new_opt_in_flags_are_forwarded(tmp_path, monkeypatch):
     assert "--use-enrichment-cache" in cmd
     assert cmd[cmd.index("--enrichment-cache-bucket") + 1] == "my-bucket"
     assert "--c5-enabled" in cmd
+    assert "--gate-full-enrichment-on-foreign-hq" in cmd
+
+
+def test_gate_full_enrichment_on_foreign_hq_defaults_off(tmp_path, monkeypatch):
+    input_path = tmp_path / "input.xlsx"
+    df = pd.DataFrame({"Company Name": ["Acme"], "Website": ["acme.example.com"]})
+    df.to_excel(input_path, index=False)
+    output_dir = tmp_path / "out"
+
+    fake_run = _fake_batch_cli_subprocess()
+    monkeypatch.setattr(cjr.subprocess, "run", fake_run)
+
+    rc = cjr.main([
+        "--input", str(input_path),
+        "--output-dir", str(output_dir),
+        "--task-index", "0",
+        "--task-count", "1",
+        "--run-id", "no-gate",
+        "--company-column", "Company Name",
+        "--domain-column", "Website",
+    ])
+
+    assert rc == 0
+    assert "--gate-full-enrichment-on-foreign-hq" not in fake_run.calls[0]
+
+
+def test_gate_full_enrichment_on_foreign_hq_via_env_var(tmp_path, monkeypatch):
+    input_path = tmp_path / "input.xlsx"
+    df = pd.DataFrame({"Company Name": ["Acme"], "Website": ["acme.example.com"]})
+    df.to_excel(input_path, index=False)
+    output_dir = tmp_path / "out"
+
+    fake_run = _fake_batch_cli_subprocess()
+    monkeypatch.setattr(cjr.subprocess, "run", fake_run)
+    monkeypatch.setenv("GATE_FULL_ENRICHMENT_ON_FOREIGN_HQ", "true")
+
+    rc = cjr.main([
+        "--input", str(input_path),
+        "--output-dir", str(output_dir),
+        "--task-index", "0",
+        "--task-count", "1",
+        "--run-id", "gate-via-env",
+        "--company-column", "Company Name",
+        "--domain-column", "Website",
+    ])
+
+    assert rc == 0
+    assert "--gate-full-enrichment-on-foreign-hq" in fake_run.calls[0]
 
 
 def test_deep_dive_on_foreign_hq_stays_on_by_default(tmp_path, monkeypatch):

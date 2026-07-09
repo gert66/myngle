@@ -679,6 +679,12 @@ def run_batch_dataframe(
     progress_callback: Optional[Callable[[dict], None]] = None,
     openai_api_key: str = "",
     firecrawl_api_key: str = "",
+    *,
+    c5_enabled: bool = False,
+    c5_scoring_behavior: str = "append_only",
+    c5_scope: str = "score_3_or_manual_review",
+    c5_model_used: str = "",
+    c5_model_tier: str = "",
 ) -> dict:
     """Run Lead Prioritizer v2 over selected rows.
 
@@ -716,16 +722,28 @@ def run_batch_dataframe(
     company), and the full per-row v2 pipeline then runs ONLY for rows
     confirmed foreign-HQ (see ``is_confirmed_foreign_hq_for_full_enrichment``).
     Skipped rows are kept in the output with ``enrichment_skipped=True`` and a
-    ``foreign_hq_skip_reason``, exactly like ``run_batch_foreign_hq_only``. C5
-    is not wired into this path yet (``run_batch_dataframe`` has never
-    supported C5) — a documented limitation (see
-    ``_run_batch_dataframe_gated``), not a silent gap. Default ``False`` means
-    every existing caller's behavior is completely unchanged.
+    ``foreign_hq_skip_reason``, exactly like ``run_batch_foreign_hq_only``.
+    Default ``False`` means every existing caller's behavior is completely
+    unchanged.
+
+    ``c5_enabled``/``c5_scoring_behavior``/``c5_scope``/``c5_model_used``/
+    ``c5_model_tier`` (same meaning/defaults as ``run_batch_foreign_hq_only``)
+    are ONLY meaningful when ``config.gate_full_enrichment_on_foreign_hq`` is
+    True — they run C5 as part of Phase 1/2, BEFORE the Phase 3 eligibility
+    decision (see ``_run_batch_dataframe_gated``), so a row C5 confirms as
+    foreign-HQ becomes eligible for full enrichment even when the plain HQ
+    score alone would not have qualified it. When gating is off, these
+    params are silently ignored — C5 remains entirely the caller's own
+    responsibility (an ``apply_c5_adjudication`` post-step), exactly as
+    before; ``run_batch_dataframe`` still has no built-in C5 support outside
+    the gated path.
     """
     if config.gate_full_enrichment_on_foreign_hq:
         return _run_batch_dataframe_gated(
             df, config, serper_api_key, anthropic_api_key,
             progress_callback, openai_api_key, firecrawl_api_key,
+            c5_enabled=c5_enabled, c5_scoring_behavior=c5_scoring_behavior,
+            c5_scope=c5_scope, c5_model_used=c5_model_used, c5_model_tier=c5_model_tier,
         )
 
     flags = resolve_pipeline_flags(config.run_mode)
@@ -1543,38 +1561,51 @@ def _run_batch_dataframe_gated(
     progress_callback: Optional[Callable[[dict], None]],
     openai_api_key: str,
     firecrawl_api_key: str,
+    *,
+    c5_enabled: bool = False,
+    c5_scoring_behavior: str = "append_only",
+    c5_scope: str = "score_3_or_manual_review",
+    c5_model_used: str = "",
+    c5_model_tier: str = "",
 ) -> dict:
     """``run_batch_dataframe``'s opt-in path when
     ``config.gate_full_enrichment_on_foreign_hq`` is True: cheap HQ-only
-    screening for every row (Phase 1, 1 Serper call per company, via
-    ``_run_hq_and_c5_screening`` with C5 disabled), then the full per-row v2
-    pipeline — using the SAME ``ai_kwargs``/``flags`` the default
-    ``run_batch_dataframe`` path would build for every row — ONLY for rows
-    confirmed foreign-HQ (Phase 3, via the shared ``_run_gated_full_enrichment``,
-    also used by ``run_batch_foreign_hq_only``). Rows that are not confirmed
-    are kept in the output with ``enrichment_skipped=True`` and a
-    ``foreign_hq_skip_reason``.
+    screening for every row (Phase 1, 1 Serper call per company, plus
+    optional C5 via ``_run_hq_and_c5_screening`` when ``c5_enabled``), then
+    the full per-row v2 pipeline — using the SAME ``ai_kwargs``/``flags`` the
+    default ``run_batch_dataframe`` path would build for every row — ONLY
+    for rows confirmed foreign-HQ (Phase 3, via the shared
+    ``_run_gated_full_enrichment``, also used by ``run_batch_foreign_hq_only``).
+    Rows that are not confirmed are kept in the output with
+    ``enrichment_skipped=True`` and a ``foreign_hq_skip_reason``.
 
-    KNOWN LIMITATION: C5 is not wired into this path yet — ``run_batch_dataframe``
-    itself has never supported C5 (only the dedicated foreign-HQ-only modes
-    do), so Phase 1 always runs with ``c5_enabled=False`` here. Adding C5
-    support to this opt-in path would be a reasonable future extension
-    (following the exact pattern ``run_batch_foreign_hq_only`` already uses),
-    not something this task adds. Deep Dive, by contrast, mirrors the
-    default path's own behavior exactly — it runs for eligible rows whenever
-    ``config.deep_dive`` is set, same as an ungated ``run_batch_dataframe`` call.
+    ``c5_enabled`` (and the four ``c5_*`` params, same meaning/defaults as
+    ``run_batch_foreign_hq_only``) run C5 as part of Phase 1/2, BEFORE the
+    Phase 3 eligibility decision — exactly the pattern
+    ``run_batch_foreign_hq_only`` already uses. This matters: a row C5
+    confirms as ``foreign_parent_confirmed`` (via
+    ``is_confirmed_foreign_hq_for_full_enrichment``) becomes eligible for
+    full enrichment even when its plain HQ score is not 3 — a borderline row
+    C5 rescues is NOT stuck at ``enrichment_skipped=True`` the way an
+    earlier version of this function (which ran C5 as a flat post-step after
+    the gate decision) would have left it. Deep Dive, by contrast, mirrors
+    the default path's own behavior exactly — it runs for eligible rows
+    whenever ``config.deep_dive`` is set, same as an ungated
+    ``run_batch_dataframe`` call.
 
     Returns the same dict shape as ``run_batch_dataframe`` (``enriched_leads``,
     ``evidence``, ``signals``, ``deep_dive``, ``run_summary``) — ``run_summary``
     additionally carries ``gated_full_enrichment_attempted_count`` /
     ``gated_full_enrichment_skipped_count`` /
     ``gated_estimated_serper_calls_saved`` (``skipped * 4``, matching the four
-    extra non-HQ Serper calls a full v2 enrichment would otherwise have made).
+    extra non-HQ Serper calls a full v2 enrichment would otherwise have made)
+    and, always, the C5 settings/counts columns (via ``add_c5_summary_fields``,
+    same as ``run_batch_foreign_hq_only``).
     """
-    rows, _c5_counts = _run_hq_and_c5_screening(
+    rows, c5_counts = _run_hq_and_c5_screening(
         df, config, serper_api_key, anthropic_api_key,
-        c5_enabled=False, c5_scoring_behavior="", c5_scope="",
-        c5_model_used="", c5_model_tier="",
+        c5_enabled=c5_enabled, c5_scoring_behavior=c5_scoring_behavior,
+        c5_scope=c5_scope, c5_model_used=c5_model_used, c5_model_tier=c5_model_tier,
         phase_labels=GATED_FULL_ENRICHMENT_PHASE_LABELS,
         progress_callback=progress_callback,
     )
@@ -1602,7 +1633,7 @@ def _run_batch_dataframe_gated(
 
     gated = _run_gated_full_enrichment(
         rows, config, serper_api_key, anthropic_api_key,
-        c5_enabled=False,
+        c5_enabled=c5_enabled,
         prioritize_kwargs={**ai_kwargs, **flags},
         phase_labels=GATED_FULL_ENRICHMENT_PHASE_LABELS,
         progress_callback=progress_callback,
@@ -1624,6 +1655,19 @@ def _run_batch_dataframe_gated(
     run_summary["gated_full_enrichment_attempted_count"] = gated["attempted"]
     run_summary["gated_full_enrichment_skipped_count"] = gated["skipped"]
     run_summary["gated_estimated_serper_calls_saved"] = gated["skipped"] * 4
+    # Always record C5 settings/counts, matching run_batch_foreign_hq_only --
+    # c5_counts came from Phase 1/2 (_run_hq_and_c5_screening) above, so this
+    # reflects the SAME C5 calls that could rescue a row into Phase 3, not a
+    # separate/duplicate C5 pass.
+    run_summary = add_c5_summary_fields(
+        run_summary,
+        c5_enabled=c5_enabled,
+        c5_scoring_behavior=c5_scoring_behavior if c5_enabled else "",
+        c5_scope=c5_scope if c5_enabled else "",
+        c5_model_tier=c5_model_tier if c5_enabled else "",
+        c5_model_used=c5_model_used if c5_enabled else "",
+        counts=c5_counts,
+    )
     run_summary = _apply_cache_run_summary_counts(run_summary, gated.get("cache_usage_before"))
 
     return {
@@ -2333,14 +2377,16 @@ def run_single_batch_unit(
     this parallel path — picks up the opt-in gate automatically for the
     regular run modes, by just passing the same ``config`` through unchanged.
 
-    KNOWN LIMITATION / TODO: combining ``gate_full_enrichment_on_foreign_hq``
-    with ``c5_enabled=True`` at THIS level has not been considered — the C5
-    post-step below would run as a blanket pass over ``tables["enriched_leads"]``,
-    which then contains a mix of fully-enriched (confirmed foreign-HQ) and
-    gate-skipped rows. Untested combination; do not assume it behaves the same
-    as C5 running only against fully-enriched rows. Scoping that properly
-    (e.g. skipping gate-skipped rows in the C5 post-step) is a reasonable
-    future extension, not part of this task.
+    When ``config.gate_full_enrichment_on_foreign_hq`` AND ``c5_enabled`` are
+    both True, C5 is passed straight through to ``run_batch_dataframe`` so it
+    runs INSIDE Phase 1/2, before the Phase 3 eligibility decision (see
+    ``_run_batch_dataframe_gated``) — a row C5 confirms as foreign-HQ becomes
+    eligible for full enrichment there, instead of being stuck
+    ``enrichment_skipped=True`` with only C5's own fields added by a flat
+    post-step. The post-step C5 application below is therefore SKIPPED in
+    this combination (it would otherwise be a second, redundant C5 pass over
+    a mix of fully-enriched and gate-skipped rows) — ``run_summary`` already
+    carries the C5 settings/counts columns from the gated path.
     """
     if config.run_mode == FOREIGN_HQ_ONLY_MODE:
         return run_batch_foreign_hq_only(
@@ -2363,12 +2409,26 @@ def run_single_batch_unit(
             progress_callback=progress_callback,
         )
 
+    gated_with_c5 = config.gate_full_enrichment_on_foreign_hq and c5_enabled
     tables = run_batch_dataframe(
         df, config, serper_api_key, anthropic_api_key,
         progress_callback=progress_callback,
         openai_api_key=openai_api_key,
         firecrawl_api_key=firecrawl_api_key,
+        **(
+            dict(c5_enabled=True, c5_scoring_behavior=c5_scoring_behavior,
+                 c5_scope=c5_scope, c5_model_used=c5_model_used,
+                 c5_model_tier=c5_model_tier)
+            if gated_with_c5 else {}
+        ),
     )
+    if gated_with_c5:
+        # C5 already ran inside the gated Phase 1/2 above (see the docstring)
+        # -- run_summary already carries the C5 settings/counts columns, and
+        # re-running C5 as a flat post-step here would double the API calls
+        # for score-3/manual-review rows.
+        return tables
+
     c5_counts: dict = {}
     if c5_enabled:
         rows, c5_counts = apply_c5_adjudication(

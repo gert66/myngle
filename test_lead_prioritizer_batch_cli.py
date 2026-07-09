@@ -202,6 +202,21 @@ class TestArgParsing:
              "--c5-enabled"])
         assert args.c5_enabled is True
 
+    def test_gate_full_enrichment_on_foreign_hq_flag_parses_and_defaults_off(self):
+        args = build_arg_parser().parse_args(
+            ["--input", "x.xlsx", "--company-column", "c", "--domain-column", "d"])
+        assert args.gate_full_enrichment_on_foreign_hq is False
+        cfg = config_from_args(args)
+        assert cfg.gate_full_enrichment_on_foreign_hq is False
+
+        args = build_arg_parser().parse_args(
+            ["--input", "x.xlsx", "--company-column", "c", "--domain-column", "d",
+             "--gate-full-enrichment-on-foreign-hq"])
+        assert args.gate_full_enrichment_on_foreign_hq is True
+        cfg = config_from_args(args)
+        assert cfg.gate_full_enrichment_on_foreign_hq is True
+
+
     def test_no_verify_quotes_flag_parses(self):
         args = build_arg_parser().parse_args(
             ["--input", "x.xlsx", "--company-column", "c", "--domain-column", "d",
@@ -512,6 +527,72 @@ class TestMain:
         assert rc == 0
         assert captured["summary_kwargs"]["c5_enabled"] is False
         assert captured["summary_kwargs"]["c5_scoring_behavior"] == ""
+
+    def test_gate_plus_c5_passes_c5_into_run_batch_dataframe_and_skips_post_step(self, tmp_path):
+        # When both --gate-full-enrichment-on-foreign-hq and --c5-enabled are
+        # set, C5 must run INSIDE run_batch_dataframe's gated path (passed as
+        # kwargs), not as a second, separate apply_c5_adjudication call --
+        # run_summary already carries the C5 columns from that inner call.
+        p = tmp_path / "in.xlsx"
+        _write_xlsx(p, {"Sheet1": _LEADS})
+        out_path = tmp_path / "result.xlsx"
+        captured = {}
+
+        gated_tables = _fake_tables()
+        gated_tables["run_summary"] = pd.DataFrame([{
+            "processed_rows": 1, "success_count": 1, "error_count": 0,
+            "gated_full_enrichment_attempted_count": 1,
+            "gated_full_enrichment_skipped_count": 0,
+            "gated_estimated_serper_calls_saved": 0,
+            "c5_enabled": True,
+        }])
+
+        def _fake_run(df, config, serper, anthropic, **kwargs):
+            captured["run_batch_dataframe_kwargs"] = kwargs
+            return gated_tables
+
+        with patch("lead_prioritizer_batch_cli.load_api_keys", return_value=_KEYS_OK), \
+             patch("lead_prioritizer_batch_cli.run_batch_dataframe", side_effect=_fake_run), \
+             patch("lead_prioritizer_batch_cli.build_excel_workbook_bytes", return_value=b"BYTES"), \
+             patch("run_hq_sonnet_adjudication_probe.resolve_c5_model",
+                   return_value=("claude-fake-model", None)), \
+             patch("lead_prioritizer_batch_core.apply_c5_adjudication") as m_c5_post, \
+             patch("lead_prioritizer_batch_core.add_c5_summary_fields") as m_summary_post:
+            argv = self._base_argv(p, **{"--output": str(out_path)})
+            argv += ["--gate-full-enrichment-on-foreign-hq", "--c5-enabled"]
+            rc = main(argv)
+
+        assert rc == 0
+        kwargs = captured["run_batch_dataframe_kwargs"]
+        assert kwargs["c5_enabled"] is True
+        assert kwargs["c5_scoring_behavior"] == "conservative_adjustment"
+        assert kwargs["c5_scope"] == "score_3_or_manual_review"
+        assert kwargs["c5_model_tier"] == "sonnet"
+        assert kwargs["c5_model_used"] == "claude-fake-model"
+        # The CLI's own post-step must NOT run a second C5 pass or overwrite
+        # the run_summary the gated path already produced.
+        m_c5_post.assert_not_called()
+        m_summary_post.assert_not_called()
+
+    def test_gate_without_c5_does_not_pass_c5_kwargs(self, tmp_path):
+        p = tmp_path / "in.xlsx"
+        _write_xlsx(p, {"Sheet1": _LEADS})
+        out_path = tmp_path / "result.xlsx"
+        captured = {}
+
+        def _fake_run(df, config, serper, anthropic, **kwargs):
+            captured["run_batch_dataframe_kwargs"] = kwargs
+            return _fake_tables()
+
+        with patch("lead_prioritizer_batch_cli.load_api_keys", return_value=_KEYS_OK), \
+             patch("lead_prioritizer_batch_cli.run_batch_dataframe", side_effect=_fake_run), \
+             patch("lead_prioritizer_batch_cli.build_excel_workbook_bytes", return_value=b"BYTES"):
+            argv = self._base_argv(p, **{"--output": str(out_path)})
+            argv.append("--gate-full-enrichment-on-foreign-hq")
+            rc = main(argv)
+
+        assert rc == 0
+        assert "c5_enabled" not in captured["run_batch_dataframe_kwargs"]
 
     def test_rich_icp_context_passthrough_independent_of_compose_caller_content(self, tmp_path):
         p = tmp_path / "in.xlsx"

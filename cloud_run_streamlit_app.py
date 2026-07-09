@@ -331,6 +331,23 @@ def main() -> None:  # pragma: no cover - exercised only under `streamlit run`
         )
 
         st.divider()
+        st.subheader("Kostenbesparing")
+        gate_full_enrichment_on_foreign_hq = st.checkbox(
+            "Alleen bedrijven met buitenlands HQ volledig verrijken", value=False,
+            help="Screent EERST elk bedrijf goedkoop op HQ (1 Serper-call per "
+                 "bedrijf); de volledige v2-pipeline (non-HQ evidence via "
+                 "Firecrawl/Serper + AI-signalen + score + caller-content, "
+                 "~4 extra Serper-calls + Firecrawl/Anthropic-kosten per rij) "
+                 "draait daarna ALLEEN nog voor rijen met bevestigd buitenlands "
+                 "HQ. Rijen zonder buitenlands HQ blijven in de output staan "
+                 "(enrichment_skipped=True) maar kosten verder niets. Werkt met "
+                 "elke Mode hierboven — dit is de goedkoopste manier om alleen "
+                 "een foreign-HQ-lijst te bouwen, in plaats van iedereen volledig "
+                 "verrijken en pas bij de Lovable-export filteren. Zet ook "
+                 "'Foreign-HQ-only export' hieronder aan om de niet-buitenlandse "
+                 "rijen ook uit de uiteindelijke lijst te weren.")
+
+        st.divider()
         st.subheader("Inhoud & AI-opties")
         compose_caller_content = st.checkbox(
             "Compose caller content via AI (Step 3)", value=True,
@@ -374,6 +391,14 @@ def main() -> None:  # pragma: no cover - exercised only under `streamlit run`
             help="Vaste instellingen (zoals de lokale app dagelijks gebruikt): "
                  "conservative_adjustment, rows=score_3_or_manual_review, "
                  "model tier=Sonnet, geen model-override.")
+        if gate_full_enrichment_on_foreign_hq and c5_enabled:
+            st.caption(
+                "'Alleen buitenlands HQ volledig verrijken' + C5 samen: C5 "
+                "draait bij deze combinatie VÓÓR de HQ-gate-beslissing, dus "
+                "een grensgeval dat C5 als buitenlands HQ bevestigt, wordt "
+                "alsnog volledig verrijkt in plaats van te blijven steken op "
+                "enrichment_skipped=True."
+            )
 
         st.divider()
         st.subheader("Lovable JSON-export + GCS-upload (na afloop)")
@@ -515,6 +540,7 @@ def main() -> None:  # pragma: no cover - exercised only under `streamlit run`
             "DEEP_DIVE_MIN_SCORE": str(deep_dive_min_score),
             "DEEP_DIVE_ON_FOREIGN_HQ": str(bool(deep_dive_on_foreign_hq)).lower(),
             "C5_ENABLED": str(bool(c5_enabled)).lower(),
+            "GATE_FULL_ENRICHMENT_ON_FOREIGN_HQ": str(bool(gate_full_enrichment_on_foreign_hq)).lower(),
         }
         if total_row_limit:
             extra_env["TOTAL_ROW_LIMIT"] = str(int(total_row_limit))
