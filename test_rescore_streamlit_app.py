@@ -23,10 +23,15 @@ from commercial_fit_scoring import (
 from rescore_streamlit_app import (
     TIER_LABELS,
     biggest_movers_dataframe,
+    build_multi_country_preview,
     default_params,
     employee_range_options,
+    multi_country_summary_dataframe,
     score_component_breakdown,
     score_distribution_dataframe,
+    signal_has_presence,
+    signal_split_score_dataframe,
+    signal_split_summary,
     sigmoid_curve_dataframe,
     tier_distribution_dataframe,
     validate_tier_thresholds,
@@ -134,6 +139,133 @@ class TestBiggestMoversDataframe:
 
     def test_empty_input_returns_empty_dataframe(self):
         df = biggest_movers_dataframe({}, {})
+        assert df.empty
+
+
+class TestSignalHasPresence:
+    def test_positive_signal_is_present(self):
+        detail = {"scoring_inputs": {"signals": {"sig_foreign_hq_score": 3}}}
+        assert signal_has_presence(detail, "sig_foreign_hq_score") is True
+
+    def test_missing_signal_is_not_present(self):
+        detail = {"scoring_inputs": {"signals": {"sig_foreign_hq_score": None}}}
+        assert signal_has_presence(detail, "sig_foreign_hq_score") is False
+
+    def test_explicit_zero_is_not_present(self):
+        # score_company folds missing and explicit-0 into the same 0.0
+        # contribution, so "present" means strictly > 0.
+        detail = {"scoring_inputs": {"signals": {"sig_foreign_hq_score": 0}}}
+        assert signal_has_presence(detail, "sig_foreign_hq_score") is False
+
+    def test_no_scoring_inputs_block_is_not_present(self):
+        assert signal_has_presence({}, "sig_foreign_hq_score") is False
+
+
+class TestSignalSplitScoreDataframe:
+    def test_splits_into_met_and_zonder_groups(self):
+        original = {
+            "c1": {"commercial_fit_score": 5.0,
+                   "scoring_inputs": {"signals": {"sig_foreign_hq_score": 3}}},
+            "c2": {"commercial_fit_score": 4.0,
+                   "scoring_inputs": {"signals": {"sig_foreign_hq_score": None}}},
+        }
+        rescored = {
+            "c1": {"commercial_fit_score": 8.0},
+            "c2": {"commercial_fit_score": 4.2},
+        }
+        df = signal_split_score_dataframe(original, rescored, "sig_foreign_hq_score")
+        assert len(df) == 4
+        c1_groups = set(df[df["company_id"] == "c1"]["group"])
+        c2_groups = set(df[df["company_id"] == "c2"]["group"])
+        assert c1_groups == {"Met sig_foreign_hq_score"}
+        assert c2_groups == {"Zonder sig_foreign_hq_score"}
+
+    def test_rescored_company_keeps_original_group(self):
+        # Rescoring never changes which companies had the signal, only the
+        # score — a company's "Nieuw" row must land in the same group as its
+        # "Huidig" row.
+        original = {"c1": {"commercial_fit_score": 5.0,
+                            "scoring_inputs": {"signals": {"sig_foreign_hq_score": 2}}}}
+        rescored = {"c1": {"commercial_fit_score": 9.0}}
+        df = signal_split_score_dataframe(original, rescored, "sig_foreign_hq_score")
+        assert set(df["group"]) == {"Met sig_foreign_hq_score"}
+
+    def test_empty_input_returns_empty_dataframe(self):
+        df = signal_split_score_dataframe({}, {}, "sig_foreign_hq_score")
+        assert df.empty
+
+
+class TestSignalSplitSummary:
+    def test_groups_by_group_and_when_with_n_and_median(self):
+        original = {
+            "c1": {"commercial_fit_score": 4.0,
+                   "scoring_inputs": {"signals": {"sig_foreign_hq_score": 3}}},
+            "c2": {"commercial_fit_score": 6.0,
+                   "scoring_inputs": {"signals": {"sig_foreign_hq_score": 3}}},
+        }
+        rescored = {"c1": {"commercial_fit_score": 8.0}, "c2": {"commercial_fit_score": 9.0}}
+        split_df = signal_split_score_dataframe(original, rescored, "sig_foreign_hq_score")
+        summary = signal_split_summary(split_df)
+        row = summary[(summary["group"] == "Met sig_foreign_hq_score")
+                       & (summary["when"] == "Huidig")].iloc[0]
+        assert row["n"] == 2
+        assert row["mediaan"] == 5.0
+
+    def test_empty_input_returns_empty_dataframe(self):
+        assert signal_split_summary(pd.DataFrame()).empty
+
+
+class TestBuildMultiCountryPreview:
+    def _detail(self, employee_range: str) -> dict:
+        return {
+            "commercial_fit_score": 5.0,
+            "commercial_tier": "🥉 Cool",
+            "scoring_inputs": {
+                "employee_range": employee_range,
+                "signals": {f: 3 for f in LEAN_COEFFICIENTS},
+            },
+        }
+
+    def test_ids_are_prefixed_by_country_and_never_collide(self):
+        current_by_country = {
+            "nl": {"detail_files": {"d1.json": {"c1": self._detail("1 - 10")}}},
+            "be": {"detail_files": {"d1.json": {"c1": self._detail("100001 - 10000000")}}},
+        }
+        preview = build_multi_country_preview(
+            current_by_country, default_params(), now_iso="2026-01-01T00:00:00Z")
+        assert set(preview["original_by_id"]) == {"nl:c1", "be:c1"}
+        assert set(preview["rescored_by_id"]) == {"nl:c1", "be:c1"}
+        # Different company size per country -> different rescored score.
+        assert preview["rescored_by_id"]["nl:c1"]["commercial_fit_score"] != \
+            preview["rescored_by_id"]["be:c1"]["commercial_fit_score"]
+
+    def test_empty_input_returns_empty_dicts(self):
+        preview = build_multi_country_preview({}, default_params(), now_iso="2026-01-01T00:00:00Z")
+        assert preview == {"original_by_id": {}, "rescored_by_id": {}}
+
+
+class TestMultiCountrySummaryDataframe:
+    def test_counts_companies_and_tier_changes_per_country(self):
+        original = {
+            "nl:c1": {"commercial_tier": "🥉 Cool"},
+            "nl:c2": {"commercial_tier": "🥉 Cool"},
+            "be:c1": {"commercial_tier": "🥉 Cool"},
+        }
+        rescored = {
+            "nl:c1": {"commercial_tier": "🥇 Hot"},
+            "nl:c2": {"commercial_tier": "🥉 Cool"},
+            "be:c1": {"commercial_tier": "🥉 Cool"},
+        }
+        df = multi_country_summary_dataframe(original, rescored)
+        nl_row = df[df["country_folder"] == "nl"].iloc[0]
+        be_row = df[df["country_folder"] == "be"].iloc[0]
+        assert nl_row["n_bedrijven"] == 2
+        assert nl_row["n_tier_gewijzigd"] == 1
+        assert be_row["n_bedrijven"] == 1
+        assert be_row["n_tier_gewijzigd"] == 0
+
+    def test_empty_input_returns_empty_dataframe(self):
+        df = multi_country_summary_dataframe({}, {})
         assert df.empty
 
 

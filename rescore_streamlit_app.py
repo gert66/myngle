@@ -45,6 +45,7 @@ from rescore_from_gcs import (
     default_rescore_run_folder,
     download_current_run,
     list_country_folders,
+    rescore_details_bucket,
     tier_distribution,
     upload_rescored_run,
     write_rescored_run,
@@ -191,6 +192,117 @@ def biggest_movers_dataframe(
     return df.reindex(df["delta"].abs().sort_values(ascending=False).index).head(top_n)
 
 
+def _signal_raw_value(detail: dict, signal_field: str) -> "float | None":
+    """Persisted raw value of one signal from a company-details record's
+    ``scoring_inputs.signals`` block, or ``None`` if never enriched /
+    unparseable. Mirrors the same block ``rehydrate_scoring_row`` reads."""
+    signals = (detail.get("scoring_inputs") or {}).get("signals") or {}
+    raw = signals.get(signal_field)
+    if raw is None:
+        return None
+    try:
+        return float(raw)
+    except (TypeError, ValueError):
+        return None
+
+
+def signal_has_presence(detail: dict, signal_field: str) -> bool:
+    """True when ``signal_field`` carries a genuine, non-zero value.
+
+    ``score_company`` folds both a missing signal and an explicit 0 into the
+    same 0.0 contribution to the LR formula (see its ``_is_missing`` check),
+    so "present" here means strictly greater than zero — the same condition
+    under which the signal actually pulls the score in its coefficient's
+    direction."""
+    value = _signal_raw_value(detail, signal_field)
+    return value is not None and value > 0
+
+
+def signal_split_score_dataframe(
+    original_by_id: dict, rescored_by_id: dict, signal_field: str,
+) -> pd.DataFrame:
+    """Long-form ``(company_id, when, group, commercial_fit_score)`` table,
+    split into "Met <signal>" / "Zonder <signal>" groups by the ORIGINAL
+    record's raw signal value (rescoring never changes which companies had
+    the signal — only the score), so a company sits in the same group for
+    both its "Huidig" and "Nieuw" row. Powers the signal-analysis tab's
+    faceted before/after histogram."""
+    met_label = f"Met {signal_field}"
+    zonder_label = f"Zonder {signal_field}"
+    rows = []
+    for cid, detail in original_by_id.items():
+        group = met_label if signal_has_presence(detail, signal_field) else zonder_label
+        rows.append({
+            "company_id": cid, "when": "Huidig", "group": group,
+            "commercial_fit_score": detail.get("commercial_fit_score"),
+        })
+    for cid, detail in rescored_by_id.items():
+        source = original_by_id.get(cid, detail)
+        group = met_label if signal_has_presence(source, signal_field) else zonder_label
+        rows.append({
+            "company_id": cid, "when": "Nieuw", "group": group,
+            "commercial_fit_score": detail.get("commercial_fit_score"),
+        })
+    return pd.DataFrame(rows)
+
+
+def signal_split_summary(split_df: pd.DataFrame) -> pd.DataFrame:
+    """``(group, when) -> n, mediaan`` summary table under the signal-split
+    histogram — the actual numbers behind the visual spread."""
+    if split_df.empty:
+        return split_df
+    return (
+        split_df.groupby(["group", "when"])["commercial_fit_score"]
+        .agg(n="count", mediaan="median")
+        .reset_index()
+        .sort_values(["group", "when"])
+    )
+
+
+def build_multi_country_preview(
+    current_by_country: dict[str, dict], params: dict, *, now_iso: str,
+) -> dict:
+    """Re-score every already-loaded country's companies against the same
+    ``params``, purely in memory — no download, no upload. Returns
+    ``{"original_by_id", "rescored_by_id"}`` with ids prefixed
+    ``"<country_folder>:<company_id>"`` so companies from different
+    countries never collide in the aggregated preview.
+
+    Upload always stays per-country (via ``build_rescored_run`` +
+    ``upload_rescored_run`` on one country's own unprefixed ids) — this
+    function only feeds the "Alle landen" preview tab's aggregate charts."""
+    original_by_id: dict = {}
+    rescored_by_id: dict = {}
+    for country, current in current_by_country.items():
+        rescored_by_file = {
+            filename: rescore_details_bucket(bucket_dict, params, now_iso=now_iso)
+            for filename, bucket_dict in current["detail_files"].items()
+        }
+        for bucket_dict in current["detail_files"].values():
+            for cid, detail in bucket_dict.items():
+                original_by_id[f"{country}:{cid}"] = detail
+        for bucket_dict in rescored_by_file.values():
+            for cid, detail in bucket_dict.items():
+                rescored_by_id[f"{country}:{cid}"] = detail
+    return {"original_by_id": original_by_id, "rescored_by_id": rescored_by_id}
+
+
+def multi_country_summary_dataframe(original_by_id: dict, rescored_by_id: dict) -> pd.DataFrame:
+    """``(country_folder, n_bedrijven, n_tier_gewijzigd)`` per country, from
+    the country-prefixed ids ``build_multi_country_preview`` produces — the
+    per-country breakdown table under the aggregate preview charts."""
+    rows: dict = {}
+    for cid, new_detail in rescored_by_id.items():
+        country = cid.split(":", 1)[0]
+        row = rows.setdefault(
+            country, {"country_folder": country, "n_bedrijven": 0, "n_tier_gewijzigd": 0})
+        row["n_bedrijven"] += 1
+        old_detail = original_by_id.get(cid)
+        if old_detail is not None and old_detail.get("commercial_tier") != new_detail.get("commercial_tier"):
+            row["n_tier_gewijzigd"] += 1
+    return pd.DataFrame(sorted(rows.values(), key=lambda r: r["country_folder"]))
+
+
 def score_component_breakdown(row: dict, params: dict) -> dict:
     """Run ``score_company()`` on one synthetic/rehydrated row and shape its
     per-signal LR components into a waterfall: intercept -> each signal's
@@ -286,6 +398,34 @@ def main() -> None:  # pragma: no cover - exercised only under `streamlit run`
                 st.error(f"Laden mislukt: {exc}")
 
         st.divider()
+        st.header("2. Alle landen (alleen preview)")
+        st.caption(
+            "Laadt meerdere land-folders tegelijk voor de tab '🌍 Alle landen'. "
+            "Uploaden gebeurt altijd nog per land, via '🚀 Toepassen & uploaden'."
+        )
+        preview_countries = st.multiselect(
+            "Landen om te previewen", options=countries, default=countries,
+            key="preview_countries_select",
+        )
+        if st.button("🌍 Alle landen preview laden", disabled=not preview_countries):
+            old_all_dir = st.session_state.get("_all_countries_work_dir")
+            if old_all_dir:
+                shutil.rmtree(old_all_dir, ignore_errors=True)
+            all_dir = tempfile.mkdtemp(prefix="rescore_streamlit_all_")
+            st.session_state["_all_countries_work_dir"] = all_dir
+            loaded: dict = {}
+            progress = st.progress(0.0)
+            for i, c in enumerate(preview_countries):
+                try:
+                    loaded[c] = download_current_run(bucket, c, f"{all_dir}/{c}")
+                except Exception as exc:
+                    st.warning(f"{c}: laden mislukt ({exc})")
+                progress.progress((i + 1) / len(preview_countries))
+            st.session_state["_all_countries_current"] = loaded
+            n_total = sum(len(b) for cur in loaded.values() for b in cur["detail_files"].values())
+            st.success(f"{len(loaded)} landen geladen, {n_total} bedrijven totaal.")
+
+        st.divider()
         if st.button("↺ Reset naar standaardparameters"):
             st.session_state["rescore_params"] = default_params()
             st.rerun()
@@ -293,11 +433,33 @@ def main() -> None:  # pragma: no cover - exercised only under `streamlit run`
     current = st.session_state.get("_current")
 
     # ---------------------------------------------------------------------
+    # Live re-score of the currently loaded single country — shared by the
+    # "Signaal-analyse" and "Toepassen & uploaden" tabs so it's computed once
+    # per rerun, not twice.
+    # ---------------------------------------------------------------------
+    rescored_run = None
+    original_by_id: dict = {}
+    rescored_by_id: dict = {}
+    if current:
+        _now_iso = pd.Timestamp.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ")
+        rescored_run = build_rescored_run(
+            current, params,
+            country_folder=st.session_state.get("_current_country", ""),
+            run_folder=st.session_state.get("_run_folder_preview") or default_rescore_run_folder(),
+            now_iso=_now_iso,
+        )
+        original_by_id = {
+            cid: d for b in current["detail_files"].values() for cid, d in b.items()}
+        rescored_by_id = {
+            cid: d for b in rescored_run["detail_files"].values() for cid, d in b.items()}
+
+    # ---------------------------------------------------------------------
     # Parameter tabs
     # ---------------------------------------------------------------------
-    tab_coef, tab_sigmoid, tab_tiers, tab_calc, tab_apply = st.tabs([
+    tab_coef, tab_sigmoid, tab_tiers, tab_calc, tab_signal, tab_all, tab_apply = st.tabs([
         "⚖️ Coëfficiënten", "📈 Sigmoid & blend", "🎯 Tier-drempels",
-        "🧮 Eén bedrijf", "🚀 Toepassen & uploaden",
+        "🧮 Eén bedrijf", "🔬 Signaal-analyse", "🌍 Alle landen",
+        "🚀 Toepassen & uploaden",
     ])
 
     # ── Coefficients ───────────────────────────────────────────────────────
@@ -432,6 +594,101 @@ def main() -> None:  # pragma: no cover - exercised only under `streamlit run`
         if result.get("missing_scoring_fields"):
             st.info(result["scoring_notes"])
 
+    # ── Signal analysis ──────────────────────────────────────────────────────
+    with tab_signal:
+        st.subheader("Signaal-analyse — doorwerking van één signaal")
+        st.caption(
+            "Bedrijven MET het signaal (score > 0) tegenover bedrijven ZONDER "
+            "(score 0 of nooit enriched — score_company behandelt die twee "
+            "hetzelfde), huidig vs. nieuw naast elkaar. Zo zie je bijvoorbeeld "
+            "hoe zwaar sig_foreign_hq_score — de sterkste voorspeller — de "
+            "score echt optrekt."
+        )
+        if not current:
+            st.info(
+                "Laad eerst een land-folder via de zijbalk om de doorwerking "
+                "op echte data te zien."
+            )
+        else:
+            signal_options = list(LEAN_COEFFICIENTS)
+            default_idx = (
+                signal_options.index("sig_foreign_hq_score")
+                if "sig_foreign_hq_score" in signal_options else 0
+            )
+            signal_field = st.selectbox(
+                "Signaal", options=signal_options, index=default_idx,
+                key="signal_analysis_field",
+            )
+            st.caption(COEFFICIENT_LABELS.get(signal_field, ""))
+
+            split_df = signal_split_score_dataframe(original_by_id, rescored_by_id, signal_field)
+            if split_df.empty:
+                st.info("Geen data om te tonen.")
+            else:
+                met_label = f"Met {signal_field}"
+                zonder_label = f"Zonder {signal_field}"
+                fig = px.histogram(
+                    split_df, x="commercial_fit_score", color="when",
+                    facet_col="group", barmode="overlay", nbins=20, opacity=0.65,
+                    category_orders={
+                        "when": ["Huidig", "Nieuw"],
+                        "group": [met_label, zonder_label],
+                    },
+                )
+                st.plotly_chart(fig, use_container_width=True)
+
+                st.dataframe(
+                    signal_split_summary(split_df), use_container_width=True, hide_index=True)
+
+    # ── All countries — preview only ──────────────────────────────────────────
+    with tab_all:
+        st.subheader("Alle landen — preview (geen upload)")
+        st.caption(
+            "Geaggregeerd over alle geladen land-folders. Uploaden gebeurt "
+            "nog steeds per land — via de tab '🚀 Toepassen & uploaden' — dit "
+            "hier schrijft niets weg."
+        )
+        all_countries_current = st.session_state.get("_all_countries_current")
+        if not all_countries_current:
+            st.info(
+                "Nog geen landen geladen. Gebruik '🌍 Alle landen preview "
+                "laden' in de zijbalk."
+            )
+        else:
+            _now_iso_all = pd.Timestamp.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ")
+            preview = build_multi_country_preview(all_countries_current, params, now_iso=_now_iso_all)
+            p_original = preview["original_by_id"]
+            p_rescored = preview["rescored_by_id"]
+            summary_df = multi_country_summary_dataframe(p_original, p_rescored)
+
+            m1, m2, m3 = st.columns(3)
+            m1.metric("Landen geladen", len(all_countries_current))
+            m2.metric("Bedrijven totaal", len(p_original))
+            m3.metric(
+                "Tier gewijzigd",
+                int(summary_df["n_tier_gewijzigd"].sum()) if not summary_df.empty else 0,
+            )
+
+            st.subheader("Per land")
+            st.dataframe(summary_df, use_container_width=True, hide_index=True)
+
+            st.subheader("Scoreverdeling: huidig vs. nieuw (alle geladen landen)")
+            dist_df = score_distribution_dataframe(p_original, p_rescored)
+            st.plotly_chart(
+                px.histogram(
+                    dist_df, x="commercial_fit_score", color="when",
+                    barmode="overlay", nbins=20, opacity=0.65,
+                ),
+                use_container_width=True,
+            )
+
+            st.subheader("Tier-verdeling: huidig vs. nieuw (alle geladen landen)")
+            tier_df = tier_distribution_dataframe(p_original, p_rescored)
+            st.plotly_chart(
+                px.bar(tier_df, x="tier", y="count", color="when", barmode="group"),
+                use_container_width=True,
+            )
+
     # ── Apply & upload ────────────────────────────────────────────────────────
     with tab_apply:
         if not current:
@@ -442,19 +699,7 @@ def main() -> None:  # pragma: no cover - exercised only under `streamlit run`
         else:
             country_folder = st.session_state["_current_country"]
             bucket = st.session_state["_current_bucket"]
-            now_iso = pd.Timestamp.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ")
-            rescored_run = build_rescored_run(
-                current, params, country_folder=country_folder,
-                run_folder=st.session_state.get("_run_folder_preview")
-                or default_rescore_run_folder(),
-                now_iso=now_iso,
-            )
             manifest = rescored_run["manifest"]
-
-            original_by_id = {
-                cid: d for b in current["detail_files"].values() for cid, d in b.items()}
-            rescored_by_id = {
-                cid: d for b in rescored_run["detail_files"].values() for cid, d in b.items()}
 
             m1, m2, m3 = st.columns(3)
             m1.metric("Bedrijven her-scoord", manifest["companies_rescored"])
