@@ -32,8 +32,10 @@ driverkaart:
 1. **Betrouwbaarheid (`strength`)** — afgeleid van de v3-score + evidence-kwaliteit:
    - **Strong** — score ≥ 2 met schone, bedrijfsspecifieke evidence.
    - **Moderate** — score ≥ 1 met schone evidence (de generic-check verbergt een gescoord signaal
-     niet meer → fix (a)).
-   - **Weak** — score > 0 met ≥ 1 bruikbare `evidence_url` maar geen schone evidence-tekst; getoond
+     niet meer → fix (a)); **of** score ≥ `_DRIVER_STRONG_MIN_SCORE` (2) zonder schone evidence maar
+     wél ≥ 1 bruikbare `evidence_url` — een positief gescoord signaal wint dan van de platte
+     Weak-fallback (zie 2026-07-09-wijziging hieronder).
+   - **Weak** — score == 1 met ≥ 1 bruikbare `evidence_url` maar geen schone evidence-tekst; getoond
      met de link + "Weak"-badge (fix (b)). Uniform voor alle vijf non-HQ-signalen, inclusief
      `employer_branding`; de link mag een hosted platform zijn (Glassdoor/LinkedIn/…).
    - **verborgen** — score ≤ 0, of geen enkele bruikbare `evidence_url` (blijft "Not
@@ -49,10 +51,10 @@ paden (Italië `build_commercial_fit_drivers`, non-Italië `build_fixed_commerci
 gebruiken dezelfde regels.
 
 > **Ontwerpkeuze (transparant):** "Strong" vereist naast score ≥ 2 óók schone, bedrijfsspecifieke
-> evidence. Een score-2-signaal met alleen een generieke/externe snippet valt bewust naar **Weak
-> (met link)** in plaats van een misleidende "Strong" zonder onderbouwing — conform de bestaande
-> regressiegaranties (DORC/BauWatch: generiek bewijs nooit als positieve claim). Wil je puur
-> score-gedreven tiers, dan is dat één config-aanpassing.
+> evidence. Een score-2-signaal met alleen een generieke/externe snippet valt bewust niet naar
+> "Strong" zonder onderbouwing — conform de bestaande regressiegaranties (DORC/BauWatch: generiek
+> bewijs nooit als positieve claim in `why_relevant`/`what_is_hot`). **Sinds 2026-07-09** valt zo'n
+> signaal wél naar **Moderate (met link)** in plaats van naar de platte Weak-fallback — zie hieronder.
 
 ### Wijziging aan het "frozen" Italië-pad
 `build_commercial_fit_drivers` stond als "frozen" gemarkeerd. Op expliciet verzoek van deze
@@ -104,6 +106,26 @@ De drie ex-"Rejected" drivers (score ≥ 1 + bewijs, door de cleanliness-check a
 bewijs/URL en blijft terecht verborgen — **regressie bevestigd**: score 0 / geen URL levert geen
 valse Weak-kaart op. (In deze verse run is het L&D-bewijs extern/generiek → Weak, niet Moderate;
 het is nu wél zichtbaar met link, wat het doel is. Serper-resultaten variëren per run.)
+
+## 2026-07-09 — Moderate herstelt uit de platte Weak-fallback
+
+**Aanleiding:** in de praktijk was "Moderate" bijna afwezig (Italië-steekproef hierboven: Weak 128 /
+Strong 17 / Moderate 1). Twee oorzaken: (1) het onderliggende v3-signaal kent maar drie scores
+(0.0/1.0/2.0 — nooit 3), en de 1.0-band ("weak_evidence") wordt bovendien overgeslagen zodra de
+eigen-domein-drempel geopend is; (2) belangrijker, Moderate vereiste tot nu toe zowel score ≥ 1 als
+schone evidence-tekst — faalde die schone-evidence-check (wat bij dun bewijs vaak gebeurt), dan
+verviel het signaal naar de score-onafhankelijke Weak-fallback, ook als de score 2 was.
+
+**Wijziging:** in de no-clean-evidence-fallback (`_weak_tier_strength_for_score`, gebruikt in zowel
+`build_commercial_fit_drivers` als `build_fixed_commercial_fit_drivers`) wint een score ≥
+`_DRIVER_STRONG_MIN_SCORE` (2) nu van de platte "Weak"-badge: zo'n signaal toont als **Moderate**
+(nog steeds zonder evidence-tekst, wel met link — "Strong" blijft gereserveerd voor score ≥ 2 mét
+schone evidence, ongewijzigd). Score == 1 zonder schoon bewijs blijft **Weak**. Twee bestaande
+tests die dit oude gedrag vastlegden (`test_shimano_...`/employer_branding-Glassdoor en de
+PitchBook-directory-test in `test_export_lead_prioritizer_to_lovable_json.py`) zijn bewust
+bijgewerkt naar "Moderate"; volledige suite + de twee regressiesuites blijven groen (231 + 110
+passed). Geen wijziging aan `why_relevant`/`what_is_hot`-promotie — die garantie (generiek bewijs
+nooit als positieve claim) staat los van de badge-tier.
 
 ## Terugdraai-instructie
 

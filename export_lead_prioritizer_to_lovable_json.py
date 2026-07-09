@@ -1298,6 +1298,17 @@ def _strength_for_score(score) -> str:
     return "Weak"
 
 
+def _weak_tier_strength_for_score(score) -> str:
+    """Strength for the no-clean-evidence fallback (score > 0 but the
+    evidence text didn't pass the cleanliness check): a signal that scored
+    >= _DRIVER_STRONG_MIN_SCORE (would have been Strong with clean evidence)
+    is shown as "Moderate" rather than collapsing into the same flat "Weak"
+    bucket as a barely-scored (== 1) signal with equally thin evidence."""
+    if score and score >= _DRIVER_STRONG_MIN_SCORE:
+        return "Moderate"
+    return "Weak"
+
+
 def build_commercial_fit_drivers(
     visible_signals: list[dict],
     employee_range: "str | None" = None,
@@ -1337,7 +1348,7 @@ def build_commercial_fit_drivers(
             elif _WEAK_TIER_ENABLED and score and score > 0 and sources:
                 driver = {
                     "label": _natural_label(label),
-                    "strength": "Weak",
+                    "strength": _weak_tier_strength_for_score(score),
                     "note": _WEAK_TIER_NOTE,
                 }
                 _apply_driver_sources(driver, sources, scope)
@@ -1455,8 +1466,12 @@ _REJECTED_NOTES: "dict[str, str]" = {
 # none) and evidence quality:
 #   Strong   : score >= 2 AND clean, domain-relevant curated evidence.
 #   Moderate : score >= 1 AND clean curated evidence (a scored signal is no
-#              longer suppressed to "Rejected" by the evidence check — fix (a)).
-#   Weak     : score  > 0 with >= 1 usable evidence_url but no clean curated
+#              longer suppressed to "Rejected" by the evidence check — fix (a));
+#              OR score >= _DRIVER_STRONG_MIN_SCORE with a usable evidence_url
+#              but no clean curated evidence text — a positively-scored signal
+#              whose evidence just didn't read clean still outranks a barely-
+#              scored (== 1) one in the no-clean-evidence fallback.
+#   Weak     : score == 1 with >= 1 usable evidence_url but no clean curated
 #              evidence — shown with the link + a "Weak" badge (fix (b)).
 #              Uniform for all five non-HQ signals, employer_branding included;
 #              the link may be a hosted platform (Glassdoor/LinkedIn/...).
@@ -1819,7 +1834,8 @@ def build_fixed_commercial_fit_drivers(
             # cleanliness check is shown as Weak-with-link (was "Rejected"),
             # never silently hidden, so the account manager can judge it.
             driver = {
-                "id": driver_id, "label": label, "strength": "Weak",
+                "id": driver_id, "label": label,
+                "strength": _weak_tier_strength_for_score(score),
                 "evidence": "", "note": _WEAK_TIER_NOTE,
             }
             _apply_driver_sources(driver, sources, scope)

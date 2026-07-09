@@ -2645,12 +2645,13 @@ def test_shimano_workday_hosted_case(tmp_path):
     assert "Japan" in ui["parent_hq_summary"]
 
     # Generic Glassdoor list-page text is not positive employer-branding
-    # evidence, but is no longer hidden: it shows as a Weak driver with its
-    # external source link (account manager judges) — never as clean evidence
-    # and never promoted into positive caller-facing text (asserted below).
+    # evidence, but is no longer hidden: it shows as a Moderate driver (score
+    # 2 outranks the flat Weak fallback) with its external source link
+    # (account manager judges) — never as clean evidence and never promoted
+    # into positive caller-facing text (asserted below).
     drivers_by_label = {d["label"]: d for d in ui["commercial_fit_drivers"]}
     eb_driver = drivers_by_label["Employer branding or employee satisfaction"]
-    assert eb_driver["strength"] == "Weak"
+    assert eb_driver["strength"] == "Moderate"
     assert eb_driver["evidence"] == ""
     assert eb_driver["note"]
     assert eb_driver["source_scope"] == "external"
@@ -2733,10 +2734,11 @@ def test_generic_third_party_directory_text_requires_company_mention(tmp_path):
     detail_a = detail_for(out_a, "IGM Resins")
     drivers_a = {d["label"]: d for d in detail_a["ui_payload"]["commercial_fit_drivers"]}
     # Generic directory text that does not mention the company is no longer
-    # hidden: it shows as a Weak driver (external source) for manual review,
-    # but is never promoted into positive caller-facing text.
+    # hidden: it shows as a Moderate driver (score 2 outranks the flat Weak
+    # fallback; external source) for manual review, but is never promoted
+    # into positive caller-facing text.
     eb_a = drivers_a["Employer branding or employee satisfaction"]
-    assert eb_a["strength"] == "Weak"
+    assert eb_a["strength"] == "Moderate"
     assert eb_a["source_scope"] == "external"
     joined_a = " ".join([
         detail_a["ui_payload"]["why_relevant"] or "",
