@@ -6,15 +6,20 @@ needed)."""
 
 from __future__ import annotations
 
+import json
 import shutil
 import subprocess
 import sys
+from pathlib import Path
+from unittest.mock import MagicMock, patch
 
 import pytest
 
 from cloud_run_streamlit_app import (
     ProcessTimeout,
+    _download_existing_current_export,
     _gcloud_executable,
+    _merge_export_into_existing_current,
     build_download_command,
     build_execute_command,
     build_list_command,
@@ -173,6 +178,147 @@ def test_list_existing_gcs_files_strips_whitespace():
     listing = "  gs://b/spain/runs/2026-07-09_full/companies.list.json  \n"
     assert list_existing_gcs_files(listing) == [
         "gs://b/spain/runs/2026-07-09_full/companies.list.json"]
+
+
+# ── current/ merge: download + combine with a fresh export ──────────────────
+
+def _fake_gcloud_for_current_download(existing_list, existing_buckets: dict):
+    """subprocess.run side_effect covering every gcloud call
+    _download_existing_current_export makes: the companies.list.json
+    download, the company-details-*.json `storage ls` listing, and each
+    bucket file's own download -- keyed off the command shape, since both
+    cloud_run_streamlit_app.run_capture and lovable_gcs_upload.download_file
+    ultimately call the same patched subprocess.run."""
+    def _run(cmd, capture_output=True, text=True, timeout=None):
+        if "ls" in cmd:
+            uris = [f"gs://b/spain/current/{name}" for name in existing_buckets]
+            return MagicMock(returncode=0 if uris else 1, stdout="\n".join(uris), stderr="")
+        # A `storage cp SOURCE DEST` download -- DEST is the last argv.
+        source, dest = cmd[-2], cmd[-1]
+        if source.endswith("companies.list.json"):
+            Path(dest).write_text(json.dumps(existing_list), encoding="utf-8")
+            return MagicMock(returncode=0, stdout="", stderr="")
+        for name, data in existing_buckets.items():
+            if source.endswith(name):
+                Path(dest).write_text(json.dumps(data), encoding="utf-8")
+                return MagicMock(returncode=0, stdout="", stderr="")
+        return MagicMock(returncode=1, stdout="", stderr="No URLs matched")
+    return _run
+
+
+class TestDownloadExistingCurrentExport:
+    def test_nothing_there_yet_degrades_to_empty(self, tmp_path):
+        with patch("lovable_gcs_upload.resolve_gcs_upload_tool",
+                   return_value=["gcloud", "storage", "cp"]), \
+             patch("subprocess.run",
+                   return_value=MagicMock(returncode=1, stdout="", stderr="not found")):
+            items, details = _download_existing_current_export(
+                "b", "spain", "proj-1", tmp_path)
+        assert items == []
+        assert details == {}
+
+    def test_no_gcloud_tool_degrades_to_empty_without_subprocess(self, tmp_path):
+        with patch("lovable_gcs_upload.resolve_gcs_upload_tool", return_value=None), \
+             patch("subprocess.run") as m_run:
+            items, details = _download_existing_current_export(
+                "b", "spain", "proj-1", tmp_path)
+        assert items == []
+        assert details == {}
+        m_run.assert_not_called()
+
+    def test_downloads_and_parses_list_plus_buckets(self, tmp_path):
+        existing_list = [{"company_id": "acme-com", "enrichment_skipped": False}]
+        existing_buckets = {"company-details-000.json": {"acme-com": {"v": 1}}}
+        with patch("lovable_gcs_upload.resolve_gcs_upload_tool",
+                   return_value=["gcloud", "storage", "cp"]), \
+             patch("subprocess.run",
+                   side_effect=_fake_gcloud_for_current_download(existing_list, existing_buckets)):
+            items, details = _download_existing_current_export(
+                "b", "spain", "proj-1", tmp_path)
+        assert items == existing_list
+        assert details == {"acme-com": {"v": 1}}
+
+
+class TestMergeExportIntoExistingCurrent:
+    def _write_export_dir(self, export_dir, list_items, buckets):
+        export_dir.mkdir(parents=True, exist_ok=True)
+        (export_dir / "companies.list.json").write_text(json.dumps(list_items), encoding="utf-8")
+        for name, data in buckets.items():
+            (export_dir / name).write_text(json.dumps(data), encoding="utf-8")
+
+    def test_merges_new_run_with_downloaded_existing_data(self, tmp_path):
+        export_dir = tmp_path / "export"
+        new_list = [
+            {"company_id": "acme-com", "enrichment_skipped": False, "score": 9},  # updates
+            {"company_id": "beta-com", "enrichment_skipped": False, "score": 5},  # new
+        ]
+        self._write_export_dir(export_dir, new_list, {
+            "company-details-000.json": {
+                "acme-com": {"v": "new-acme"}, "beta-com": {"v": "new-beta"}},
+        })
+        existing_list = [
+            {"company_id": "acme-com", "enrichment_skipped": False, "score": 1},
+            {"company_id": "gamma-com", "enrichment_skipped": False, "score": 2},
+        ]
+        existing_details = {"acme-com": {"v": "old-acme"}, "gamma-com": {"v": "old-gamma"}}
+
+        with patch("cloud_run_streamlit_app._download_existing_current_export",
+                   return_value=(existing_list, existing_details)):
+            merged_dir, filenames, summary = _merge_export_into_existing_current(
+                tmp_path, export_dir, {"generated_at": "now"}, "b", "spain", 500, "proj-1")
+
+        merged_list = json.loads((merged_dir / "companies.list.json").read_text(encoding="utf-8"))
+        merged_ids = {i["company_id"] for i in merged_list}
+        assert merged_ids == {"acme-com", "beta-com", "gamma-com"}
+        acme = next(i for i in merged_list if i["company_id"] == "acme-com")
+        assert acme["score"] == 9  # new run's update won (both fully enriched)
+
+        manifest = json.loads((merged_dir / "export_manifest.json").read_text(encoding="utf-8"))
+        assert manifest["merge_summary"] == summary
+        assert summary["added"] == 1       # beta-com
+        assert summary["updated"] == 1     # acme-com
+        assert summary["kept_richer_existing"] == 0
+        assert summary["total_after"] == 3
+        assert "companies.list.json" in filenames
+        assert "export_manifest.json" in filenames
+
+    def test_new_gated_thin_row_never_downgrades_existing_rich_company(self, tmp_path):
+        export_dir = tmp_path / "export"
+        new_list = [{"company_id": "acme-com", "enrichment_skipped": True, "score": 0}]
+        self._write_export_dir(export_dir, new_list, {
+            "company-details-000.json": {"acme-com": {"v": "new-thin"}},
+        })
+        existing_list = [{"company_id": "acme-com", "enrichment_skipped": False, "score": 9}]
+        existing_details = {"acme-com": {"v": "old-rich"}}
+
+        with patch("cloud_run_streamlit_app._download_existing_current_export",
+                   return_value=(existing_list, existing_details)):
+            merged_dir, _, summary = _merge_export_into_existing_current(
+                tmp_path, export_dir, {}, "b", "spain", 500, "proj-1")
+
+        merged_list = json.loads((merged_dir / "companies.list.json").read_text(encoding="utf-8"))
+        assert merged_list[0]["score"] == 9
+        assert merged_list[0]["enrichment_skipped"] is False
+        assert summary["kept_richer_existing"] == 1
+        assert summary["updated"] == 0
+
+    def test_first_ever_run_with_no_existing_data(self, tmp_path):
+        export_dir = tmp_path / "export"
+        new_list = [{"company_id": "acme-com", "enrichment_skipped": False}]
+        self._write_export_dir(export_dir, new_list, {
+            "company-details-000.json": {"acme-com": {"v": 1}}})
+
+        with patch("cloud_run_streamlit_app._download_existing_current_export",
+                   return_value=([], {})):
+            merged_dir, filenames, summary = _merge_export_into_existing_current(
+                tmp_path, export_dir, {}, "b", "spain", 500, "proj-1")
+
+        assert summary == {
+            "companies_before": 0, "added": 1, "updated": 0,
+            "kept_richer_existing": 0, "total_after": 1,
+        }
+        merged_list = json.loads((merged_dir / "companies.list.json").read_text(encoding="utf-8"))
+        assert [i["company_id"] for i in merged_list] == ["acme-com"]
 
 
 # ── Regression: gcloud is a .cmd wrapper on Windows ──────────────────────────

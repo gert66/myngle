@@ -16,14 +16,17 @@ from lovable_gcs_upload import (
     country_folder_slug,
     default_gcs_run_folder,
     describe_gcloud_environment,
+    download_file,
     gcs_current_path,
     gcs_archive_path,
     gcs_flat_path,
     gcs_manifest_path,
+    merge_company_records,
     normalize_gcs_prefix,
     public_manifest_url,
     public_url,
     public_url_flat,
+    rebucket_company_details,
     resolve_gcs_upload_tool,
     select_lovable_export_files,
     validate_gcs_bucket,
@@ -272,6 +275,148 @@ class TestRunUploadPlan:
         assert len(results) == len(jobs)
         assert all(r["success"] for r in results)
         assert mock_run.call_count == len(jobs)
+
+
+class TestDownloadFile:
+    def test_missing_remote_object_fails_without_raising(self, tmp_path):
+        local = tmp_path / "companies.list.json"
+        mock_proc = MagicMock(returncode=1, stdout="", stderr="No URLs matched")
+        with patch("lovable_gcs_upload.subprocess.run", return_value=mock_proc):
+            result = download_file(["gcloud", "storage", "cp"], "gs://b/f.json", str(local))
+        assert result["success"] is False
+        assert not local.exists()
+
+    def test_successful_download_no_shell(self, tmp_path):
+        local = tmp_path / "sub" / "companies.list.json"
+
+        def _fake_run(cmd, capture_output, text, timeout):
+            local.parent.mkdir(parents=True, exist_ok=True)
+            local.write_text("[]")
+            return MagicMock(returncode=0, stdout="Copying...\n", stderr="")
+
+        with patch("lovable_gcs_upload.subprocess.run", side_effect=_fake_run) as mock_run:
+            result = download_file(["gcloud", "storage", "cp"], "gs://b/f.json", str(local))
+        assert result["success"] is True
+        args, kwargs = mock_run.call_args
+        assert args[0] == ["gcloud", "storage", "cp", "gs://b/f.json", str(local)]
+        assert "shell" not in kwargs or kwargs["shell"] is False
+
+    def test_subprocess_exception_does_not_raise(self, tmp_path):
+        local = tmp_path / "companies.list.json"
+        with patch("lovable_gcs_upload.subprocess.run", side_effect=OSError("boom")):
+            result = download_file(["gcloud", "storage", "cp"], "gs://b/f.json", str(local))
+        assert result["success"] is False
+        assert "boom" in result["error"]
+
+
+def _item(company_id, enrichment_skipped=False, **extra):
+    return {"company_id": company_id, "enrichment_skipped": enrichment_skipped, **extra}
+
+
+class TestMergeCompanyRecords:
+    def test_disjoint_sets_keep_both(self):
+        existing = [_item("acme-com")]
+        new = [_item("beta-com")]
+        merged_items, merged_details = merge_company_records(
+            existing, {"acme-com": {"v": "old"}}, new, {"beta-com": {"v": "new"}})
+        assert [i["company_id"] for i in merged_items] == ["acme-com", "beta-com"]
+        assert merged_details == {"acme-com": {"v": "old"}, "beta-com": {"v": "new"}}
+
+    def test_new_fully_enriched_wins_over_old_fully_enriched(self):
+        existing = [_item("acme-com", enrichment_skipped=False, score=1)]
+        new = [_item("acme-com", enrichment_skipped=False, score=2)]
+        merged_items, merged_details = merge_company_records(
+            existing, {"acme-com": {"v": "old"}}, new, {"acme-com": {"v": "new"}})
+        assert merged_items[0]["score"] == 2
+        assert merged_details["acme-com"] == {"v": "new"}
+
+    def test_new_skipped_does_not_downgrade_old_rich_record(self):
+        # The exact scenario the conflict rule exists for: a cheap/gated
+        # rerun must never clobber a previously fully-enriched company.
+        existing = [_item("acme-com", enrichment_skipped=False, score=9)]
+        new = [_item("acme-com", enrichment_skipped=True, score=0)]
+        merged_items, merged_details = merge_company_records(
+            existing, {"acme-com": {"v": "old"}}, new, {"acme-com": {"v": "new"}})
+        assert merged_items[0]["score"] == 9
+        assert merged_items[0]["enrichment_skipped"] is False
+        assert merged_details["acme-com"] == {"v": "old"}
+
+    def test_new_upgrades_old_skipped_record(self):
+        existing = [_item("acme-com", enrichment_skipped=True)]
+        new = [_item("acme-com", enrichment_skipped=False, score=5)]
+        merged_items, _ = merge_company_records(
+            existing, {"acme-com": {"v": "old"}}, new, {"acme-com": {"v": "new"}})
+        assert merged_items[0]["enrichment_skipped"] is False
+        assert merged_items[0]["score"] == 5
+
+    def test_both_skipped_new_still_wins_for_freshness(self):
+        existing = [_item("acme-com", enrichment_skipped=True, note="old-skip-reason")]
+        new = [_item("acme-com", enrichment_skipped=True, note="new-skip-reason")]
+        merged_items, _ = merge_company_records(
+            existing, {}, new, {})
+        assert merged_items[0]["note"] == "new-skip-reason"
+
+    def test_existing_order_preserved_new_appended_at_tail(self):
+        existing = [_item("a"), _item("b"), _item("c")]
+        new = [_item("b", score=9), _item("d")]  # b updates in place, d is new
+        merged_items, _ = merge_company_records(existing, {}, new, {})
+        assert [i["company_id"] for i in merged_items] == ["a", "b", "c", "d"]
+
+    def test_never_mutates_arguments(self):
+        existing = [_item("a")]
+        existing_copy = [dict(existing[0])]
+        new = [_item("a", score=1), _item("b")]
+        merge_company_records(existing, {"a": {"x": 1}}, new, {"a": {"x": 2}, "b": {"x": 3}})
+        assert existing == existing_copy
+
+
+class TestRebucketCompanyDetails:
+    def test_assigns_sequential_buckets(self):
+        items = [_item("a"), _item("b"), _item("c")]
+        details = {"a": {"v": "a"}, "b": {"v": "b"}, "c": {"v": "c"}}
+        updated, buckets = rebucket_company_details(items, details, bucket_size=2)
+        assert [i["detail_bucket"] for i in updated] == [
+            "company-details-000.json", "company-details-000.json", "company-details-001.json"]
+        assert set(buckets) == {"company-details-000.json", "company-details-001.json"}
+        assert buckets["company-details-000.json"]["a"]["v"] == "a"
+        assert buckets["company-details-001.json"]["c"]["v"] == "c"
+
+    def test_detail_bucket_set_on_both_list_item_and_detail_record(self):
+        items = [_item("a")]
+        details = {"a": {"v": "a"}}
+        updated, buckets = rebucket_company_details(items, details, bucket_size=500)
+        assert updated[0]["detail_bucket"] == "company-details-000.json"
+        assert buckets["company-details-000.json"]["a"]["detail_bucket"] == "company-details-000.json"
+
+    def test_preexisting_companies_keep_their_bucket_across_a_merge(self):
+        # The property merge_company_records' ordering guarantee exists for:
+        # re-bucketing after appending new companies at the tail must not
+        # move any PRE-EXISTING company into a different bucket file.
+        original_items = [_item(f"c{i}") for i in range(5)]
+        original_details = {f"c{i}": {"v": i} for i in range(5)}
+        _, original_buckets = rebucket_company_details(original_items, original_details, bucket_size=2)
+
+        merged_items, merged_details = merge_company_records(
+            original_items, original_details, [_item("c5")], {"c5": {"v": 5}})
+        _, new_buckets = rebucket_company_details(merged_items, merged_details, bucket_size=2)
+
+        for bucket_file in original_buckets:
+            for cid in original_buckets[bucket_file]:
+                assert cid in new_buckets[bucket_file], (
+                    f"{cid} moved out of {bucket_file} after appending a new company")
+
+    def test_zero_bucket_size_raises(self):
+        with pytest.raises(ValueError):
+            rebucket_company_details([_item("a")], {"a": {}}, bucket_size=0)
+
+    def test_never_mutates_arguments(self):
+        items = [_item("a")]
+        items_copy = [dict(items[0])]
+        details = {"a": {"v": 1}}
+        details_copy = {"a": dict(details["a"])}
+        rebucket_company_details(items, details, bucket_size=1)
+        assert items == items_copy
+        assert details == details_copy
 
 
 class TestNormalizeGcsPrefix:

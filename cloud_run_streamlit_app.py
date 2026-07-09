@@ -24,6 +24,7 @@ Run with:
 from __future__ import annotations
 
 import functools
+import json
 import shutil
 import subprocess
 import tempfile
@@ -263,6 +264,140 @@ def run_capture(cmd: list[str]) -> tuple[int, str]:
 
 
 # =============================================================================
+# current/ merge: download existing data, combine with this run's fresh
+# export (lovable_gcs_upload.merge_company_records/rebucket_company_details
+# do the actual, unit-tested merge logic — this is the I/O glue around it).
+# =============================================================================
+
+def _download_existing_current_export(
+    bucket: str, country_folder: str, project: str, local_dir: Path,
+) -> tuple[list[dict], dict[str, dict]]:
+    """Download and parse the existing current/companies.list.json +
+    current/company-details-*.json for one country.
+
+    Returns ``([], {})`` — never raises — when nothing is there yet (the
+    normal first-ever export for this country/bucket) or any download/parse
+    step fails: a merge must degrade to "nothing existing" rather than ever
+    block or corrupt this run's own export, same philosophy as
+    enrichment_cache.py's cache-load failure handling.
+    """
+    import lovable_gcs_upload as lovable_gcs
+
+    tool_cmd = lovable_gcs.resolve_gcs_upload_tool()
+    if tool_cmd is None:
+        return [], {}
+    local_dir.mkdir(parents=True, exist_ok=True)
+
+    list_local = local_dir / "companies.list.json"
+    list_result = lovable_gcs.download_file(
+        tool_cmd,
+        lovable_gcs.gcs_current_path(bucket, country_folder, "companies.list.json"),
+        str(list_local),
+    )
+    if not list_result["success"]:
+        return [], {}
+    try:
+        existing_list_items = json.loads(list_local.read_text(encoding="utf-8"))
+    except Exception:
+        return [], {}
+    if not isinstance(existing_list_items, list):
+        return [], {}
+
+    bucket_glob = f"gs://{bucket}/{country_folder}/current/company-details-*.json"
+    rc_ls, listing = run_capture(build_list_command(bucket_glob, project))
+    bucket_uris = list_existing_gcs_files(listing) if rc_ls == 0 else []
+
+    existing_details: dict[str, dict] = {}
+    for uri in bucket_uris:
+        local_bucket_path = local_dir / Path(uri).name
+        result = lovable_gcs.download_file(tool_cmd, uri, str(local_bucket_path))
+        if not result["success"]:
+            continue
+        try:
+            bucket_data = json.loads(local_bucket_path.read_text(encoding="utf-8"))
+        except Exception:
+            continue
+        if isinstance(bucket_data, dict):
+            existing_details.update(bucket_data)
+
+    return existing_list_items, existing_details
+
+
+def _merge_export_into_existing_current(
+    local_run_dir: Path, export_dir: Path, manifest: dict,
+    gcs_bucket_norm: str, gcs_prefix_norm: str, bucket_size: int, project: str,
+) -> tuple[Path, list[str], dict]:
+    """Build the merged current/ export in its own local directory.
+
+    ``export_dir`` (this run's own, unmerged snapshot — also used as-is for
+    the archive/ upload) is left untouched. Downloads the existing
+    current/ data, merges in this run's freshly exported companies
+    (``lovable_gcs_upload.merge_company_records``), re-buckets
+    (``rebucket_company_details``), and writes ``companies.list.json`` +
+    bucket files + an ``export_manifest.json`` extended with a
+    ``merge_summary`` block to a new directory.
+
+    Returns ``(merged_dir, filenames, merge_summary)``. Never raises: a
+    failure downloading the EXISTING data degrades to "nothing existing
+    yet" (this run's own export becomes the entire current/ set).
+    """
+    import lovable_gcs_upload as lovable_gcs
+
+    new_list_items = json.loads(
+        (export_dir / "companies.list.json").read_text(encoding="utf-8"))
+    new_details: dict[str, dict] = {}
+    for bucket_path in sorted(export_dir.glob("company-details-*.json")):
+        new_details.update(json.loads(bucket_path.read_text(encoding="utf-8")))
+
+    existing_dir = local_run_dir / "lovable_current_existing"
+    existing_list_items, existing_details = _download_existing_current_export(
+        gcs_bucket_norm, gcs_prefix_norm, project, existing_dir)
+
+    merged_items, merged_details = lovable_gcs.merge_company_records(
+        existing_list_items, existing_details, new_list_items, new_details)
+    merged_items, merged_buckets = lovable_gcs.rebucket_company_details(
+        merged_items, merged_details, bucket_size)
+
+    merged_dir = local_run_dir / "lovable_export_merged_current"
+    merged_dir.mkdir(parents=True, exist_ok=True)
+    (merged_dir / "companies.list.json").write_text(
+        json.dumps(merged_items, ensure_ascii=False, indent=2, default=str), encoding="utf-8")
+    for bucket_file, bucket_data in merged_buckets.items():
+        (merged_dir / bucket_file).write_text(
+            json.dumps(bucket_data, ensure_ascii=False, indent=2, default=str), encoding="utf-8")
+
+    existing_by_id = {i["company_id"]: i for i in existing_list_items}
+    new_by_id = {i["company_id"]: i for i in new_list_items}
+    existing_ids, new_ids = set(existing_by_id), set(new_by_id)
+    merge_summary = {
+        "companies_before": len(existing_list_items),
+        "added": len(new_ids - existing_ids),
+        "updated": 0,
+        "kept_richer_existing": 0,
+        "total_after": len(merged_items),
+    }
+    # Re-derive updated-vs-kept-richer for reporting by re-applying the same
+    # winner rule merge_company_records already used — cheap, both sides are
+    # already in hand, and this avoids merge_company_records having to
+    # return bookkeeping counters alongside its actual merged data.
+    for cid in (new_ids & existing_ids):
+        new_skipped = bool(new_by_id[cid].get("enrichment_skipped"))
+        old_skipped = bool(existing_by_id[cid].get("enrichment_skipped"))
+        if (not new_skipped) or old_skipped:
+            merge_summary["updated"] += 1
+        else:
+            merge_summary["kept_richer_existing"] += 1
+
+    merged_manifest = dict(manifest)
+    merged_manifest["merged_into_existing_current"] = True
+    merged_manifest["merge_summary"] = merge_summary
+    (merged_dir / "export_manifest.json").write_text(
+        json.dumps(merged_manifest, ensure_ascii=False, indent=2, default=str), encoding="utf-8")
+
+    return merged_dir, sorted(f.name for f in merged_dir.iterdir()), merge_summary
+
+
+# =============================================================================
 # Streamlit UI
 # =============================================================================
 
@@ -433,6 +568,7 @@ def main() -> None:  # pragma: no cover - exercised only under `streamlit run`
         export_gcs_prefix = ""
         export_gcs_run_folder = ""
         upload_current = True
+        merge_current = False
         upload_archive = True
         if auto_lovable_export_enabled:
             _country_options = [""] + list(SUPPORTED_DEFAULT_INPUT_COUNTRIES)
@@ -479,7 +615,22 @@ def main() -> None:  # pragma: no cover - exercised only under `streamlit run`
                     "GCS run folder",
                     value=lovable_gcs.default_gcs_run_folder(mode))
                 uc1, uc2 = st.columns(2)
-                upload_current = uc1.checkbox("Overwrite current/", value=True)
+                current_mode = uc1.radio(
+                    "current/-gedrag",
+                    options=["Overwrite", "Merge", "Niet uploaden"],
+                    index=0,
+                    help="**Overwrite**: current/ volledig vervangen door "
+                         "alleen het resultaat van DEZE run (het oude "
+                         "gedrag). **Merge**: bestaande current/-data eerst "
+                         "downloaden en samenvoegen met deze run — nieuwe "
+                         "bedrijven worden toegevoegd, bestaande bedrijven "
+                         "bijgewerkt met de nieuwe data TENZIJ die dunner is "
+                         "(bv. door de foreign-HQ-gate overgeslagen) dan wat "
+                         "er al stond, dan blijft de rijkere oude versie "
+                         "staan. Cold-caller-toewijzingen van bedrijven die "
+                         "al bestonden blijven ongewijzigd.")
+                upload_current = current_mode != "Niet uploaden"
+                merge_current = current_mode == "Merge"
                 upload_archive = uc2.checkbox("Archive naar runs/<run_folder>/", value=True)
 
     # ---- Pre-flight: warn if the Lovable ARCHIVE folder already has data ---
@@ -753,11 +904,39 @@ def main() -> None:  # pragma: no cover - exercised only under `streamlit run`
                     else:
                         output_filenames = sorted(
                             {Path(p).name for p in manifest.get("output_files", [])})
-                        jobs = lovable_gcs.build_upload_plan(
+
+                        # ---- 6a. current/: merge with existing data, or plain overwrite ---
+                        current_export_dir = export_dir
+                        current_filenames = output_filenames
+                        if upload_current and merge_current:
+                            with st.spinner(
+                                "Bestaande current/-data downloaden en samenvoegen…"
+                            ):
+                                current_export_dir, current_filenames, merge_summary = \
+                                    _merge_export_into_existing_current(
+                                        local_run_dir, export_dir, manifest,
+                                        gcs_bucket_norm, gcs_prefix_norm,
+                                        int(bucket_size), project,
+                                    )
+                            st.info(
+                                f"Merge: {merge_summary['added']} nieuw, "
+                                f"{merge_summary['updated']} bijgewerkt, "
+                                f"{merge_summary['kept_richer_existing']} bestaande "
+                                "(rijkere) versie behouden, "
+                                f"{merge_summary['total_after']} totaal in current/."
+                            )
+
+                        current_jobs = lovable_gcs.build_upload_plan(
+                            current_export_dir, current_filenames, gcs_bucket_norm,
+                            gcs_prefix_norm, gcs_run_folder_norm,
+                            upload_current=upload_current, upload_archive=False,
+                        )
+                        archive_jobs = lovable_gcs.build_upload_plan(
                             export_dir, output_filenames, gcs_bucket_norm, gcs_prefix_norm,
                             gcs_run_folder_norm,
-                            upload_current=upload_current, upload_archive=upload_archive,
+                            upload_current=False, upload_archive=upload_archive,
                         )
+                        jobs = current_jobs + archive_jobs
                         with st.spinner("Lovable JSON uploaden naar Google Cloud Storage…"):
                             upload_results = lovable_gcs.run_upload_plan(jobs)
                         failures = [r for r in upload_results if not r["success"]]
