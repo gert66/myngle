@@ -568,7 +568,6 @@ def main() -> None:  # pragma: no cover - exercised only under `streamlit run`
         export_gcs_prefix = ""
         export_gcs_run_folder = ""
         upload_current = True
-        merge_current = False
         upload_archive = True
         if auto_lovable_export_enabled:
             _country_options = [""] + list(SUPPORTED_DEFAULT_INPUT_COUNTRIES)
@@ -614,31 +613,47 @@ def main() -> None:  # pragma: no cover - exercised only under `streamlit run`
                 export_gcs_run_folder = st.text_input(
                     "GCS run folder",
                     value=lovable_gcs.default_gcs_run_folder(mode))
-                uc1, uc2 = st.columns(2)
-                current_mode = uc1.radio(
-                    "current/-gedrag",
-                    options=["Overwrite", "Merge", "Niet uploaden"],
-                    index=0,
-                    help="**Overwrite**: current/ volledig vervangen door "
-                         "alleen het resultaat van DEZE run (het oude "
-                         "gedrag). **Merge**: bestaande current/-data eerst "
-                         "downloaden en samenvoegen met deze run — nieuwe "
-                         "bedrijven worden toegevoegd, bestaande bedrijven "
-                         "bijgewerkt met de nieuwe data TENZIJ die dunner is "
-                         "(bv. door de foreign-HQ-gate overgeslagen) dan wat "
-                         "er al stond, dan blijft de rijkere oude versie "
-                         "staan. Cold-caller-toewijzingen van bedrijven die "
-                         "al bestonden blijven ongewijzigd.")
-                upload_current = current_mode != "Niet uploaden"
-                merge_current = current_mode == "Merge"
-                upload_archive = uc2.checkbox("Archive naar runs/<run_folder>/", value=True)
+                # current/ zelf altijd uploaden zodra Lovable-export + GCS-
+                # upload allebei aanstaan -- de vraag is niet "wel of niet",
+                # maar "overschrijven of mergen", en die keuze staat expliciet
+                # in het hoofdveld hieronder (niet hier in de sidebar), vlak
+                # vóór de Start-knop, waar hij niet gemist kan worden.
+                upload_current = True
+                upload_archive = st.checkbox("Archive naar runs/<run_folder>/", value=True)
+
+    # ---- Explicit main-panel choice: overwrite or merge current/ ----------
+    # Moved out of the sidebar so it can't be missed: this decides whether a
+    # rerun of the same country replaces the existing current/ company list
+    # in GCS, or combines it with what's already there (see
+    # lovable_gcs_upload.merge_company_records for the merge rule). Shown
+    # unconditionally (not only on a detected conflict, unlike the archive
+    # check below) since it's a real decision on every run, not just an
+    # edge case.
+    merge_current = False
+    if uploaded is not None and auto_lovable_export_enabled and auto_gcs_upload_enabled:
+        st.subheader("current/-gedrag")
+        current_choice = st.radio(
+            "Wat moet er met de bestaande current/-lijst in GCS gebeuren?",
+            options=["Overschrijven", "Mergen (bestaande data behouden)"],
+            index=0,
+            horizontal=True,
+            help="**Overschrijven**: current/ volledig vervangen door "
+                 "alleen het resultaat van DEZE run (het oude gedrag). "
+                 "**Mergen**: bestaande current/-data eerst downloaden en "
+                 "samenvoegen met deze run — nieuwe bedrijven worden "
+                 "toegevoegd, bestaande bedrijven bijgewerkt met de nieuwe "
+                 "data TENZIJ die dunner is (bv. door de foreign-HQ-gate "
+                 "overgeslagen) dan wat er al stond, dan blijft de rijkere "
+                 "oude versie staan. Cold-caller-toewijzingen van bedrijven "
+                 "die al bestonden blijven ongewijzigd.",
+        )
+        merge_current = current_choice.startswith("Mergen")
 
     # ---- Pre-flight: warn if the Lovable ARCHIVE folder already has data ---
-    # current/ is intentionally always overwritten with the latest run (that
-    # IS its purpose) so it is never checked here. The archive folder
-    # (runs/<run_folder>/, keyed by date+mode by default) is meant to be a
-    # per-run historical record -- a second run of the same country/mode on
-    # the same day would otherwise silently overwrite an earlier run's
+    # The archive folder (runs/<run_folder>/, keyed by date+mode by default)
+    # is meant to be a per-run historical snapshot regardless of the
+    # current/-gedrag choice above -- a second run of the same country/mode
+    # on the same day would otherwise silently overwrite an earlier run's
     # archived export with no warning at all. Runs this check on every
     # rerun (not just on click) so the warning is visible BEFORE the user
     # commits to starting an expensive Cloud Run Job, not only at upload
