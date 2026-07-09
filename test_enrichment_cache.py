@@ -1,14 +1,16 @@
 """Tests for the shared, GCS-backed per-country enrichment cache.
 
-No real network/gcloud calls: ``resolve_gcs_upload_tool``/``upload_file``/
-``subprocess.run`` are mocked throughout. Covers key normalization, TTL
-expiry, force_refresh, and graceful degradation on a failing
-download/upload (cache must always be an optimization, never a hard
-dependency).
+No real network/gcloud/google-cloud-storage calls: ``_storage_client``,
+``resolve_gcs_upload_tool``/``upload_file``/``subprocess.run`` are mocked
+throughout. Covers key normalization, TTL expiry, force_refresh, the Python
+client transport, the gcloud/gsutil CLI fallback transport, and graceful
+degradation when both fail (cache must always be an optimization, never a
+hard dependency).
 """
 
 from __future__ import annotations
 
+import json
 from datetime import datetime, timedelta, timezone
 from unittest.mock import patch
 
@@ -120,7 +122,112 @@ class TestGetPutCached:
 
 
 # ---------------------------------------------------------------------------
-# load_cache_index — graceful degradation
+# load_cache_index / save_cache_index — Python google-cloud-storage client
+# path (this is what actually works inside a Cloud Run Job, which has ADC
+# via its service account but no gcloud/gsutil CLI installed at all).
+# ---------------------------------------------------------------------------
+
+class _FakeBlob:
+    def __init__(self, store: dict, name: str):
+        self._store = store
+        self.name = name
+
+    def exists(self) -> bool:
+        return self.name in self._store
+
+    def download_as_text(self) -> str:
+        return self._store[self.name]
+
+    def upload_from_string(self, data, content_type=None):
+        self._store[self.name] = data
+
+
+class _FakeBucket:
+    def __init__(self, store: dict):
+        self._store = store
+
+    def blob(self, name: str) -> _FakeBlob:
+        return _FakeBlob(self._store, name)
+
+
+class _FakeClient:
+    def __init__(self, store: dict):
+        self._store = store
+
+    def bucket(self, name: str) -> _FakeBucket:
+        return _FakeBucket(self._store)
+
+
+class TestLoadCacheIndexViaClient:
+    def test_blank_bucket_or_country_returns_empty_before_touching_client(self):
+        with patch("enrichment_cache._storage_client") as m_client:
+            assert ec.load_cache_index("", "italy") == {}
+            assert ec.load_cache_index("bucket", "") == {}
+        m_client.assert_not_called()
+
+    def test_missing_blob_returns_empty_without_falling_back_to_cli(self):
+        with patch("enrichment_cache._storage_client", return_value=_FakeClient({})), \
+             patch("enrichment_cache.resolve_gcs_upload_tool") as m_cli:
+            assert ec.load_cache_index("bucket", "italy") == {}
+        m_cli.assert_not_called()
+
+    def test_existing_blob_parses_json(self):
+        payload = {"serper|acme.com|hq": {"fetched_at": "2026-01-01T00:00:00+00:00",
+                                           "response": {"organic": []}}}
+        store = {"_enrichment_cache/italy_cache_index.json": json.dumps(payload)}
+        with patch("enrichment_cache._storage_client", return_value=_FakeClient(store)):
+            assert ec.load_cache_index("bucket", "italy") == payload
+
+    def test_invalid_json_returns_empty(self):
+        store = {"_enrichment_cache/italy_cache_index.json": "not json{{{"}
+        with patch("enrichment_cache._storage_client", return_value=_FakeClient(store)):
+            assert ec.load_cache_index("bucket", "italy") == {}
+
+    def test_client_unavailable_falls_back_to_cli(self):
+        with patch("enrichment_cache._storage_client", return_value=None), \
+             patch("enrichment_cache.resolve_gcs_upload_tool", return_value=["gcloud", "storage", "cp"]), \
+             patch("subprocess.run", side_effect=OSError("no cli either")):
+            assert ec.load_cache_index("bucket", "italy") == {}
+
+    def test_client_raising_falls_back_to_cli(self):
+        class _BrokenClient:
+            def bucket(self, name):
+                raise RuntimeError("no ADC")
+
+        with patch("enrichment_cache._storage_client", return_value=_BrokenClient()), \
+             patch("enrichment_cache.resolve_gcs_upload_tool", return_value=["gcloud", "storage", "cp"]), \
+             patch("subprocess.run", side_effect=OSError("no cli either")):
+            assert ec.load_cache_index("bucket", "italy") == {}
+
+
+class TestSaveCacheIndexViaClient:
+    def test_uploads_via_client_when_available(self):
+        store: dict = {}
+        with patch("enrichment_cache._storage_client", return_value=_FakeClient(store)), \
+             patch("enrichment_cache.resolve_gcs_upload_tool") as m_cli:
+            result = ec.save_cache_index("bucket", "italy", {"a": 1})
+        assert result["success"] is True
+        assert json.loads(store["_enrichment_cache/italy_cache_index.json"]) == {"a": 1}
+        m_cli.assert_not_called()  # client worked -- CLI fallback never touched
+
+    def test_client_raising_falls_back_to_cli(self):
+        class _BrokenClient:
+            def bucket(self, name):
+                raise RuntimeError("no ADC")
+
+        with patch("enrichment_cache._storage_client", return_value=_BrokenClient()), \
+             patch("enrichment_cache.resolve_gcs_upload_tool",
+                   return_value=["gcloud", "storage", "cp"]), \
+             patch("enrichment_cache.upload_file", return_value={"success": True}) as m_upload:
+            result = ec.save_cache_index("bucket", "italy", {"a": 1})
+        assert result == {"success": True}
+        m_upload.assert_called_once()
+
+
+# ---------------------------------------------------------------------------
+# load_cache_index / save_cache_index — gcloud/gsutil CLI fallback path
+# (local machine with CLI credentials but no ADC configured; also what a
+# Cloud Run Job falls back to if google-cloud-storage is ever unusable).
 # ---------------------------------------------------------------------------
 
 class TestLoadCacheIndex:
@@ -129,20 +236,23 @@ class TestLoadCacheIndex:
         assert ec.load_cache_index("bucket", "") == {}
 
     def test_no_gcloud_tool_returns_empty(self):
-        with patch("enrichment_cache.resolve_gcs_upload_tool", return_value=None):
+        with patch("enrichment_cache._storage_client", return_value=None), \
+             patch("enrichment_cache.resolve_gcs_upload_tool", return_value=None):
             assert ec.load_cache_index("bucket", "italy") == {}
 
     def test_failing_download_returns_empty_dict_without_crash(self):
-        with patch("enrichment_cache.resolve_gcs_upload_tool", return_value=["gcloud", "storage", "cp"]):
-            with patch("subprocess.run", side_effect=OSError("boom")):
-                assert ec.load_cache_index("bucket", "italy") == {}
+        with patch("enrichment_cache._storage_client", return_value=None), \
+             patch("enrichment_cache.resolve_gcs_upload_tool", return_value=["gcloud", "storage", "cp"]), \
+             patch("subprocess.run", side_effect=OSError("boom")):
+            assert ec.load_cache_index("bucket", "italy") == {}
 
     def test_nonzero_returncode_returns_empty(self):
         class _Proc:
             returncode = 1
-        with patch("enrichment_cache.resolve_gcs_upload_tool", return_value=["gcloud", "storage", "cp"]):
-            with patch("subprocess.run", return_value=_Proc()):
-                assert ec.load_cache_index("bucket", "italy") == {}
+        with patch("enrichment_cache._storage_client", return_value=None), \
+             patch("enrichment_cache.resolve_gcs_upload_tool", return_value=["gcloud", "storage", "cp"]), \
+             patch("subprocess.run", return_value=_Proc()):
+            assert ec.load_cache_index("bucket", "italy") == {}
 
     def test_successful_download_parses_json(self, tmp_path):
         payload = {"serper|acme.com|hq": {"fetched_at": "2026-01-01T00:00:00+00:00",
@@ -152,16 +262,16 @@ class TestLoadCacheIndex:
             # cmd[-1] is the local destination path the function generated.
             local_path = cmd[-1]
             from pathlib import Path
-            import json
             Path(local_path).write_text(json.dumps(payload), encoding="utf-8")
 
             class _Proc:
                 returncode = 0
             return _Proc()
 
-        with patch("enrichment_cache.resolve_gcs_upload_tool", return_value=["gcloud", "storage", "cp"]):
-            with patch("subprocess.run", side_effect=_fake_run):
-                result = ec.load_cache_index("bucket", "italy")
+        with patch("enrichment_cache._storage_client", return_value=None), \
+             patch("enrichment_cache.resolve_gcs_upload_tool", return_value=["gcloud", "storage", "cp"]), \
+             patch("subprocess.run", side_effect=_fake_run):
+            result = ec.load_cache_index("bucket", "italy")
         assert result == payload
 
     def test_invalid_json_returns_empty(self):
@@ -174,9 +284,10 @@ class TestLoadCacheIndex:
                 returncode = 0
             return _Proc()
 
-        with patch("enrichment_cache.resolve_gcs_upload_tool", return_value=["gcloud", "storage", "cp"]):
-            with patch("subprocess.run", side_effect=_fake_run):
-                assert ec.load_cache_index("bucket", "italy") == {}
+        with patch("enrichment_cache._storage_client", return_value=None), \
+             patch("enrichment_cache.resolve_gcs_upload_tool", return_value=["gcloud", "storage", "cp"]), \
+             patch("subprocess.run", side_effect=_fake_run):
+            assert ec.load_cache_index("bucket", "italy") == {}
 
 
 # ---------------------------------------------------------------------------
@@ -195,17 +306,19 @@ class TestSaveCacheIndex:
         assert result["success"] is False
 
     def test_no_gcloud_tool_fails_with_clear_error(self):
-        with patch("enrichment_cache.resolve_gcs_upload_tool", return_value=None):
+        with patch("enrichment_cache._storage_client", return_value=None), \
+             patch("enrichment_cache.resolve_gcs_upload_tool", return_value=None):
             result = ec.save_cache_index("bucket", "italy", {"a": 1})
         assert result["success"] is False
         assert "gcloud" in result["error"].lower() or "gsutil" in result["error"].lower()
 
     def test_failing_upload_returns_result_dict_no_crash(self):
-        with patch("enrichment_cache.resolve_gcs_upload_tool",
-                   return_value=["gcloud", "storage", "cp"]):
-            with patch("enrichment_cache.upload_file",
-                       return_value={"success": False, "error": "network unreachable"}):
-                result = ec.save_cache_index("bucket", "italy", {"a": 1})
+        with patch("enrichment_cache._storage_client", return_value=None), \
+             patch("enrichment_cache.resolve_gcs_upload_tool",
+                   return_value=["gcloud", "storage", "cp"]), \
+             patch("enrichment_cache.upload_file",
+                   return_value={"success": False, "error": "network unreachable"}):
+            result = ec.save_cache_index("bucket", "italy", {"a": 1})
         assert result == {"success": False, "error": "network unreachable"}
 
     def test_successful_upload_delegates_to_upload_file(self):
@@ -216,18 +329,20 @@ class TestSaveCacheIndex:
             captured["local_path"] = local_path
             return {"success": True}
 
-        with patch("enrichment_cache.resolve_gcs_upload_tool",
-                   return_value=["gcloud", "storage", "cp"]):
-            with patch("enrichment_cache.upload_file", side_effect=_fake_upload):
-                result = ec.save_cache_index("bucket", "italy", {"a": 1})
+        with patch("enrichment_cache._storage_client", return_value=None), \
+             patch("enrichment_cache.resolve_gcs_upload_tool",
+                   return_value=["gcloud", "storage", "cp"]), \
+             patch("enrichment_cache.upload_file", side_effect=_fake_upload):
+            result = ec.save_cache_index("bucket", "italy", {"a": 1})
         assert result == {"success": True}
         assert captured["destination"] == \
             "gs://bucket/_enrichment_cache/italy_cache_index.json"
 
     def test_unexpected_exception_returns_failure_dict(self):
-        with patch("enrichment_cache.resolve_gcs_upload_tool",
-                   return_value=["gcloud", "storage", "cp"]):
-            with patch("enrichment_cache.upload_file", side_effect=RuntimeError("boom")):
-                result = ec.save_cache_index("bucket", "italy", {"a": 1})
+        with patch("enrichment_cache._storage_client", return_value=None), \
+             patch("enrichment_cache.resolve_gcs_upload_tool",
+                   return_value=["gcloud", "storage", "cp"]), \
+             patch("enrichment_cache.upload_file", side_effect=RuntimeError("boom")):
+            result = ec.save_cache_index("bucket", "italy", {"a": 1})
         assert result["success"] is False
         assert "boom" in result["error"]
