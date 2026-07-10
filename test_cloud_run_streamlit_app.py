@@ -21,15 +21,19 @@ from cloud_run_streamlit_app import (
     _download_existing_current_export,
     _gcloud_executable,
     _merge_export_into_existing_current,
+    build_cat_command,
     build_download_command,
     build_execute_command,
     build_list_command,
     build_upload_command,
     count_task_statuses,
+    determine_run_stage,
     gcs_incoming_uri,
     gcs_output_dir,
     known_enriched_company_ids,
     list_existing_gcs_files,
+    parse_run_ids_from_manifest_listing,
+    read_gcs_json,
     run_streaming,
     split_rows_by_existing_enrichment,
 )
@@ -51,7 +55,7 @@ def test_build_upload_command_includes_project():
     ]
 
 
-def test_build_execute_command_sets_all_env_vars_and_waits():
+def test_build_execute_command_sets_all_env_vars_and_does_not_wait_by_default():
     cmd = build_execute_command(
         job_name="myngle-lead-prioritizer",
         project="proj-1",
@@ -63,7 +67,10 @@ def test_build_execute_command_sets_all_env_vars_and_waits():
         mode="full",
     )
     assert cmd[:5] == [_gcloud_executable(), "run", "jobs", "execute", "myngle-lead-prioritizer"]
-    assert "--wait" in cmd
+    # Non-blocking by default: the Cloud Run Job keeps running server-side
+    # regardless, but this gcloud subprocess (and therefore the local
+    # laptop) doesn't need to stay alive for the whole run.
+    assert "--wait" not in cmd
     # --tasks must be passed explicitly: the TASK_COUNT env var alone doesn't
     # change the execution's task count (Cloud Run's own CLOUD_RUN_TASK_COUNT
     # — the deploy-time count — takes precedence in the runner), so without
@@ -76,6 +83,21 @@ def test_build_execute_command_sets_all_env_vars_and_waits():
     assert "RUN_ID=run123" in env_vars
     assert "TASK_COUNT=10" in env_vars
     assert "MODE=full" in env_vars
+
+
+def test_build_execute_command_appends_wait_when_requested():
+    cmd = build_execute_command(
+        job_name="myngle-lead-prioritizer",
+        project="proj-1",
+        region="europe-west4",
+        input_uri="gs://b/incoming/leads.xlsx",
+        output_dir="gs://b/runs/run123",
+        run_id="run123",
+        task_count=10,
+        mode="full",
+        wait=True,
+    )
+    assert "--wait" in cmd
 
 
 def test_build_execute_command_appends_extra_env_vars():
@@ -151,6 +173,78 @@ def test_count_task_statuses_order_independent_for_same_task():
         "gs://b/runs/r/status/part_0000_running.json\n"
     )
     assert count_task_statuses(listing) == {"done": 1, "failed": 0, "running": 0}
+
+
+# ── read_gcs_json / build_cat_command: remote status polling, no download ──
+
+def test_build_cat_command_includes_project():
+    cmd = build_cat_command("gs://b/runs/r/manifest.json", "proj-1")
+    assert cmd == [_gcloud_executable(), "storage", "cat", "gs://b/runs/r/manifest.json", "--project", "proj-1"]
+
+
+def test_read_gcs_json_parses_successful_cat_output():
+    with patch("cloud_run_streamlit_app.run_capture", return_value=(0, '{"status": "done"}')):
+        assert read_gcs_json("gs://b/runs/r/manifest.json", "proj-1") == {"status": "done"}
+
+
+def test_read_gcs_json_returns_none_when_file_does_not_exist_yet():
+    with patch("cloud_run_streamlit_app.run_capture", return_value=(1, "ERROR: not found")):
+        assert read_gcs_json("gs://b/runs/r/manifest.json", "proj-1") is None
+
+
+def test_read_gcs_json_returns_none_on_invalid_json():
+    with patch("cloud_run_streamlit_app.run_capture", return_value=(0, "not json")):
+        assert read_gcs_json("gs://b/runs/r/manifest.json", "proj-1") is None
+
+
+# ── parse_run_ids_from_manifest_listing: Recent runs discovery ─────────────
+
+def test_parse_run_ids_from_manifest_listing_sorts_most_recent_first():
+    listing = (
+        "gs://b/runs/20260701_120000_spain/manifest.json\n"
+        "gs://b/runs/20260710_090000_switzerland/manifest.json\n"
+        "gs://b/runs/20260705_150000_italy/manifest.json\n"
+    )
+    assert parse_run_ids_from_manifest_listing(listing) == [
+        "20260710_090000_switzerland", "20260705_150000_italy", "20260701_120000_spain",
+    ]
+
+
+def test_parse_run_ids_from_manifest_listing_ignores_unrelated_lines():
+    listing = (
+        "No matches for pattern\n"
+        "gs://b/runs/20260710_090000_switzerland/parts/part_0000.xlsx\n"
+        "gs://b/runs/20260710_090000_switzerland/manifest.json\n"
+    )
+    assert parse_run_ids_from_manifest_listing(listing) == ["20260710_090000_switzerland"]
+
+
+# ── determine_run_stage: single source of truth for the status panel ───────
+
+def test_determine_run_stage_no_status_yet():
+    assert determine_run_stage({"done": 0, "failed": 0, "running": 0}, 10, None) == "no_status_yet"
+
+
+def test_determine_run_stage_running():
+    assert determine_run_stage({"done": 4, "failed": 0, "running": 6}, 10, None) == "running"
+
+
+def test_determine_run_stage_ready_to_merge():
+    assert determine_run_stage({"done": 10, "failed": 0, "running": 0}, 10, None) == "ready_to_merge"
+
+
+def test_determine_run_stage_has_failed_tasks():
+    assert determine_run_stage({"done": 8, "failed": 2, "running": 0}, 10, None) == "has_failed_tasks"
+
+
+def test_determine_run_stage_merged_wins_over_task_counts():
+    merge_manifest = {"status": "done"}
+    assert determine_run_stage({"done": 10, "failed": 0, "running": 0}, 10, merge_manifest) == "merged"
+
+
+def test_determine_run_stage_merge_failed():
+    merge_manifest = {"status": "failed", "error": "1 task(s) failed"}
+    assert determine_run_stage({"done": 9, "failed": 1, "running": 0}, 10, merge_manifest) == "merge_failed"
 
 
 # ── list_existing_gcs_files: archive-folder overwrite pre-flight check ──────
