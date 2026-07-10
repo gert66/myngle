@@ -616,12 +616,20 @@ def main() -> None:  # pragma: no cover - exercised only under `streamlit run`
     import plotly.graph_objects as go
     import streamlit as st
 
-    def render_before_after(original_by_id: dict, rescored_by_id: dict) -> None:
+    def render_before_after(
+        original_by_id: dict, rescored_by_id: dict, *, key_prefix: str,
+    ) -> None:
         """Score-distribution histogram + tier bar chart for a huidig/nieuw
-        pair. Shared by the "Alle landen" and "Toepassen & uploaden" tabs.
-        Shows an info message instead of crashing when there is no company
-        with a score to plot (e.g. a country folder whose current/ run has
-        no company-details records)."""
+        pair. Shared by the "Impact", "Alle landen" and "Toepassen &
+        uploaden" tabs. Shows an info message instead of crashing when there
+        is no company with a score to plot (e.g. a country folder whose
+        current/ run has no company-details records).
+
+        ``key_prefix`` MUST be unique per call site: Streamlit renders every
+        tab's body on every rerun (not just the visible tab), so the three
+        call sites below all execute in the same run — without distinct
+        keys their auto-generated chart IDs collide
+        (StreamlitDuplicateElementId)."""
         dist_df = score_distribution_dataframe(original_by_id, rescored_by_id)
         if not dist_df.empty:
             dist_df = dist_df.dropna(subset=["commercial_fit_score"])
@@ -638,6 +646,7 @@ def main() -> None:  # pragma: no cover - exercised only under `streamlit run`
                     labels={"commercial_fit_score": "commercial_fit_score", "when": ""},
                 ),
                 use_container_width=True,
+                key=f"{key_prefix}_dist_chart",
             )
 
         tier_df = tier_distribution_dataframe(original_by_id, rescored_by_id)
@@ -653,6 +662,7 @@ def main() -> None:  # pragma: no cover - exercised only under `streamlit run`
                     labels={"when": ""},
                 ),
                 use_container_width=True,
+                key=f"{key_prefix}_tier_chart",
             )
 
     st.set_page_config(page_title="Re-score Explorer", page_icon="🎛️", layout="wide")
@@ -910,7 +920,7 @@ def main() -> None:  # pragma: no cover - exercised only under `streamlit run`
             else:
                 st.dataframe(summary_df, use_container_width=True, hide_index=True)
 
-            render_before_after(original_by_id, rescored_by_id)
+            render_before_after(original_by_id, rescored_by_id, key_prefix="impact")
 
             st.subheader("Top-bedrijven (nieuw, hoog → laag)")
             top_df = top_companies_dataframe(original_by_id, rescored_by_id)
@@ -984,6 +994,28 @@ def main() -> None:  # pragma: no cover - exercised only under `streamlit run`
             "grootte-gewicht past zich automatisch aan (zoals in de "
             "referentie-spreadsheet's 'Scoring Parameters'-tab)."
         )
+        if params["size_weight"] >= 0.7:
+            _size_values = ", ".join(f"{v:g}" for v in sorted(set(SIZE_BAND_LOOKUP.values())))
+            if params["model_weight"] == 0.0:
+                st.warning(
+                    "ICP-gewicht staat op 0: `final_commercial_fit_score` wordt nu "
+                    "EXACT gelijk aan `company_size_score` — de ICP-signalen tellen "
+                    "helemaal niet meer mee. Bedrijfsgrootte is geen doorlopende "
+                    "schaal maar een vaste band per employee-range, dus de score "
+                    f"kan maar **{len(set(SIZE_BAND_LOOKUP.values()))} vaste "
+                    f"waarden** aannemen: {_size_values}. Dat verklaart de "
+                    "'verbreding'/blokjes in de histogram hierboven in plaats van "
+                    "een vloeiende verdeling — elk blokje is één employee-range-band."
+                )
+            else:
+                st.info(
+                    "Bij een hoog grootte-gewicht domineert `company_size_score` "
+                    "de eindscore. Let op: grootte is geen doorlopende schaal maar "
+                    f"een vaste band per employee-range ({len(set(SIZE_BAND_LOOKUP.values()))} "
+                    f"mogelijke waarden: {_size_values}), dus de histogram gaat er "
+                    "steeds blokkiger/'breder' uitzien naarmate size_weight hoger "
+                    "wordt — dat is verwacht gedrag, geen bug."
+                )
 
         curve_df = sigmoid_curve_dataframe(
             params["sigmoid_k"],
@@ -1252,7 +1284,7 @@ def main() -> None:  # pragma: no cover - exercised only under `streamlit run`
             else:
                 st.dataframe(summary_df, use_container_width=True, hide_index=True)
 
-            render_before_after(p_original, p_rescored)
+            render_before_after(p_original, p_rescored, key_prefix="all_countries")
 
             st.divider()
             st.subheader("Uploaden naar GCS — alle landen")
@@ -1339,7 +1371,7 @@ def main() -> None:  # pragma: no cover - exercised only under `streamlit run`
             m2.metric("In preview her-scoord", len(rescored_by_id))
             m3.metric("Land-folder", country_folder)
 
-            render_before_after(original_by_id, rescored_by_id)
+            render_before_after(original_by_id, rescored_by_id, key_prefix="apply")
 
             st.subheader("Grootste verschuivingen")
             movers_df = biggest_movers_dataframe(original_by_id, rescored_by_id)

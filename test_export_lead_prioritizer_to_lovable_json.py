@@ -1132,7 +1132,7 @@ def test_ui_payload_and_array_fields(tmp_path):
     assert ui_payload["what_is_hot"] == [
         "Foreign ownership or group structure confirmed.",
         "Industry: Manufacturing.",
-        "Company size: 201-500 employees.",
+        "Company size: Mid-Size (201–500 employees).",
     ]
     assert len(ui_payload["what_is_hot"]) <= 5
     # commercial_fit_drivers always lists all six fixed dimensions now — the
@@ -4485,6 +4485,54 @@ class TestScoringInputsExport:
         assert recomputed["final_commercial_fit_score"] == \
             expected["final_commercial_fit_score"]
         assert recomputed["commercial_tier"] == expected["commercial_tier"]
+
+
+class TestSizeCategoryAppExport:
+    """size_category_app / display_size_category_app used to be read
+    straight from the input row and were therefore always blank — nothing
+    upstream ever computed them, even though employee_range (25% of
+    final_commercial_fit_score) was populated and scored the whole time.
+    They're now derived from the same employee-range data the scoring
+    engine reads (commercial_fit_scoring.resolve_size_category), so the app
+    finally has a human-readable size label to display."""
+
+    def test_list_item_gets_derived_size_category(self, tmp_path):
+        enriched = [enriched_row(employee_range="1001-5000")]
+        _, out_dir = run_export(tmp_path, enriched)
+        list_items = load_list(out_dir)
+        item = next(i for i in list_items if i["company_name"] == "Acme Brasil")
+        assert item["size_category_app"] == "large"
+        assert item["display_size_category_app"] == "Large (1,001–5,000 employees)"
+
+    def test_detail_record_carries_the_same_size_category(self, tmp_path):
+        enriched = [enriched_row(employee_range="501-1000")]
+        _, out_dir = run_export(tmp_path, enriched)
+        detail = detail_for(out_dir, "Acme Brasil")
+        assert detail["size_category_app"] == "mid_large"
+        assert detail["display_size_category_app"] == "Mid-Large (501–1,000 employees)"
+
+    def test_missing_employee_range_leaves_size_category_blank(self, tmp_path):
+        enriched = [enriched_row(employee_range=None)]
+        _, out_dir = run_export(tmp_path, enriched)
+        list_items = load_list(out_dir)
+        item = next(i for i in list_items if i["company_name"] == "Acme Brasil")
+        assert item["size_category_app"] is None
+        assert item["display_size_category_app"] is None
+
+    def test_explicit_input_override_is_not_replaced(self, tmp_path):
+        # An input row that already carries these columns (e.g. a future
+        # upstream source that computes its own label) wins — mirrors
+        # _resolve_industry's "keep the input value when present" rule.
+        enriched = [enriched_row(
+            employee_range="1001-5000",
+            size_category_app="custom_slug",
+            display_size_category_app="Custom Label",
+        )]
+        _, out_dir = run_export(tmp_path, enriched)
+        list_items = load_list(out_dir)
+        item = next(i for i in list_items if i["company_name"] == "Acme Brasil")
+        assert item["size_category_app"] == "custom_slug"
+        assert item["display_size_category_app"] == "Custom Label"
 
     def test_scoring_inputs_survives_dutch_localization(self, tmp_path):
         # localize_detail_record_for_dutch must not strip a non-display field.
