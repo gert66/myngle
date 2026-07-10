@@ -1161,6 +1161,13 @@ def main() -> None:  # pragma: no cover - exercised only under `streamlit run`
                 f"📊 Bezig: {counts['done']} klaar, {counts['failed']} gefaald, "
                 f"{counts['running']} bezig ({reported}/{expected_task_count} gerapporteerd)."
             )
+
+        if stage in ("no_status_yet", "running"):
+            # Reachable from provisioning onward, not just once a task has
+            # reported -- a run stuck for 40+ minutes before its first task
+            # even writes a status file (e.g. because the wrong task count
+            # was used for the file's real row count) previously had no way
+            # to be stopped from the UI at all.
             execution_name = (manifest or {}).get("execution_name")
             if execution_name:
                 st.warning(
