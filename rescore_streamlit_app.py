@@ -55,6 +55,7 @@ from rescore_from_gcs import (
     default_rescore_run_folder,
     download_current_run,
     list_country_folders,
+    promote_run_to_current,
     rehydrate_scoring_row,
     rescore_details_bucket,
     resolve_detail_employee_range,
@@ -1663,9 +1664,58 @@ def main() -> None:  # pragma: no cover - exercised only under `streamlit run`
                             f"{len(results)} bestanden geüpload naar "
                             f"gs://{bucket}/{country_folder}/runs/{run_folder}/"
                         )
+                        st.session_state["_last_uploaded_run_folder"] = run_folder
                     st.dataframe(pd.DataFrame(results), use_container_width=True, hide_index=True)
                 except Exception as exc:
                     st.error(f"Upload mislukt: {exc}")
+
+            st.divider()
+            st.subheader("Promoveren naar current/")
+            st.caption(
+                "Maakt een al geüploade run live voor de Company Hub door "
+                "alles uit `runs/<run-folder>/` te kopiëren naar `current/` "
+                "— overschrijft de bestaande current/ run zonder eigen "
+                "fallback, dus controleer eerst de cijfers hierboven."
+            )
+            promote_folder = st.text_input(
+                "Te promoveren run-folder",
+                value=st.session_state.get("_last_uploaded_run_folder", run_folder),
+                key="_promote_run_folder",
+            )
+            promote_confirmed = st.checkbox(
+                f"Ik begrijp dat dit gs://{bucket}/{country_folder}/current/ "
+                f"overschrijft met de inhoud van runs/{promote_folder}/.",
+                key="_promote_confirmed",
+            )
+            if st.button(
+                "⬆️ Promoveer naar current/", disabled=not promote_confirmed
+            ):
+                try:
+                    with st.spinner(
+                        f"runs/{promote_folder}/ promoveren naar current/…"
+                    ):
+                        promote_result = promote_run_to_current(
+                            bucket, country_folder, promote_folder
+                        )
+                    promote_results = promote_result["results"]
+                    n_promote_failed = sum(
+                        1 for r in promote_results if not r["success"])
+                    if n_promote_failed:
+                        st.error(
+                            f"{n_promote_failed} van {len(promote_results)} "
+                            "bestanden mislukt bij promoten."
+                        )
+                    else:
+                        st.success(
+                            f"{len(promote_results)} bestanden gepromoveerd "
+                            f"naar gs://{bucket}/{country_folder}/current/"
+                        )
+                    st.dataframe(
+                        pd.DataFrame(promote_results),
+                        use_container_width=True, hide_index=True,
+                    )
+                except Exception as exc:
+                    st.error(f"Promoten mislukt: {exc}")
 
     st.session_state["rescore_params"] = params
 
