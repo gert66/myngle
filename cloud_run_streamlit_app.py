@@ -142,22 +142,30 @@ def list_existing_gcs_files(listing_output: str) -> list[str]:
 
 
 _STATUS_SUFFIXES = (("_done.json", "done"), ("_failed.json", "failed"), ("_running.json", "running"))
+_STATUS_PRECEDENCE = {"running": 0, "failed": 1, "done": 2}
 
 
 def count_task_statuses(listing_output: str) -> dict:
     """Classify ``gcloud storage ls .../status/*.json`` output lines into
     per-TASK final state, then tally those states.
 
-    cloud_job_runner.py never deletes a task's ``_running.json`` once it
-    writes the matching ``_done.json``/``_failed.json`` (see its ``main()``),
-    so both files coexist for every finished task — counting raw file
-    suffixes would count every finished task as "still running" forever.
-    Instead this groups lines by task label (the filename with the status
-    suffix stripped) and lets ``done``/``failed`` (terminal) win over a
-    leftover ``running`` marker for the same task, regardless of listing
-    order. Ignores non-matching/blank lines (e.g. gcloud's "no matches"
-    message on an empty/not-yet-existing prefix) so this never raises on a
-    run that hasn't written anything yet.
+    cloud_job_runner.py keys every status file by task index alone (not by
+    retry attempt) and never deletes an earlier attempt's marker. So a task
+    that failed once and then succeeded on a Cloud Run-driven retry (or a
+    manual rerun of just that task) leaves BOTH its stale ``_failed.json``
+    and its fresh ``_done.json`` sitting in GCS side by side — same for a
+    finished task's leftover ``_running.json``. Counting raw file suffixes,
+    or letting whichever state is listed last win, would then depend on
+    ``gcloud storage ls``'s lexicographic ordering ("_done.json" always
+    sorts before "_failed.json"), which would let a *stale* failure
+    permanently outrank a *later* success. Instead this groups lines by task
+    label (the filename with the status suffix stripped) and applies a
+    fixed precedence — done > failed > running — so the state can only
+    move up this ladder, never down, regardless of listing order: once a
+    label has reported "done", nothing can downgrade it back to "failed".
+    Ignores non-matching/blank lines (e.g. gcloud's "no matches" message on
+    an empty/not-yet-existing prefix) so this never raises on a run that
+    hasn't written anything yet.
     """
     task_state: dict[str, str] = {}
     for line in listing_output.splitlines():
@@ -165,7 +173,8 @@ def count_task_statuses(listing_output: str) -> dict:
         for suffix, state in _STATUS_SUFFIXES:
             if name.endswith(suffix):
                 label = name[: -len(suffix)]
-                if state != "running" or label not in task_state:
+                current = task_state.get(label)
+                if current is None or _STATUS_PRECEDENCE[state] > _STATUS_PRECEDENCE[current]:
                     task_state[label] = state
                 break
     counts = {"running": 0, "done": 0, "failed": 0}
@@ -176,6 +185,52 @@ def count_task_statuses(listing_output: str) -> dict:
 
 def build_cat_command(uri: str, project: str) -> list[str]:
     return [_gcloud_executable(), "storage", "cat", uri, "--project", project]
+
+
+def build_execution_describe_command(execution_name: str, project: str, region: str) -> list[str]:
+    return [
+        _gcloud_executable(), "run", "jobs", "executions", "describe", execution_name,
+        "--project", project, "--region", region, "--format", "json",
+    ]
+
+
+def parse_execution_status(describe_output: str) -> Optional[dict]:
+    """Parse `gcloud run jobs executions describe --format=json` into a
+    small live-concurrency summary sourced directly from Cloud Run itself
+    (spec.parallelism / spec.taskCount, status.runningCount/succeededCount/
+    failedCount) rather than inferred from which GCS status/*.json files
+    have appeared -- gives "hoeveel systemen er in de lucht zijn" visibility
+    the GCS-polling counts above can't (they only reflect finished tasks).
+    None on any parse failure (execution not found yet, empty output)."""
+    try:
+        data = json.loads(describe_output)
+    except Exception:
+        return None
+    status = data.get("status") or {}
+    spec = data.get("spec") or {}
+    return {
+        "running": int(status.get("runningCount", 0) or 0),
+        "succeeded": int(status.get("succeededCount", 0) or 0),
+        "failed": int(status.get("failedCount", 0) or 0),
+        "task_count": int(spec.get("taskCount", 0) or 0),
+        "parallelism": int(spec.get("parallelism", 0) or 0),
+    }
+
+
+def build_logs_tail_command(
+    job_name: str, execution_name: str, project: str, region: str, limit: int = 25,
+) -> list[str]:
+    log_filter = (
+        f'resource.type="cloud_run_job" AND '
+        f'resource.labels.job_name="{job_name}" AND '
+        f'resource.labels.location="{region}" AND '
+        f'labels."run.googleapis.com/execution_name"="{execution_name}"'
+    )
+    return [
+        _gcloud_executable(), "logging", "read", log_filter,
+        "--project", project, "--limit", str(limit),
+        "--format", "value(timestamp,textPayload)", "--order", "desc", "--freshness=1d",
+    ]
 
 
 def read_gcs_json(uri: str, project: str) -> Optional[dict]:
@@ -892,10 +947,11 @@ def main() -> None:  # pragma: no cover - exercised only under `streamlit run`
         job_name = st.text_input("Cloud Run Job", value=DEFAULT_JOB_NAME)
         st.divider()
         task_count = st.number_input(
-            "Task count", min_value=1, max_value=50, value=10, step=1,
-            help="10 / 25 / 50 zijn de aanbevolen stappen — zie 'Eerste veilige "
-                 "instellingen' in de doc. Hoger = sneller maar zwaardere "
-                 "Firecrawl/Serper-belasting.",
+            "Task count", min_value=1, max_value=500, value=10, step=1,
+            help="10 / 25 / 50 zijn de aanbevolen stappen voor kleine bestanden. "
+                 "Voor grote bestanden: zet dit ruim boven de parallelism-limiet "
+                 "(bv. 100-150 bij parallelism=50) zodat trage shards niet de "
+                 "hele run ophouden — zie 'Eerste veilige instellingen' in de doc.",
         )
         try:
             from lead_prioritizer_batch_core import SUPPORTED_RUN_MODES
@@ -1155,12 +1211,18 @@ def main() -> None:  # pragma: no cover - exercised only under `streamlit run`
         reported = counts["done"] + counts["failed"]
 
         if stage == "no_status_yet":
-            st.info("⏳ Nog geen enkele taak heeft gerapporteerd — de job wordt mogelijk nog geprovisioneerd.")
+            with st.status(
+                "Nog geen enkele taak heeft gerapporteerd — de job wordt mogelijk nog geprovisioneerd.",
+                state="running",
+            ):
+                pass
         elif stage == "running":
-            st.info(
-                f"📊 Bezig: {counts['done']} klaar, {counts['failed']} gefaald, "
-                f"{counts['running']} bezig ({reported}/{expected_task_count} gerapporteerd)."
-            )
+            with st.status(
+                f"Bezig: {counts['done']} klaar, {counts['failed']} gefaald, "
+                f"{counts['running']} bezig ({reported}/{expected_task_count} gerapporteerd).",
+                state="running",
+            ):
+                pass
 
         if stage in ("no_status_yet", "running"):
             # Reachable from provisioning onward, not just once a task has
@@ -1170,6 +1232,25 @@ def main() -> None:  # pragma: no cover - exercised only under `streamlit run`
             # to be stopped from the UI at all.
             execution_name = (manifest or {}).get("execution_name")
             if execution_name:
+                rc_desc, describe_output = run_capture(
+                    build_execution_describe_command(execution_name, project, region))
+                exec_status = parse_execution_status(describe_output) if rc_desc == 0 else None
+                if exec_status:
+                    st.caption(
+                        f"📶 Live vanuit Cloud Run: **{exec_status['running']}** van de "
+                        f"{exec_status['task_count']} taken nu actief tegelijk "
+                        f"(max parallelism {exec_status['parallelism']}) — "
+                        f"{exec_status['succeeded']} klaar, {exec_status['failed']} gefaald."
+                    )
+                with st.expander("📜 Recente logs (laatste 25 regels)"):
+                    if st.button("Ververs logs", key=f"refresh_logs_{run_id}"):
+                        st.rerun()
+                    rc_logs, logs_output = run_capture(
+                        build_logs_tail_command(job_name, execution_name, project, region))
+                    if rc_logs != 0 or not logs_output.strip():
+                        st.caption("Nog geen logregels beschikbaar.")
+                    else:
+                        st.code(logs_output, language=None)
                 st.warning(
                     "⚠️ Een run stoppen kan niet ongedaan gemaakt worden — reeds "
                     "gelukte shards blijven wel staan in `parts/` en worden bij "

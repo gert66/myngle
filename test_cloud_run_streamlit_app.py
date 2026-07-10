@@ -24,7 +24,9 @@ from cloud_run_streamlit_app import (
     build_cat_command,
     build_download_command,
     build_execute_command,
+    build_execution_describe_command,
     build_list_command,
+    build_logs_tail_command,
     build_upload_command,
     count_task_statuses,
     determine_run_stage,
@@ -33,6 +35,7 @@ from cloud_run_streamlit_app import (
     gcs_output_dir,
     known_enriched_company_ids,
     list_existing_gcs_files,
+    parse_execution_status,
     parse_run_ids_from_manifest_listing,
     read_gcs_json,
     run_streaming,
@@ -172,6 +175,60 @@ def test_build_list_command_targets_glob():
     ]
 
 
+# ── build_execution_describe_command / parse_execution_status / logs tail ──
+
+def test_build_execution_describe_command():
+    cmd = build_execution_describe_command("myngle-lead-prioritizer-abc12", "proj-1", "europe-west4")
+    assert cmd == [
+        _gcloud_executable(), "run", "jobs", "executions", "describe",
+        "myngle-lead-prioritizer-abc12", "--project", "proj-1", "--region", "europe-west4",
+        "--format", "json",
+    ]
+
+
+def test_parse_execution_status_reads_running_and_spec_fields():
+    # Real shape from `gcloud run jobs executions describe --format=json` on
+    # a still-running execution: only the counts that are non-zero are
+    # present under status (a fully-succeeded execution omits runningCount
+    # entirely, for example), so every field is read with a default of 0.
+    describe_output = json.dumps({
+        "spec": {"parallelism": 50, "taskCount": 10},
+        "status": {"runningCount": 6, "succeededCount": 3, "failedCount": 1},
+    })
+    assert parse_execution_status(describe_output) == {
+        "running": 6, "succeeded": 3, "failed": 1, "task_count": 10, "parallelism": 50,
+    }
+
+
+def test_parse_execution_status_defaults_missing_counts_to_zero():
+    # Completed execution: status carries only succeededCount.
+    describe_output = json.dumps({
+        "spec": {"parallelism": 50, "taskCount": 10},
+        "status": {"succeededCount": 10},
+    })
+    assert parse_execution_status(describe_output) == {
+        "running": 0, "succeeded": 10, "failed": 0, "task_count": 10, "parallelism": 50,
+    }
+
+
+def test_parse_execution_status_invalid_json_returns_none():
+    assert parse_execution_status("") is None
+    assert parse_execution_status("not json") is None
+
+
+def test_build_logs_tail_command_filters_by_execution_name():
+    cmd = build_logs_tail_command(
+        "myngle-lead-prioritizer", "myngle-lead-prioritizer-abc12", "proj-1", "europe-west4")
+    assert cmd[:3] == [_gcloud_executable(), "logging", "read"]
+    log_filter = cmd[3]
+    assert 'resource.type="cloud_run_job"' in log_filter
+    assert 'resource.labels.job_name="myngle-lead-prioritizer"' in log_filter
+    assert 'resource.labels.location="europe-west4"' in log_filter
+    assert 'labels."run.googleapis.com/execution_name"="myngle-lead-prioritizer-abc12"' in log_filter
+    assert "--project" in cmd and "proj-1" in cmd
+    assert "--limit" in cmd and "25" in cmd
+
+
 # ── count_task_statuses: classify status/ listing output ────────────────────
 
 def test_count_task_statuses_classifies_by_suffix():
@@ -209,6 +266,31 @@ def test_count_task_statuses_order_independent_for_same_task():
     listing = (
         "gs://b/runs/r/status/part_0000_done.json\n"
         "gs://b/runs/r/status/part_0000_running.json\n"
+    )
+    assert count_task_statuses(listing) == {"done": 1, "failed": 0, "running": 0}
+
+
+def test_count_task_statuses_retried_task_done_beats_stale_failed():
+    # part_0050 failed once, then succeeded on a retry (Cloud Run's own
+    # task-level retry, or a manual rerun of just that task index) --
+    # cloud_job_runner.py never deletes the earlier _failed.json, so both
+    # markers coexist. "_done.json" sorts before "_failed.json"
+    # lexicographically, which is exactly the ordering `gcloud storage ls`
+    # returns here -- a naive last-one-wins would let the stale failure
+    # outrank the later success. It must count as done, not failed.
+    listing = (
+        "gs://b/runs/r/status/part_0050_done.json\n"
+        "gs://b/runs/r/status/part_0050_failed.json\n"
+    )
+    assert count_task_statuses(listing) == {"done": 1, "failed": 0, "running": 0}
+
+
+def test_count_task_statuses_retried_task_done_beats_stale_failed_reverse_order():
+    # Same as above but with the two files in the opposite order, to prove
+    # the precedence rule -- not incidental listing order -- is what wins.
+    listing = (
+        "gs://b/runs/r/status/part_0050_failed.json\n"
+        "gs://b/runs/r/status/part_0050_done.json\n"
     )
     assert count_task_statuses(listing) == {"done": 1, "failed": 0, "running": 0}
 
