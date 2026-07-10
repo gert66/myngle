@@ -296,6 +296,12 @@ async def handle_event(request: Request):
     output_dir = join_path(runs_bucket_dir, "runs", run_id)
     extra_env = build_env_overrides_from_config(config)
 
+    # Job execution is started BEFORE the manifest is written (not after, as
+    # before) so the manifest can carry execution_name for the stop button --
+    # the manifest is still always written, even when the execution call
+    # fails, so "manifest exists even without deploy credentials" still holds.
+    execution = start_cloud_run_job_execution(run_id, input_uri, output_dir, task_count, extra_env=extra_env)
+
     manifest = {
         "run_id": run_id,
         "input_uri": input_uri,
@@ -304,14 +310,13 @@ async def handle_event(request: Request):
         "task_count": task_count,
         "created_at": datetime.now(timezone.utc).isoformat(),
         "config": config,
+        "execution_name": execution.get("execution") if execution.get("started") else None,
     }
     manifest_uri = join_path(output_dir, "manifest.json")
     try:
         write_status_json(manifest_uri, manifest)
     except Exception as exc:
         print(f"[cloud_dispatcher] ERROR: could not write manifest: {type(exc).__name__}: {exc}", file=sys.stderr)
-
-    execution = start_cloud_run_job_execution(run_id, input_uri, output_dir, task_count, extra_env=extra_env)
 
     return JSONResponse(
         {
@@ -371,15 +376,53 @@ def _claim_completion(claim_uri: str, run_id: str) -> bool:
     return True
 
 
+def _download_existing_current_via_client(bucket: str, country_folder: str) -> tuple[list[dict], dict[str, dict]]:
+    """GCS-client equivalent of cloud_run_streamlit_app._download_existing_current_export
+    (that one shells out to gcloud/gsutil, which isn't available in this
+    lean Cloud Run service). Returns ``([], {})`` -- never raises -- when
+    nothing is there yet or any read/parse step fails, same "merge degrades
+    to nothing existing" philosophy."""
+    prefix = f"{country_folder}/current/"
+    try:
+        blobs = list(_gcs_client().bucket(bucket).list_blobs(prefix=prefix))
+    except Exception:
+        return [], {}
+
+    list_items: list[dict] = []
+    details: dict[str, dict] = {}
+    for blob in blobs:
+        name = blob.name.rsplit("/", 1)[-1]
+        if name != "companies.list.json" and not name.startswith("company-details-"):
+            continue
+        data = _read_json(f"gs://{bucket}/{blob.name}")
+        if data is None:
+            continue
+        if name == "companies.list.json" and isinstance(data, list):
+            list_items = data
+        elif name.startswith("company-details-") and isinstance(data, dict):
+            details.update(data)
+    return list_items, details
+
+
 def _run_lovable_export(final_output_uri: str, output_dir: str, lovable_cfg: dict) -> dict:
     """Download the merged final Excel, run
-    export_lead_prioritizer_to_lovable_json.py in-process, and upload the
-    resulting JSON files to <output_dir>/final/lovable_export/.
+    export_lead_prioritizer_to_lovable_json.py in-process, and:
+      1. archive the raw export to <output_dir>/final/lovable_export/
+         (per-run snapshot inside the runs bucket, as before)
+      2. merge it into the country's live <country>/current/ bucket (the one
+         the Lovable app actually reads from) and archive the same merged
+         snapshot under <country>/runs/<run_folder>/ -- mirroring
+         cloud_run_streamlit_app.run_lovable_export_and_upload, since that
+         was the only place this "go live" step existed before. Always
+         merges rather than overwrites current/ (never the reverse) because
+         this runs unattended -- an unattended overwrite of a live country
+         bucket is the riskier default.
 
     Never raises: any failure (missing country/cold_callers, bad workbook,
-    export exception) comes back as {"started": ..., "ok": False, "error":
-    ...} so a broken export config never blocks the merge itself from being
-    reported as done — the merged Excel is still available either way."""
+    export exception, current/-merge failure) comes back as {"started": ...,
+    "ok": False, "error": ...} so a broken export config never blocks the
+    merge itself from being reported as done — the merged Excel is still
+    available either way."""
     country = lovable_cfg.get("country")
     cold_callers = lovable_cfg.get("cold_callers")
     if not country or not cold_callers:
@@ -394,11 +437,18 @@ def _run_lovable_export(final_output_uri: str, output_dir: str, lovable_cfg: dic
 
     from cloud_merge_results import _download_to_local
     from export_lead_prioritizer_to_lovable_json import main as export_main
+    import lovable_gcs_upload as lovable_gcs
 
     with tempfile.TemporaryDirectory() as td:
+        # _download_to_local returns the path to actually use -- for a gs://
+        # URI that's the local_path it just downloaded to; for an already-
+        # local path (only relevant in tests -- production always passes a
+        # gs:// final_output_uri) it's the ORIGINAL path unchanged, not the
+        # local_xlsx target, so the return value must be captured, not
+        # assumed to equal local_xlsx.
         local_xlsx = Path(td) / Path(final_output_uri).name
         try:
-            _download_to_local(final_output_uri, local_xlsx)
+            local_xlsx = _download_to_local(final_output_uri, local_xlsx)
         except Exception as exc:
             return {"started": False, "ok": False, "error": f"could not download {final_output_uri}: {exc}"}
 
@@ -413,8 +463,8 @@ def _run_lovable_export(final_output_uri: str, output_dir: str, lovable_cfg: dic
             argv.append("--include-skipped")
         if lovable_cfg.get("foreign_hq_only") is False:
             argv.append("--no-foreign-hq-only")
-        if lovable_cfg.get("bucket_size"):
-            argv += ["--bucket-size", str(int(lovable_cfg["bucket_size"]))]
+        bucket_size = int(lovable_cfg["bucket_size"]) if lovable_cfg.get("bucket_size") else 500
+        argv += ["--bucket-size", str(bucket_size)]
         if lovable_cfg.get("content_language"):
             argv += ["--content-language", str(lovable_cfg["content_language"])]
 
@@ -431,7 +481,58 @@ def _run_lovable_export(final_output_uri: str, output_dir: str, lovable_cfg: dic
             dest_uri = join_path(dest_dir, local_file.name)
             upload_output_file(local_file, dest_uri)
             uploaded.append(dest_uri)
-        return {"started": True, "ok": True, "files": uploaded, "dest_dir": dest_dir}
+
+        result = {"started": True, "ok": True, "files": uploaded, "dest_dir": dest_dir, "live_upload": None}
+
+        # ---- Go live: merge into <country>/current/ + archive snapshot ----
+        try:
+            gcs_bucket = lovable_gcs.DEFAULT_GCS_BUCKET
+            country_folder = lovable_gcs.country_folder_slug(str(country))
+            run_folder = lovable_gcs.default_gcs_run_folder(
+                str(lovable_cfg.get("mode") or "full"),
+                now=datetime.now(timezone.utc),
+            )
+
+            new_list_items = json.loads((local_export_dir / "companies.list.json").read_text(encoding="utf-8"))
+            new_details: dict = {}
+            for bucket_path in sorted(local_export_dir.glob("company-details-*.json")):
+                new_details.update(json.loads(bucket_path.read_text(encoding="utf-8")))
+
+            existing_list_items, existing_details = _download_existing_current_via_client(
+                gcs_bucket, country_folder)
+            merged_items, merged_details = lovable_gcs.merge_company_records(
+                existing_list_items, existing_details, new_list_items, new_details)
+            merged_items, merged_buckets = lovable_gcs.rebucket_company_details(
+                merged_items, merged_details, bucket_size)
+
+            merged_dir = Path(td) / "lovable_export_merged_current"
+            merged_dir.mkdir(parents=True, exist_ok=True)
+            (merged_dir / "companies.list.json").write_text(
+                json.dumps(merged_items, ensure_ascii=False, indent=2, default=str), encoding="utf-8")
+            for bucket_file, bucket_data in merged_buckets.items():
+                (merged_dir / bucket_file).write_text(
+                    json.dumps(bucket_data, ensure_ascii=False, indent=2, default=str), encoding="utf-8")
+            merged_filenames = ["companies.list.json"] + sorted(merged_buckets.keys())
+
+            for filename in merged_filenames:
+                upload_output_file(
+                    merged_dir / filename,
+                    lovable_gcs.gcs_current_path(gcs_bucket, country_folder, filename))
+            for local_file in sorted(local_export_dir.glob("*.json")):
+                upload_output_file(
+                    local_file,
+                    lovable_gcs.gcs_archive_path(gcs_bucket, country_folder, run_folder, local_file.name))
+
+            result["live_upload"] = {
+                "ok": True,
+                "current_dir": lovable_gcs.gcs_current_path(gcs_bucket, country_folder, ""),
+                "archive_dir": lovable_gcs.gcs_archive_path(gcs_bucket, country_folder, run_folder, ""),
+                "companies_total_after": len(merged_items),
+            }
+        except Exception as exc:
+            result["live_upload"] = {"ok": False, "error": f"{type(exc).__name__}: {exc}"}
+
+        return result
 
 
 def check_and_trigger_completion(output_dir: str, run_id: str) -> dict:

@@ -2,9 +2,14 @@
 logic (see docs/cloud_run_workflow.md's "Per-run config" / "Auto-merge +
 auto-export" sections).
 
-Everything here uses local paths only (never gs://), so no GCS client is
-ever constructed and no live calls happen. An autouse fixture clears every
+Most tests here use local paths only (never gs://), so no GCS client is
+constructed and no live calls happen. An autouse fixture clears every
 cloud-related env var so tests never pick up leftover config from the host.
+The "go live" tests (TestDownloadExistingCurrent / TestRunLovableExportLive)
+are the exception -- they exercise the <country>/current/ merge-and-upload
+path, which always targets real gs:// destinations regardless of output_dir,
+so they patch both cloud_dispatcher._gcs_client and cloud_job_runner._gcs_client
+(upload_output_file resolves the latter from its own module) to a shared fake.
 """
 
 from __future__ import annotations
@@ -12,6 +17,7 @@ from __future__ import annotations
 import json
 import sys
 from pathlib import Path
+from unittest.mock import patch
 
 import pandas as pd
 import pytest
@@ -19,7 +25,9 @@ import pytest
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 import cloud_dispatcher as disp
+import cloud_job_runner as cjr
 from cloud_job_runner import ROW_INDEX_COL
+from test_export_lead_prioritizer_to_lovable_json import enriched_row, write_workbook
 
 _CLOUD_ENV_VARS = [
     "CLOUD_RUN_JOB_NAME", "CLOUD_RUN_REGION", "CLOUD_RUN_PROJECT",
@@ -189,3 +197,130 @@ def test_completion_check_reports_lovable_export_config_error(tmp_path):
     assert result["status"] == "merged"
     assert result["export"]["ok"] is False
     assert "country" in result["export"]["error"] or "cold_callers" in result["export"]["error"]
+
+
+# ── _download_existing_current_via_client / _run_lovable_export (go-live) ──
+# Fakes mirror test_screened_domains_ledger.py / test_enrichment_cache.py,
+# extended with list_blobs (not needed there) and upload_from_filename
+# (upload_output_file uses filename upload, not upload_from_string).
+
+class _FakeBlob:
+    def __init__(self, store: dict, name: str):
+        self._store = store
+        self.name = name
+
+    def exists(self) -> bool:
+        return self.name in self._store
+
+    def download_as_text(self) -> str:
+        return self._store[self.name]
+
+    def upload_from_filename(self, local_path: str) -> None:
+        self._store[self.name] = Path(local_path).read_text(encoding="utf-8")
+
+    def upload_from_string(self, data, content_type=None) -> None:
+        self._store[self.name] = data
+
+
+class _FakeBucket:
+    def __init__(self, store: dict):
+        self._store = store
+
+    def blob(self, name: str) -> _FakeBlob:
+        return _FakeBlob(self._store, name)
+
+    def list_blobs(self, prefix: str = ""):
+        return [_FakeBlob(self._store, name) for name in self._store if name.startswith(prefix)]
+
+
+class _FakeClient:
+    def __init__(self, store: dict):
+        self._store = store
+
+    def bucket(self, name: str) -> _FakeBucket:
+        return _FakeBucket(self._store)
+
+
+class TestDownloadExistingCurrentViaClient:
+    def test_nothing_existing_returns_empty(self):
+        with patch.object(disp, "_gcs_client", return_value=_FakeClient({})):
+            items, details = disp._download_existing_current_via_client("bucket", "brazil")
+        assert items == []
+        assert details == {}
+
+    def test_parses_existing_list_and_detail_buckets(self):
+        store = {
+            "brazil/current/companies.list.json": json.dumps(
+                [{"company_id": "acme-com-br", "company_name": "Acme Brasil"}]),
+            "brazil/current/company-details-000.json": json.dumps(
+                {"acme-com-br": {"company_id": "acme-com-br", "company_name": "Acme Brasil"}}),
+            # A file under a DIFFERENT country's current/ must never leak in.
+            "italy/current/companies.list.json": json.dumps([{"company_id": "other"}]),
+        }
+        with patch.object(disp, "_gcs_client", return_value=_FakeClient(store)):
+            items, details = disp._download_existing_current_via_client("bucket", "brazil")
+        assert items == [{"company_id": "acme-com-br", "company_name": "Acme Brasil"}]
+        assert "acme-com-br" in details
+        assert "other" not in details
+
+
+class TestRunLovableExportLive:
+    """_run_lovable_export must not just archive the raw export into the
+    runs bucket -- it must also merge it into <country>/current/ (the
+    bucket the Lovable app actually reads from) and archive that same
+    merged snapshot under <country>/runs/<run_folder>/."""
+
+    def _export_and_upload(self, tmp_path, store, rows):
+        xlsx = tmp_path / "final.xlsx"
+        write_workbook(xlsx, rows)
+        with patch.object(disp, "_gcs_client", return_value=_FakeClient(store)), \
+             patch.object(cjr, "_gcs_client", return_value=_FakeClient(store)):
+            return disp._run_lovable_export(
+                str(xlsx), str(tmp_path / "out"),
+                {"country": "Brazil", "cold_callers": ["Jantje", "Pietje"], "foreign_hq_only": False},
+            )
+
+    def test_first_ever_export_goes_live_with_no_prior_current(self, tmp_path):
+        store: dict = {}
+        result = self._export_and_upload(tmp_path, store, [enriched_row()])
+
+        assert result["ok"] is True
+        assert result["live_upload"]["ok"] is True
+        assert result["live_upload"]["companies_total_after"] == 1
+        current_list = json.loads(store["brazil/current/companies.list.json"])
+        assert [c["company_name"] for c in current_list] == ["Acme Brasil"]
+        # Archived under brazil/runs/<run_folder>/, not just the runs-bucket
+        # staging copy under <output_dir>/final/lovable_export/.
+        assert any(k.startswith("brazil/runs/") and k.endswith("companies.list.json") for k in store)
+
+    def test_merges_into_existing_current_instead_of_overwriting(self, tmp_path):
+        store = {
+            "brazil/current/companies.list.json": json.dumps(
+                [{"company_id": "existing-co", "company_name": "Existing Co", "enrichment_skipped": False}]),
+            "brazil/current/company-details-000.json": json.dumps(
+                {"existing-co": {"company_id": "existing-co", "company_name": "Existing Co"}}),
+        }
+        result = self._export_and_upload(
+            tmp_path, store, [enriched_row(source_index=1, company_name="Acme Brasil", domain="acme.com.br")])
+
+        assert result["live_upload"]["ok"] is True
+        current_list = json.loads(store["brazil/current/companies.list.json"])
+        current_ids = {c["company_id"] for c in current_list}
+        assert "existing-co" in current_ids, "pre-existing company must survive the merge"
+        assert len(current_list) == 2
+        assert result["live_upload"]["companies_total_after"] == 2
+
+    def test_live_upload_failure_does_not_flip_the_base_result_to_not_ok(self, tmp_path):
+        """A broken current/-merge step (e.g. a bad bucket) must not hide
+        that the archive-to-runs-bucket export itself succeeded."""
+        xlsx = tmp_path / "final.xlsx"
+        write_workbook(xlsx, [enriched_row()])
+        with patch.object(disp, "_gcs_client", return_value=_FakeClient({})), \
+             patch.object(cjr, "_gcs_client", side_effect=RuntimeError("boom")):
+            result = disp._run_lovable_export(
+                str(xlsx), str(tmp_path / "out"),
+                {"country": "Brazil", "cold_callers": ["Jantje"], "foreign_hq_only": False},
+            )
+        assert result["ok"] is True
+        assert result["live_upload"]["ok"] is False
+        assert "boom" in result["live_upload"]["error"]

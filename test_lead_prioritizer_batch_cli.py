@@ -302,7 +302,7 @@ class TestHelpers:
         when = datetime(2026, 7, 1, 9, 30, 15)
         out = generate_output_path(Path("/data/Italy_500.xlsx"), "full", when)
         assert out.name == "Italy_500_lead_prioritizer_v2_full_20260701_093015.xlsx"
-        assert str(out.parent) == "/data"
+        assert out.parent == Path("/data")
 
     def test_resolve_single_sheet(self):
         assert resolve_sheet(["OnlySheet"], None) == "OnlySheet"

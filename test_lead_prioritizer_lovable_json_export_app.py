@@ -279,7 +279,7 @@ class TestSanitizeFilenamePart:
 class TestCleanUserPath:
     def test_strips_quotes(self):
         assert str(clean_user_path('"C:\\Data\\Brazil"')) == "C:\\Data\\Brazil"
-        assert str(clean_user_path("'/home/user/Brazil'")) == "/home/user/Brazil"
+        assert clean_user_path("'/home/user/Brazil'") == Path("/home/user/Brazil")
 
     def test_blank_returns_none(self):
         assert clean_user_path("") is None
@@ -287,7 +287,7 @@ class TestCleanUserPath:
         assert clean_user_path(None) is None
 
     def test_plain_path_unchanged(self):
-        assert str(clean_user_path("/data/brazil")) == "/data/brazil"
+        assert clean_user_path("/data/brazil") == Path("/data/brazil")
 
 
 # ---------------------------------------------------------------------------

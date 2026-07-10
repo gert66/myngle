@@ -6,6 +6,8 @@ Streamlit itself is not required (the app imports it lazily inside ``main``).
 
 from __future__ import annotations
 
+from pathlib import Path
+
 import pytest
 
 import lead_prioritizer_batch_app as app
@@ -524,7 +526,7 @@ class TestCleanUserPath:
 
     def test_strips_surrounding_single_quotes(self):
         p = clean_user_path("'/home/user/Brazil'")
-        assert str(p) == "/home/user/Brazil"
+        assert p == Path("/home/user/Brazil")
 
     def test_blank_returns_none(self):
         assert clean_user_path("") is None
@@ -536,7 +538,7 @@ class TestCleanUserPath:
         assert not str(p).startswith("~")
 
     def test_plain_path_unchanged(self):
-        assert str(clean_user_path("/data/brazil")) == "/data/brazil"
+        assert clean_user_path("/data/brazil") == Path("/data/brazil")
 
 
 class TestResolveBatchOutputDir:

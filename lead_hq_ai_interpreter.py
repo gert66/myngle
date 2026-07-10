@@ -67,6 +67,10 @@ DEEPSEEK_BASE_URL = "https://api.deepseek.com"
 MODEL_PRICING_USD_PER_MTOK: dict[str, "tuple[float, float] | None"] = {
     # Anthropic — Claude Haiku 4.5
     "claude-haiku-4-5-20251001": (1.00, 5.00),
+    # Anthropic — Claude Sonnet 5 (standard rate; a $2/$10 intro rate applies
+    # through 2026-08-31, but a stable estimator should use the rate that'll
+    # be in effect for most of a run's shelf life, not the temporary discount)
+    "claude-sonnet-5": (3.00, 15.00),
     # OpenAI (experimental, provisional pricing — verify before production use)
     "gpt-5.4-nano": (0.20, 1.25),
     "gpt-5.4-mini": (0.75, 4.50),
