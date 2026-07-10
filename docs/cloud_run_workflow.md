@@ -321,18 +321,19 @@ gcloud run jobs deploy myngle-lead-prioritizer \
   --parallelism 50 \
   --max-retries 1 \
   --task-timeout 3600 \
-  --memory 4Gi
+  --cpu 2 \
+  --memory 8Gi
 ```
 
-`--memory 4Gi` is bewust veel ruimer dan de Cloud Run-default (512Mi): elke
-task draait pandas + openpyxl in de runner én een tweede Python-proces
-(`lead_prioritizer_batch_cli.py`) met de volledige pipeline er bovenop. De
-eerdere 2Gi bleek in de praktijk te krap (gecrashte tasks). 4Gi is het
-maximum bij 1 vCPU — nog hoger vereist ook `--cpu 2`. Geheugen aanpassen op
-een al gedeployde job kan zonder volledige redeploy:
+`--memory 8Gi` (met `--cpu 2`, verplicht boven 4Gi op 1 vCPU) is bewust
+ruim: elke task draait pandas + openpyxl in de runner én een tweede
+Python-proces (`lead_prioritizer_batch_cli.py`) met de volledige pipeline
+er bovenop. 2Gi bleek te krap, en zelfs 4Gi gaf nog OOM-crashes bij grote
+runs (bv. 909 rijen in één task) — vandaar de bump naar 8Gi/2 CPU. Geheugen
+aanpassen op een al gedeployde job kan zonder volledige redeploy:
 
 ```bash
-gcloud run jobs update myngle-lead-prioritizer --region REGION --memory 4Gi
+gcloud run jobs update myngle-lead-prioritizer --region REGION --memory 8Gi --cpu 2
 ```
 
 Cloud Run Job execution starten met task count en parallelism (handmatige test,
