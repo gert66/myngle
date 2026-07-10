@@ -22,6 +22,93 @@ inline na de run. Is de URL kwijt, dan vindt de "Recente runs"-lijst
 `cloud_run_streamlit_app.finish_run_merge`/`run_lovable_export_and_upload`/
 `determine_run_stage` voor de onderliggende logica.
 
+## De Streamlit-dashboard zelf naar Cloud Run (geen laptop meer nodig, ook niet om 'm te bedienen)
+
+Bovenstaande maakt de *run* laptop-onafhankelijk, maar je bedient hem nog
+via een lokaal gestarte `streamlit run` — dat proces moet dus wél actief
+zijn op het moment dat je de status wil bekijken of een nieuwe run wil
+starten. `Dockerfile.streamlit` (apart van het bestaande `Dockerfile`, dat
+alleen de job/dispatcher bouwt) containeriseert de dashboard-app zelf, zodat
+ook het bedienen ervan via een browser-URL kan, ongeacht je laptop.
+
+**Waarom dit werkt zonder wijzigingen aan de app-logica**: elke actie in het
+statuspaneel (mergen, retry, export, download) leest zijn staat uit GCS via
+`run_id`, niet uit Streamlit's eigen sessiegeheugen — de enige plek waar
+sessiegeheugen gebruikt wordt (`st.session_state`, om een net gemergd
+eindresultaat niet meteen opnieuw te hoeven downloaden) is puur een cache;
+verdwijnt die (nieuwe container-instance, scale-to-zero, ander tabblad), dan
+haalt de app het gewoon opnieuw op. Cloud Run mag dus vrijelijk naar 0
+schalen en meerdere instances gebruiken zonder dat de app kapot gaat.
+
+**Belangrijk verschil met het bestaande `Dockerfile`**: `cloud_run_streamlit_app.py`
+roept `gcloud` als subprocess aan (zie de module-docstring) i.p.v. de
+`google-cloud-*`-Python-clients rechtstreeks te gebruiken — daarom installeert
+`Dockerfile.streamlit` ook de Google Cloud CLI zelf. Op Cloud Run gebruikt
+`gcloud` automatisch het gekoppelde service-account via de metadata-server
+— geen `gcloud auth login` nodig, zolang dat service-account de rollen
+hieronder heeft.
+
+**Bouwen (Cloud Build, geen lokale Docker nodig)**:
+
+```bash
+gcloud builds submit --config=cloudbuild.streamlit.yaml \
+  --substitutions=_IMAGE=europe-west4-docker.pkg.dev/PROJECT_ID/myngle/streamlit-dashboard:latest .
+```
+
+(Heb je wél lokale Docker: `docker build -f Dockerfile.streamlit -t <image> .`
++ `docker push <image>` werkt ook — dit is **niet** end-to-end getest vanuit
+deze sessie: uitgaand verkeer naar Docker Hub's CDN was hier geblokkeerd
+door het egress-beleid van de sandbox. Bouw 'm dus zelf één keer voordat je
+'m vertrouwt.)
+
+**Deployen als Cloud Run service**:
+
+```bash
+gcloud run deploy myngle-streamlit-dashboard \
+  --image europe-west4-docker.pkg.dev/PROJECT_ID/myngle/streamlit-dashboard:latest \
+  --region europe-west4 \
+  --service-account STREAMLIT_SA@PROJECT_ID.iam.gserviceaccount.com \
+  --no-allow-unauthenticated \
+  --memory 2Gi \
+  --timeout 1800 \
+  --session-affinity \
+  --set-secrets ANTHROPIC_API_KEY=anthropic-api-key:latest,SERPER_API_KEY=serper-api-key:latest,FIRECRAWL_API_KEY=firecrawl-api-key:latest
+```
+
+- `--timeout 1800`: de "Mergen & afronden"/Lovable-export-knoppen downloaden
+  parts en verwerken ze synchroon binnen ÉÉN request — bij een grote run
+  (50 shards) kan dat een paar minuten duren; ruim boven de Cloud Run-default
+  (300s) houdt dat comfortabel binnen budget (max. 60 min toegestaan).
+- `--session-affinity`: geen harde vereiste (zie hierboven), maar voorkomt
+  dat een browser-sessie halverwege naar een andere instance wisselt en
+  daardoor onnodig een keer opnieuw vanuit GCS moet herladen.
+- `--set-secrets`: alleen nodig als je de sidebar-instellingen ook
+  daadwerkelijk API-keys laat gebruiken vanuit deze service zelf (bv. voor
+  toekomstige functionaliteit) — de huidige app geeft keys altijd door aan
+  de Cloud Run **Job** (via `--update-env-vars`/Secret Manager op de job-
+  deploy zelf, zie hierboven), niet aan deze dashboard-service.
+
+**Benodigde IAM-rollen op `STREAMLIT_SA`**:
+
+| Rol | Waarvoor |
+|---|---|
+| `roles/storage.objectAdmin` (op de input-/runs-bucket) | `gcloud storage cp/ls/cat` — upload, status polling, download |
+| `roles/run.developer` (of minimaal `run.jobs.run` + `run.jobs.get`) | "Start Cloud Run"/retry-knoppen roepen `gcloud run jobs execute` aan |
+
+**Toegang tot de dashboard-service zelf**: `--no-allow-unauthenticated`
+hierboven is bewust de default — deze app start echte, betaalde API-calls en
+raakt bedrijfsdata, dus geen publieke, ongeauthenticeerde URL. Toegang:
+
+```bash
+gcloud run services proxy myngle-streamlit-dashboard --region europe-west4
+```
+
+tunnelt de service naar `localhost` met je eigen `gcloud`-identiteit — geen
+IAP-opzet nodig voor persoonlijk gebruik. Voor meerdere gebruikers: geef ze
+`roles/run.invoker` op de service en laat ze dezelfde `services proxy`-
+aanroep zelf draaien, of zet Identity-Aware Proxy op (grotere ingreep, niet
+hier uitgewerkt).
+
 ## Doelarchitectuur (simpele tekst)
 
 1. Een gebruiker uploadt één Excel naar een Cloud Storage input-bucket, onder

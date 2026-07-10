@@ -1,0 +1,49 @@
+# Container for the mYngle Lead Prioritizer's Cloud Run dashboard
+# (cloud_run_streamlit_app.py) — deployed as its own Cloud Run *service*,
+# separate from Dockerfile (which builds the Cloud Run Job worker /
+# dispatcher). See docs/cloud_run_workflow.md's "Laptop-onafhankelijkheid:
+# de Streamlit-dashboard zelf naar Cloud Run" for the deploy command and
+# required IAM roles.
+#
+# Unlike the job/dispatcher image, this one needs the gcloud CLI itself:
+# cloud_run_streamlit_app.py shells out to `gcloud storage`/`gcloud run
+# jobs` (see its module docstring) instead of using the google-cloud-*
+# Python clients directly. On Cloud Run, gcloud picks up the service's
+# attached service account automatically via the metadata server — no
+# `gcloud auth login` needed, as long as that service account has the
+# roles documented alongside the deploy command.
+FROM python:3.11-slim
+
+WORKDIR /app
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    build-essential curl gnupg ca-certificates \
+    && curl -fsSL https://packages.cloud.google.com/apt/doc/apt-key.gpg \
+       | gpg --dearmor -o /usr/share/keyrings/cloud.google.gpg \
+    && echo "deb [signed-by=/usr/share/keyrings/cloud.google.gpg] https://packages.cloud.google.com/apt cloud-sdk main" \
+       > /etc/apt/sources.list.d/google-cloud-sdk.list \
+    && apt-get update && apt-get install -y --no-install-recommends google-cloud-cli \
+    && apt-get clean && rm -rf /var/lib/apt/lists/*
+
+COPY requirements.txt .
+RUN pip install --no-cache-dir -r requirements.txt
+
+COPY . .
+
+ENV PYTHONUNBUFFERED=1
+EXPOSE 8080
+
+# Shell form (not exec/JSON form) so ${PORT:-8080} actually expands -- Cloud
+# Run injects PORT at runtime, and it isn't always 8080.
+# --server.enableCORS=false/--server.enableXsrfProtection=false is the
+# standard Streamlit-behind-a-proxy setting (Cloud Run's own front end
+# already terminates TLS and handles routing); --server.headless=true
+# skips the interactive "email address" prompt Streamlit otherwise blocks
+# startup on.
+CMD streamlit run cloud_run_streamlit_app.py \
+    --server.port=${PORT:-8080} \
+    --server.address=0.0.0.0 \
+    --server.headless=true \
+    --server.enableCORS=false \
+    --server.enableXsrfProtection=false \
+    --browser.gatherUsageStats=false
