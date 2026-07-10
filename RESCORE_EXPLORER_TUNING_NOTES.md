@@ -28,7 +28,7 @@ Twee oorzaken, allebei nu aan te pakken vanuit de app:
 | Onderdeel | Wat het doet |
 |---|---|
 | **📊 Impact-tab** (eerste tab) | KPI's (max, top-25-gemiddelde, scheefheid huidig vs. nieuw), percentielentabel, before/after-histogrammen, **top-bedrijven hoog → laag**, size-dekking. |
-| **🪄 Preset "minder scheef & top ≈ 10"** | Zet K → 6 (mildere spreiding) + kalibreert de ankers op de geladen data. Eén klik, daarna fijnafstemmen met de sliders. |
+| **🎯 Auto-kalibratie K + intercept** (Impact-tab) | Zoekt deterministisch (grid search) de intercept + K waarbij het p95-bedrijf op het top-doel landt (standaard 9.3, de echte top loopt door tot ~10) en het p5-bedrijf op het onderkant-doel (standaard 4.0). **Signaalgewichten, blend en ankers blijven onaangeroerd.** Optionele checkbox (standaard aan): foreign-HQ-gewicht licht verlagen (0.7465 → 0.65, de vijf andere positieve signalen iets omhoog, totaalgewicht gelijk) — verkleint de twee-bulten-verdeling die het dominante HQ-signaal veroorzaakt. Doelen instelbaar; resultaat (bereikt p95/p5/mediaan) blijft zichtbaar. Verving de eerdere "🪄 preset" die de ankers verschoof. |
 | **⚡ Snelle preview** (zijbalk, standaard aan) | Herscoort per slider-tweak alleen een **deterministische percentiel-steekproef** (standaard 300; ranking hoog → laag, top-25 altijd volledig, rest gelijkmatig gespreid over de percentielen). Uploaden herscoort altijd álle bedrijven. Geldt ook voor de "Alle landen"-preview. |
 | **🎯 Anker-kalibratie** (Sigmoid-tab) | Kalibreer p_lo/p_hi op instelbare percentielen van de geladen populatie; herstel-knop naar de standaard-ankers. Ankers zichtbaar in de audit (`sigmoid_p_lo`/`sigmoid_p_hi` in `SCORE_OUTPUT_COLS` en in de `rescore_audit.params` van elke run). |
 | **📐 Tier-drempel-voorstel** (Tier-tab) | Drempels uit de níeuwe verdeling volgens de oorspronkelijke 10/20/30-regel (top 10% Hot, volgende 20% Warm, volgende 30% Cool). |
@@ -38,11 +38,44 @@ Twee oorzaken, allebei nu aan te pakken vanuit de app:
 ## K-factor en intercept
 
 - **K (sigmoid-steilheid)** bepaalt hoe hard de kansen naar 1 en 10 worden
-  geduwd. K=10 (default) maakt de verdeling bimodaal/scheef; de preset zet
-  **K=6**. Verandert de ránking nooit, alleen de spreiding.
-- **Intercept** verschuift alle kansen tegelijk. Met gekalibreerde ankers is
-  het effect op de eindscores grotendeels weggenormaliseerd — kalibratie is
-  het effectievere instrument; de intercept-slider blijft beschikbaar.
+  geduwd; verandert de ránking nooit, alleen de spreiding.
+- **Intercept** verschuift alle kansen (en dus de hele verdeling) tegelijk.
+- De **auto-kalibratie op de Impact-tab** zoekt beide sámen: intercept
+  centreert de populatie, K spreidt haar, tot p95/p5 op de doelen zitten.
+  Afhankelijk van de data kan K daarbij omhoog óf omlaag gaan — het doel
+  (top ≈ 9+, onderkant ≈ 4) is leidend, niet een vaste K-waarde.
+- De **anker-kalibratie** op de Sigmoid-tab is het alternatieve mechanisme
+  (verschuift p_lo/p_hi in plaats van K/intercept); gebruik één van de
+  twee, niet beide tegelijk.
+
+## Bedrijfsgrootte in v2-exports (Spanje, …) — gevonden en gerepareerd
+
+Italië toonde bedrijfsgroottes, Spanje niet. Oorzaak: de v2-pijplijn bewaart
+de Lusha-range onder **`lusha_employee_range`** en laat de kolom
+`employee_range` bewust leeg (`lead_v2_scoring_adapter.py`). De exporter las
+alléén `employee_range` → voor v2-landen bleven én het app-veld én
+`scoring_inputs.employee_range` leeg, en her-scores vielen stil terug op de
+neutrale grootte-score 5.5. Drie fixes:
+
+1. **Exporter** (`export_lead_prioritizer_to_lovable_json.py`): leest nu
+   dezelfde alias-keten als de scoring-engine
+   (`resolve_employee_range_value`: lusha_api → lusha → employee_range →
+   company_size) voor zowel het app-veld als `scoring_inputs`.
+2. **Re-score** (`rescore_from_gcs.py`): bestaande v2-records in GCS hebben
+   de Lusha-kolommen nog onder `debug.lead_prioritizer_row`;
+   `resolve_detail_employee_range` haalt de range daar terug (audit-spoor:
+   `employee_range_source`), scoort met de échte grootte, en **vult de lege
+   app-velden** (`employee_range`, `size_category_app`,
+   `display_size_category_app`) op detail- én lijstrecords — expliciete
+   bestaande waarden worden nooit overschreven. Eén re-score + promotie
+   maakt de groottes dus zichtbaar in Spanje, zonder her-export.
+3. **Dekking-paneel** (Impact-tab) telt nu via dezelfde keten en toont per
+   bron (scoring_inputs / detailrecord / debug-rij) waar de range vandaan
+   komt.
+
+Let op: hierdoor verschuiven Spaanse her-scores t.o.v. eerdere her-scores —
+de 25% grootte-blend rekent nu met echte groottes in plaats van overal 5.5.
+Dat is precies de bedoeling ("company size implemented").
 
 ## Ongewijzigd gedrag
 

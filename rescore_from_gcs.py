@@ -45,7 +45,11 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
 
-from commercial_fit_scoring import score_company
+from commercial_fit_scoring import (
+    resolve_employee_range_value,
+    resolve_size_category,
+    score_company,
+)
 from lovable_gcs_upload import DEFAULT_GCS_BUCKET
 
 RESCORE_SCHEMA_VERSION = 1
@@ -74,6 +78,39 @@ def rehydrate_scoring_row(scoring_inputs: dict) -> dict:
     return row
 
 
+def resolve_detail_employee_range(detail: dict) -> "tuple[str | None, str]":
+    """``(employee_range, source)`` for one company-details record.
+
+    v2-era exports (Spain, ...) persisted ``scoring_inputs.employee_range``
+    as ``None`` because the exporter read only the ``employee_range`` column
+    while the v2 pipeline stores the Lusha range under
+    ``lusha_employee_range`` (fixed in the exporter since; see
+    ``resolve_employee_range_value``). The raw Lusha columns ARE still
+    preserved in those records under ``debug.lead_prioritizer_row``, so a
+    re-score can recover the real company size instead of silently scoring
+    everyone with the neutral 5.5 default. Priority:
+
+    1. ``scoring_inputs.employee_range``      -> ``"scoring_inputs"``
+    2. the record's own ``employee_range``    -> ``"detail_record"``
+    3. ``debug.lead_prioritizer_row`` aliases -> ``"debug_row"``
+    4. nothing usable                          -> ``(None, "missing")``
+    """
+    scoring_inputs = detail.get("scoring_inputs") or {}
+    value = resolve_employee_range_value(
+        {"employee_range": scoring_inputs.get("employee_range")})
+    if value:
+        return value, "scoring_inputs"
+    value = resolve_employee_range_value(
+        {"employee_range": detail.get("employee_range")})
+    if value:
+        return value, "detail_record"
+    debug_row = (detail.get("debug") or {}).get("lead_prioritizer_row") or {}
+    value = resolve_employee_range_value(debug_row)
+    if value:
+        return value, "debug_row"
+    return None, "missing"
+
+
 def rescore_detail_record(detail: dict, params: dict, *, now_iso: str) -> dict:
     """Re-score one company-details record from its persisted
     ``scoring_inputs``. Returns a NEW dict — ``detail`` is never mutated.
@@ -93,6 +130,8 @@ def rescore_detail_record(detail: dict, params: dict, *, now_iso: str) -> dict:
         )
 
     row = rehydrate_scoring_row(scoring_inputs)
+    employee_range, employee_range_source = resolve_detail_employee_range(detail)
+    row["employee_range"] = employee_range
     result = score_company(row, params=params)
 
     missing_raw = result.get("missing_scoring_fields") or ""
@@ -101,6 +140,18 @@ def rescore_detail_record(detail: dict, params: dict, *, now_iso: str) -> dict:
     new_detail = dict(detail)
     new_detail["commercial_fit_score"] = result["final_commercial_fit_score"]
     new_detail["commercial_tier"] = result["commercial_tier"]
+    # Backfill the app-facing size fields when the original export left them
+    # blank (v2-era exports) — an explicit value from the original export is
+    # never overwritten. The label derives from the same employee_range the
+    # re-score just used, so app display and blend can't disagree.
+    if employee_range and not str(new_detail.get("employee_range") or "").strip():
+        new_detail["employee_range"] = employee_range
+    if not new_detail.get("size_category_app") and not new_detail.get("display_size_category_app"):
+        size_category, display_size_category = resolve_size_category(
+            {"employee_range": employee_range})
+        if size_category:
+            new_detail["size_category_app"] = size_category
+            new_detail["display_size_category_app"] = display_size_category
     new_detail["rescore_audit"] = {
         "schema_version": RESCORE_SCHEMA_VERSION,
         "rescored_at": now_iso,
@@ -111,6 +162,8 @@ def rescore_detail_record(detail: dict, params: dict, *, now_iso: str) -> dict:
         "commercial_tier": result["commercial_tier"],
         "missing_scoring_signals": missing_signals,
         "scoring_notes": result["scoring_notes"],
+        "employee_range_used": employee_range,
+        "employee_range_source": employee_range_source,
     }
     return new_detail
 
@@ -156,9 +209,13 @@ def skipped_company_ids(details_by_id: dict) -> list[str]:
 def rescore_list_items(list_items: list[dict], rescored_by_id: dict) -> list[dict]:
     """Mirror the new ``commercial_fit_score``/``commercial_tier`` from the
     rescored detail records onto the lightweight ``companies.list.json``
-    entries, so list and detail stay consistent in the new run folder. An
-    item whose ``company_id`` has no rescored counterpart is passed through
-    unchanged rather than dropped."""
+    entries, so list and detail stay consistent in the new run folder. The
+    size fields a re-score may have backfilled (``employee_range``,
+    ``size_category_app``, ``display_size_category_app`` — see
+    ``rescore_detail_record``) are mirrored the same way, but only onto a
+    list item whose own value is blank: an explicit original value is never
+    overwritten. An item whose ``company_id`` has no rescored counterpart is
+    passed through unchanged rather than dropped."""
     updated = []
     for item in list_items:
         new_item = dict(item)
@@ -166,6 +223,11 @@ def rescore_list_items(list_items: list[dict], rescored_by_id: dict) -> list[dic
         if rescored is not None:
             new_item["commercial_fit_score"] = rescored["commercial_fit_score"]
             new_item["commercial_tier"] = rescored["commercial_tier"]
+            for field in ("employee_range", "size_category_app",
+                          "display_size_category_app"):
+                if (not str(new_item.get(field) or "").strip()
+                        and rescored.get(field)):
+                    new_item[field] = rescored[field]
         updated.append(new_item)
     return updated
 

@@ -57,6 +57,7 @@ from rescore_from_gcs import (
     list_country_folders,
     rehydrate_scoring_row,
     rescore_details_bucket,
+    resolve_detail_employee_range,
     tier_distribution,
     upload_rescored_run,
     write_rescored_run,
@@ -88,17 +89,38 @@ COEFFICIENT_LABELS: dict[str, str] = {
 
 TIER_LABELS: list[str] = ["🥇 Hot", "🥈 Warm", "🥉 Cool", "❄️ Pass"]
 
-# Preset "minder scheef & top ≈ 10": a gentler sigmoid than the default
-# K=10 (which piles companies up against both ends), combined with
-# empirically calibrated sigmoid anchors (auto_calibrate_sigmoid_anchors) so
-# the loaded population's own best companies map to ~10 and its weakest
-# to ~1 instead of everything topping out around 8.7.
-PRESET_LESS_SKEWED_K: float = 6.0
-#: Percentiles used by the preset/auto-calibration for the sigmoid anchors:
+#: Percentiles used by the anchor auto-calibration (Sigmoid tab):
 #: everything at/above the high percentile clamps to icp 10, everything
 #: at/below the low percentile clamps to icp 1.
 CALIBRATION_LO_PCT: float = 5.0
 CALIBRATION_HI_PCT: float = 95.0
+
+#: Default targets for the intercept+K auto-calibration on the Impact tab:
+#: the p95 company should land around 9.3 (so the very top ranges 9–10) and
+#: the p5 company around 4.0 — a spread you can actually see, instead of
+#: everything compressed into one hump.
+CALIBRATION_TARGET_HI: float = 9.3
+CALIBRATION_TARGET_LO: float = 4.0
+
+#: Optional modest coefficient rebalance for the intercept+K calibration:
+#: sig_foreign_hq_score dominates the LR model (0.7465 — more than the
+#: other five positive signals get individually), which splits the
+#: population into a "has foreign HQ" hump near the top and an "everything
+#: else" hump near the bottom. This preset shaves it down slightly and
+#: gives the difference to the other positive signals, keeping the TOTAL
+#: positive weight (1.5785 → 1.580) essentially unchanged so the model's
+#: overall dynamic range stays put. All values sit on the coefficient
+#: sliders' 0.005 grid. sig_rapid_growth_score (the disqualifier) is
+#: untouched.
+FOREIGN_HQ_REBALANCED_COEFFICIENTS: dict[str, float] = {
+    "sig_foreign_hq_score":        0.650,   # was 0.7465
+    "sig_explicit_lnd_score":      0.240,   # was 0.2185
+    "sig_intl_footprint_score":    0.200,   # was 0.1795
+    "sig_employer_branding_score": 0.180,   # was 0.1602
+    "sig_lnd_onboarding_score":    0.145,   # was 0.1250
+    "ti_onboarding_score":         0.165,   # was 0.1488
+    "sig_rapid_growth_score":     -0.2905,  # unchanged
+}
 
 # Consistent order + colours for the huidig/nieuw comparison across every
 # chart. Distinct hues (not two shades of one colour) so that even when the
@@ -391,6 +413,142 @@ def auto_calibrate_sigmoid_anchors(
     return round(p_lo, 5), round(p_hi, 5)
 
 
+def _percentile_from_sorted(sorted_values: list, pct: float) -> "float | None":
+    """Linear-interpolated percentile over an ascending-sorted list."""
+    if not sorted_values:
+        return None
+    if len(sorted_values) == 1:
+        return sorted_values[0]
+    idx = pct / 100.0 * (len(sorted_values) - 1)
+    lo = math.floor(idx)
+    hi = math.ceil(idx)
+    frac = idx - lo
+    return sorted_values[lo] * (1.0 - frac) + sorted_values[hi] * frac
+
+
+def collect_calibration_features(details_by_id: dict, params: dict) -> list:
+    """``(signal_sum, company_size_score)`` per scorable company under the
+    given coefficients — the two per-company numbers the intercept+K solver
+    needs. ``signal_sum`` is the LR z-score MINUS the intercept (Σ coeff ×
+    normalised signal), so the solver can re-add any candidate intercept
+    without re-running ``score_company`` thousands of times. Employee range
+    is recovered through the same fallback chain the actual re-score uses
+    (``resolve_detail_employee_range``), so calibration sees the same size
+    blend the re-score will apply."""
+    features = []
+    for detail in details_by_id.values():
+        scoring_inputs = detail.get("scoring_inputs")
+        if not scoring_inputs or "signals" not in scoring_inputs:
+            continue
+        row = rehydrate_scoring_row(scoring_inputs)
+        employee_range, _source = resolve_detail_employee_range(detail)
+        row["employee_range"] = employee_range
+        result = score_company(row, params=params)
+        features.append((
+            result["lr_z_score"] - result["lr_intercept_component"],
+            result["company_size_score"],
+        ))
+    return features
+
+
+def calibrate_intercept_and_k(
+    details_by_id: dict, params: dict, *,
+    target_hi: float = CALIBRATION_TARGET_HI,
+    target_lo: float = CALIBRATION_TARGET_LO,
+    hi_pct: float = 95.0, lo_pct: float = 5.0,
+    max_companies: int = 300,
+) -> "dict | None":
+    """Find the (intercept, sigmoid K) pair under which the loaded
+    population's final-score distribution hits the requested spread: its
+    ``hi_pct``-percentile company lands near ``target_hi`` (so the very top
+    ranges 9–10) and its ``lo_pct``-percentile company near ``target_lo``.
+
+    ONLY the intercept and K move. Coefficients (signal weights), the
+    ICP/size blend and the sigmoid anchors are read from ``params`` and
+    left exactly as they are — this is the "tune K and intercept, keep the
+    signal weights" calibration, deliberately different from
+    ``auto_calibrate_sigmoid_anchors`` (which moves the anchors instead).
+
+    Deterministic grid search (intercept −3.0…1.0, K 1.0…25.0 — the UI
+    sliders' own ranges and step grids) with an intercept refinement pass
+    around the best coarse hit; on ties the lower (gentler) K wins. Large
+    populations are thinned to ``max_companies`` evenly-spaced companies
+    over the signal-sum ranking, so the search stays fast and reproducible.
+
+    Returns ``{"intercept", "sigmoid_k", "achieved_hi", "achieved_lo",
+    "achieved_median", "n_companies_used", ...}`` or ``None`` when fewer
+    than 2 scorable companies are available."""
+    features = collect_calibration_features(details_by_id, params)
+    if len(features) < 2:
+        return None
+    if len(features) > max_companies:
+        features.sort(key=lambda t: t[0])
+        step = (len(features) - 1) / (max_companies - 1)
+        features = [features[round(i * step)] for i in range(max_companies)]
+
+    p_lo_anchor = float(params.get("sigmoid_p_lo", _SIGMOID_P_LO))
+    p_hi_anchor = float(params.get("sigmoid_p_hi", _SIGMOID_P_HI))
+    w_model = float(params.get("model_weight", ICP_SIMILARITY_WEIGHT))
+    w_size = float(params.get("size_weight", COMPANY_SIZE_WEIGHT))
+
+    def _evaluate(intercept: float, k: float):
+        s_min = 1.0 / (1.0 + math.exp(-k * (p_lo_anchor - 0.5)))
+        s_max = 1.0 / (1.0 + math.exp(-k * (p_hi_anchor - 0.5)))
+        denom = s_max - s_min if abs(s_max - s_min) > 1e-9 else 1.0
+        finals = []
+        for signal_sum, size_score in features:
+            z = max(-500.0, min(500.0, intercept + signal_sum))
+            p = 1.0 / (1.0 + math.exp(-z))
+            s = 1.0 / (1.0 + math.exp(-k * (p - 0.5)))
+            icp = max(1.0, min(10.0, 1.0 + 9.0 * (s - s_min) / denom))
+            finals.append(max(1.0, min(10.0, w_model * icp + w_size * size_score)))
+        finals.sort()
+        hi = _percentile_from_sorted(finals, hi_pct)
+        lo = _percentile_from_sorted(finals, lo_pct)
+        med = _percentile_from_sorted(finals, 50.0)
+        loss = (hi - target_hi) ** 2 + (lo - target_lo) ** 2
+        return loss, hi, lo, med
+
+    k_values = [round(1.0 + 0.5 * i, 1) for i in range(49)]          # 1.0 … 25.0
+    coarse_intercepts = [round(-3.0 + 0.1 * i, 2) for i in range(41)]  # −3.0 … 1.0
+    best = None  # (loss, k, intercept, hi, lo, med)
+    for k in k_values:
+        for intercept in coarse_intercepts:
+            loss, hi, lo, med = _evaluate(intercept, k)
+            candidate = (loss, k, intercept, hi, lo, med)
+            if best is None or (candidate[0], candidate[1]) < (best[0], best[1]):
+                best = candidate
+
+    # Refine the intercept (slider step 0.01) around the coarse optimum,
+    # trying the neighbouring on-grid K values too. K itself stays on the
+    # slider's 0.5 grid so the UI never holds an off-grid value.
+    _, best_k, best_b, _, _, _ = best
+    for k in sorted({max(1.0, best_k - 0.5), best_k, min(25.0, best_k + 0.5)}):
+        for i in range(-10, 11):
+            intercept = round(best_b + 0.01 * i, 2)
+            if not (-3.0 <= intercept <= 1.0):
+                continue
+            loss, hi, lo, med = _evaluate(intercept, k)
+            candidate = (loss, k, intercept, hi, lo, med)
+            if (candidate[0], candidate[1]) < (best[0], best[1]):
+                best = candidate
+
+    loss, k, intercept, hi, lo, med = best
+    return {
+        "intercept": intercept,
+        "sigmoid_k": k,
+        "achieved_hi": round(hi, 2),
+        "achieved_lo": round(lo, 2),
+        "achieved_median": round(med, 2),
+        "loss": round(loss, 4),
+        "n_companies_used": len(features),
+        "target_hi": target_hi,
+        "target_lo": target_lo,
+        "hi_pct": hi_pct,
+        "lo_pct": lo_pct,
+    }
+
+
 def _score_series(details_by_id: dict) -> pd.Series:
     return pd.Series(
         [d.get("commercial_fit_score") for d in details_by_id.values()],
@@ -464,25 +622,33 @@ def top_companies_dataframe(
 
 
 def size_coverage_summary(details_by_id: dict) -> dict:
-    """How many loaded companies actually carry an ``employee_range`` in
-    their ``scoring_inputs`` (the Lucia/Lusha size data the 25% size blend
-    reads). Companies without it fall back to the neutral size score 5.5 —
-    which is exactly what drags top scores down when size data is absent."""
+    """How many loaded companies have usable employee-range (Lusha) data for
+    the size blend, resolved through the same fallback chain the re-score
+    itself uses (``resolve_detail_employee_range``): ``scoring_inputs``
+    first, then the record's own ``employee_range`` field, then the raw
+    Lusha columns preserved under ``debug.lead_prioritizer_row`` — v2-era
+    exports (Spain, ...) only have it in that last place. Companies with no
+    usable range anywhere fall back to the neutral size score 5.5, which is
+    exactly what drags top scores down. ``sources`` breaks the coverage
+    down by where the range was found."""
     n_total = 0
     n_with_range = 0
+    sources: dict = {}
     for detail in details_by_id.values():
         scoring_inputs = detail.get("scoring_inputs")
         if not scoring_inputs or "signals" not in scoring_inputs:
             continue
         n_total += 1
-        employee_range = str(scoring_inputs.get("employee_range") or "").strip()
+        employee_range, source = resolve_detail_employee_range(detail)
         if employee_range:
             n_with_range += 1
+            sources[source] = sources.get(source, 0) + 1
     return {
         "n_total": n_total,
         "n_with_range": n_with_range,
         "n_missing": n_total - n_with_range,
         "pct_with_range": round(100.0 * n_with_range / n_total, 1) if n_total else 0.0,
+        "sources": sources,
     }
 
 
@@ -885,32 +1051,89 @@ def main() -> None:  # pragma: no cover - exercised only under `streamlit run`
                 help="Dichter bij 0 = symmetrischer verdeling.",
             )
 
-            if st.button(
-                "🪄 Preset: minder scheef & top ≈ 10 "
-                f"(K → {PRESET_LESS_SKEWED_K:g} + kalibratie op deze data)",
-                key="preset_less_skewed_btn",
-            ):
-                anchors = auto_calibrate_sigmoid_anchors(all_details_by_id, params)
-                pending: dict = {
-                    "params": {"sigmoid_k": PRESET_LESS_SKEWED_K},
-                    "widgets": {"k_slider": PRESET_LESS_SKEWED_K},
-                }
-                if anchors:
-                    pending["params"]["sigmoid_p_lo"] = anchors[0]
-                    pending["params"]["sigmoid_p_hi"] = anchors[1]
-                else:
-                    st.warning(
-                        "Kalibratie niet mogelijk (te weinig bedrijven met "
-                        "scoring_inputs) — alleen K aangepast.")
-                st.session_state["_pending_param_updates"] = pending
-                st.rerun()
+            st.subheader("🎯 Auto-kalibratie: K + intercept")
             st.caption(
-                "De preset verlaagt de sigmoid-K (mildere spreiding rond het "
-                "midden) en kalibreert het 1–10-bereik op de kansverdeling "
-                "van de geladen bedrijven zelf (p5 → 1, p95 → 10), zodat de "
-                "top ~10 haalt in plaats van te blijven hangen rond 8.7. "
-                "Fijnafstemming: tabs '📈 Sigmoid & blend' en "
-                "'⚖️ Coëfficiënten'."
+                "Zoekt de intercept en sigmoid-K waarbij de geladen verdeling "
+                "de gewenste spreiding krijgt: het p95-bedrijf op het doel "
+                "voor de top (de echte top loopt dan door tot ~10) en het "
+                "p5-bedrijf op het doel voor de onderkant. "
+                "**Signaalgewichten, ICP/grootte-blend en ankers blijven "
+                "onaangeroerd** — alleen K en intercept bewegen, tenzij je "
+                "hieronder bewust de foreign-HQ-herverdeling aanvinkt."
+            )
+            t1, t2 = st.columns(2)
+            with t1:
+                calib_target_hi = st.number_input(
+                    "Doel-score top (p95)", min_value=8.0, max_value=10.0,
+                    value=CALIBRATION_TARGET_HI, step=0.1, key="calib_target_hi")
+            with t2:
+                calib_target_lo = st.number_input(
+                    "Doel-score onderkant (p5)", min_value=1.0, max_value=6.0,
+                    value=CALIBRATION_TARGET_LO, step=0.1, key="calib_target_lo")
+            rebalance_hq = st.checkbox(
+                "Foreign-HQ-gewicht licht verlagen (0.7465 → 0.65; de vijf "
+                "andere positieve signalen iets omhoog, totaalgewicht gelijk)",
+                value=True, key="calib_rebalance_hq_cb",
+                help="sig_foreign_hq_score domineert het model, waardoor de "
+                     "verdeling in twee bulten splitst (mét vs. zónder "
+                     "foreign HQ). Deze bescheiden herverdeling verkleint die "
+                     "kloof. Let op: dit vervangt de coëfficiënten door de "
+                     "herverdeelde set — eigen slider-aanpassingen op de "
+                     "coëfficiënten-tab gaan daarbij verloren.",
+            )
+            if st.button("🎯 Auto-kalibreer K + intercept", type="primary",
+                         key="calibrate_k_intercept_btn"):
+                calib_params = dict(params)
+                if rebalance_hq:
+                    calib_params["coefficients"] = dict(FOREIGN_HQ_REBALANCED_COEFFICIENTS)
+                with st.spinner("Beste intercept + K zoeken…"):
+                    calib = calibrate_intercept_and_k(
+                        all_details_by_id, calib_params,
+                        target_hi=calib_target_hi, target_lo=calib_target_lo)
+                if calib is None:
+                    st.warning(
+                        "Kalibratie niet mogelijk — te weinig bedrijven met "
+                        "scoring_inputs geladen.")
+                else:
+                    pending = {
+                        "params": {
+                            "intercept": calib["intercept"],
+                            "sigmoid_k": calib["sigmoid_k"],
+                        },
+                        "widgets": {
+                            "intercept_slider": calib["intercept"],
+                            "k_slider": calib["sigmoid_k"],
+                        },
+                    }
+                    if rebalance_hq:
+                        pending["params"]["coefficients"] = dict(
+                            FOREIGN_HQ_REBALANCED_COEFFICIENTS)
+                        pending["widgets"].update({
+                            f"coef_{field}": value
+                            for field, value in FOREIGN_HQ_REBALANCED_COEFFICIENTS.items()
+                        })
+                    calib["rebalanced_hq"] = rebalance_hq
+                    st.session_state["_last_calibration"] = calib
+                    st.session_state["_pending_param_updates"] = pending
+                    st.rerun()
+            _last_calib = st.session_state.get("_last_calibration")
+            if _last_calib:
+                st.success(
+                    f"Laatste kalibratie: intercept **{_last_calib['intercept']:+.2f}**, "
+                    f"K **{_last_calib['sigmoid_k']:g}** — bereikt: "
+                    f"p95 ≈ {_last_calib['achieved_hi']}, "
+                    f"p5 ≈ {_last_calib['achieved_lo']}, "
+                    f"mediaan ≈ {_last_calib['achieved_median']} "
+                    f"(doel: {_last_calib['target_hi']} / {_last_calib['target_lo']}; "
+                    f"{_last_calib['n_companies_used']} bedrijven gebruikt; "
+                    f"foreign-HQ herverdeeld: "
+                    f"{'ja' if _last_calib.get('rebalanced_hq') else 'nee'})."
+                )
+            st.caption(
+                "Fijnafstemming achteraf: tabs '📈 Sigmoid & blend' en "
+                "'⚖️ Coëfficiënten'. De anker-kalibratie (het alternatief dat "
+                "de p_lo/p_hi-ankers verschuift in plaats van K/intercept) "
+                "staat op de Sigmoid-tab."
             )
 
             st.subheader("Percentielen: huidig vs. nieuw")
@@ -931,17 +1154,28 @@ def main() -> None:  # pragma: no cover - exercised only under `streamlit run`
 
             coverage = size_coverage_summary(all_details_by_id)
             if coverage["n_total"]:
-                st.subheader("Bedrijfsgrootte (Lucia/Lusha-data)")
+                st.subheader("Bedrijfsgrootte (Lusha-data)")
                 s1, s2, s3 = st.columns(3)
                 s1.metric("Met employee_range", coverage["n_with_range"])
                 s2.metric("Zonder (→ neutraal 5.5)", coverage["n_missing"])
                 s3.metric("Dekking", f"{coverage['pct_with_range']:.1f}%")
+                _src_labels = {
+                    "scoring_inputs": "scoring_inputs",
+                    "detail_record": "detailrecord",
+                    "debug_row": "debug-rij (v2-export, hersteld bij re-score)",
+                }
+                _src_parts = [
+                    f"{_src_labels.get(source, source)}: {count}"
+                    for source, count in sorted(coverage.get("sources", {}).items())
+                ]
                 st.caption(
                     f"Grootte telt mee voor {params['size_weight']:.0%} in de "
                     "blend (instelbaar op de tab '📈 Sigmoid & blend'). "
                     "Bedrijven zónder employee_range krijgen de neutrale "
                     "grootte-score 5.5 — bij een hoog aandeel ontbrekende "
                     "data drukt dat de topscores."
+                    + (f" Bron van de range — {'; '.join(_src_parts)}."
+                       if _src_parts else "")
                 )
 
     # ── Coefficients ───────────────────────────────────────────────────────
