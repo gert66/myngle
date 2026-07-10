@@ -55,6 +55,31 @@ Twee oorzaken, allebei nu aan te pakken vanuit de app:
   run-manifest, dus een goede tuning is reproduceerbaar via
   `rescore_from_gcs.py --params-json`.
 
+## Downloaden was traag — niet door de steekproefgrootte
+
+De "⚡ Snelle preview"-steekproef versnelt alléén het *herscoren* ná het
+laden (elke slider-tweak); ze verkleint niets aan het éénmalige downloaden
+van `current/` uit de cloud — dat gebeurt nog steeds voor het hele land,
+ongeacht de ingestelde steekproefgrootte.
+
+Het echte probleem: `download_current_run` deed vroeger één losse
+`gcloud storage cp`/`gsutil cp`-subprocesaanroep **per bestand**. Een land
+met duizenden bedrijven heeft weliswaar maar een handvol
+`company-details-*.json`-bucketbestanden (500 bedrijven per bucket), maar
+elke aparte CLI-aanroep betaalt zijn eigen opstart-/auth-overhead — bij een
+land als Spanje (5.288 bedrijven → 11 bucketbestanden + manifest + lijst =
+13 aanroepen) telde dat op tot enkele minuten, puur overhead, geen
+netwerktransport.
+
+**Fix:** alle bestanden worden nu in **één** `cp`-aanroep gedownload
+(`download_files_batch`; `cp bron1 bron2 … bestemmingsmap/`, ondersteund
+door zowel `gcloud storage` als `gsutil`). Dat scheelt niet lineair met het
+aantal bedrijven maar met het aantal *bestanden* — en dat blijft klein
+ongeacht landgrootte. De laadknop toont nu ook hoeveel seconden het
+downloaden kostte, zodat dit meetbaar is. Test
+`test_many_detail_buckets_use_one_cp_call_not_one_per_file` bevestigt: 11
+bucketbestanden → exact 1 `ls`- en 1 `cp`-aanroep, niet 13.
+
 ## Aanbevolen werkwijze
 
 1. Land laden → **📊 Impact** → **🪄 preset** klikken.

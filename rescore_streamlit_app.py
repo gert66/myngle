@@ -610,6 +610,7 @@ def employee_range_options() -> list[str]:
 def main() -> None:  # pragma: no cover - exercised only under `streamlit run`
     import shutil
     import tempfile
+    import time
 
     import plotly.express as px
     import plotly.graph_objects as go
@@ -712,6 +713,12 @@ def main() -> None:  # pragma: no cover - exercised only under `streamlit run`
             country_folder = st.text_input(
                 "Land-folder (bv. brazil)", value="brazil", key="country_text")
 
+        st.caption(
+            "Downloadt éénmalig alle bedrijven van dit land uit de cloud "
+            "(één bestand per ~500 bedrijven, in één keer opgehaald — dus "
+            "dit duurt ongeveer even lang ongeacht landgrootte). Daarna "
+            "werkt alles hieronder lokaal en direct, ook bij grote landen."
+        )
         if st.button("📥 Huidige run laden", type="primary"):
             old_dir = st.session_state.get("_work_dir")
             if old_dir:
@@ -719,13 +726,18 @@ def main() -> None:  # pragma: no cover - exercised only under `streamlit run`
             work_dir = tempfile.mkdtemp(prefix="rescore_streamlit_")
             st.session_state["_work_dir"] = work_dir
             try:
+                _dl_t0 = time.monotonic()
                 with st.spinner(f"{country_folder}/current/ downloaden…"):
                     current = download_current_run(bucket, country_folder, work_dir)
+                _dl_elapsed = time.monotonic() - _dl_t0
                 st.session_state["_current"] = current
                 st.session_state["_current_country"] = country_folder
                 st.session_state["_current_bucket"] = bucket
                 n_companies = sum(len(b) for b in current["detail_files"].values())
-                st.success(f"{n_companies} bedrijven geladen uit {country_folder}/current/.")
+                st.success(
+                    f"{n_companies} bedrijven geladen uit {country_folder}/current/ "
+                    f"({_dl_elapsed:.1f}s)."
+                )
             except Exception as exc:
                 st.error(f"Laden mislukt: {exc}")
 
