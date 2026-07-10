@@ -28,7 +28,7 @@ import json
 import shutil
 import subprocess
 import tempfile
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
 
@@ -78,8 +78,15 @@ def build_upload_command(local_path: str, dest_uri: str, project: str) -> list[s
 def build_execute_command(
     job_name: str, project: str, region: str,
     input_uri: str, output_dir: str, run_id: str, task_count: int, mode: str,
-    extra_env: Optional[dict] = None,
+    extra_env: Optional[dict] = None, wait: bool = False,
 ) -> list[str]:
+    """``wait=False`` (the default) returns immediately once the execution is
+    accepted — the Cloud Run Job itself keeps running server-side either
+    way, ``--wait`` only controls whether THIS gcloud subprocess blocks until
+    it finishes. Non-blocking is what makes the app laptop-independent: the
+    caller stores the run_id (see main()'s "Status" panel) and can check
+    back on it later instead of having to keep this process alive for the
+    whole run."""
     env_pairs = [
         f"INPUT_GCS_URI={input_uri}", f"OUTPUT_GCS_DIR={output_dir}",
         f"RUN_ID={run_id}", f"TASK_COUNT={task_count}", f"MODE={mode}",
@@ -87,7 +94,7 @@ def build_execute_command(
     for key, value in (extra_env or {}).items():
         env_pairs.append(f"{key}={value}")
     env_vars = ",".join(env_pairs)
-    return [
+    cmd = [
         _gcloud_executable(), "run", "jobs", "execute", job_name,
         "--project", project,
         "--region", region,
@@ -99,8 +106,10 @@ def build_execute_command(
         # then failed for any other value chosen in the sidebar).
         "--tasks", str(task_count),
         "--update-env-vars", env_vars,
-        "--wait",
     ]
+    if wait:
+        cmd.append("--wait")
+    return cmd
 
 
 def build_download_command(src_glob: str, local_dir: str, project: str) -> list[str]:
@@ -157,6 +166,72 @@ def count_task_statuses(listing_output: str) -> dict:
     for state in task_state.values():
         counts[state] += 1
     return counts
+
+
+def build_cat_command(uri: str, project: str) -> list[str]:
+    return [_gcloud_executable(), "storage", "cat", uri, "--project", project]
+
+
+def read_gcs_json(uri: str, project: str) -> Optional[dict]:
+    """Best-effort read of a small remote JSON file (manifest.json,
+    final/manifest_done.json) via `gcloud storage cat` — no local download
+    step, no ADC needed. None on any failure (file doesn't exist yet,
+    invalid JSON, gcloud error): callers treat that as "not available yet",
+    never a crash — this is polled repeatedly while a run is in progress."""
+    rc, output = run_capture(build_cat_command(uri, project))
+    if rc != 0:
+        return None
+    try:
+        return json.loads(output)
+    except Exception:
+        return None
+
+
+def parse_run_ids_from_manifest_listing(listing_output: str) -> list[str]:
+    """Extract run_ids from `gcloud storage ls gs://bucket/runs/*/manifest.json`
+    output, most recent first. A run_id embeds a sortable
+    YYYYMMDD_HHMMSS_<slug> prefix (see cloud_dispatcher.build_run_id), so a
+    plain descending string sort already orders by recency without needing
+    to open/parse each manifest."""
+    run_ids = []
+    for line in listing_output.splitlines():
+        line = line.strip()
+        if not line.startswith("gs://") or not line.endswith("/manifest.json"):
+            continue
+        parts = line.split("/")
+        try:
+            run_ids.append(parts[parts.index("runs") + 1])
+        except (ValueError, IndexError):
+            continue
+    return sorted(set(run_ids), reverse=True)
+
+
+def determine_run_stage(counts: dict, expected_task_count: int, merge_manifest: Optional[dict]) -> str:
+    """Classify a run's current stage from its status/*.json task counts and
+    (if present) its final/manifest_done.json — kept pure/unit-tested so the
+    Streamlit status panel is just a thin rendering of one of these values:
+
+    - "merged": final/manifest_done.json reports status "done".
+    - "merge_failed": final/manifest_done.json reports status "failed"
+      (cloud_merge_results.py refused to merge — e.g. a failed task).
+    - "has_failed_tasks": every task reported in, but at least one failed,
+      and no merge has been attempted yet.
+    - "ready_to_merge": every task reported "done", none failed.
+    - "running": some, but not all, tasks have reported yet.
+    - "no_status_yet": nothing reported yet (job execution may still be
+      provisioning, or hasn't started).
+    """
+    if merge_manifest is not None:
+        if merge_manifest.get("status") == "done":
+            return "merged"
+        if merge_manifest.get("status") == "failed":
+            return "merge_failed"
+    reported = counts.get("done", 0) + counts.get("failed", 0)
+    if reported == 0:
+        return "no_status_yet"
+    if expected_task_count and reported >= expected_task_count:
+        return "has_failed_tasks" if counts.get("failed", 0) > 0 else "ready_to_merge"
+    return "running"
 
 
 # =============================================================================
@@ -259,7 +334,17 @@ def run_streaming(
 
 
 def run_capture(cmd: list[str]) -> tuple[int, str]:
-    result = subprocess.run(cmd, capture_output=True, text=True)
+    """Never raises: a missing/misconfigured gcloud executable (OSError,
+    e.g. FileNotFoundError) comes back as (1, error message) instead of
+    crashing the caller. This matters more than it used to -- the "Status
+    van een run" panel and "Recente runs" listing now call this on every
+    page load/rerun (not just from an explicit button click like upload/
+    execute did before), so a broken gcloud setup must degrade to a normal
+    st.error/st.caption rather than a raw traceback on every render."""
+    try:
+        result = subprocess.run(cmd, capture_output=True, text=True)
+    except OSError as exc:
+        return 1, f"{type(exc).__name__}: {exc}"
     output = (result.stdout or "") + (result.stderr or "")
     return result.returncode, output
 
@@ -399,6 +484,174 @@ def _merge_export_into_existing_current(
 
 
 # =============================================================================
+# Run lifecycle: non-blocking dispatch + on-demand merge/export.
+#
+# main()'s "Start Cloud Run" button only uploads the input and starts the
+# Cloud Run Job execution (build_execute_command's wait=False) -- it no
+# longer blocks on the whole run. Everything below (merge, Lovable export,
+# GCS upload) instead runs later, triggered from the "Status" panel keyed by
+# run_id, which survives a closed/reopened browser tab via the URL's
+# ?run_id= query param (see main()). The Cloud Run Job itself keeps running
+# server-side regardless of whether this Streamlit process is even alive,
+# so a laptop going to sleep mid-run never loses anything -- merging and
+# exporting simply happen whenever you come back to this page.
+# =============================================================================
+
+def finish_run_merge(bucket: str, project: str, run_id: str, task_count: int, work_dir: Path) -> dict:
+    """Download this run's part/status files locally, merge them into one
+    final Excel (reusing cloud_merge_results.py's own merge logic), and push
+    the result back to GCS under FINAL_OUTPUT_NAME so it's discoverable
+    later purely from run_id. Returns
+    ``{"ok": bool, "final_local": Path | None, "output_dir": str,
+    "row_count": int | None, "error": str | None}`` -- never raises."""
+    import cloud_merge_results as cmr
+
+    output_dir = gcs_output_dir(bucket, run_id)
+    local_run_dir = work_dir / "run"
+    local_parts = local_run_dir / "parts"
+    local_status = local_run_dir / "status"
+    local_parts.mkdir(parents=True, exist_ok=True)
+    local_status.mkdir(parents=True, exist_ok=True)
+
+    rc, output = run_capture(build_download_command(
+        join_path(output_dir, "parts", "*.xlsx"), str(local_parts) + "/", project))
+    if rc != 0:
+        return {"ok": False, "final_local": None, "output_dir": output_dir,
+                "row_count": None, "error": f"Ophalen van part-bestanden mislukt:\n{output}"}
+    run_capture(build_download_command(
+        join_path(output_dir, "status", "*_done.json"), str(local_status) + "/", project))
+    # No _failed.json files is the normal, successful case -- a non-zero
+    # exit here (glob matched nothing) is expected, not an error.
+    run_capture(build_download_command(
+        join_path(output_dir, "status", "*_failed.json"), str(local_status) + "/", project))
+
+    merge_rc = cmr.main([
+        "--run-id", run_id,
+        "--output-dir", str(local_run_dir),
+        "--expected-task-count", str(int(task_count)),
+    ])
+    if merge_rc != 0:
+        return {"ok": False, "final_local": None, "output_dir": output_dir,
+                "row_count": None,
+                "error": "Merge mislukt — controleer of er een gefaalde task tussen zit."}
+
+    final_local = local_run_dir / "final" / cmr.DEFAULT_FINAL_OUTPUT_NAME
+    import pandas as pd
+    try:
+        row_count = len(pd.read_excel(final_local, sheet_name=cmr.ENRICHED_LEADS_SHEET_NAME))
+    except Exception:
+        row_count = None
+
+    run_capture(build_upload_command(
+        str(final_local), join_path(output_dir, "final", FINAL_OUTPUT_NAME), project))
+
+    return {"ok": True, "final_local": final_local, "output_dir": output_dir,
+            "row_count": row_count, "error": None}
+
+
+def run_lovable_export_and_upload(
+    final_local: Path, work_dir: Path, export_country: str, cold_callers_raw: str,
+    foreign_hq_only_export: bool, bucket_size: int, content_language: str,
+    export_gcs_bucket: str, export_gcs_prefix: str, export_gcs_run_folder: str,
+    merge_current: bool, upload_current: bool, upload_archive: bool, project: str,
+) -> dict:
+    """Run the Lovable JSON export on an already-merged final Excel, then
+    (if configured) merge with/overwrite current/ in GCS, upload current/ +
+    the run's archive/ snapshot, and update the screened-domains ledger.
+    Returns a dict describing what happened; every step's own failure is
+    captured in the returned dict rather than raised, so one broken step
+    (e.g. a bad GCS prefix) never hides whether the export itself worked."""
+    import export_lead_prioritizer_to_lovable_json as lovable_export
+    import lovable_gcs_upload as lovable_gcs
+    import screened_domains_ledger
+    import pandas as pd
+    from lead_prioritizer_batch_app import parse_cold_callers
+
+    cold_callers = parse_cold_callers(cold_callers_raw)
+    if not export_country:
+        return {"ok": False, "error": "Geen export country ingevuld."}
+    if not cold_callers:
+        return {"ok": False, "error": "Minimaal één cold caller is verplicht."}
+
+    export_dir = work_dir / "lovable_export"
+    try:
+        manifest = lovable_export.export_workbook_to_lovable_json(
+            input_xlsx=final_local,
+            output_dir=export_dir,
+            export_country=export_country,
+            cold_callers=cold_callers,
+            foreign_hq_only=bool(foreign_hq_only_export),
+            bucket_size=int(bucket_size),
+            content_language=content_language,
+        )
+    except Exception as exc:
+        return {"ok": False, "error": f"Lovable JSON-export mislukt: {exc}"}
+
+    result: dict = {
+        "ok": True, "manifest": manifest, "export_dir": export_dir,
+        "uploaded": False, "merge_summary": None, "upload_failures": [],
+        "ledger_updated_count": 0,
+    }
+
+    gcs_bucket_norm = export_gcs_bucket.strip()
+    gcs_prefix_norm = lovable_gcs.normalize_gcs_prefix(export_gcs_prefix)
+    gcs_run_folder_norm = lovable_gcs.normalize_gcs_prefix(export_gcs_run_folder)
+
+    if gcs_bucket_norm and gcs_prefix_norm:
+        try:
+            enriched_rows = pd.read_excel(final_local, sheet_name="Enriched Leads").to_dict("records")
+        except Exception:
+            enriched_rows = []
+        ledger_updates = screened_domains_ledger.build_ledger_updates(enriched_rows)
+        if ledger_updates:
+            save_result = screened_domains_ledger.save_ledger(
+                gcs_bucket_norm, gcs_prefix_norm, ledger_updates)
+            if save_result.get("success"):
+                result["ledger_updated_count"] = len(ledger_updates)
+
+    validation = manifest.get("validation_summary", {}) or {}
+    validation_ok = (
+        validation.get("status") == "ok"
+        and int(validation.get("structural_errors", 0) or 0) == 0
+    )
+    can_upload = (
+        validation_ok and bool(gcs_bucket_norm) and bool(gcs_prefix_norm)
+        and (upload_current or upload_archive)
+    )
+    if not can_upload:
+        result["upload_skipped_reason"] = (
+            "Exportvalidatie of bucket/prefix-instellingen waren niet in orde."
+        )
+        return result
+
+    output_filenames = sorted({Path(p).name for p in manifest.get("output_files", [])})
+    current_export_dir = export_dir
+    current_filenames = output_filenames
+    if upload_current and merge_current:
+        current_export_dir, current_filenames, merge_summary = \
+            _merge_export_into_existing_current(
+                work_dir, export_dir, manifest,
+                gcs_bucket_norm, gcs_prefix_norm, int(bucket_size), project,
+            )
+        result["merge_summary"] = merge_summary
+
+    current_jobs = lovable_gcs.build_upload_plan(
+        current_export_dir, current_filenames, gcs_bucket_norm,
+        gcs_prefix_norm, gcs_run_folder_norm,
+        upload_current=upload_current, upload_archive=False,
+    )
+    archive_jobs = lovable_gcs.build_upload_plan(
+        export_dir, output_filenames, gcs_bucket_norm, gcs_prefix_norm,
+        gcs_run_folder_norm,
+        upload_current=False, upload_archive=upload_archive,
+    )
+    upload_results = lovable_gcs.run_upload_plan(current_jobs + archive_jobs)
+    result["uploaded"] = True
+    result["upload_failures"] = [r for r in upload_results if not r["success"]]
+    return result
+
+
+# =============================================================================
 # Skip-already-enriched pre-filter: cheaper reruns when merging (only
 # processes rows whose company isn't already fully enriched in current/,
 # instead of re-running the whole pipeline every time and merging after the
@@ -475,14 +728,12 @@ def main() -> None:  # pragma: no cover - exercised only under `streamlit run`
     import pandas as pd
     import streamlit as st
 
-    import cloud_merge_results as cmr
     import export_lead_prioritizer_to_lovable_json as lovable_export
     import lovable_gcs_upload as lovable_gcs
     import screened_domains_ledger
     from lead_prioritizer_batch_app import (
         DEFAULT_COLD_CALLERS_TEXT,
         default_gcs_country_prefix,
-        parse_cold_callers,
         suggest_country_from_filename,
         SUPPORTED_DEFAULT_INPUT_COUNTRIES,
     )
@@ -623,25 +874,25 @@ def main() -> None:  # pragma: no cover - exercised only under `streamlit run`
             )
 
         st.divider()
-        st.subheader("Lovable JSON-export + GCS-upload (na afloop)")
+        st.subheader("Lovable JSON-export + GCS-upload")
         st.caption(
-            "Draait één keer na de merge, op het volledige samengevoegde "
-            "eindresultaat — net als de lokale app."
+            "Deze instellingen sturen alleen de pre-flight skip-filter en "
+            "archive-conflict-check hieronder aan (vóór de dure run). De "
+            "daadwerkelijke export/upload gebeurt niet meer automatisch na "
+            "afloop — dat doe je on-demand in het 'Status van een run'-"
+            "paneel bovenaan, zodra de run klaar is (ook nuttig als je "
+            "laptop tussentijds sliep en je pas later terugkomt)."
         )
         auto_lovable_export_enabled = st.checkbox(
-            "Na afloop automatisch Lovable JSON exporteren", value=True)
+            "Skip-filter/archive-check hieronder gebruiken", value=True)
         export_country = ""
-        cold_callers_raw = DEFAULT_COLD_CALLERS_TEXT
         # Derived from the "Scope" choice above, not a separate checkbox --
         # see the comment there for why these two must never drift apart.
         foreign_hq_only_export = gate_full_enrichment_on_foreign_hq
-        bucket_size = 500
-        content_language = lovable_export.DEFAULT_CONTENT_LANGUAGE
         auto_gcs_upload_enabled = True
         export_gcs_bucket = lovable_gcs.DEFAULT_GCS_BUCKET
         export_gcs_prefix = ""
         export_gcs_run_folder = ""
-        upload_current = True
         upload_archive = True
         if auto_lovable_export_enabled:
             _country_options = [""] + list(SUPPORTED_DEFAULT_INPUT_COUNTRIES)
@@ -660,22 +911,14 @@ def main() -> None:  # pragma: no cover - exercised only under `streamlit run`
                 help="Automatisch geraden uit de bestandsnaam; pas aan indien nodig. "
                      "Bepaalt ook het GCS-pad hieronder (gs://<bucket>/<dit land>/...) "
                      "— leeg laten stuurt de export naar .../unknown/.")
-            cold_callers_raw = st.text_input(
-                "Cold callers (comma-separated)", value=DEFAULT_COLD_CALLERS_TEXT)
             st.caption(
                 "Foreign-HQ-only export: "
                 f"**{'aan' if foreign_hq_only_export else 'uit'}** "
                 "(afgeleid van de Scope-keuze hierboven — "
                 f"“{scope_choice}”)."
             )
-            bucket_size = st.number_input("Bucket size", min_value=1, value=500, step=50)
-            content_language = st.selectbox(
-                "Lovable content language", list(lovable_export.SUPPORTED_CONTENT_LANGUAGES),
-                index=list(lovable_export.SUPPORTED_CONTENT_LANGUAGES).index(
-                    lovable_export.DEFAULT_CONTENT_LANGUAGE),
-            )
             auto_gcs_upload_enabled = st.checkbox(
-                "Na Lovable JSON-export uploaden naar Google Cloud Storage", value=True)
+                "GCS-prefix hieronder ook gebruiken voor de archive-conflict-check", value=True)
             if auto_gcs_upload_enabled:
                 export_gcs_bucket = st.text_input(
                     "GCS bucket (Lovable-export)", value=lovable_gcs.DEFAULT_GCS_BUCKET)
@@ -702,13 +945,208 @@ def main() -> None:  # pragma: no cover - exercised only under `streamlit run`
                         f"{lovable_gcs.default_gcs_run_folder(mode)}_"
                         f"{datetime.now().strftime('%H%M%S')}"
                     ))
-                # current/ zelf altijd uploaden zodra Lovable-export + GCS-
-                # upload allebei aanstaan -- de vraag is niet "wel of niet",
-                # maar "overschrijven of mergen", en die keuze staat expliciet
-                # in het hoofdveld hieronder (niet hier in de sidebar), vlak
-                # vóór de Start-knop, waar hij niet gemist kan worden.
-                upload_current = True
                 upload_archive = st.checkbox("Archive naar runs/<run_folder>/", value=True)
+
+    # Built once, right after the sidebar, so both the "Start Cloud Run"
+    # dispatch below AND the retry-failed-shards button in the status panel
+    # can reuse the exact same env overrides without duplicating this dict.
+    extra_env = {
+        "COMPOSE_CALLER_CONTENT": str(bool(compose_caller_content)).lower(),
+        "RICH_ICP_CONTEXT": str(bool(rich_icp_context)).lower(),
+        "AI_SIGNAL_SCORING": str(bool(ai_signal_scoring)).lower(),
+        "USE_ENRICHMENT_CACHE": str(bool(use_enrichment_cache)).lower(),
+        "ENRICHMENT_CACHE_BUCKET": enrichment_cache_bucket if use_enrichment_cache else "",
+        "DEEP_DIVE": str(bool(deep_dive)).lower(),
+        "DEEP_DIVE_MIN_SCORE": str(deep_dive_min_score),
+        "DEEP_DIVE_ON_FOREIGN_HQ": str(bool(deep_dive_on_foreign_hq)).lower(),
+        "C5_ENABLED": str(bool(c5_enabled)).lower(),
+        "GATE_FULL_ENRICHMENT_ON_FOREIGN_HQ": str(bool(gate_full_enrichment_on_foreign_hq)).lower(),
+    }
+    if total_row_limit:
+        extra_env["TOTAL_ROW_LIMIT"] = str(int(total_row_limit))
+
+    # =========================================================================
+    # Status panel: keyed by run_id, not by browser session. A run dispatched
+    # via the button below stores its run_id in the URL (?run_id=...) and
+    # reruns into this same panel -- reopening that URL later (after a
+    # laptop sleep/reboot/closed tab) lands right back here, because
+    # everything it shows/does is re-derived from GCS, never from Streamlit
+    # session state alone. "Recente runs" covers the case where the URL
+    # itself got lost.
+    # =========================================================================
+
+    def _render_lovable_export_form(run_id: str, merge_manifest: Optional[dict]) -> None:
+        guessed_country = suggest_country_from_filename(run_id, SUPPORTED_DEFAULT_INPUT_COUNTRIES)
+        country_options = [""] + list(SUPPORTED_DEFAULT_INPUT_COUNTRIES)
+        country = st.selectbox(
+            "Export country", options=country_options,
+            index=country_options.index(guessed_country) if guessed_country in country_options else 0,
+            key=f"export_country_status_{run_id}")
+        cold_callers_raw = st.text_input(
+            "Cold callers (comma-separated)", value=DEFAULT_COLD_CALLERS_TEXT,
+            key=f"cold_callers_status_{run_id}")
+        foreign_hq_only = st.checkbox(
+            "Foreign-HQ-only export", value=True, key=f"foreign_hq_status_{run_id}")
+        gcs_bucket_export = st.text_input(
+            "GCS bucket", value=lovable_gcs.DEFAULT_GCS_BUCKET, key=f"gcs_bucket_status_{run_id}")
+        gcs_prefix_export = st.text_input(
+            "GCS prefix (bv. <land>)", value=default_gcs_country_prefix(country),
+            key=f"gcs_prefix_status_{run_id}")
+        gcs_run_folder_export = st.text_input(
+            "GCS run folder", value=run_id, key=f"gcs_run_folder_status_{run_id}")
+        current_choice = st.radio(
+            "current/-gedrag", ["Overschrijven", "Mergen (bestaande data behouden)"],
+            horizontal=True, key=f"current_choice_status_{run_id}")
+
+        if st.button("📤 Exporteren & uploaden", key=f"do_export_{run_id}"):
+            final_bytes = st.session_state.get(f"final_bytes_{run_id}")
+            if not final_bytes:
+                final_output_uri = (merge_manifest or {}).get("final_output_uri")
+                if not final_output_uri:
+                    st.error("Kon het eindresultaat niet vinden — haal het eerst op via de downloadknop hierboven.")
+                    st.stop()
+                fetch_dir = Path(tempfile.mkdtemp(prefix="cloud_run_status_fetch_"))
+                local_final = fetch_dir / Path(final_output_uri).name
+                rc, output = run_capture(build_download_command(final_output_uri, str(local_final), project))
+                if rc != 0:
+                    st.error(f"Ophalen eindresultaat mislukt:\n{output}")
+                    st.stop()
+                final_bytes = local_final.read_bytes()
+                st.session_state[f"final_bytes_{run_id}"] = final_bytes
+
+            export_work_dir = Path(tempfile.mkdtemp(prefix="cloud_run_status_export_"))
+            local_final_for_export = export_work_dir / "final.xlsx"
+            local_final_for_export.write_bytes(final_bytes)
+            with st.spinner("Lovable JSON exporteren + uploaden…"):
+                export_result = run_lovable_export_and_upload(
+                    local_final_for_export, export_work_dir, country, cold_callers_raw,
+                    foreign_hq_only, 500, lovable_export.DEFAULT_CONTENT_LANGUAGE,
+                    gcs_bucket_export, gcs_prefix_export, gcs_run_folder_export,
+                    merge_current=current_choice.startswith("Mergen"),
+                    upload_current=True, upload_archive=True, project=project,
+                )
+            if not export_result.get("ok"):
+                st.error(export_result.get("error", "Onbekende fout bij export."))
+            else:
+                msg = "Export + upload voltooid."
+                if export_result.get("merge_summary"):
+                    ms = export_result["merge_summary"]
+                    msg += (f" ({ms['added']} nieuw, {ms['updated']} bijgewerkt, "
+                            f"{ms['kept_richer_existing']} bestaande versie behouden)")
+                if export_result.get("upload_failures"):
+                    st.warning(f"{msg} Let op: {len(export_result['upload_failures'])} upload(s) mislukten.")
+                else:
+                    st.success(msg)
+
+    def _render_run_status(run_id: str) -> None:
+        output_dir = gcs_output_dir(bucket, run_id)
+        st.caption(f"`{output_dir}`")
+        manifest = read_gcs_json(join_path(output_dir, "manifest.json"), project)
+        expected_task_count = (
+            int(manifest["task_count"]) if manifest and manifest.get("task_count") else int(task_count)
+        )
+
+        if st.button("🔄 Ververs status", key=f"refresh_{run_id}"):
+            st.rerun()
+
+        rc_ls, listing = run_capture(build_list_command(
+            join_path(output_dir, "status", "*.json"), project))
+        counts = count_task_statuses(listing) if rc_ls == 0 else {"running": 0, "done": 0, "failed": 0}
+        merge_manifest = read_gcs_json(join_path(output_dir, "final", "manifest_done.json"), project)
+        stage = determine_run_stage(counts, expected_task_count, merge_manifest)
+        reported = counts["done"] + counts["failed"]
+
+        if stage == "no_status_yet":
+            st.info("⏳ Nog geen enkele taak heeft gerapporteerd — de job wordt mogelijk nog geprovisioneerd.")
+        elif stage == "running":
+            st.info(
+                f"📊 Bezig: {counts['done']} klaar, {counts['failed']} gefaald, "
+                f"{counts['running']} bezig ({reported}/{expected_task_count} gerapporteerd)."
+            )
+        elif stage == "ready_to_merge":
+            st.success(f"✅ Alle {expected_task_count} taken zijn klaar, geen fouten.")
+            if st.button("🔀 Mergen & afronden", key=f"merge_{run_id}", type="primary"):
+                work_dir = Path(tempfile.mkdtemp(prefix="cloud_run_status_merge_"))
+                with st.spinner("Resultaten mergen…"):
+                    merge_result = finish_run_merge(bucket, project, run_id, expected_task_count, work_dir)
+                if not merge_result["ok"]:
+                    st.error(merge_result["error"])
+                else:
+                    st.session_state[f"final_bytes_{run_id}"] = merge_result["final_local"].read_bytes()
+                    st.rerun()
+        elif stage == "merged":
+            row_count = merge_manifest.get("row_count") if merge_manifest else None
+            st.success(f"✅ Klaar — {row_count if row_count is not None else '?'} rijen samengevoegd.")
+            final_bytes = st.session_state.get(f"final_bytes_{run_id}")
+            if not final_bytes and st.button("⬇️ Eindresultaat ophalen", key=f"fetch_final_{run_id}"):
+                final_output_uri = (merge_manifest or {}).get("final_output_uri")
+                fetch_dir = Path(tempfile.mkdtemp(prefix="cloud_run_status_fetch_"))
+                local_final = fetch_dir / Path(final_output_uri).name
+                rc, output = run_capture(build_download_command(final_output_uri, str(local_final), project))
+                if rc != 0:
+                    st.error(f"Ophalen mislukt:\n{output}")
+                else:
+                    st.session_state[f"final_bytes_{run_id}"] = local_final.read_bytes()
+                    st.rerun()
+            final_bytes = st.session_state.get(f"final_bytes_{run_id}")
+            if final_bytes:
+                st.download_button(
+                    "💾 Download eindresultaat (.xlsx)", data=final_bytes,
+                    file_name=f"{run_id}_prioritized.xlsx",
+                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                    key=f"download_final_{run_id}",
+                )
+            with st.expander("📤 Lovable JSON-export (on-demand)"):
+                _render_lovable_export_form(run_id, merge_manifest)
+        elif stage == "merge_failed":
+            st.error(f"❌ Merge mislukt: {(merge_manifest or {}).get('error', '')}")
+
+        if counts["failed"] > 0 and stage != "merged":
+            st.warning(
+                f"⚠️ {counts['failed']} taak/taken definitief gefaald (na retries). "
+                f"De {counts['done']} gelukte delen staan veilig in `{output_dir}/parts/` "
+                "en worden bij een herstart automatisch overgeslagen."
+            )
+            if st.button(
+                "🔁 Ontbrekende/mislukte shards opnieuw draaien (huidige sidebar-instellingen)",
+                key=f"retry_{run_id}",
+            ):
+                input_uri = (manifest or {}).get("input_uri")
+                if not input_uri:
+                    st.error("Kon de input-URI van deze run niet vinden in manifest.json — kan niet herstarten.")
+                else:
+                    rc, output = run_capture(build_execute_command(
+                        job_name, project, region, input_uri, output_dir,
+                        run_id, expected_task_count, mode, extra_env=extra_env,
+                    ))
+                    if rc == 0:
+                        st.success("Opnieuw gestart — ververs de status over een tijdje.")
+                    else:
+                        st.error(f"Herstart mislukt:\n{output}")
+
+    st.divider()
+    st.subheader("📡 Status van een run")
+    run_id_from_url = st.query_params.get("run_id", "")
+    run_id_input = st.text_input(
+        "Run-ID (staat in de URL na het starten van een run, of kies hieronder)",
+        value=run_id_from_url,
+    )
+    if run_id_input and run_id_input != run_id_from_url:
+        st.query_params["run_id"] = run_id_input
+    if run_id_from_url and st.button("🆕 Nieuwe run starten (status wissen)"):
+        st.query_params.clear()
+        st.rerun()
+
+    with st.expander("🕘 Recente runs", expanded=not run_id_input):
+        rc_ls, listing = run_capture(build_list_command(f"gs://{bucket}/runs/*/manifest.json", project))
+        recent_run_ids = parse_run_ids_from_manifest_listing(listing) if rc_ls == 0 else []
+        if not recent_run_ids:
+            st.caption("Geen eerdere runs gevonden onder deze bucket/project (of nog niet opgehaald).")
+        for rid in recent_run_ids[:20]:
+            st.markdown(f"- [`{rid}`](?run_id={rid})")
+
+    if run_id_input:
+        _render_run_status(run_id_input)
 
     # ---- Explicit main-panel choice: overwrite or merge current/ ----------
     # Moved out of the sidebar so it can't be missed: this decides whether a
@@ -894,8 +1332,6 @@ def main() -> None:  # pragma: no cover - exercised only under `streamlit run`
         run_id = build_run_id(uploaded.name)
         input_uri = gcs_incoming_uri(bucket, uploaded.name)
         output_dir = gcs_output_dir(bucket, run_id)
-        resolved_export_country = export_country or suggest_country_from_filename(
-            uploaded.name, SUPPORTED_DEFAULT_INPUT_COUNTRIES)
 
         st.info(f"Run-ID: `{run_id}`")
 
@@ -908,304 +1344,39 @@ def main() -> None:  # pragma: no cover - exercised only under `streamlit run`
             st.stop()
         st.success(f"Geupload naar {input_uri}")
 
-        # ---- 2. Execute the Cloud Run Job, streaming progress ---------------
-        import time
-
-        st.subheader("Job-executie")
-        elapsed_placeholder = st.empty()
-        status_placeholder = st.empty()
-        log_placeholder = st.empty()
-        buf: list[str] = []
-        state = {"last_update": 0.0, "start": time.monotonic(), "last_status_poll": 0.0}
-        MIN_UPDATE_INTERVAL = 0.3  # seconds — avoid hammering the UI on every single character
-        STATUS_POLL_INTERVAL = 15.0  # seconds — gcloud storage ls is a real subprocess call
-
-        def _on_chunk(chunk: str) -> None:
-            buf.append(chunk)
-            now = time.monotonic()
-            if now - state["last_update"] < MIN_UPDATE_INTERVAL and "\n" not in chunk:
-                return
-            state["last_update"] = now
-            elapsed_placeholder.caption(f"⏱️ bezig: {now - state['start']:.0f}s")
-            log_placeholder.code("".join(buf)[-4000:])
-
-        def _on_tick() -> None:
-            # gcloud run jobs execute --wait goes silent for the entire
-            # execution phase (the part that takes longest) — this is the
-            # ONLY live signal the UI has during that phase, pulled straight
-            # from the same status/ JSON files the Cloud Console reads.
-            now = time.monotonic()
-            if now - state["last_status_poll"] < STATUS_POLL_INTERVAL:
-                return
-            state["last_status_poll"] = now
-            rc_ls, listing = run_capture(build_list_command(
-                join_path(output_dir, "status", "*.json"), project))
-            if rc_ls != 0:
-                return  # normal early on: the status/ prefix may not exist yet
-            counts = count_task_statuses(listing)
-            reported = counts["done"] + counts["failed"] + counts["running"]
-            status_placeholder.info(
-                f"📊 Taken: {counts['done']} klaar, {counts['failed']} gefaald, "
-                f"{counts['running']} bezig ({reported}/{int(task_count)} gerapporteerd)"
-            )
-
-        extra_env = {
-            "COMPOSE_CALLER_CONTENT": str(bool(compose_caller_content)).lower(),
-            "RICH_ICP_CONTEXT": str(bool(rich_icp_context)).lower(),
-            "AI_SIGNAL_SCORING": str(bool(ai_signal_scoring)).lower(),
-            "USE_ENRICHMENT_CACHE": str(bool(use_enrichment_cache)).lower(),
-            "ENRICHMENT_CACHE_BUCKET": enrichment_cache_bucket if use_enrichment_cache else "",
-            "DEEP_DIVE": str(bool(deep_dive)).lower(),
-            "DEEP_DIVE_MIN_SCORE": str(deep_dive_min_score),
-            "DEEP_DIVE_ON_FOREIGN_HQ": str(bool(deep_dive_on_foreign_hq)).lower(),
-            "C5_ENABLED": str(bool(c5_enabled)).lower(),
-            "GATE_FULL_ENRICHMENT_ON_FOREIGN_HQ": str(bool(gate_full_enrichment_on_foreign_hq)).lower(),
+        # ---- 2. Write a manifest.json + start the job, WITHOUT --wait ------
+        # The Cloud Run Job runs entirely server-side once execute accepts
+        # it -- this process (and therefore this laptop) doesn't need to
+        # stay alive for the run to finish. manifest.json is what lets the
+        # "Status van een run" panel above (and "Recente runs") find this
+        # run later purely from GCS, in a completely fresh browser session.
+        run_manifest = {
+            "run_id": run_id, "input_uri": input_uri, "output_dir": output_dir,
+            "task_count": int(task_count), "mode": mode,
+            "created_at": datetime.now(timezone.utc).isoformat(),
+            "source": "streamlit",
         }
-        if total_row_limit:
-            extra_env["TOTAL_ROW_LIMIT"] = str(int(total_row_limit))
-
-        job_timeout_seconds = 3600  # 1 uur — ruim boven de verwachte duur, voorkomt een oneindige hang
-        try:
-            rc = run_streaming(
-                build_execute_command(
-                    job_name, project, region, input_uri, output_dir,
-                    run_id, int(task_count), mode, extra_env=extra_env,
-                ),
-                on_chunk=_on_chunk,
-                timeout_seconds=job_timeout_seconds,
-                on_tick=_on_tick,
-            )
-        except ProcessTimeout as exc:
-            st.error(
-                f"{exc} De Cloud Run Job zelf loopt mogelijk nog door op GCP — "
-                f"check `gcloud run jobs executions list --job={job_name} --region={region}`."
-            )
-            st.stop()
-        if rc != 0:
-            st.error(
-                "Job-executie mislukt of gefaald. Check de status-JSON's in "
-                f"`{output_dir}/status/` en Cloud Logging voor 429's/errors."
-            )
-            st.stop()
-        st.success(f"Job-executie voltooid in {time.monotonic() - state['start']:.0f}s.")
-
-        # ---- 3. Download part/status files locally (avoids needing ADC) ----
-        local_run_dir = work_dir / "run"
-        local_parts = local_run_dir / "parts"
-        local_status = local_run_dir / "status"
-        local_parts.mkdir(parents=True, exist_ok=True)
-        local_status.mkdir(parents=True, exist_ok=True)
-
-        with st.spinner("Deel-resultaten ophalen…"):
-            rc, output = run_capture(build_download_command(
-                join_path(output_dir, "parts", "*.xlsx"), str(local_parts) + "/", project))
-            if rc != 0:
-                st.error("Ophalen van part-bestanden mislukt:")
-                st.code(output)
-                st.stop()
-            run_capture(build_download_command(
-                join_path(output_dir, "status", "*_done.json"), str(local_status) + "/", project))
-            # No _failed.json files is the normal, successful case — a non-zero
-            # exit here (glob matched nothing) is expected and not an error.
-            run_capture(build_download_command(
-                join_path(output_dir, "status", "*_failed.json"), str(local_status) + "/", project))
-
-        # ---- 4. Merge locally (reuses the actual pipeline's merge logic) ---
-        with st.spinner("Resultaten mergen…"):
-            merge_rc = cmr.main([
-                "--run-id", run_id,
-                "--output-dir", str(local_run_dir),
-                "--expected-task-count", str(int(task_count)),
-            ])
-        if merge_rc != 0:
-            st.error(
-                "Merge mislukt — controleer of er een gefaalde task tussen zit "
-                f"(status-bestanden in `{local_status}`)."
-            )
-            st.stop()
-
-        final_local = local_run_dir / "final" / cmr.DEFAULT_FINAL_OUTPUT_NAME
-        st.success(f"Merge voltooid: {final_local.name}")
-
-        # ---- 4b. Combined API-usage + cache-hit report across every task ---
-        # Each task's own lead_prioritizer_batch_cli.py subprocess tracks its
-        # own usage (usage_tracker.py, one process = one tracker) and folds a
-        # JSON snapshot into its own _done.json (cloud_job_runner.py); this
-        # just sums all of those already-downloaded status files into one
-        # run-wide report — no extra GCS calls.
-        import json as _json
-        import usage_tracker
-
-        task_snapshots = []
-        for status_path in sorted(local_status.glob("*_done.json")):
-            try:
-                payload = _json.loads(status_path.read_text(encoding="utf-8"))
-            except Exception:
-                continue
-            if payload.get("usage"):
-                task_snapshots.append(payload["usage"])
-        if task_snapshots:
-            combined_usage = usage_tracker.merge_snapshots(task_snapshots)
-            with st.expander(
-                f"📊 API-verbruik + cache-hitrate — {len(task_snapshots)}/"
-                f"{int(task_count)} taken rapporteerden dit"
-            ):
-                st.code(usage_tracker.format_summary_text(combined_usage))
-        else:
-            st.caption(
-                "Geen API-verbruiksdata gevonden in de status-bestanden "
-                "(oudere image zonder --usage-output-ondersteuning?)."
-            )
-
-        # ---- 4c. Update the screened-domains ledger (all HQ-screened rows) --
-        # Independent of Lovable export/foreign_hq_only_export filtering --
-        # every row this run screened for HQ (gated or not) is a candidate,
-        # so a future run's skip-filter can recognize a settled-domestic
-        # company even though it never lands in current/. Always attempted
-        # whenever GCS export is configured, regardless of whether THIS run
-        # itself uses the skip-filter -- future runs benefit either way.
-        if auto_lovable_export_enabled and auto_gcs_upload_enabled:
-            gcs_bucket_norm_ledger = export_gcs_bucket.strip()
-            gcs_prefix_norm_ledger = lovable_gcs.normalize_gcs_prefix(export_gcs_prefix)
-            if gcs_bucket_norm_ledger and gcs_prefix_norm_ledger:
-                try:
-                    enriched_rows = pd.read_excel(
-                        final_local, sheet_name=cmr.ENRICHED_LEADS_SHEET_NAME
-                    ).to_dict("records")
-                except Exception:
-                    enriched_rows = []
-                ledger_updates = screened_domains_ledger.build_ledger_updates(enriched_rows)
-                if ledger_updates:
-                    save_result = screened_domains_ledger.save_ledger(
-                        gcs_bucket_norm_ledger, gcs_prefix_norm_ledger, ledger_updates)
-                    if save_result.get("success"):
-                        st.caption(
-                            f"Gescreende-domeinen-ledger bijgewerkt: "
-                            f"{len(ledger_updates)} definitief-binnenlands bedrijf/"
-                            "bedrijven vastgelegd."
-                        )
-
-        # ---- 5. Push the final Excel back to GCS for consistency -----------
+        manifest_local = work_dir / "manifest.json"
+        manifest_local.write_text(json.dumps(run_manifest), encoding="utf-8")
         run_capture(build_upload_command(
-            str(final_local), join_path(output_dir, "final", FINAL_OUTPUT_NAME), project))
+            str(manifest_local), join_path(output_dir, "manifest.json"), project))
 
-        # ---- 6. Optional: Lovable JSON export + GCS upload, once, on the ---
-        # full merged result (same shape as the local app's after-run export).
-        if auto_lovable_export_enabled:
-            export_dir = local_run_dir / "lovable_export"
-            cold_callers = parse_cold_callers(cold_callers_raw)
-            export_error = None
-            if not resolved_export_country:
-                export_error = (
-                    "Lovable-export: geen export country ingevuld en kon er geen "
-                    "raden uit de bestandsnaam."
-                )
-            elif not cold_callers:
-                export_error = "Lovable-export: minimaal één cold caller is verplicht."
-            if export_error:
-                st.error(export_error)
-            else:
-                manifest = None
-                try:
-                    with st.spinner("Lovable JSON exporteren…"):
-                        manifest = lovable_export.export_workbook_to_lovable_json(
-                            input_xlsx=final_local,
-                            output_dir=export_dir,
-                            export_country=resolved_export_country,
-                            cold_callers=cold_callers,
-                            foreign_hq_only=bool(foreign_hq_only_export),
-                            bucket_size=int(bucket_size),
-                            content_language=content_language,
-                        )
-                    st.success(
-                        f"Lovable JSON-export voltooid: "
-                        f"{len(manifest.get('output_files', []))} bestand(en)."
-                    )
-                except Exception as exc:
-                    st.error(f"Lovable JSON-export mislukt: {exc}")
-
-                if manifest is not None and auto_gcs_upload_enabled:
-                    validation = manifest.get("validation_summary", {}) or {}
-                    validation_ok = (
-                        validation.get("status") == "ok"
-                        and int(validation.get("structural_errors", 0) or 0) == 0
-                    )
-                    gcs_bucket_norm = export_gcs_bucket.strip()
-                    gcs_prefix_norm = lovable_gcs.normalize_gcs_prefix(export_gcs_prefix)
-                    gcs_run_folder_norm = lovable_gcs.normalize_gcs_prefix(export_gcs_run_folder)
-                    can_upload = (
-                        validation_ok and bool(gcs_bucket_norm) and bool(gcs_prefix_norm)
-                        and (upload_current or upload_archive)
-                    )
-                    if not can_upload:
-                        st.warning(
-                            "GCS-upload overgeslagen: exportvalidatie of bucket/prefix-"
-                            "instellingen waren niet in orde. De Lovable JSON staat wel "
-                            "lokaal klaar."
-                        )
-                    else:
-                        output_filenames = sorted(
-                            {Path(p).name for p in manifest.get("output_files", [])})
-
-                        # ---- 6a. current/: merge with existing data, or plain overwrite ---
-                        current_export_dir = export_dir
-                        current_filenames = output_filenames
-                        if upload_current and merge_current:
-                            with st.spinner(
-                                "Bestaande current/-data downloaden en samenvoegen…"
-                            ):
-                                current_export_dir, current_filenames, merge_summary = \
-                                    _merge_export_into_existing_current(
-                                        local_run_dir, export_dir, manifest,
-                                        gcs_bucket_norm, gcs_prefix_norm,
-                                        int(bucket_size), project,
-                                    )
-                            st.info(
-                                f"Merge: {merge_summary['added']} nieuw, "
-                                f"{merge_summary['updated']} bijgewerkt, "
-                                f"{merge_summary['kept_richer_existing']} bestaande "
-                                "(rijkere) versie behouden, "
-                                f"{merge_summary['total_after']} totaal in current/."
-                            )
-
-                        current_jobs = lovable_gcs.build_upload_plan(
-                            current_export_dir, current_filenames, gcs_bucket_norm,
-                            gcs_prefix_norm, gcs_run_folder_norm,
-                            upload_current=upload_current, upload_archive=False,
-                        )
-                        archive_jobs = lovable_gcs.build_upload_plan(
-                            export_dir, output_filenames, gcs_bucket_norm, gcs_prefix_norm,
-                            gcs_run_folder_norm,
-                            upload_current=False, upload_archive=upload_archive,
-                        )
-                        jobs = current_jobs + archive_jobs
-                        with st.spinner("Lovable JSON uploaden naar Google Cloud Storage…"):
-                            upload_results = lovable_gcs.run_upload_plan(jobs)
-                        failures = [r for r in upload_results if not r["success"]]
-                        if failures:
-                            st.error(
-                                f"GCS-upload: {len(failures)} van {len(upload_results)} "
-                                "uploads mislukt."
-                            )
-                            for r in failures:
-                                st.code(f"{r['destination']}: {r.get('error') or r.get('stderr') or ''}")
-                        else:
-                            st.success(
-                                f"GCS-upload voltooid: {len(upload_results)} bestand(en).")
-
-        # ---- 7. Preview + download ------------------------------------------
-        df = pd.read_excel(final_local)
-        st.subheader(f"Resultaat — {len(df)} rijen")
-        preview_cols = [c for c in ["company_name", "domain", "run_success", "final_commercial_fit_score"] if c in df.columns]
-        st.dataframe(df[preview_cols] if preview_cols else df, use_container_width=True)
-
-        st.download_button(
-            "⬇️ Download eindresultaat (.xlsx)",
-            data=final_local.read_bytes(),
-            file_name=f"{Path(uploaded.name).stem}_prioritized.xlsx",
-            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        with st.spinner("Cloud Run Job starten…"):
+            rc, output = run_capture(build_execute_command(
+                job_name, project, region, input_uri, output_dir,
+                run_id, int(task_count), mode, extra_env=extra_env, wait=False,
+            ))
+        if rc != 0:
+            st.error("Starten van de Cloud Run Job mislukt:")
+            st.code(output)
+            st.stop()
+        st.success(
+            "Job-executie gestart. De run loopt nu volledig op Cloud Run — dit "
+            "tabblad (en je laptop) hoeft niet open te blijven. Volg de "
+            "voortgang hierboven bij 'Status van een run'."
         )
-        st.caption(f"Ook beschikbaar in GCS: `{output_dir}/final/{FINAL_OUTPUT_NAME}`")
+        st.query_params["run_id"] = run_id
+        st.rerun()
 
 
 if __name__ == "__main__":  # pragma: no cover

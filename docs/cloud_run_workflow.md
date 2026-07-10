@@ -5,6 +5,23 @@ verwerking van lead-prioritization runs met Google Cloud Run Jobs. Dit document
 bevat **geen** deploy-acties — alle `gcloud`-commando's zijn voorbeelden die je
 later handmatig uitvoert.
 
+## Laptop-onafhankelijkheid: `cloud_run_streamlit_app.py`
+
+`streamlit run cloud_run_streamlit_app.py` start een Cloud Run Job-executie
+zonder `--wait` — de gcloud-aanroep keert bijna meteen terug, en de job zelf
+draait daarna volledig op Cloud Run, los van of dit Streamlit-proces (of je
+laptop) nog aan staat. Na het starten komt `run_id` in de URL
+(`?run_id=...`) te staan; die URL heropenen (ook in een compleet nieuwe
+browser-sessie, op een ander moment) laat het "Status van een run"-paneel
+opnieuw de actuele status uit GCS ophalen (task-counts, gemergd of niet),
+en biedt van daaruit: opnieuw draaien van alleen de mislukte shards
+(idempotent — gelukte delen worden overgeslagen), mergen zodra alles klaar
+is, en de Lovable JSON-export — allemaal on-demand, niet meer automatisch
+inline na de run. Is de URL kwijt, dan vindt de "Recente runs"-lijst
+(gebaseerd op elke run's `manifest.json` in GCS) 'm terug. Zie
+`cloud_run_streamlit_app.finish_run_merge`/`run_lovable_export_and_upload`/
+`determine_run_stage` voor de onderliggende logica.
+
 ## Doelarchitectuur (simpele tekst)
 
 1. Een gebruiker uploadt één Excel naar een Cloud Storage input-bucket, onder
