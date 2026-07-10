@@ -106,6 +106,12 @@ def build_execute_command(
         # then failed for any other value chosen in the sidebar).
         "--tasks", str(task_count),
         "--update-env-vars", env_vars,
+        # Bare execution name in stdout (e.g. "myngle-lead-prioritizer-gp4f2")
+        # instead of the human-readable "Execution [...] has successfully
+        # started running." message -- lets the caller persist it into
+        # manifest.json for the stop button (gcloud run jobs executions
+        # cancel takes exactly this name).
+        "--format", "value(metadata.name)",
     ]
     if wait:
         cmd.append("--wait")
@@ -204,6 +210,83 @@ def parse_run_ids_from_manifest_listing(listing_output: str) -> list[str]:
         except (ValueError, IndexError):
             continue
     return sorted(set(run_ids), reverse=True)
+
+
+def estimate_cost_from_recent_runs(
+    bucket: str, project: str, sample_run_count: int = 2, max_tasks_per_run: int = 50,
+) -> dict:
+    """Pre-run cost estimate derived from real recent Cloud Run executions,
+    not a fixed per-row heuristic (unlike estimate_prescreen_cost in
+    input_cleaner_lusha_edition.py) -- Cloud Run task containers are
+    ephemeral and never write to the local logs/usage_history.csv that
+    heuristic would otherwise read, but each task's status/*_done.json
+    already carries its own usage_tracker snapshot (cloud_job_runner.py),
+    and those files persist in GCS across every past run. Samples the most
+    recent ``sample_run_count`` completed runs, merges their per-task usage
+    snapshots via usage_tracker.merge_snapshots (which recomputes cost from
+    raw call/token counters using the CURRENT pricing constants, so a past
+    price fix applies retroactively), and returns a per-company cost ratio.
+
+    Never raises: any failure (no completed runs yet, gcloud unavailable,
+    malformed status file) degrades to {"ok": False, "reason": ...} so a
+    broken estimate never blocks starting a run.
+    """
+    import usage_tracker
+
+    rc_ls, listing = run_capture(build_list_command(f"gs://{bucket}/runs/*/manifest.json", project))
+    if rc_ls != 0:
+        return {"ok": False, "reason": "kon recente runs niet ophalen"}
+    run_ids = parse_run_ids_from_manifest_listing(listing)
+
+    snapshots: list[dict] = []
+    companies_sampled = 0
+    runs_sampled = 0
+    for run_id in run_ids:
+        if runs_sampled >= sample_run_count:
+            break
+        output_dir = gcs_output_dir(bucket, run_id)
+        merge_manifest = read_gcs_json(join_path(output_dir, "final", "manifest_done.json"), project)
+        if not merge_manifest or merge_manifest.get("status") != "done":
+            continue  # only completed runs have a full, representative usage picture
+        row_count = merge_manifest.get("row_count")
+        if not row_count:
+            continue
+
+        rc_status, status_listing = run_capture(build_list_command(
+            join_path(output_dir, "status", "*_done.json"), project))
+        if rc_status != 0:
+            continue
+        status_uris = [
+            line.strip() for line in status_listing.splitlines()
+            if line.strip().startswith("gs://") and line.strip().endswith("_done.json")
+        ][:max_tasks_per_run]
+        run_snapshots = []
+        for uri in status_uris:
+            task_status = read_gcs_json(uri, project)
+            usage = (task_status or {}).get("usage")
+            if isinstance(usage, dict):
+                run_snapshots.append(usage)
+        if not run_snapshots:
+            continue
+
+        merged = usage_tracker.merge_snapshots(run_snapshots)
+        snapshots.append(merged)
+        companies_sampled += int(row_count)
+        runs_sampled += 1
+
+    if not snapshots or companies_sampled == 0:
+        return {"ok": False, "reason": "geen recente voltooide runs met verbruiksdata gevonden"}
+
+    total = usage_tracker.merge_snapshots(snapshots)
+    return {
+        "ok": True,
+        "runs_sampled": runs_sampled,
+        "companies_sampled": companies_sampled,
+        "usd_per_company": total["estimated_total_usd"] / companies_sampled,
+        "serper_usd_per_company": total["estimated_serper_usd"] / companies_sampled,
+        "anthropic_usd_per_company": (total["estimated_anthropic_usd"] or 0.0) / companies_sampled,
+        "firecrawl_usd_per_company": total["estimated_firecrawl_usd"] / companies_sampled,
+    }
 
 
 def determine_run_stage(counts: dict, expected_task_count: int, merge_manifest: Optional[dict]) -> str:
@@ -760,6 +843,34 @@ def main() -> None:  # pragma: no cover - exercised only under `streamlit run`
     )
     _uploaded_key = uploaded.name if uploaded is not None else "none"
 
+    # Moved out of the sidebar so it can't be missed -- same rationale as the
+    # current/-gedrag radio in the status panel below. ONE choice drives both
+    # the enrichment gate AND the export filter -- deliberately not two
+    # separate checkboxes. Having them as two independently-toggleable
+    # settings is exactly what let a run fully-enrich AND publish
+    # confirmed-domestic companies (e.g. "Molins", "Confirmed domestic") into
+    # the live Lovable app: the cost gate was on, but the separate
+    # "Foreign-HQ-only export" checkbox was left off, so nothing filtered
+    # them out of current/. Tying them to one variable makes that mismatch
+    # structurally impossible instead of relying on remembering to check both.
+    st.subheader("Scope")
+    scope_choice = st.radio(
+        "Welke bedrijven wil je verwerken en publiceren?",
+        options=["Alle bedrijven", "Alleen buitenlands HQ"],
+        index=0,
+        horizontal=True,
+        help="**Alle bedrijven**: iedereen krijgt de volledige v2-pipeline "
+             "en iedereen komt ook in de Lovable-lijst — simpelste optie, "
+             "duurste. **Alleen buitenlands HQ**: goedkope HQ-screening "
+             "voor iedereen eerst; de dure volledige pipeline "
+             "(Firecrawl/Anthropic-signalen/score/caller-content) draait "
+             "daarna ALLEEN nog voor bevestigd-buitenlandse bedrijven, en "
+             "ALLEEN die komen ook in de Lovable-lijst terecht. Deze ene "
+             "keuze stuurt zowel de kostengate als de Lovable-export-"
+             "filter tegelijk.",
+    )
+    gate_full_enrichment_on_foreign_hq = scope_choice == "Alleen buitenlands HQ"
+
     with st.sidebar:
         st.header("Instellingen")
         project = st.text_input("GCP-project", value=DEFAULT_PROJECT)
@@ -792,33 +903,6 @@ def main() -> None:  # pragma: no cover - exercised only under `streamlit run`
                  "gespreid over 'Task count' hierboven (bv. 100 rijen / 50 taken = "
                  "~2 rijen per taak). 0 = het hele bestand.",
         )
-
-        st.divider()
-        st.subheader("Scope")
-        # ONE choice drives both the enrichment gate AND the export filter --
-        # deliberately not two separate checkboxes. Having them as two
-        # independently-toggleable settings is exactly what let a run
-        # fully-enrich AND publish confirmed-domestic companies (e.g.
-        # "Molins", "Confirmed domestic") into the live Lovable app: the
-        # cost gate was on, but the separate "Foreign-HQ-only export"
-        # checkbox was left off, so nothing filtered them out of current/.
-        # Tying them to one variable makes that mismatch structurally
-        # impossible instead of relying on remembering to check both.
-        scope_choice = st.radio(
-            "Welke bedrijven wil je verwerken en publiceren?",
-            options=["Alle bedrijven", "Alleen buitenlands HQ"],
-            index=0,
-            help="**Alle bedrijven**: iedereen krijgt de volledige v2-pipeline "
-                 "en iedereen komt ook in de Lovable-lijst — simpelste optie, "
-                 "duurste. **Alleen buitenlands HQ**: goedkope HQ-screening "
-                 "voor iedereen eerst; de dure volledige pipeline "
-                 "(Firecrawl/Anthropic-signalen/score/caller-content) draait "
-                 "daarna ALLEEN nog voor bevestigd-buitenlandse bedrijven, en "
-                 "ALLEEN die komen ook in de Lovable-lijst terecht. Deze ene "
-                 "keuze stuurt zowel de kostengate als de Lovable-export-"
-                 "filter tegelijk.",
-        )
-        gate_full_enrichment_on_foreign_hq = scope_choice == "Alleen buitenlands HQ"
 
         st.divider()
         st.subheader("Inhoud & AI-opties")
@@ -876,12 +960,13 @@ def main() -> None:  # pragma: no cover - exercised only under `streamlit run`
         st.divider()
         st.subheader("Lovable JSON-export + GCS-upload")
         st.caption(
-            "Deze instellingen sturen alleen de pre-flight skip-filter en "
-            "archive-conflict-check hieronder aan (vóór de dure run). De "
-            "daadwerkelijke export/upload gebeurt niet meer automatisch na "
-            "afloop — dat doe je on-demand in het 'Status van een run'-"
-            "paneel bovenaan, zodra de run klaar is (ook nuttig als je "
-            "laptop tussentijds sliep en je pas later terugkomt)."
+            "Land + cold callers hieronder sturen zowel de pre-flight "
+            "skip-filter/archive-conflict-check (vóór de dure run) als de "
+            "automatische export/upload zodra de run klaar is — dat laatste "
+            "gebeurt zelf zonder dat je hoeft terug te komen naar dit "
+            "tabblad (ook als je laptop tussentijds sliep). Het "
+            "'Status van een run'-paneel bovenaan blijft ook on-demand "
+            "handmatig exporteren toestaan, bv. voor een losse test-export."
         )
         auto_lovable_export_enabled = st.checkbox(
             "Skip-filter/archive-check hieronder gebruiken", value=True)
@@ -1063,6 +1148,35 @@ def main() -> None:  # pragma: no cover - exercised only under `streamlit run`
                 f"📊 Bezig: {counts['done']} klaar, {counts['failed']} gefaald, "
                 f"{counts['running']} bezig ({reported}/{expected_task_count} gerapporteerd)."
             )
+            execution_name = (manifest or {}).get("execution_name")
+            if execution_name:
+                st.warning(
+                    "⚠️ Een run stoppen kan niet ongedaan gemaakt worden — reeds "
+                    "gelukte shards blijven wel staan in `parts/` en worden bij "
+                    "een latere herstart overgeslagen."
+                )
+                stop_confirmed = st.checkbox(
+                    "Ja, ik wil deze run stoppen",
+                    key=f"stop_confirmed_{run_id}",
+                )
+                if st.button("⏹️ Run stoppen", key=f"stop_{run_id}"):
+                    if not stop_confirmed:
+                        st.error("Vink eerst de bevestiging hierboven aan om door te gaan.")
+                    else:
+                        rc, output = run_capture([
+                            _gcloud_executable(), "run", "jobs", "executions", "cancel",
+                            execution_name, "--project", project, "--region", region, "--quiet",
+                        ])
+                        if rc == 0:
+                            st.success("Run gestopt.")
+                            st.rerun()
+                        else:
+                            st.error(f"Stoppen mislukt:\n{output}")
+            else:
+                st.caption(
+                    "Geen execution-naam bekend voor deze run (bv. gestart vóór "
+                    "deze functie bestond) — stoppen kan hier niet automatisch."
+                )
         elif stage == "ready_to_merge":
             st.success(f"✅ Alle {expected_task_count} taken zijn klaar, geen fouten.")
             if st.button("🔀 Mergen & afronden", key=f"merge_{run_id}", type="primary"):
@@ -1120,6 +1234,17 @@ def main() -> None:  # pragma: no cover - exercised only under `streamlit run`
                         run_id, expected_task_count, mode, extra_env=extra_env,
                     ))
                     if rc == 0:
+                        # Retry starts a NEW execution -- update the stored
+                        # execution_name so the stop button targets the
+                        # execution that's actually running now, not the
+                        # original (by-now-finished) one.
+                        updated_manifest = dict(manifest or {})
+                        updated_manifest["execution_name"] = output.strip() or None
+                        retry_manifest_local = Path(tempfile.mkdtemp(
+                            prefix="cloud_run_retry_manifest_")) / "manifest.json"
+                        retry_manifest_local.write_text(json.dumps(updated_manifest), encoding="utf-8")
+                        run_capture(build_upload_command(
+                            str(retry_manifest_local), join_path(output_dir, "manifest.json"), project))
                         st.success("Opnieuw gestart — ververs de status over een tijdje.")
                     else:
                         st.error(f"Herstart mislukt:\n{output}")
@@ -1234,6 +1359,43 @@ def main() -> None:  # pragma: no cover - exercised only under `streamlit run`
                 key=f"overwrite_confirmed_{archive_glob}",
             )
 
+    # ---- Pre-run cost estimate, based on real recent Cloud Run executions --
+    # Gated behind an explicit button (not recomputed on every rerun) since
+    # it reads several GCS status files per sampled run via gcloud subprocess
+    # calls -- not something to redo on every Streamlit widget interaction.
+    if uploaded is not None:
+        if st.button("📊 Kostenschatting op basis van recente runs"):
+            import pandas as pd
+            import usage_tracker
+            USD_TO_EUR = usage_tracker.USD_TO_EUR
+            try:
+                row_count = len(pd.read_excel(uploaded, sheet_name=0))
+            except Exception:
+                row_count = None
+            uploaded.seek(0)  # pd.read_excel consumes the buffer; rewind for the actual upload below
+            estimate = estimate_cost_from_recent_runs(bucket, project)
+            if not estimate["ok"]:
+                st.info(f"Geen schatting mogelijk: {estimate['reason']}.")
+            elif row_count is None:
+                st.info(
+                    f"Kon het aantal rijen in `{uploaded.name}` niet bepalen — "
+                    f"wel bekend: ~€{estimate['usd_per_company'] * USD_TO_EUR:.3f} "
+                    "per bedrijf, gebaseerd op "
+                    f"{estimate['runs_sampled']} recente run(s)."
+                )
+            else:
+                total_usd = estimate["usd_per_company"] * row_count
+                st.info(
+                    f"~{row_count} bedrijven → geschat **€{total_usd * USD_TO_EUR:.2f}** "
+                    f"(Serper €{estimate['serper_usd_per_company'] * row_count * USD_TO_EUR:.2f}, "
+                    f"Anthropic €{estimate['anthropic_usd_per_company'] * row_count * USD_TO_EUR:.2f}, "
+                    f"Firecrawl €{estimate['firecrawl_usd_per_company'] * row_count * USD_TO_EUR:.2f}), "
+                    f"op basis van {estimate['runs_sampled']} recente voltooide run(s) "
+                    f"({estimate['companies_sampled']} bedrijven samen). Dit is een schatting "
+                    "op basis van eerdere runs, geen offerte — het werkelijke verbruik hangt af "
+                    "van welke AI/Deep-Dive-opties hierboven aanstaan."
+                )
+
     if uploaded is not None and st.button("🚀 Start Cloud Run", type="primary"):
         if archive_conflict_files and not overwrite_confirmed:
             st.error("Vink eerst de bevestiging hierboven aan om door te gaan.")
@@ -1344,23 +1506,15 @@ def main() -> None:  # pragma: no cover - exercised only under `streamlit run`
             st.stop()
         st.success(f"Geupload naar {input_uri}")
 
-        # ---- 2. Write a manifest.json + start the job, WITHOUT --wait ------
+        # ---- 2. Start the job, WITHOUT --wait, then write manifest.json ----
         # The Cloud Run Job runs entirely server-side once execute accepts
         # it -- this process (and therefore this laptop) doesn't need to
         # stay alive for the run to finish. manifest.json is what lets the
         # "Status van een run" panel above (and "Recente runs") find this
         # run later purely from GCS, in a completely fresh browser session.
-        run_manifest = {
-            "run_id": run_id, "input_uri": input_uri, "output_dir": output_dir,
-            "task_count": int(task_count), "mode": mode,
-            "created_at": datetime.now(timezone.utc).isoformat(),
-            "source": "streamlit",
-        }
-        manifest_local = work_dir / "manifest.json"
-        manifest_local.write_text(json.dumps(run_manifest), encoding="utf-8")
-        run_capture(build_upload_command(
-            str(manifest_local), join_path(output_dir, "manifest.json"), project))
-
+        # Execute happens BEFORE the manifest write (not after) so the
+        # execution name (stdout, via build_execute_command's --format) can
+        # be persisted into the manifest for the stop button.
         with st.spinner("Cloud Run Job starten…"):
             rc, output = run_capture(build_execute_command(
                 job_name, project, region, input_uri, output_dir,
@@ -1370,6 +1524,41 @@ def main() -> None:  # pragma: no cover - exercised only under `streamlit run`
             st.error("Starten van de Cloud Run Job mislukt:")
             st.code(output)
             st.stop()
+        execution_name = output.strip() or None
+
+        # config.lovable_export mirrors the sidecar-config shape the
+        # dispatcher's own /status-event completion handler already reads
+        # (cloud_dispatcher.check_and_trigger_completion) -- writing it here
+        # too means a Streamlit-started run gets the exact same automatic
+        # merge+export as a bucket-upload-triggered run, once the Eventarc
+        # trigger on the runs bucket is active. Country is best-effort
+        # guessed from the filename (same helper the sidebar uses) when the
+        # sidebar's own "Export country" selectbox was left blank.
+        _manifest_export_country = export_country or _guessed_export_country
+        run_manifest = {
+            "run_id": run_id, "input_uri": input_uri, "output_dir": output_dir,
+            "task_count": int(task_count), "mode": mode,
+            "created_at": datetime.now(timezone.utc).isoformat(),
+            "source": "streamlit",
+            "execution_name": execution_name,
+            "config": {
+                "gate_full_enrichment_on_foreign_hq": bool(gate_full_enrichment_on_foreign_hq),
+                "lovable_export": {
+                    "enabled": bool(_manifest_export_country),
+                    "country": _manifest_export_country,
+                    "cold_callers": [
+                        c.strip() for c in DEFAULT_COLD_CALLERS_TEXT.split(",") if c.strip()
+                    ],
+                    "foreign_hq_only": bool(foreign_hq_only_export),
+                    "bucket_size": 500,
+                },
+            },
+        }
+        manifest_local = work_dir / "manifest.json"
+        manifest_local.write_text(json.dumps(run_manifest), encoding="utf-8")
+        run_capture(build_upload_command(
+            str(manifest_local), join_path(output_dir, "manifest.json"), project))
+
         st.success(
             "Job-executie gestart. De run loopt nu volledig op Cloud Run — dit "
             "tabblad (en je laptop) hoeft niet open te blijven. Volg de "

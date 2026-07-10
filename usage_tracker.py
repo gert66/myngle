@@ -40,8 +40,10 @@ from typing import Optional
 #   - Firecrawl: https://firecrawl.dev/pricing
 #   - FX rate:   any current USD->EUR reference
 USD_TO_EUR: float = 0.92
-SERPER_USD_PER_CALL: float = 0.001
-FIRECRAWL_USD_PER_CALL: float = 0.001
+SERPER_USD_PER_CALL: float = 0.00075
+# Real account rate: EUR 87 / 100,000 calls = EUR 0.00087/call, converted to
+# USD via USD_TO_EUR so it stays USD-denominated like SERPER_USD_PER_CALL.
+FIRECRAWL_USD_PER_CALL: float = 0.00087 / USD_TO_EUR
 
 # Default history log (append-only, one line per run). Kept tiny on purpose —
 # no database. Overridable per call to append_history().
