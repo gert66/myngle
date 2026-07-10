@@ -624,19 +624,103 @@ over dezelfde bedrijven/landen.
 Let op het verschil in feature-defaults tussen de twee manieren om een run
 te starten:
 
-- **Eventarc → dispatcher**: de job-executie krijgt alleen
-  `INPUT_GCS_URI`/`OUTPUT_GCS_DIR`/`RUN_ID`/`TASK_COUNT` als override; alle
-  feature-vlaggen komen uit de env-config van de job-deploy. Zonder daar iets
-  te zetten draait dit pad dus met alles uit (geen caller content, geen
-  rich ICP, geen AI-signaalscoring, geen C5, geen cache, mode `full`).
+- **Eventarc → dispatcher**: zonder sidecar-config (zie hieronder) krijgt de
+  job-executie alleen `INPUT_GCS_URI`/`OUTPUT_GCS_DIR`/`RUN_ID`/`TASK_COUNT`
+  als override; alle feature-vlaggen komen dan uit de env-config van de
+  job-deploy. Zonder daar iets te zetten draait dit pad dus met alles uit
+  (geen caller content, geen rich ICP, geen AI-signaalscoring, geen C5, geen
+  cache, mode `full`).
 - **Streamlit-app / PowerShell-script**: de Streamlit-app zet expliciete
   overrides mee en heeft de meeste opties standaard áán (zoals de lokale
   batch-app); het PowerShell-script geeft alleen `MODE` mee.
 
 Hetzelfde bestand via `incoming/`-upload versus via de Streamlit-app kan
 daardoor andere output (en kosten) opleveren. Wil je het Eventarc-pad
-gelijktrekken, bak de gewenste vlaggen dan in de job-deploy
-(`--set-env-vars` bij `gcloud run jobs deploy`).
+gelijktrekken zonder de job te herdeployen, gebruik dan de sidecar-config
+hieronder — of bak de gewenste vlaggen in de job-deploy (`--set-env-vars`
+bij `gcloud run jobs deploy`) als je maar één profiel wilt.
+
+## Per-run configuratie zonder redeploy (sidecar-config-JSON)
+
+Upload je naast `incoming/<bestand>.xlsx` ook een
+`incoming/<bestand>.xlsx.config.json`, dan leest `cloud_dispatcher.py` die
+uit en vertaalt hem naar extra env-overrides bovenop de vaste
+`INPUT_GCS_URI`/`OUTPUT_GCS_DIR`/`RUN_ID`/`TASK_COUNT` — dezelfde
+gedeployde job kan zo per upload een ander profiel draaien (bv. "alleen
+buitenlands HQ" naast "alles volledig verrijken"), zonder de job zelf te
+herdeployen. Ontbreekt het sidecar-bestand, dan gedraagt de run zich exact
+als voorheen (alles uit de job-deploy-config).
+
+Voorbeeld — `incoming/Spain_cleaned.xlsx.config.json`:
+
+```json
+{
+  "task_count": 25,
+  "mode": "full",
+  "gate_full_enrichment_on_foreign_hq": true,
+  "deep_dive": true,
+  "deep_dive_min_score": 8.0,
+  "c5_enabled": true,
+  "lovable_export": {
+    "enabled": true,
+    "country": "Spain",
+    "cold_callers": ["Jantje", "Pietje", "Marietje"],
+    "foreign_hq_only": true
+  }
+}
+```
+
+Ondersteunde velden (alles optioneel, alleen expliciet gezette velden
+overschrijven de job-default): `task_count`, `mode`,
+`gate_full_enrichment_on_foreign_hq`, `deep_dive`, `deep_dive_min_score`,
+`deep_dive_on_foreign_hq`, `compose_caller_content`, `c5_enabled`,
+`use_enrichment_cache`, `enrichment_cache_bucket`, `ai_signal_scoring`,
+`rich_icp_context`, `company_column`, `domain_column`,
+`input_country_column`, `total_row_limit`, `checkpoint_every_rows`,
+`force_rerun` — zie `cloud_dispatcher.build_env_overrides_from_config` voor
+de exacte mapping naar env vars uit de tabel hierboven. De hele config wordt
+ook in `runs/<run_id>/manifest.json` opgeslagen, zodat de auto-merge-stap
+hieronder de `lovable_export`-instellingen later kan teruglezen.
+
+## Automatische merge + Lovable-JSON-export zodra een run compleet is
+
+Een **tweede** Eventarc-trigger, op "object finalized"-events van de
+runs-bucket, gericht op het `/status-event`-pad van dezelfde dispatcher-
+service, laat `cloud_dispatcher.py` zelf detecteren wanneer alle tasks van
+een run een terminale status hebben geschreven — dan:
+
+1. draait hij `cloud_merge_results.main()` in-process (dezelfde fail-fast
+   check op `EXPECTED_TASK_COUNT`/gefaalde tasks als bij handmatig mergen);
+2. staat in de sidecar-config `lovable_export.enabled: true`, dan draait hij
+   daarna ook `export_lead_prioritizer_to_lovable_json.py` in-process op de
+   zojuist gemergde Excel, en uploadt de JSON-bestanden naar
+   `runs/<run_id>/final/lovable_export/`.
+
+Beide stappen zijn best-effort: een kapotte exportconfig (bv. ontbrekend
+`country`/`cold_callers`) blokkeert nooit de merge zelf — die telt gewoon
+als geslaagd, alleen het `export`-veld in de response meldt de fout. Omdat
+Eventarc dit endpoint bij élke status-schrijfactie aanroept (niet alleen de
+laatste), voorkomt een `if_generation_match=0`-claim-bestand
+(`final/_merge_claimed.json`) dat de merge dubbel start.
+
+Voorbeeldtrigger (naast de bestaande `myngle-incoming-trigger`):
+
+```bash
+gcloud eventarc triggers create myngle-status-trigger \
+  --location europe-west1 \
+  --destination-run-service myngle-dispatcher \
+  --destination-run-region europe-west1 \
+  --destination-run-path /status-event \
+  --event-filters type=google.cloud.storage.object.v1.finalized \
+  --event-filters bucket=myngle-runs \
+  --service-account EVENTARC_SA@PROJECT_ID.iam.gserviceaccount.com
+```
+
+Dit endpoint filtert zelf op `runs/<run_id>/status/*_{done,failed}.json` —
+events voor `parts/`, `manifest.json`, `checkpoint`/`running`-statussen of
+`final/`-bestanden worden genegeerd, dus dezelfde bucket voor input én runs
+gebruiken (zoals hierboven al toegestaan) levert geen dubbele/onnodige
+verwerking op.
 
 ## Bekende beperkingen (v1)
 
