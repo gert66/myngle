@@ -44,7 +44,11 @@ from urllib.parse import urlparse
 
 import pandas as pd
 
-from commercial_fit_scoring import LEAN_COEFFICIENTS, resolve_size_category
+from commercial_fit_scoring import (
+    LEAN_COEFFICIENTS,
+    resolve_employee_range_value,
+    resolve_size_category,
+)
 from hq_simple_detector import (
     _HOSTED_CAREERS_PLATFORM_DOMAINS,
     is_hosted_careers_platform_domain,
@@ -2237,7 +2241,13 @@ def _build_list_item(row: dict, company_id: str, export_country: str,
         "foreign_hq_detected_for_export": foreign_hq_detected,
         "foreign_hq_export_reason": foreign_hq_reason,
         "industry": _resolve_industry(row),
-        "employee_range": clean_str(row.get("employee_range")) or "",
+        # Resolved across the same alias chain the scoring engine reads
+        # (lusha_api_employee_range / lusha_employee_range / employee_range /
+        # company_size) — v2 rows carry the Lusha range under
+        # lusha_employee_range with employee_range itself empty, which is why
+        # v2-era exports (Spain, ...) showed no company size in the app even
+        # though size fed 25% of the score.
+        "employee_range": resolve_employee_range_value(row) or "",
         "size_category_app": size_category_app,
         "display_size_category_app": display_size_category_app,
         "commercial_fit_score": score,
@@ -2414,7 +2424,12 @@ def _build_scoring_inputs(row: dict) -> dict:
     return {
         "schema_version": 1,
         "signals": signals,
-        "employee_range": clean_str(row.get("employee_range")),
+        # Same alias chain as the scoring engine (resolve_employee_range_value)
+        # — v2 rows keep the Lusha range in lusha_employee_range with
+        # employee_range itself empty, and persisting only employee_range
+        # made every v2-era re-score silently fall back to the neutral size
+        # score 5.5 even though the original pipeline run scored real size.
+        "employee_range": resolve_employee_range_value(row),
     }
 
 

@@ -34,6 +34,7 @@ from rescore_from_gcs import (
     rescore_country,
     rescore_detail_record,
     rescore_details_bucket,
+    resolve_detail_employee_range,
     rescore_list_items,
     resolve_gcs_tool,
     skipped_company_ids,
@@ -145,6 +146,100 @@ class TestRescoreDetailRecord:
         assert audit["commercial_tier"] == rescored["commercial_tier"]
         assert "sig_rapid_growth_score" in audit["missing_scoring_signals"]
         assert isinstance(audit["scoring_notes"], str) and audit["scoring_notes"]
+
+
+class TestEmployeeRangeRecovery:
+    """v2-era exports (Spain, ...) persisted scoring_inputs.employee_range as
+    None — the exporter read only the employee_range column while the v2
+    pipeline stores the Lusha range under lusha_employee_range. The raw
+    Lusha columns survive under debug.lead_prioritizer_row, so a re-score
+    must recover the real size from there instead of silently scoring
+    everyone with the neutral 5.5 default, and must backfill the app-facing
+    size fields the original export left blank."""
+
+    def _v2_style_detail(self, company_id="c1", lusha_range="1001 - 5000") -> dict:
+        signals = {field: 2.0 for field in LEAN_COEFFICIENTS}
+        return {
+            "company_id": company_id,
+            "company_name": f"Company {company_id}",
+            "commercial_fit_score": 5.0,
+            "commercial_tier": "🥉 Cool",
+            "employee_range": "",
+            "size_category_app": None,
+            "display_size_category_app": None,
+            "scoring_inputs": {
+                "schema_version": 1, "signals": signals, "employee_range": None,
+            },
+            "debug": {"lead_prioritizer_row": {
+                "employee_range": "", "lusha_employee_range": lusha_range,
+            }},
+        }
+
+    def test_resolve_priority_scoring_inputs_then_detail_then_debug(self):
+        detail = self._v2_style_detail()
+        assert resolve_detail_employee_range(detail) == ("1001 - 5000", "debug_row")
+
+        detail_with_field = dict(detail, employee_range="201-500")
+        assert resolve_detail_employee_range(detail_with_field) == \
+            ("201-500", "detail_record")
+
+        detail_with_inputs = json.loads(json.dumps(detail))
+        detail_with_inputs["scoring_inputs"]["employee_range"] = "51 - 200"
+        assert resolve_detail_employee_range(detail_with_inputs) == \
+            ("51 - 200", "scoring_inputs")
+
+    def test_nothing_usable_anywhere_is_missing(self):
+        detail = self._v2_style_detail(lusha_range="")
+        assert resolve_detail_employee_range(detail) == (None, "missing")
+
+    def test_rescore_uses_recovered_size_not_neutral_default(self):
+        detail = self._v2_style_detail()
+        rescored = rescore_detail_record(detail, params={}, now_iso="2026-07-10T00:00:00Z")
+
+        signals = {field: 2.0 for field in LEAN_COEFFICIENTS}
+        with_size = score_company({**signals, "employee_range": "1001 - 5000"})
+        neutral = score_company(signals)
+        assert rescored["commercial_fit_score"] == with_size["final_commercial_fit_score"]
+        assert rescored["commercial_fit_score"] != neutral["final_commercial_fit_score"]
+
+    def test_rescore_backfills_app_facing_size_fields(self):
+        rescored = rescore_detail_record(
+            self._v2_style_detail(), params={}, now_iso="2026-07-10T00:00:00Z")
+        assert rescored["employee_range"] == "1001 - 5000"
+        assert rescored["size_category_app"] == "large"
+        assert rescored["display_size_category_app"] == "Large (1,001–5,000 employees)"
+        assert rescored["rescore_audit"]["employee_range_used"] == "1001 - 5000"
+        assert rescored["rescore_audit"]["employee_range_source"] == "debug_row"
+
+    def test_explicit_original_size_fields_never_overwritten(self):
+        detail = self._v2_style_detail()
+        detail["employee_range"] = "201-500"
+        detail["size_category_app"] = "custom_slug"
+        detail["display_size_category_app"] = "Custom Label"
+        rescored = rescore_detail_record(detail, params={}, now_iso="2026-07-10T00:00:00Z")
+        assert rescored["employee_range"] == "201-500"
+        assert rescored["size_category_app"] == "custom_slug"
+        assert rescored["display_size_category_app"] == "Custom Label"
+
+    def test_list_items_mirror_backfilled_size_fields_without_overwriting(self):
+        rescored = rescore_detail_record(
+            self._v2_style_detail("c1"), params={}, now_iso="2026-07-10T00:00:00Z")
+        list_items = [
+            {"company_id": "c1", "commercial_fit_score": 5.0,
+             "commercial_tier": "🥉 Cool", "employee_range": "",
+             "size_category_app": None, "display_size_category_app": None},
+            {"company_id": "c1", "commercial_fit_score": 5.0,
+             "commercial_tier": "🥉 Cool", "employee_range": "51 - 200",
+             "size_category_app": "explicit", "display_size_category_app": "Explicit"},
+        ]
+        updated = rescore_list_items(list_items, {"c1": rescored})
+        assert updated[0]["employee_range"] == "1001 - 5000"
+        assert updated[0]["size_category_app"] == "large"
+        assert updated[0]["display_size_category_app"] == "Large (1,001–5,000 employees)"
+        # An item with explicit original values keeps them.
+        assert updated[1]["employee_range"] == "51 - 200"
+        assert updated[1]["size_category_app"] == "explicit"
+        assert updated[1]["display_size_category_app"] == "Explicit"
 
 
 class TestRescoreDetailsBucket:

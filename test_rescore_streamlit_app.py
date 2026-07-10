@@ -22,11 +22,16 @@ from commercial_fit_scoring import (
 )
 from commercial_fit_scoring import _SIGMOID_P_HI, _SIGMOID_P_LO
 from rescore_streamlit_app import (
+    CALIBRATION_TARGET_HI,
+    CALIBRATION_TARGET_LO,
+    FOREIGN_HQ_REBALANCED_COEFFICIENTS,
     TIER_LABELS,
     auto_calibrate_sigmoid_anchors,
     biggest_movers_dataframe,
     build_multi_country_preview,
     build_multi_country_rescored_runs,
+    calibrate_intercept_and_k,
+    collect_calibration_features,
     compute_model_probabilities,
     default_params,
     employee_range_options,
@@ -533,7 +538,23 @@ class TestSizeCoverageSummary:
     def test_empty_input(self):
         cov = size_coverage_summary({})
         assert cov == {"n_total": 0, "n_with_range": 0, "n_missing": 0,
-                       "pct_with_range": 0.0}
+                       "pct_with_range": 0.0, "sources": {}}
+
+    def test_v2_export_range_recovered_from_debug_row(self):
+        # v2-era exports (Spain, ...) have scoring_inputs.employee_range=None
+        # but keep the raw Lusha columns under debug.lead_prioritizer_row —
+        # coverage must count those, matching what the re-score itself uses.
+        details = {
+            "a": {
+                "scoring_inputs": {"employee_range": None,
+                                   "signals": {f: 2 for f in LEAN_COEFFICIENTS}},
+                "debug": {"lead_prioritizer_row": {
+                    "lusha_employee_range": "1001 - 5000"}},
+            },
+        }
+        cov = size_coverage_summary(details)
+        assert cov["n_with_range"] == 1
+        assert cov["sources"] == {"debug_row": 1}
 
 
 class TestSuggestTierThresholds:
@@ -554,6 +575,119 @@ class TestSuggestTierThresholds:
 
     def test_too_few_companies_returns_none(self):
         assert suggest_tier_thresholds(_details_with_scores([1.0, 2.0])) is None
+
+
+class TestForeignHqRebalancedCoefficients:
+    def test_same_signal_set_as_lean_coefficients(self):
+        assert set(FOREIGN_HQ_REBALANCED_COEFFICIENTS) == set(LEAN_COEFFICIENTS)
+
+    def test_foreign_hq_lowered_others_raised_rapid_growth_untouched(self):
+        assert FOREIGN_HQ_REBALANCED_COEFFICIENTS["sig_foreign_hq_score"] < \
+            LEAN_COEFFICIENTS["sig_foreign_hq_score"]
+        for field in ("sig_explicit_lnd_score", "sig_intl_footprint_score",
+                      "sig_employer_branding_score", "sig_lnd_onboarding_score",
+                      "ti_onboarding_score"):
+            assert FOREIGN_HQ_REBALANCED_COEFFICIENTS[field] > LEAN_COEFFICIENTS[field]
+        assert FOREIGN_HQ_REBALANCED_COEFFICIENTS["sig_rapid_growth_score"] == \
+            LEAN_COEFFICIENTS["sig_rapid_growth_score"]
+
+    def test_total_positive_weight_essentially_unchanged(self):
+        # A modest REdistribution, not a re-weighting: the model's overall
+        # dynamic range must stay put.
+        default_sum = sum(v for v in LEAN_COEFFICIENTS.values() if v > 0)
+        rebalanced_sum = sum(v for v in FOREIGN_HQ_REBALANCED_COEFFICIENTS.values() if v > 0)
+        assert abs(rebalanced_sum - default_sum) < 0.01
+
+    def test_tweak_is_modest(self):
+        # "Don't tweak too much" — the foreign-HQ cut stays under 15%.
+        default = LEAN_COEFFICIENTS["sig_foreign_hq_score"]
+        rebalanced = FOREIGN_HQ_REBALANCED_COEFFICIENTS["sig_foreign_hq_score"]
+        assert (default - rebalanced) / default < 0.15
+
+
+def _calibration_population(n: int = 80) -> dict:
+    """Synthetic population with a realistic spread: signal levels vary per
+    company AND per field, employee ranges cycle over the size bands."""
+    ranges = [None, "11 - 50", "201 - 500", "1001 - 5000", "10001 - 100000"]
+    details = {}
+    for i in range(n):
+        signals = {
+            field: (i * 3 + j) % 4
+            for j, field in enumerate(LEAN_COEFFICIENTS)
+        }
+        details[f"c{i}"] = {
+            "commercial_fit_score": 5.0,
+            "commercial_tier": "🥉 Cool",
+            "scoring_inputs": {
+                "schema_version": 1, "signals": signals,
+                "employee_range": ranges[i % len(ranges)],
+            },
+        }
+    return details
+
+
+class TestCalibrateInterceptAndK:
+    def test_hits_targets_on_spread_population(self):
+        result = calibrate_intercept_and_k(_calibration_population(), default_params())
+        assert result is not None
+        assert abs(result["achieved_hi"] - CALIBRATION_TARGET_HI) <= 0.5
+        assert abs(result["achieved_lo"] - CALIBRATION_TARGET_LO) <= 0.8
+        assert result["achieved_hi"] > result["achieved_lo"] + 3.0
+
+    def test_result_stays_on_the_ui_sliders_grids_and_bounds(self):
+        result = calibrate_intercept_and_k(_calibration_population(), default_params())
+        assert -3.0 <= result["intercept"] <= 1.0
+        assert 1.0 <= result["sigmoid_k"] <= 25.0
+        # K stays on the slider's 0.5 grid; intercept on its 0.01 grid.
+        assert (result["sigmoid_k"] * 2) == int(result["sigmoid_k"] * 2)
+        assert round(result["intercept"], 2) == result["intercept"]
+
+    def test_does_not_mutate_caller_params(self):
+        import copy
+        params = default_params()
+        before = copy.deepcopy(params)
+        calibrate_intercept_and_k(_calibration_population(), params)
+        assert params == before
+
+    def test_deterministic(self):
+        population = _calibration_population()
+        a = calibrate_intercept_and_k(population, default_params())
+        b = calibrate_intercept_and_k(population, default_params())
+        assert a == b
+
+    def test_custom_targets_shift_the_result(self):
+        population = _calibration_population()
+        wide = calibrate_intercept_and_k(
+            population, default_params(), target_hi=9.5, target_lo=2.0)
+        narrow = calibrate_intercept_and_k(
+            population, default_params(), target_hi=8.5, target_lo=6.0)
+        assert wide["achieved_hi"] - wide["achieved_lo"] > \
+            narrow["achieved_hi"] - narrow["achieved_lo"]
+
+    def test_too_few_companies_returns_none(self):
+        assert calibrate_intercept_and_k({}, default_params()) is None
+        single = dict(list(_calibration_population().items())[:1])
+        assert calibrate_intercept_and_k(single, default_params()) is None
+
+    def test_large_population_is_thinned_deterministically(self):
+        population = _calibration_population(n=800)
+        result = calibrate_intercept_and_k(
+            population, default_params(), max_companies=300)
+        assert result["n_companies_used"] == 300
+
+    def test_collect_features_recovers_v2_debug_row_size(self):
+        # Same recovery chain as the actual re-score: a v2-era record with
+        # scoring_inputs.employee_range=None but a Lusha range in the debug
+        # row must contribute its REAL size score, not the neutral 5.5.
+        detail = {
+            "scoring_inputs": {"employee_range": None,
+                               "signals": {f: 2 for f in LEAN_COEFFICIENTS}},
+            "debug": {"lead_prioritizer_row": {
+                "lusha_employee_range": "1001 - 5000"}},
+        }
+        features = collect_calibration_features({"a": detail}, default_params())
+        assert len(features) == 1
+        assert features[0][1] == 6.63  # the "1001 - 5000" band, not 5.5
 
 
 class TestSigmoidAnchorParamsFlowThroughScoring:

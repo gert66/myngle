@@ -386,6 +386,35 @@ def _resolve_size_score(row: dict) -> tuple[float, bool, str]:
     return SIZE_SCORE_MISSING, True, ""
 
 
+def resolve_employee_range_value(row: "dict | pd.Series") -> "str | None":
+    """The raw employee-range string that ``_resolve_size_score`` would
+    actually use for ``company_size_score``, or ``None`` when nothing
+    usable is present.
+
+    Public so exporters can persist the SAME value the scoring engine
+    scored with. The v2 pipeline stores the Lusha range under
+    ``lusha_employee_range`` and leaves ``employee_range`` empty (see
+    ``lead_v2_scoring_adapter``), so an exporter that reads only
+    ``employee_range`` silently drops the size data that DID feed 25% of
+    ``final_commercial_fit_score`` — exactly the bug that left
+    ``employee_range``/``scoring_inputs.employee_range`` blank for v2-era
+    exports (Spain, ...) while Italy register exports had it.
+    """
+    if isinstance(row, pd.Series):
+        row = row.to_dict()
+    for field in ("lusha_api_employee_range", "lusha_employee_range",
+                  "employee_range", "company_size"):
+        raw = row.get(field)
+        if _is_missing(raw):
+            continue
+        norm_key = _normalize_range_str(str(raw))
+        if norm_key in SIZE_BAND_LOOKUP or str(raw).strip() in SIZE_BAND_LOOKUP:
+            return str(raw).strip()
+        if _parse_range_midpoint(raw) is not None:
+            return str(raw).strip()
+    return None
+
+
 def resolve_size_category(row: "dict | pd.Series") -> "tuple[str | None, str | None]":
     """``(size_category, display_size_category)`` for the app export —
     e.g. ``("large", "Large (1,001–5,000 employees)")``.
@@ -1040,6 +1069,22 @@ if __name__ == "__main__":
          cat_mid is not None, str(cat_mid))
     _chk("midpoint-fallback label matches the same band the score itself used",
          cat_mid == "large", str(cat_mid))
+
+    # ── Smoke Test 14: resolve_employee_range_value (exporter contract) ──────
+    _section("Smoke Test 14: resolve_employee_range_value")
+
+    _chk("v2-style row (only lusha_employee_range) resolves the Lusha value",
+         resolve_employee_range_value(
+             {"employee_range": "", "lusha_employee_range": "1001 - 5000"})
+         == "1001 - 5000")
+    _chk("legacy row (employee_range) still resolves",
+         resolve_employee_range_value({"employee_range": "201-500"}) == "201-500")
+    _chk("no usable field -> None",
+         resolve_employee_range_value({"employee_range": "", "company_size": "n/a"}) is None)
+    _chk("resolved value scores identically to the full row",
+         score_company({"lusha_employee_range": "1001 - 5000"})["company_size_score"]
+         == score_company({"employee_range": resolve_employee_range_value(
+             {"lusha_employee_range": "1001 - 5000"})})["company_size_score"])
 
     # ── Summary ───────────────────────────────────────────────────────────────
     print(f"\n{'═'*60}")
