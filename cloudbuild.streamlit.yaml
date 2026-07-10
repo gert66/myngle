@@ -1,0 +1,16 @@
+# Builds cloud_run_streamlit_app.py's own image via Cloud Build -- no local
+# Docker needed. See docs/cloud_run_workflow.md's "Laptop-onafhankelijkheid:
+# de Streamlit-dashboard zelf naar Cloud Run" for the full deploy flow.
+#
+# Usage:
+#   gcloud builds submit --config=cloudbuild.streamlit.yaml \
+#     --substitutions=_IMAGE=europe-west4-docker.pkg.dev/PROJECT_ID/myngle/streamlit-dashboard:latest .
+steps:
+  - name: gcr.io/cloud-builders/docker
+    args: ['build', '-f', 'Dockerfile.streamlit', '-t', '${_IMAGE}', '.']
+images:
+  - '${_IMAGE}'
+substitutions:
+  _IMAGE: europe-west4-docker.pkg.dev/PROJECT_ID/myngle/streamlit-dashboard:latest
+options:
+  logging: CLOUD_LOGGING_ONLY
