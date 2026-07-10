@@ -432,6 +432,19 @@ def run_capture(cmd: list[str]) -> tuple[int, str]:
     return result.returncode, output
 
 
+def extract_execution_name(run_capture_output: str) -> Optional[str]:
+    """``build_execute_command``'s ``--format value(metadata.name)`` makes
+    the bare execution name the first line of STDOUT -- but run_capture
+    concatenates STDOUT+STDERR, and gcloud writes its human-readable
+    "Creating execution... Provisioning resources... done." progress lines
+    to STDERR, appended right after. Only the first line is ever the actual
+    name; grabbing the whole (stripped) string, as an earlier version of
+    this code did, stored the progress text too and broke `gcloud run jobs
+    executions cancel <name>` (multi-line/garbage argument)."""
+    stripped = run_capture_output.strip()
+    return stripped.splitlines()[0].strip() if stripped else None
+
+
 # =============================================================================
 # current/ merge: download existing data, combine with this run's fresh
 # export (lovable_gcs_upload.merge_company_records/rebucket_company_details
@@ -1239,7 +1252,7 @@ def main() -> None:  # pragma: no cover - exercised only under `streamlit run`
                         # execution that's actually running now, not the
                         # original (by-now-finished) one.
                         updated_manifest = dict(manifest or {})
-                        updated_manifest["execution_name"] = output.strip() or None
+                        updated_manifest["execution_name"] = extract_execution_name(output)
                         retry_manifest_local = Path(tempfile.mkdtemp(
                             prefix="cloud_run_retry_manifest_")) / "manifest.json"
                         retry_manifest_local.write_text(json.dumps(updated_manifest), encoding="utf-8")
@@ -1524,7 +1537,7 @@ def main() -> None:  # pragma: no cover - exercised only under `streamlit run`
             st.error("Starten van de Cloud Run Job mislukt:")
             st.code(output)
             st.stop()
-        execution_name = output.strip() or None
+        execution_name = extract_execution_name(output)
 
         # config.lovable_export mirrors the sidecar-config shape the
         # dispatcher's own /status-event completion handler already reads

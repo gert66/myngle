@@ -28,6 +28,7 @@ from cloud_run_streamlit_app import (
     build_upload_command,
     count_task_statuses,
     determine_run_stage,
+    extract_execution_name,
     gcs_incoming_uri,
     gcs_output_dir,
     known_enriched_company_ids,
@@ -116,6 +117,43 @@ def test_build_execute_command_appends_extra_env_vars():
     assert "RUN_ID=run123" in env_vars
     assert "DEEP_DIVE=true" in env_vars
     assert "C5_ENABLED=true" in env_vars
+
+
+def test_build_execute_command_requests_bare_execution_name_format():
+    cmd = build_execute_command(
+        job_name="myngle-lead-prioritizer", project="proj-1", region="europe-west4",
+        input_uri="gs://b/incoming/leads.xlsx", output_dir="gs://b/runs/run123",
+        run_id="run123", task_count=10, mode="full",
+    )
+    assert cmd[cmd.index("--format") + 1] == "value(metadata.name)"
+
+
+class TestExtractExecutionName:
+    def test_bare_name_only(self):
+        assert extract_execution_name("myngle-lead-prioritizer-gp4f2\n") == "myngle-lead-prioritizer-gp4f2"
+
+    def test_strips_gcloud_progress_text_appended_via_stderr(self):
+        # run_capture concatenates STDOUT+STDERR -- gcloud's human-readable
+        # progress lines land on STDERR, right after the --format STDOUT
+        # line. Real captured output from a live `gcloud run jobs execute`
+        # call (see the bug this regression-tests: an earlier version stored
+        # this whole blob as execution_name, breaking the stop button's
+        # `gcloud run jobs executions cancel <name>` call).
+        raw = (
+            "myngle-lead-prioritizer-lhrzh\n"
+            "Creating execution...\n"
+            "Provisioning resources...................done\n"
+            "Done.\n"
+            "Execution [myngle-lead-prioritizer-lhrzh] has successfully started running.\n"
+            "\n"
+            "View details about this execution by running:\n"
+            "gcloud run jobs executions describe myngle-lead-prioritizer-lhrzh\n"
+        )
+        assert extract_execution_name(raw) == "myngle-lead-prioritizer-lhrzh"
+
+    def test_blank_output_returns_none(self):
+        assert extract_execution_name("") is None
+        assert extract_execution_name("   \n  ") is None
 
 
 def test_build_download_command_targets_local_dir():
