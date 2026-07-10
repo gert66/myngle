@@ -4519,6 +4519,21 @@ class TestSizeCategoryAppExport:
         assert item["size_category_app"] is None
         assert item["display_size_category_app"] is None
 
+    def test_falls_back_to_lusha_employees_when_employee_range_blank(self, tmp_path):
+        # lead_v2_scoring_adapter.py builds a lusha_employee_range key
+        # on-the-fly for score_company() (from LeadPrioritizationResult.
+        # lusha_employees), so scoring itself always sees real Lusha data --
+        # but that ephemeral key is never persisted, only the original
+        # lusha_employees column is. Without commercial_fit_scoring reading
+        # lusha_employees too, a v2-scored row (employee_range always "")
+        # showed a blank company size in the app despite scoring correctly.
+        enriched = [enriched_row(employee_range="", lusha_employees="201-500")]
+        _, out_dir = run_export(tmp_path, enriched)
+        list_items = load_list(out_dir)
+        item = next(i for i in list_items if i["company_name"] == "Acme Brasil")
+        assert item["size_category_app"] == "mid"
+        assert item["display_size_category_app"] is not None
+
     def test_explicit_input_override_is_not_replaced(self, tmp_path):
         # An input row that already carries these columns (e.g. a future
         # upstream source that computes its own label) wins — mirrors

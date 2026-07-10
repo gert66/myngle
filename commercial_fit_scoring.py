@@ -367,7 +367,7 @@ def _resolve_size_score(row: dict) -> tuple[float, bool, str]:
     Falls back to SIZE_SCORE_MISSING when nothing is parseable.
     """
     for field in ("lusha_api_employee_range", "lusha_employee_range",
-                  "employee_range", "company_size"):
+                  "employee_range", "lusha_employees", "company_size"):
         raw = row.get(field)
         if _is_missing(raw):
             continue
@@ -438,11 +438,21 @@ def resolve_size_category(row: "dict | pd.Series") -> "tuple[str | None, str | N
 # lusha_api_employee_range is always "" in Layer 1 (live API disabled),
 # so it falls through to lusha_employee_range (uploaded static data),
 # then employee_range (input file), then company_size (input file).
+#
+# lusha_employees is a separate case: lead_v2_scoring_adapter.py builds a
+# lusha_employee_range key on-the-fly (from LeadPrioritizationResult.lusha_employees)
+# for the score_company() call, so scoring itself always sees the real Lusha
+# data under one of the names above -- but that ephemeral key is never
+# persisted to the Excel/export row, only the original lusha_employees field
+# is. Without this entry, export_lead_prioritizer_to_lovable_json.py re-reading
+# that persisted row later finds nothing under any of the names above and
+# shows a blank company size in the app, even though the row scored correctly.
 _EMPLOYEE_RANGE_SOURCE_PRIORITY: list[tuple[str, str, str]] = [
     # (field_name, source_label, confidence)  — confidence title-cased to match resolver
     ("employee_range",             "input_file",                 "High"),
     ("lusha_employee_range",       "uploaded_lusha_company_data","Medium"),
     ("lusha_api_employee_range",   "uploaded_lusha_company_data","Medium"),
+    ("lusha_employees",            "uploaded_lusha_company_data","Medium"),
     ("company_size",               "input_file",                 "High"),
 ]
 
