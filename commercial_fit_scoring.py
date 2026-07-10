@@ -96,6 +96,38 @@ _SIZE_MIDPOINT_BANDS: list[tuple[float, float]] = [
 ]
 SIZE_SCORE_MISSING: float = 5.5   # default when range is unknown
 
+#: Friendly (slug, display-label) per employee-range band — same 9 bands as
+#: ``SIZE_BAND_LOOKUP``, keyed identically. This exists because the Lovable
+#: export has carried ``size_category_app``/``display_size_category_app``
+#: columns since the export contract was written, but nothing in the
+#: pipeline ever computed them — they were read straight from the input
+#: row (see ``export_lead_prioritizer_to_lovable_json._build_list_item``),
+#: which never has those exact column names, so they were always blank.
+#: Company size DID feed ``final_commercial_fit_score`` (25% of the blend)
+#: the whole time; only the human-readable label for the app was missing.
+SIZE_BAND_CATEGORY_LABELS: dict[str, tuple[str, str]] = {
+    "1 - 10":              ("micro",             "Micro (1–10 employees)"),
+    "11 - 50":              ("small",             "Small (11–50 employees)"),
+    "51 - 200":             ("small_mid",         "Small-Mid (51–200 employees)"),
+    "201 - 500":            ("mid",               "Mid-Size (201–500 employees)"),
+    "501 - 1000":           ("mid_large",         "Mid-Large (501–1,000 employees)"),
+    "1001 - 5000":          ("large",             "Large (1,001–5,000 employees)"),
+    "5001 - 10000":         ("large_enterprise",  "Large Enterprise (5,001–10,000 employees)"),
+    "10001 - 100000":       ("enterprise",        "Enterprise (10,001–100,000 employees)"),
+    "100001 - 10000000":    ("global_enterprise", "Global Enterprise (100,000+ employees)"),
+}
+assert set(SIZE_BAND_CATEGORY_LABELS) == set(SIZE_BAND_LOOKUP), \
+    "SIZE_BAND_CATEGORY_LABELS must cover exactly the same bands as SIZE_BAND_LOOKUP"
+
+#: score -> (slug, display-label), derived from the two band dicts above so
+#: a label always matches the ``company_size_score`` value that actually
+#: drove the blend — whether that score came from an exact band-string
+#: match or the numeric-midpoint fallback (both paths only ever produce one
+#: of these 9 literal ``SIZE_BAND_LOOKUP`` values; see ``_resolve_size_score``).
+_SIZE_SCORE_TO_CATEGORY: dict[float, tuple[str, str]] = {
+    SIZE_BAND_LOOKUP[band]: labels for band, labels in SIZE_BAND_CATEGORY_LABELS.items()
+}
+
 #: Sigmoid steepness.  Controls how strongly probabilities are spread around
 #: the midpoint.  Higher k → sharper separation; does NOT change prob ranking.
 SIGMOID_K: float = 10.0
@@ -352,6 +384,25 @@ def _resolve_size_score(row: dict) -> tuple[float, bool, str]:
         if mid is not None:
             return _band_lookup_midpoint(mid), False, norm_key
     return SIZE_SCORE_MISSING, True, ""
+
+
+def resolve_size_category(row: "dict | pd.Series") -> "tuple[str | None, str | None]":
+    """``(size_category, display_size_category)`` for the app export —
+    e.g. ``("large", "Large (1,001–5,000 employees)")``.
+
+    Reads the exact same employee-range fields ``_resolve_size_score`` uses
+    for ``company_size_score``, so the label always matches the band that
+    actually drove 25% of the blend — never a label for a different band.
+    Returns ``(None, None)`` when no usable employee-range data was found
+    (mirrors ``company_size_missing``), so a caller can distinguish "we
+    don't know the size" from a genuine band.
+    """
+    if isinstance(row, pd.Series):
+        row = row.to_dict()
+    size_score, size_missing, _range_key = _resolve_size_score(row)
+    if size_missing:
+        return None, None
+    return _SIZE_SCORE_TO_CATEGORY.get(round(size_score, 2), (None, None))
 
 
 # Priority order for employee_range source attribution.
@@ -967,6 +1018,28 @@ if __name__ == "__main__":
          str(r12["icp_similarity_score"]))
     _chk("anchor override does not change lean_model_prob",
          r12["lean_model_prob"] == r12_default["lean_model_prob"])
+
+    # ── Smoke Test 13: resolve_size_category ─────────────────────────────────
+    _section("Smoke Test 13: resolve_size_category (app-facing size label)")
+
+    _chk("SIZE_BAND_CATEGORY_LABELS covers exactly the SIZE_BAND_LOOKUP bands",
+         set(SIZE_BAND_CATEGORY_LABELS) == set(SIZE_BAND_LOOKUP))
+
+    cat, display = resolve_size_category({"lusha_api_employee_range": "1001 - 5000"})
+    _chk("'1001 - 5000' -> category 'large'", cat == "large", str(cat))
+    _chk("'1001 - 5000' -> display mentions '1,001–5,000'",
+         display is not None and "1,001–5,000" in display, str(display))
+
+    cat_missing, display_missing = resolve_size_category({})
+    _chk("no employee-range data -> (None, None)",
+         cat_missing is None and display_missing is None,
+         f"{cat_missing!r}, {display_missing!r}")
+
+    cat_mid, display_mid = resolve_size_category({"employee_range": "2000-3000"})
+    _chk("midpoint-fallback range '2000-3000' still resolves a label (not None)",
+         cat_mid is not None, str(cat_mid))
+    _chk("midpoint-fallback label matches the same band the score itself used",
+         cat_mid == "large", str(cat_mid))
 
     # ── Summary ───────────────────────────────────────────────────────────────
     print(f"\n{'═'*60}")

@@ -22,6 +22,7 @@ from rescore_from_gcs import (
     default_rescore_run_folder,
     download_current_run,
     download_file,
+    download_files_batch,
     gcs_current_dir,
     gcs_run_dir,
     list_country_folders,
@@ -361,6 +362,41 @@ class TestDownloadFile:
         assert "boom" in result["error"]
 
 
+class TestDownloadFilesBatch:
+    def test_single_subprocess_call_for_many_sources(self, tmp_path):
+        mock_proc = MagicMock(returncode=0, stdout="Copying...", stderr="")
+        sources = [f"gs://b/company-details-{i:03d}.json" for i in range(11)]
+        with patch("rescore_from_gcs.subprocess.run", return_value=mock_proc) as mock_run:
+            result = download_files_batch(["gcloud", "storage"], sources, str(tmp_path) + "/")
+        assert result["success"] is True
+        mock_run.assert_called_once()
+        args, _ = mock_run.call_args
+        cmd = args[0]
+        assert cmd[:3] == ["gcloud", "storage", "cp"]
+        assert cmd[3:-1] == sources
+        assert cmd[-1] == str(tmp_path) + "/"
+
+    def test_empty_sources_is_a_no_op(self):
+        with patch("rescore_from_gcs.subprocess.run") as mock_run:
+            result = download_files_batch(["gcloud", "storage"], [], "/tmp/out/")
+        assert result["success"] is True
+        mock_run.assert_not_called()
+
+    def test_failed_batch_captures_stderr(self, tmp_path):
+        mock_proc = MagicMock(returncode=1, stdout="", stderr="PermissionDenied")
+        with patch("rescore_from_gcs.subprocess.run", return_value=mock_proc):
+            result = download_files_batch(
+                ["gsutil"], ["gs://b/f1.json", "gs://b/f2.json"], str(tmp_path) + "/")
+        assert result["success"] is False
+        assert result["stderr"] == "PermissionDenied"
+
+    def test_subprocess_exception_does_not_raise(self):
+        with patch("rescore_from_gcs.subprocess.run", side_effect=OSError("boom")):
+            result = download_files_batch(["gcloud", "storage"], ["gs://b/f.json"], "/tmp/out/")
+        assert result["success"] is False
+        assert "boom" in result["error"]
+
+
 class TestUploadFile:
     def test_missing_local_file_fails_without_subprocess(self, tmp_path):
         missing = tmp_path / "nope.json"
@@ -419,11 +455,14 @@ def _write_fixture_current_run(country_dir: Path, *, include_legacy_company: boo
 def _fake_gcs_tool_for_local_dir(remote_root: Path):
     """Build a subprocess.run stand-in that serves 'ls'/'cp' from a local
     directory tree as if it were gs://bucket/... — keeps the download tests
-    honest about the ls-then-cp flow without touching a real bucket."""
+    honest about the ls-then-cp flow without touching a real bucket.
+
+    'cp' handles both the single-source form (upload_file / promote's
+    download_file calls: ``cp source dest_file``) and the batch form
+    (``download_files_batch``: ``cp source1 source2 ... dest_dir/``) so both
+    code paths can be exercised against the same fake."""
 
     def _run(cmd, capture_output=True, text=True, timeout=None):
-        if cmd[-2] == "ls" or "ls" in cmd:
-            pass
         if "ls" in cmd:
             target = cmd[-1]
             rel = target.replace("gs://bucket-a/", "").rstrip("/")
@@ -433,7 +472,19 @@ def _fake_gcs_tool_for_local_dir(remote_root: Path):
             lines = [f"{target.rstrip('/')}/{p.name}" for p in sorted(local_dir.iterdir())]
             return MagicMock(returncode=0, stdout="\n".join(lines) + ("\n" if lines else ""), stderr="")
         if "cp" in cmd:
-            source, dest = cmd[-2], cmd[-1]
+            cp_idx = cmd.index("cp")
+            args = cmd[cp_idx + 1:]
+            *sources, dest = args
+            if len(sources) > 1 or dest.endswith("/"):
+                # Batch form: many sources -> one destination directory.
+                dest_dir = Path(dest)
+                dest_dir.mkdir(parents=True, exist_ok=True)
+                for source in sources:
+                    rel = source.replace("gs://bucket-a/", "")
+                    local_source = remote_root / rel
+                    (dest_dir / local_source.name).write_bytes(local_source.read_bytes())
+                return MagicMock(returncode=0, stdout="", stderr="")
+            source = sources[0]
             if source.startswith("gs://"):
                 rel = source.replace("gs://bucket-a/", "")
                 local_source = remote_root / rel
@@ -476,6 +527,44 @@ class TestDownloadCurrentRun:
              patch("rescore_from_gcs.subprocess.run", side_effect=_fake_gcs_tool_for_local_dir(remote_root)):
             with pytest.raises(RuntimeError, match="No re-scorable files"):
                 download_current_run("bucket-a", "brazil", tmp_path / "work")
+
+    def test_many_detail_buckets_use_one_cp_call_not_one_per_file(self, tmp_path):
+        """The slow part users hit ('Huidige run laden' taking minutes) was
+        one subprocess (CLI startup + auth) per file. With 11 detail-bucket
+        files (a ~5000-company country at bucket_size=500) plus manifest +
+        list, downloading must still cost exactly one 'ls' and one 'cp'
+        call — not 13."""
+        remote_root = tmp_path / "remote"
+        country_dir = remote_root / "brazil" / "current"
+        country_dir.mkdir(parents=True)
+        all_ids = []
+        for bucket_no in range(11):
+            bucket = {
+                f"company-{bucket_no}-{i}": {
+                    "company_id": f"company-{bucket_no}-{i}",
+                    "commercial_fit_score": 5.0,
+                    "commercial_tier": "🥉 Cool",
+                }
+                for i in range(5)
+            }
+            all_ids.extend(bucket)
+            (country_dir / f"company-details-{bucket_no:03d}.json").write_text(
+                json.dumps(bucket), encoding="utf-8")
+        (country_dir / LIST_FILENAME).write_text(
+            json.dumps([{"company_id": cid} for cid in all_ids]), encoding="utf-8")
+        (country_dir / CURRENT_MANIFEST_FILENAME).write_text(
+            json.dumps({"export_country": "Brazil"}), encoding="utf-8")
+
+        with patch("rescore_from_gcs.resolve_gcs_tool", return_value=["gcloud", "storage"]), \
+             patch("rescore_from_gcs.subprocess.run",
+                   side_effect=_fake_gcs_tool_for_local_dir(remote_root)) as mock_run:
+            current = download_current_run("bucket-a", "brazil", tmp_path / "work")
+
+        assert len(current["detail_files"]) == 11
+        cp_calls = [c for c in mock_run.call_args_list if "cp" in c.args[0]]
+        ls_calls = [c for c in mock_run.call_args_list if "ls" in c.args[0]]
+        assert len(cp_calls) == 1
+        assert len(ls_calls) == 1
 
 
 class TestBuildRescoredRunPureCore:

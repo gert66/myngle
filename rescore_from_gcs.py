@@ -348,6 +348,31 @@ def download_file(tool: list[str], source: str, local_path: str) -> dict:
     }
 
 
+def download_files_batch(tool: list[str], sources: list[str], dest_dir: str) -> dict:
+    """Download many GCS objects in ONE subprocess call — ``cp`` accepts
+    multiple source URLs followed by a destination directory, so this
+    avoids paying the CLI-startup/auth overhead of ``download_file`` once
+    per file. That per-file overhead (not network transfer of the — usually
+    small — JSON files themselves) is what makes downloading a country with
+    many ``company-details-*.json`` buckets slow; batching cuts N subprocess
+    launches down to 1. Never raises; failure comes back as
+    ``{"success": False, ...}``. No-op success when ``sources`` is empty."""
+    if not sources:
+        return {"success": True, "returncode": 0, "stdout": "", "stderr": ""}
+    try:
+        proc = subprocess.run(
+            [*tool, "cp", *sources, dest_dir],
+            capture_output=True, text=True, timeout=300,
+        )
+    except Exception as exc:
+        return {"success": False, "error": f"{type(exc).__name__}: {exc}"}
+    return {
+        "success": proc.returncode == 0,
+        "returncode": proc.returncode,
+        "stdout": proc.stdout[-2000:], "stderr": proc.stderr[-2000:],
+    }
+
+
 def upload_file(tool: list[str], local_path: str, destination: str) -> dict:
     """Upload one local file via subprocess (no ``shell=True``). Mirrors
     ``lovable_gcs_upload.upload_file`` — verifies the local file exists
@@ -379,11 +404,20 @@ def download_current_run(bucket: str, country_folder: str, work_dir) -> dict:
     """Download ``<country_folder>/current/``'s manifest, ``companies.list.json``
     and every ``company-details-*.json`` into ``work_dir``.
 
+    All relevant files are fetched in a SINGLE ``cp`` subprocess call (see
+    ``download_files_batch``) rather than one call per file — a country with
+    a few thousand companies still only has a handful of
+    ``company-details-*.json`` buckets (``export_lead_prioritizer_to_lovable_json``'s
+    default ``bucket_size=500``), but each separate CLI invocation used to
+    pay its own startup/auth cost, which is what made this step take
+    minutes. Batching turns that into one launch regardless of company
+    count.
+
     Returns ``{"manifest": dict|None, "list_items": list, "detail_files":
     {filename: dict}}``. Raises ``RuntimeError`` (with a clear message, no
     secrets) if no GCS CLI tool is available, the current folder is empty,
-    or any single download fails — a partial re-score input is worse than
-    no re-score at all.
+    or the download fails — a partial re-score input is worse than no
+    re-score at all.
     """
     tool = resolve_gcs_tool()
     if tool is None:
@@ -408,16 +442,27 @@ def download_current_run(bucket: str, country_folder: str, work_dir) -> dict:
             "current run?"
         )
 
+    sources = [f"{current_dir}/{filename}" for filename in relevant]
+    batch_result = download_files_batch(tool, sources, f"{work_dir}/")
+    if not batch_result["success"]:
+        raise RuntimeError(
+            f"Failed to download files from {current_dir}: "
+            f"{batch_result.get('stderr') or batch_result.get('error')}"
+        )
+
     downloaded: dict = {}
+    missing = []
     for filename in relevant:
         local_path = work_dir / filename
-        result = download_file(tool, f"{current_dir}/{filename}", str(local_path))
-        if not result["success"]:
-            raise RuntimeError(
-                f"Failed to download {filename} from {current_dir}: "
-                f"{result.get('stderr') or result.get('error')}"
-            )
+        if not local_path.exists():
+            missing.append(filename)
+            continue
         downloaded[filename] = local_path
+    if missing:
+        raise RuntimeError(
+            f"Download reported success but {len(missing)} file(s) are "
+            f"missing from {work_dir}: {', '.join(missing)}"
+        )
 
     manifest = None
     if CURRENT_MANIFEST_FILENAME in downloaded:

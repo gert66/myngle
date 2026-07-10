@@ -44,7 +44,7 @@ from urllib.parse import urlparse
 
 import pandas as pd
 
-from commercial_fit_scoring import LEAN_COEFFICIENTS
+from commercial_fit_scoring import LEAN_COEFFICIENTS, resolve_size_category
 from hq_simple_detector import (
     _HOSTED_CAREERS_PLATFORM_DOMAINS,
     is_hosted_careers_platform_domain,
@@ -2184,6 +2184,27 @@ def _resolve_industry(row: dict) -> str:
     return value or "Unknown"
 
 
+def _resolve_size_category_fields(row: dict) -> "tuple[str | None, str | None]":
+    """``(size_category_app, display_size_category_app)`` for the export.
+
+    These two columns have been part of the export contract since it was
+    written, read straight from the input row — but nothing upstream ever
+    computed them, so on a normal Enriched Leads row they were always blank
+    even though ``employee_range`` (25% of ``final_commercial_fit_score``)
+    was populated and used the whole time. An input row that DOES carry an
+    explicit override wins (matches ``_resolve_industry``'s "keep the input
+    value when present" pattern); otherwise the label is derived from the
+    same employee-range data the scoring engine reads, via
+    ``commercial_fit_scoring.resolve_size_category``, so it can never
+    disagree with the ``company_size_score`` that actually drove the blend.
+    """
+    input_category = clean_str(row.get("size_category_app"))
+    input_display = clean_str(row.get("display_size_category_app"))
+    if input_category or input_display:
+        return input_category, input_display
+    return resolve_size_category(row)
+
+
 def _build_list_item(row: dict, company_id: str, export_country: str,
                      foreign_hq_detected: bool, foreign_hq_reason,
                      now_iso: str) -> dict:
@@ -2198,6 +2219,8 @@ def _build_list_item(row: dict, company_id: str, export_country: str,
         tier = clean_str(row.get("commercial_tier_app"))
     if tier is None:
         tier = "D"
+
+    size_category_app, display_size_category_app = _resolve_size_category_fields(row)
 
     return {
         "company_id": company_id,
@@ -2215,8 +2238,8 @@ def _build_list_item(row: dict, company_id: str, export_country: str,
         "foreign_hq_export_reason": foreign_hq_reason,
         "industry": _resolve_industry(row),
         "employee_range": clean_str(row.get("employee_range")) or "",
-        "size_category_app": clean_str(row.get("size_category_app")),
-        "display_size_category_app": clean_str(row.get("display_size_category_app")),
+        "size_category_app": size_category_app,
+        "display_size_category_app": display_size_category_app,
         "commercial_fit_score": score,
         "commercial_tier": tier,
         "commercial_fit_score_app": to_float(row.get("commercial_fit_score_app")),
