@@ -361,7 +361,11 @@ def _write_fixture_current_run(country_dir: Path) -> list[dict]:
 
 def _fake_gcs_tool_for_local_dir(remote_root: Path):
     """subprocess.run stand-in serving ls/cp from a local dir tree as if it
-    were gs://bucket-a/... — identical to test_rescore_from_gcs's helper."""
+    were gs://bucket-a/... — identical to test_rescore_from_gcs's helper.
+
+    'cp' handles both the single-source form (upload_file / promote's
+    download_file: ``cp source dest_file``) and the batch download form
+    (``download_files_batch``: ``cp source1 source2 ... dest_dir/``)."""
 
     def _run(cmd, capture_output=True, text=True, timeout=None):
         if "ls" in cmd:
@@ -373,7 +377,17 @@ def _fake_gcs_tool_for_local_dir(remote_root: Path):
             lines = [f"{target.rstrip('/')}/{p.name}" for p in sorted(local_dir.iterdir())]
             return MagicMock(returncode=0, stdout="\n".join(lines) + ("\n" if lines else ""), stderr="")
         if "cp" in cmd:
-            source, dest = cmd[-2], cmd[-1]
+            cp_idx = cmd.index("cp")
+            *sources, dest = cmd[cp_idx + 1:]
+            if len(sources) > 1 or dest.endswith("/"):
+                dest_dir = Path(dest)
+                dest_dir.mkdir(parents=True, exist_ok=True)
+                for source in sources:
+                    rel = source.replace("gs://bucket-a/", "")
+                    local_source = remote_root / rel
+                    (dest_dir / local_source.name).write_bytes(local_source.read_bytes())
+                return MagicMock(returncode=0, stdout="", stderr="")
+            source = sources[0]
             if source.startswith("gs://"):
                 rel = source.replace("gs://bucket-a/", "")
                 Path(dest).write_bytes((remote_root / rel).read_bytes())
