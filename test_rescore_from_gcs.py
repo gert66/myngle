@@ -570,7 +570,8 @@ class TestRescoreCountry:
 
         # current/ on the fake remote must be untouched.
         current_dir = remote_root / "brazil" / "current"
-        original_bucket = json.loads((current_dir / "company-details-000.json").read_text())
+        original_bucket = json.loads(
+            (current_dir / "company-details-000.json").read_text(encoding="utf-8"))
         assert original_bucket["company-a"]["commercial_fit_score"] == \
             fixture_detail("company-a", sig_foreign_hq_score=3, sig_explicit_lnd_score=3)["commercial_fit_score"]
 
@@ -597,7 +598,7 @@ class TestRescoreCountry:
 
         new_bucket = json.loads(
             (remote_root / "brazil" / "runs" / "2026-07-08_rescore" / "company-details-000.json")
-            .read_text())
+            .read_text(encoding="utf-8"))
         assert new_bucket["legacy-co"]["commercial_fit_score"] == 4.2
         assert new_bucket["legacy-co"]["commercial_tier"] == "🥉 Cool"
         assert new_bucket["legacy-co"]["rescore_audit"]["skipped"] is True
@@ -616,7 +617,7 @@ class TestRescoreCountry:
 
         new_bucket = json.loads(
             (remote_root / "brazil" / "runs" / "2026-07-08_rescore" / "company-details-000.json")
-            .read_text())
+            .read_text(encoding="utf-8"))
         for cid, original_detail in original_bucket.items():
             assert new_bucket[cid]["commercial_fit_score"] == original_detail["commercial_fit_score"]
             assert new_bucket[cid]["commercial_tier"] == original_detail["commercial_tier"]
@@ -712,18 +713,19 @@ class TestPromoteRunToCurrent:
         }
 
         current_dir = remote_root / "brazil" / "current"
-        promoted_manifest = json.loads((current_dir / CURRENT_MANIFEST_FILENAME).read_text())
+        promoted_manifest = json.loads(
+            (current_dir / CURRENT_MANIFEST_FILENAME).read_text(encoding="utf-8"))
         assert promoted_manifest["promoted_to_current"] is True
         assert promoted_manifest["promoted_from_run_folder"] == "2026-07-08_reallocate"
         assert promoted_manifest["promoted_at"] == "2026-07-09T13:41:00Z"
 
-        promoted_list = json.loads((current_dir / LIST_FILENAME).read_text())
+        promoted_list = json.loads((current_dir / LIST_FILENAME).read_text(encoding="utf-8"))
         assert len(promoted_list) == 2
 
         # The source run folder itself must be untouched.
         source_manifest = json.loads(
             (remote_root / "brazil" / "runs" / "2026-07-08_reallocate" /
-             CURRENT_MANIFEST_FILENAME).read_text())
+             CURRENT_MANIFEST_FILENAME).read_text(encoding="utf-8"))
         assert "promoted_to_current" not in source_manifest
 
     def test_no_tool_raises_clear_error(self, tmp_path):
@@ -745,7 +747,7 @@ class TestPromoteRunToCurrent:
         # Mutate the run's list so it's distinguishable from the stale current/.
         run_list_path = (
             remote_root / "brazil" / "runs" / "2026-07-08_reallocate" / LIST_FILENAME)
-        run_list = json.loads(run_list_path.read_text())
+        run_list = json.loads(run_list_path.read_text(encoding="utf-8"))
         run_list[0]["assigned_cold_caller"] = "Ernie"
         run_list_path.write_text(json.dumps(run_list), encoding="utf-8")
 
@@ -754,5 +756,5 @@ class TestPromoteRunToCurrent:
             promote_run_to_current("bucket-a", "brazil", "2026-07-08_reallocate")
 
         current_list = json.loads(
-            (remote_root / "brazil" / "current" / LIST_FILENAME).read_text())
+            (remote_root / "brazil" / "current" / LIST_FILENAME).read_text(encoding="utf-8"))
         assert current_list[0]["assigned_cold_caller"] == "Ernie"

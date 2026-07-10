@@ -48,16 +48,16 @@ class TestCallerDistributionDataframe:
             for it in original
         ]
         df = caller_distribution_dataframe(original, new_items)
-        pivot = df.pivot(index="caller", columns="when", values="count").fillna(0)
-        assert pivot.loc["Ann", "Huidig"] == 1
-        assert pivot.loc["Ann", "Nieuw"] == 0
-        assert pivot.loc["Zoe", "Nieuw"] == 2
-        assert pivot.loc["Zoe", "Huidig"] == 0
+        pivot = df.pivot(index="caller", columns="period", values="count").fillna(0)
+        assert pivot.loc["Ann", "Current"] == 1
+        assert pivot.loc["Ann", "New"] == 0
+        assert pivot.loc["Zoe", "New"] == 2
+        assert pivot.loc["Zoe", "Current"] == 0
 
     def test_blank_caller_labelled(self):
         original = [make_item("c1", score=1, rank=1, caller=None)]
         df = caller_distribution_dataframe(original, original)
-        assert "— (geen)" in set(df["caller"])
+        assert "— (none)" in set(df["caller"])
 
 
 class TestMoversDataframe:

@@ -81,7 +81,7 @@ class TestBuildIcpContextQueries:
 
 class TestCollectIcpContextEvidence:
     def test_collects_evidence_across_three_queries(self):
-        def _fake_serper(query, key):
+        def _fake_serper(query, key, **kwargs):
             return {"organic": [{"title": "T", "snippet": f"snippet for {query}",
                                   "link": "https://acme.com/page"}]}
         with patch("lead_icp_context_composer.call_serper_for_enrichment",
@@ -93,7 +93,7 @@ class TestCollectIcpContextEvidence:
             assert item["evidence"]
 
     def test_hosted_platform_evidence_excluded(self):
-        def _fake_serper(query, key):
+        def _fake_serper(query, key, **kwargs):
             return {"organic": [{"title": "T", "snippet": "some snippet",
                                   "link": "https://acme.wd3.myworkdayjobs.com/en-US/Careers"}]}
         with patch("lead_icp_context_composer.call_serper_for_enrichment",
