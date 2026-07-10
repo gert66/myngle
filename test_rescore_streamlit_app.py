@@ -20,21 +20,30 @@ from commercial_fit_scoring import (
     TIER_THRESHOLDS,
     score_company,
 )
+from commercial_fit_scoring import _SIGMOID_P_HI, _SIGMOID_P_LO
 from rescore_streamlit_app import (
     TIER_LABELS,
+    auto_calibrate_sigmoid_anchors,
     biggest_movers_dataframe,
     build_multi_country_preview,
     build_multi_country_rescored_runs,
+    compute_model_probabilities,
     default_params,
     employee_range_options,
     multi_country_summary_dataframe,
+    percentile_sample_ids,
+    sample_current_bundle,
     score_component_breakdown,
     score_distribution_dataframe,
+    score_percentile_summary_dataframe,
     signal_has_presence,
     signal_split_score_dataframe,
     signal_split_summary,
     sigmoid_curve_dataframe,
+    size_coverage_summary,
+    suggest_tier_thresholds,
     tier_distribution_dataframe,
+    top_companies_dataframe,
     validate_tier_thresholds,
 )
 
@@ -47,6 +56,8 @@ class TestDefaultParams:
         assert params["model_weight"] == ICP_SIMILARITY_WEIGHT
         assert params["size_weight"] == COMPANY_SIZE_WEIGHT
         assert params["sigmoid_k"] == SIGMOID_K
+        assert params["sigmoid_p_lo"] == _SIGMOID_P_LO
+        assert params["sigmoid_p_hi"] == _SIGMOID_P_HI
         assert [tuple(t) for t in params["tier_thresholds"]] == TIER_THRESHOLDS
 
     def test_returns_independent_copies(self):
@@ -359,3 +370,204 @@ class TestEmployeeRangeOptions:
             assert band in options
         assert "missing / unknown" in options
         assert options[-1] == "missing / unknown"
+
+
+def _details_with_scores(scores: "list[float]") -> dict:
+    return {
+        f"c{i}": {"commercial_fit_score": s, "commercial_tier": "🥉 Cool"}
+        for i, s in enumerate(scores)
+    }
+
+
+class TestPercentileSampleIds:
+    def test_small_population_returns_everything_ranked_high_to_low(self):
+        details = _details_with_scores([3.0, 9.0, 6.0])
+        ids = percentile_sample_ids(details, sample_size=10)
+        assert ids == ["c1", "c2", "c0"]  # 9.0, 6.0, 3.0
+
+    def test_always_includes_the_full_top(self):
+        details = _details_with_scores([i / 10.0 for i in range(100)])
+        ids = percentile_sample_ids(details, sample_size=30, always_top=10)
+        scores = sorted(
+            (details[cid]["commercial_fit_score"] for cid in details), reverse=True)
+        top_scores = set(scores[:10])
+        sampled_scores = {details[cid]["commercial_fit_score"] for cid in ids}
+        assert top_scores <= sampled_scores
+
+    def test_spans_the_full_range_including_bottom(self):
+        details = _details_with_scores([i / 10.0 for i in range(200)])
+        ids = percentile_sample_ids(details, sample_size=50)
+        sampled = [details[cid]["commercial_fit_score"] for cid in ids]
+        assert max(sampled) == max(d["commercial_fit_score"] for d in details.values())
+        assert min(sampled) == min(d["commercial_fit_score"] for d in details.values())
+
+    def test_deterministic(self):
+        details = _details_with_scores([i * 0.037 % 10 for i in range(500)])
+        assert percentile_sample_ids(details, 100) == percentile_sample_ids(details, 100)
+
+    def test_never_exceeds_sample_size(self):
+        details = _details_with_scores([i / 10.0 for i in range(1000)])
+        assert len(percentile_sample_ids(details, sample_size=100)) <= 100
+
+    def test_companies_without_score_are_excluded(self):
+        details = {"a": {"commercial_fit_score": 5.0}, "b": {}}
+        assert percentile_sample_ids(details, 10) == ["a"]
+
+
+class TestSampleCurrentBundle:
+    def test_keeps_detail_file_shape_and_empty_list_items(self):
+        details = _details_with_scores([i / 10.0 for i in range(100)])
+        current = {
+            "detail_files": {"d1.json": details},
+            "list_items": [{"company_id": "c0"}],
+            "manifest": {"country_folder": "nl"},
+        }
+        sampled = sample_current_bundle(current, sample_size=20)
+        assert set(sampled) == {"detail_files", "list_items", "manifest"}
+        assert sampled["list_items"] == []
+        assert sampled["manifest"] == {"country_folder": "nl"}
+        n = sum(len(b) for b in sampled["detail_files"].values())
+        assert 0 < n <= 20
+
+    def test_small_bundle_passes_through_all_companies(self):
+        details = _details_with_scores([1.0, 2.0])
+        current = {"detail_files": {"d1.json": details}, "list_items": [], "manifest": None}
+        sampled = sample_current_bundle(current, sample_size=50)
+        assert set(sampled["detail_files"]["d1.json"]) == {"c0", "c1"}
+
+
+def _detail_with_signals(value: float, employee_range: "str | None" = None) -> dict:
+    return {
+        "commercial_fit_score": 5.0,
+        "commercial_tier": "🥉 Cool",
+        "scoring_inputs": {
+            "employee_range": employee_range,
+            "signals": {f: value for f in LEAN_COEFFICIENTS},
+        },
+    }
+
+
+class TestAutoCalibrateSigmoidAnchors:
+    def _population(self) -> dict:
+        # Mixed signal strengths -> a real spread of model probabilities.
+        return {
+            f"c{i}": _detail_with_signals(v)
+            for i, v in enumerate([0, 0, 1, 1, 2, 2, 3, 3, 0.5, 2.5])
+        }
+
+    def test_returns_ordered_anchors_within_0_1(self):
+        anchors = auto_calibrate_sigmoid_anchors(self._population(), default_params())
+        assert anchors is not None
+        p_lo, p_hi = anchors
+        assert 0.0 < p_lo < p_hi < 1.0
+
+    def test_calibrated_anchors_push_top_company_to_10(self):
+        population = self._population()
+        params = default_params()
+        anchors = auto_calibrate_sigmoid_anchors(population, params, lo_pct=0.0, hi_pct=100.0)
+        params["sigmoid_p_lo"], params["sigmoid_p_hi"] = anchors
+        best = score_company(
+            {f: 3 for f in LEAN_COEFFICIENTS}, params=params)
+        assert best["icp_similarity_score"] == 10.0
+
+    def test_too_few_companies_returns_none(self):
+        assert auto_calibrate_sigmoid_anchors({}, default_params()) is None
+        assert auto_calibrate_sigmoid_anchors(
+            {"c1": _detail_with_signals(2)}, default_params()) is None
+
+    def test_no_spread_returns_none(self):
+        population = {f"c{i}": _detail_with_signals(2) for i in range(5)}
+        assert auto_calibrate_sigmoid_anchors(population, default_params()) is None
+
+    def test_companies_without_scoring_inputs_are_skipped(self):
+        population = {"a": {}, "b": {"scoring_inputs": {}}}
+        assert compute_model_probabilities(population, default_params()) == []
+
+
+class TestScorePercentileSummaryDataframe:
+    def test_contains_expected_statistics_for_both_sides(self):
+        original = _details_with_scores([2.0, 4.0, 6.0, 8.0])
+        rescored = _details_with_scores([3.0, 5.0, 7.0, 9.0])
+        df = score_percentile_summary_dataframe(original, rescored)
+        stats = dict(zip(df["statistiek"], zip(df["Huidig"], df["Nieuw"])))
+        assert stats["min"] == (2.0, 3.0)
+        assert stats["max"] == (8.0, 9.0)
+        assert stats["mediaan"] == (5.0, 6.0)
+        assert "scheefheid" in stats
+
+    def test_empty_input_returns_empty_dataframe(self):
+        assert score_percentile_summary_dataframe({}, {}).empty
+
+
+class TestTopCompaniesDataframe:
+    def test_ranked_high_to_low_by_new_score(self):
+        original = _details_with_scores([5.0, 5.0, 5.0])
+        rescored = {
+            "c0": {"commercial_fit_score": 7.0, "company_name": "A", "commercial_tier": "🥈 Warm"},
+            "c1": {"commercial_fit_score": 9.5, "company_name": "B", "commercial_tier": "🥇 Hot"},
+            "c2": {"commercial_fit_score": 3.0, "company_name": "C", "commercial_tier": "❄️ Pass"},
+        }
+        df = top_companies_dataframe(original, rescored, top_n=2)
+        assert list(df["company_id"]) == ["c1", "c0"]
+        assert list(df["rang"]) == [1, 2]
+        assert df.iloc[0]["delta"] == 4.5
+
+    def test_empty_input_returns_empty_dataframe(self):
+        assert top_companies_dataframe({}, {}).empty
+
+
+class TestSizeCoverageSummary:
+    def test_counts_range_presence_only_for_scorable_companies(self):
+        details = {
+            "a": _detail_with_signals(2, "1001 - 5000"),
+            "b": _detail_with_signals(2, None),
+            "c": _detail_with_signals(2, ""),
+            "d": {"commercial_fit_score": 5.0},  # no scoring_inputs -> ignored
+        }
+        cov = size_coverage_summary(details)
+        assert cov["n_total"] == 3
+        assert cov["n_with_range"] == 1
+        assert cov["n_missing"] == 2
+        assert cov["pct_with_range"] == pytest.approx(33.3)
+
+    def test_empty_input(self):
+        cov = size_coverage_summary({})
+        assert cov == {"n_total": 0, "n_with_range": 0, "n_missing": 0,
+                       "pct_with_range": 0.0}
+
+
+class TestSuggestTierThresholds:
+    def test_thresholds_follow_10_20_30_rule_and_descend(self):
+        scores = [i / 10.0 for i in range(1, 101)]  # 0.1 .. 10.0
+        details = _details_with_scores(scores)
+        suggestion = suggest_tier_thresholds(details)
+        assert suggestion is not None
+        hot, warm, cool = suggestion[0][0], suggestion[1][0], suggestion[2][0]
+        assert hot > warm > cool >= 0
+        assert suggestion[3] == [0.0, "❄️ Pass"]
+        # Top 10% of 0.1..10.0 starts at the 90th percentile ≈ 9.1.
+        assert hot == pytest.approx(9.1, abs=0.2)
+
+    def test_no_spread_returns_none(self):
+        details = _details_with_scores([5.0] * 10)
+        assert suggest_tier_thresholds(details) is None
+
+    def test_too_few_companies_returns_none(self):
+        assert suggest_tier_thresholds(_details_with_scores([1.0, 2.0])) is None
+
+
+class TestSigmoidAnchorParamsFlowThroughScoring:
+    def test_default_anchors_leave_reference_score_unchanged(self):
+        row = {f: 2 for f in LEAN_COEFFICIENTS}
+        base = score_company(row)
+        with_default_params = score_company(row, params=default_params())
+        assert with_default_params["icp_similarity_score"] == base["icp_similarity_score"]
+
+    def test_sigmoid_curve_dataframe_accepts_custom_anchors(self):
+        wide = sigmoid_curve_dataframe(k=10.0, n=100)
+        narrow = sigmoid_curve_dataframe(k=10.0, n=100, p_lo=0.45, p_hi=0.55)
+        # Narrower anchors -> a probability just above the high anchor
+        # already maps to (clamped) 10.
+        p_idx = 60  # p = 0.60
+        assert narrow["icp_similarity_score"][p_idx] == 10.0
+        assert wide["icp_similarity_score"][p_idx] < 10.0

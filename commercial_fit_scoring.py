@@ -104,6 +104,12 @@ SIGMOID_K: float = 10.0
 #: These are the practical min/max LR probabilities from model calibration.
 #: Changing SIGMOID_K does NOT require changing these — S_MIN/S_MAX are
 #: recomputed automatically below.
+#: Overridable per call via params["sigmoid_p_lo"] / params["sigmoid_p_hi"]:
+#: a population whose top probability sits below _SIGMOID_P_HI can never
+#: reach icp_similarity_score 10 under the fixed anchors, so a re-score run
+#: may pass empirically calibrated anchors (e.g. the population's own
+#: 5th/95th probability percentiles) to stretch its scores over the full
+#: 1–10 range.
 _SIGMOID_P_LO: float = 0.35734
 _SIGMOID_P_HI: float = 0.76427
 
@@ -242,6 +248,8 @@ SCORE_OUTPUT_COLS: list[str] = [
     "size_scoring_note",
     # ── Audit: sigmoid ───────────────────────────────────────────────────────
     "sigmoid_k",
+    "sigmoid_p_lo",
+    "sigmoid_p_hi",
     "sigmoid_s_min",
     "sigmoid_s_max",
     "sigmoid_input_value",
@@ -446,6 +454,8 @@ def score_company(
     _model_w     = float(p.get("model_weight", _profile["model_weight"]))
     _size_w      = float(p.get("size_weight",  _profile["size_weight"]))
     _sig_k       = float(p.get("sigmoid_k",    _profile["sigmoid_k"]))
+    _p_lo        = float(p.get("sigmoid_p_lo", _profile.get("sigmoid_p_lo", _SIGMOID_P_LO)))
+    _p_hi        = float(p.get("sigmoid_p_hi", _profile.get("sigmoid_p_hi", _SIGMOID_P_HI)))
 
     if isinstance(row, pd.Series):
         row = row.to_dict()
@@ -486,9 +496,10 @@ def score_company(
     lean_model_prob = 1.0 / (1.0 + math.exp(-lr_z))
 
     # ── 3. Sigmoid stretch → ICP Similarity Score ────────────────────────────
-    # Use profile-specific K; recompute S_MIN/S_MAX so normalisation stays valid.
-    _s_min = 1.0 / (1.0 + math.exp(-_sig_k * (_SIGMOID_P_LO - 0.5)))
-    _s_max = 1.0 / (1.0 + math.exp(-_sig_k * (_SIGMOID_P_HI - 0.5)))
+    # Use profile-specific K and anchors; recompute S_MIN/S_MAX so
+    # normalisation stays valid.
+    _s_min = 1.0 / (1.0 + math.exp(-_sig_k * (_p_lo - 0.5)))
+    _s_max = 1.0 / (1.0 + math.exp(-_sig_k * (_p_hi - 0.5)))
     sigmoid_raw_s = 1.0 / (1.0 + math.exp(-_sig_k * (lean_model_prob - 0.5)))
     _denom = _s_max - _s_min if abs(_s_max - _s_min) > 1e-9 else 1.0
     icp_sim = _clamp(1.0 + 9.0 * (sigmoid_raw_s - _s_min) / _denom, 1.0, 10.0)
@@ -614,6 +625,8 @@ def score_company(
         "model_probability":           round(lean_model_prob, 7),
         # Sigmoid audit
         "sigmoid_k":           _sig_k,
+        "sigmoid_p_lo":        _p_lo,
+        "sigmoid_p_hi":        _p_hi,
         "sigmoid_s_min":       _s_min,
         "sigmoid_s_max":       _s_max,
         "sigmoid_input_value": round(lean_model_prob, 7),
@@ -936,6 +949,24 @@ if __name__ == "__main__":
     # Confirm tier uses the NEW score, not legacy
     _chk("Case A: tier computed from final_commercial_fit_score (not legacy)",
          ra["commercial_tier"] == _tier_for(ra["final_commercial_fit_score"]))
+
+    # ── Smoke Test 12: sigmoid anchor override (calibration params) ──────────
+    _section("Smoke Test 12: sigmoid_p_lo / sigmoid_p_hi params")
+
+    r12_default = score_company(capgemini)
+    _chk("no params → default anchors in audit fields",
+         r12_default["sigmoid_p_lo"] == _SIGMOID_P_LO
+         and r12_default["sigmoid_p_hi"] == _SIGMOID_P_HI,
+         f"{r12_default['sigmoid_p_lo']} / {r12_default['sigmoid_p_hi']}")
+    r12 = score_company(capgemini, params={
+        "sigmoid_p_lo": 0.40,
+        "sigmoid_p_hi": r12_default["lean_model_prob"],
+    })
+    _chk("p_hi anchored at own prob → icp_similarity_score = 10",
+         r12["icp_similarity_score"] == 10.0,
+         str(r12["icp_similarity_score"]))
+    _chk("anchor override does not change lean_model_prob",
+         r12["lean_model_prob"] == r12_default["lean_model_prob"])
 
     # ── Summary ───────────────────────────────────────────────────────────────
     print(f"\n{'═'*60}")
