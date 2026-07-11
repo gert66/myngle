@@ -462,17 +462,20 @@ vervolgstap.
 - `TASK_COUNT=10` voor de eerste test.
 - `TASK_COUNT=25` voor de tweede test.
 - `TASK_COUNT=50` voor een productieachtige test.
-- `TASK_COUNT` ruim boven de 50 (tot 100, de Firecrawl-tier-limiet — zie de
-  Cloud Run Streamlit-app's automatische task-count-suggestie o.b.v. het
-  aantal rijen in het geüploade bestand) voor een grote productierun, zodra
-  de quotaverhoging hieronder is goedgekeurd.
+- `TASK_COUNT` ruim boven de 50 (zie de Cloud Run Streamlit-app's
+  automatische task-count-suggestie o.b.v. het aantal rijen in het
+  geüploade bestand) voor een grote productierun — werkt prima ook zonder
+  hogere parallelism, geeft alleen geen extra gelijktijdigheid boven de 50
+  (zie hieronder).
 - Parallelism staat vast op de `--parallelism` van de job-deploy (executies
-  kunnen hem niet overriden); zet hem bij deploy gelijk aan het hoogste
-  `TASK_COUNT` dat je van plan bent, tot maximaal 100 (de Firecrawl-tier —
-  zie Rate-limit notities). **Momenteel nog op 50** in afwachting van een
-  Google-quotaverhoging (`MemAllocPerProjectRegion` in `europe-west4`); een
-  `TASK_COUNT` boven de 50 werkt tot dan nog steeds, maar levert vanaf taak
-  51 geen extra gelijktijdigheid op — zie Rate-limit notities.
+  kunnen hem niet overriden); staat momenteel op **50** — dat is een
+  bewuste keuze, niet een tijdelijke beperking: de nieuwe, grotere
+  Firecrawl-tier zou een hogere parallelism (100) toelaten, maar dat
+  vereist een `MemAllocPerProjectRegion`-quotaverhoging die op deze
+  GCP-proefaccount niet self-service aan te vragen is (eerst een upgrade
+  naar een volledig betaald account nodig) — zie Rate-limit notities. Een
+  `TASK_COUNT` boven de 50 werkt gewoon, maar levert vanaf taak 51 geen
+  extra gelijktijdigheid meer op zolang parallelism op 50 staat.
 - Let op: het aantal tasks van een executie bepaal je met `--tasks` op
   `gcloud run jobs execute` (dat doen `run_cloud_lead_prioritizer.ps1` en de
   Cloud Run Streamlit-app inmiddels ook). Alleen de `TASK_COUNT` env var
@@ -500,15 +503,17 @@ vervolgstap.
   Firecrawl Hobby (5 concurrent / 100 scrapes/min) is dus al snel de
   bottleneck bij `TASK_COUNT` boven ~5; Firecrawl Standard (50 concurrent /
   500 scrapes/min) past beter bij `TASK_COUNT=25–50`. Sinds de upgrade naar
-  een grotere Firecrawl-tier (100 concurrent) is het doel om de deployed
-  Job's `--parallelism` van 50 naar 100 op te hogen — zie "Task count"
-  hieronder voor de bijbehorende `TASK_COUNT`-richtlijn. **Nog niet live**:
-  bij 8Gi/taak zit 50 al op de volledige `MemAllocPerProjectRegion`-quota
-  van dit project in `europe-west4` (400GiB); 100 vereist eerst een
-  Google-quotaverhoging (aangevraagd via IAM & Admin → Quotas in de
-  Console — geen `gcloud`-commando, vereist handmatige beoordeling door
-  Google). Tot die goedkeuring staat de deployed Job nog op
-  `--parallelism 50`.
+  een grotere Firecrawl-tier (100 concurrent) zou de deployed Job's
+  `--parallelism` in theorie van 50 naar 100 kunnen om die ruimte volledig
+  te benutten, maar dat vereist een hogere `MemAllocPerProjectRegion`-quota
+  in `europe-west4` (bij 8Gi/taak zit 50 al op de volledige 400GiB-quota van
+  dit project). Die quota staat op deze GCP-proefaccount op "Adjustable: No"
+  — trial-projecten laten deze niet self-service verhogen; dat vereist eerst
+  een upgrade naar een volledig (betaald) account. **Besluit: voorlopig op
+  `--parallelism 50` blijven staan** in plaats van die accountupgrade te
+  doen — zie "Task count" hieronder voor de daarbij passende
+  `TASK_COUNT`-richtlijn (een hogere `TASK_COUNT` dan 50 werkt nog steeds,
+  levert vanaf taak 51 alleen geen extra gelijktijdigheid meer op).
 - Een 429 van Firecrawl of Serper wordt sinds deze wijziging een paar keer
   met backoff geretried (`api_retry.py`, gebruikt door
   `deep_dive_runner._firecrawl_scrape_page` en
