@@ -177,6 +177,29 @@ def test_failed_task_blocks_merge(tmp_path):
     assert "part_0001_failed.json" in manifest["error"]
 
 
+def test_retried_task_done_beats_stale_failed_status(tmp_path):
+    """Task 1 failed once, then succeeded on a retry (Cloud Run's own
+    task-level retry, or a manual rerun of just that task index) --
+    cloud_job_runner.py never deletes the earlier _failed.json, so both
+    markers coexist for the same label. The merge must go ahead using the
+    later "_done.json", not refuse because of the superseded failure."""
+    output_dir = tmp_path / "out"
+    _write_part(output_dir / "parts" / "part_0000.xlsx", ["A"], [0])
+    _write_part(output_dir / "parts" / "part_0001.xlsx", ["B"], [1])
+    _write_status(output_dir, 0, "done")
+    _write_status(output_dir, 1, "failed")
+    _write_status(output_dir, 1, "done")
+
+    rc = cmr.main(["--output-dir", str(output_dir), "--run-id", "retried-task", "--expected-task-count", "2"])
+
+    assert rc == 0
+    manifest = json.loads((output_dir / "final" / "manifest_done.json").read_text(encoding="utf-8"))
+    assert manifest["status"] == "done"
+    assert manifest["row_count"] == 2
+    final_df = pd.read_excel(output_dir / "final" / cmr.DEFAULT_FINAL_OUTPUT_NAME)
+    assert sorted(final_df["company_name"]) == ["A", "B"]
+
+
 def test_more_tasks_than_rows_merges_only_nonempty_parts(tmp_path):
     """TASK_COUNT=10 against a 3-row file (the documented "first safe test"
     setting): 7 tasks get an empty row-shard, write a "done" status, and never

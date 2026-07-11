@@ -183,6 +183,50 @@ def test_completion_check_reports_merge_failure_without_crashing(tmp_path):
     assert result["status"] == "merge_failed"
 
 
+def test_completion_check_retries_after_a_later_retry_succeeds(tmp_path):
+    """Task 1 fails first, so the merge attempt correctly fails and claims
+    the run -- but Cloud Run's own task-level retry then succeeds for that
+    same task index (its "_done.json" lands alongside the stale
+    "_failed.json"), which fires another status event. That event must be
+    able to claim and merge instead of being permanently locked out by the
+    first, premature attempt's claim."""
+    output_dir = tmp_path / "out"
+    _write_manifest(output_dir, "run-1", task_count=2)
+    _write_part(output_dir / "parts" / "part_0000.xlsx", ["A"], [0])
+    _write_status(output_dir, 0, "done")
+    _write_status(output_dir, 1, "failed")
+
+    first = disp.check_and_trigger_completion(str(output_dir), "run-1")
+    assert first["status"] == "merge_failed"
+
+    # Cloud Run retries task 1; it succeeds and writes _done.json (the stale
+    # _failed.json from the first attempt is never deleted).
+    _write_part(output_dir / "parts" / "part_0001.xlsx", ["B"], [1])
+    _write_status(output_dir, 1, "done")
+
+    second = disp.check_and_trigger_completion(str(output_dir), "run-1")
+
+    assert second["status"] == "merged"
+    merge_manifest = json.loads((output_dir / "final" / "manifest_done.json").read_text(encoding="utf-8"))
+    assert merge_manifest["status"] == "done"
+    assert merge_manifest["row_count"] == 2
+
+
+def test_completion_check_does_not_double_count_a_retried_task_as_reported_twice(tmp_path):
+    """Task 0 has both a stale _failed.json and a fresh _done.json (from a
+    Cloud Run-driven retry) -- reported must count it once, as done, not
+    twice against expected_task_count."""
+    output_dir = tmp_path / "out"
+    _write_manifest(output_dir, "run-1", task_count=1)
+    _write_part(output_dir / "parts" / "part_0000.xlsx", ["A"], [0])
+    _write_status(output_dir, 0, "failed")
+    _write_status(output_dir, 0, "done")
+
+    result = disp.check_and_trigger_completion(str(output_dir), "run-1")
+
+    assert result["status"] == "merged"
+
+
 def test_completion_check_reports_lovable_export_config_error(tmp_path):
     """lovable_export.enabled=true without country/cold_callers must not
     crash the pipeline or block the merge -- only the export sub-result

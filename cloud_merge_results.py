@@ -123,6 +123,25 @@ def list_status_files(output_dir: str, suffix: str) -> list[str]:
     return sorted(str(p) for p in local_status_dir.glob(f"*{suffix}"))
 
 
+def resolve_task_states(output_dir: str) -> dict[str, str]:
+    """Map each task label (e.g. "part_0098") to its terminal status.
+
+    cloud_job_runner.py keys status files by task index alone — never by
+    retry attempt — and never deletes an earlier attempt's marker. So a
+    task that failed once and then succeeded on a Cloud Run-driven retry
+    (or a manual rerun of just that task) leaves both a stale
+    "_failed.json" and a fresh "_done.json" on GCS for the same label.
+    "done" always wins over "failed" here, regardless of which file
+    happens to sort first, so a superseded failure can't block the merge
+    or get double-counted against expected_task_count.
+    """
+    failed_labels = {Path(p).name[: -len("_failed.json")] for p in list_status_files(output_dir, "_failed.json")}
+    done_labels = {Path(p).name[: -len("_done.json")] for p in list_status_files(output_dir, "_done.json")}
+    states: dict[str, str] = {label: "failed" for label in failed_labels}
+    states.update({label: "done" for label in done_labels})
+    return states
+
+
 def _download_to_local(uri_or_path: str, local_path: Path) -> Path:
     if is_gcs_uri(uri_or_path):
         bucket_name, blob_name = parse_gcs_uri(uri_or_path)
@@ -253,23 +272,22 @@ def main(argv=None) -> int:
 
     expected = cfg["expected_task_count"]
     if expected:
-        done_statuses = list_status_files(cfg["output_dir"], "_done.json")
-        failed_statuses = list_status_files(cfg["output_dir"], "_failed.json")
-        reported = len(done_statuses) + len(failed_statuses)
+        task_states = resolve_task_states(cfg["output_dir"])
+        reported = len(task_states)
+        done_count = sum(1 for s in task_states.values() if s == "done")
+        failed_labels = sorted(label for label, state in task_states.items() if state == "failed")
         if reported != expected:
             err_msg = (
                 f"Expected {expected} task(s) to report status but found {reported} "
-                f"({len(done_statuses)} done, {len(failed_statuses)} failed) — some tasks "
+                f"({done_count} done, {len(failed_labels)} failed) — some tasks "
                 f"are still running or never started."
             )
             print(f"[cloud_merge_results] ERROR: {err_msg}", file=sys.stderr)
             _write_manifest_failed(manifest_uri, cfg, started_at, err_msg)
             return 1
-        if failed_statuses:
-            err_msg = (
-                f"{len(failed_statuses)} task(s) failed: "
-                f"{[Path(p).name for p in failed_statuses]}"
-            )
+        if failed_labels:
+            failed_filenames = [f"{label}_failed.json" for label in failed_labels]
+            err_msg = f"{len(failed_filenames)} task(s) failed: {failed_filenames}"
             print(f"[cloud_merge_results] ERROR: {err_msg}", file=sys.stderr)
             _write_manifest_failed(manifest_uri, cfg, started_at, err_msg)
             return 1

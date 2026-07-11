@@ -376,6 +376,29 @@ def _claim_completion(claim_uri: str, run_id: str) -> bool:
     return True
 
 
+def _release_claim(claim_uri: str) -> None:
+    """Undo a claim taken by _claim_completion whose merge attempt then
+    failed, so a later status event -- e.g. once a task's own "_done.json"
+    from a Cloud Run-driven retry supersedes the "_failed.json" that made
+    this attempt look complete-but-failed -- can claim and retry instead of
+    being permanently locked out by a claim that turned out to be premature.
+    Only a *failed* attempt releases its claim; a successful merge's claim
+    is left in place forever, same as before. Best-effort: if the delete
+    itself fails, the next event just sees "already_claimed" and the run
+    needs a manual retry, same as today -- not silently losing data."""
+    if is_gcs_uri(claim_uri):
+        bucket_name, blob_name = parse_gcs_uri(claim_uri)
+        try:
+            _gcs_client().bucket(bucket_name).blob(blob_name).delete()
+        except Exception:
+            pass
+        return
+    try:
+        Path(claim_uri).unlink()
+    except FileNotFoundError:
+        pass
+
+
 def _download_existing_current_via_client(bucket: str, country_folder: str) -> tuple[list[dict], dict[str, dict]]:
     """GCS-client equivalent of cloud_run_streamlit_app._download_existing_current_export
     (that one shells out to gcloud/gsutil, which isn't available in this
@@ -555,9 +578,12 @@ def check_and_trigger_completion(output_dir: str, run_id: str) -> dict:
 
         import cloud_merge_results as cmr
 
-        done = cmr.list_status_files(output_dir, "_done.json")
-        failed = cmr.list_status_files(output_dir, "_failed.json")
-        reported = len(done) + len(failed)
+        # Dedup by task label (not raw file count): a task retried after an
+        # initial failure (Cloud Run's own task-level retry) leaves both a
+        # stale "_failed.json" and a fresh "_done.json" for the same label,
+        # which would otherwise inflate "reported" past "expected" early.
+        task_states = cmr.resolve_task_states(output_dir)
+        reported = len(task_states)
         if reported < expected:
             return {"status": "waiting", "run_id": run_id, "reported": reported, "expected": expected}
 
@@ -571,6 +597,13 @@ def check_and_trigger_completion(output_dir: str, run_id: str) -> dict:
             "--expected-task-count", str(expected),
         ])
         if merge_exit != 0:
+            # Release the claim: a task counted as "failed" right now might
+            # still be mid-retry (Cloud Run's own task-level retry runs
+            # independently of this event), so a later status event for the
+            # same run must be able to claim and retry the merge once that
+            # retry's "_done.json" actually lands -- not find the slot
+            # permanently taken by this premature attempt.
+            _release_claim(claim_uri)
             return {"status": "merge_failed", "run_id": run_id}
 
         export_result = None
