@@ -75,6 +75,36 @@ def build_upload_command(local_path: str, dest_uri: str, project: str) -> list[s
     return [_gcloud_executable(), "storage", "cp", local_path, dest_uri, "--project", project]
 
 
+#: Target rows-per-task the "Task count" suggestion aims for — small enough
+#: that one task comfortably clears the job's task-timeout even on a slow
+#: shard, large enough that the run doesn't fragment into hundreds of
+#: near-empty tasks. See suggest_task_count.
+_SUGGESTED_ROWS_PER_TASK = 20
+
+
+def suggest_task_count(row_count: Optional[int]) -> int:
+    """Suggest a "Task count" value from the uploaded input file's row
+    count, aiming for ~_SUGGESTED_ROWS_PER_TASK rows per shard (e.g. 4000
+    rows -> 200 tasks -> 20 rows/task). Rounds to the nearest 5 for a clean
+    number and stays within the "Task count" field's own [10, 500] bounds --
+    that lower bound also happens to match the smallest of the documented
+    "Eerste veilige instellingen" tiers (10/25/50), which this formula
+    reproduces almost exactly at 100/500/1000 input rows.
+
+    Mirrors cloud_dispatcher.pick_task_count's role for the automatic
+    upload-trigger path, but calibrated for this dashboard's larger,
+    manually-launched production runs instead of that path's conservative
+    small-file-only tiers (capped at 50). Falls back to 10 (same fallback
+    pick_task_count uses) when the row count isn't known yet -- no file
+    uploaded, or it failed to parse.
+    """
+    if not row_count or row_count <= 0:
+        return 10
+    raw = row_count / _SUGGESTED_ROWS_PER_TASK
+    rounded = int(round(raw / 5.0) * 5)
+    return max(10, min(500, rounded))
+
+
 def build_execute_command(
     job_name: str, project: str, region: str,
     input_uri: str, output_dir: str, run_id: str, task_count: int, mode: str,
@@ -932,6 +962,16 @@ def main() -> None:  # pragma: no cover - exercised only under `streamlit run`
         if uploaded is not None else ""
     )
     _uploaded_key = uploaded.name if uploaded is not None else "none"
+    # Also read here (not just later, near the cost estimate) so the "Task
+    # count" widget below can default to a size-appropriate suggestion --
+    # same read-before-sidebar rationale as _guessed_export_country above.
+    try:
+        _uploaded_row_count = len(pd.read_excel(uploaded, sheet_name=0)) if uploaded is not None else None
+    except Exception:
+        _uploaded_row_count = None
+    finally:
+        if uploaded is not None:
+            uploaded.seek(0)  # pd.read_excel consumes the buffer; rewind for every later read/upload
 
     # Moved out of the sidebar so it can't be missed -- same rationale as the
     # current/-gedrag radio in the status panel below. ONE choice drives both
@@ -968,12 +1008,24 @@ def main() -> None:  # pragma: no cover - exercised only under `streamlit run`
         bucket = st.text_input("Bucket", value=DEFAULT_BUCKET)
         job_name = st.text_input("Cloud Run Job", value=DEFAULT_JOB_NAME)
         st.divider()
+        _suggested_task_count = suggest_task_count(_uploaded_row_count)
         task_count = st.number_input(
-            "Task count", min_value=1, max_value=500, value=10, step=1,
-            help="10 / 25 / 50 zijn de aanbevolen stappen voor kleine bestanden. "
-                 "Voor grote bestanden: zet dit ruim boven de parallelism-limiet "
-                 "(bv. 100-150 bij parallelism=50) zodat trage shards niet de "
-                 "hele run ophouden — zie 'Eerste veilige instellingen' in de doc.",
+            "Task count", min_value=1, max_value=500,
+            value=_suggested_task_count, step=1,
+            key=f"task_count_{_uploaded_key}",
+            help=(
+                "10 / 25 / 50 zijn de aanbevolen stappen voor kleine bestanden. "
+                "Voor grote bestanden: zet dit ruim boven de parallelism-limiet "
+                "(bv. 100-150 bij parallelism=50) zodat trage shards niet de "
+                "hele run ophouden — zie 'Eerste veilige instellingen' in de doc. "
+                + (
+                    f"Suggestie o.b.v. {_uploaded_row_count} rijen in het "
+                    f"geüploade bestand (~{_SUGGESTED_ROWS_PER_TASK} rijen/taak): "
+                    f"{_suggested_task_count}."
+                    if _uploaded_row_count else
+                    "Upload een bestand hierboven voor een automatische suggestie."
+                )
+            ),
         )
         try:
             from lead_prioritizer_batch_core import SUPPORTED_RUN_MODES

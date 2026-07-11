@@ -43,6 +43,7 @@ from cloud_run_streamlit_app import (
     read_gcs_json,
     run_streaming,
     split_rows_by_existing_enrichment,
+    suggest_task_count,
 )
 
 
@@ -108,6 +109,30 @@ def test_finish_run_merge_uploads_manifest_with_gcs_paths_rewritten(tmp_path, mo
     assert manifest["status"] == "done"
     assert manifest["final_output_uri"] == final_uri
     assert manifest["output_dir"] == "gs://my-bucket/runs/run-1"
+
+
+# ── suggest_task_count ──────────────────────────────────────────────────────
+
+def test_suggest_task_count_none_falls_back_to_10():
+    assert suggest_task_count(None) == 10
+    assert suggest_task_count(0) == 10
+
+
+def test_suggest_task_count_reproduces_documented_small_file_tiers():
+    # "Eerste veilige instellingen" doc tiers: 10/25/50 for progressively
+    # larger small files -- the formula (~20 rows/task, rounded to the
+    # nearest 5) should land almost exactly on these already-documented steps.
+    assert suggest_task_count(100) == 10
+    assert suggest_task_count(500) == 25
+    assert suggest_task_count(1000) == 50
+
+
+def test_suggest_task_count_matches_the_4000_row_worked_example():
+    assert suggest_task_count(4000) == 200
+
+
+def test_suggest_task_count_clamped_to_field_max():
+    assert suggest_task_count(50_000) == 500
 
 
 def test_build_execute_command_sets_all_env_vars_and_does_not_wait_by_default():
