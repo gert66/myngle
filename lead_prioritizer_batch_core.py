@@ -1064,8 +1064,17 @@ def _append_hq_reason(row: dict, note: str) -> None:
 
 
 def _apply_conservative_adjustment(enriched: dict, result, counts: dict) -> None:
-    """Conservative C5 scoring: confirm/downgrade score-3 positives; never
-    auto-upgrade score-0 rows. Mutates ``enriched`` in place."""
+    """Conservative C5 scoring: confirm/downgrade score-3 positives; upgrade
+    a score-0 row to 3 only when C5 itself confirms a foreign parent (High/
+    Medium confidence, target company matched) -- the same bar
+    ``is_confirmed_foreign_hq_for_full_enrichment`` already uses to include a
+    row in the foreign-HQ-only export. Before this, a C5-confirmed row could
+    be exported/enriched as "confirmed foreign HQ" while its own commercial
+    fit score still treated it as having no HQ signal at all (sig_foreign_hq
+    carries the largest single coefficient in the scoring model), which
+    silently pulled ~1/5 of a real foreign-HQ export below score 4 despite
+    every one of them having a confirmed foreign parent. Mutates ``enriched``
+    in place."""
     old = _c5_score(enriched.get("sig_foreign_hq_score_for_next_scoring"))
     confirmed = (
         bool(result.call_success)
@@ -1086,17 +1095,19 @@ def _apply_conservative_adjustment(enriched: dict, result, counts: dict) -> None
         return
 
     if old == 0.0:
-        enriched["sig_foreign_hq_score_for_next_scoring"] = 0.0  # never auto-upgrade
         if confirmed:
+            enriched["sig_foreign_hq_score_for_next_scoring"] = 3.0
             enriched["c5_possible_foreign_parent_for_review"] = True
             enriched["needs_manual_review"] = True
             _append_hq_reason(
                 enriched,
-                "C5 possible foreign parent, not auto-upgraded under conservative mode.")
+                "C5 confirmed foreign parent; upgraded from suppressed HQ score-0.")
             counts["c5_possible_foreign_parent_for_review_count"] += 1
-        elif not result.call_success:
-            # Row was selected for C5 but the call/parse failed → stay safe.
-            enriched["needs_manual_review"] = True
+        else:
+            enriched["sig_foreign_hq_score_for_next_scoring"] = 0.0
+            if not result.call_success:
+                # Row was selected for C5 but the call/parse failed → stay safe.
+                enriched["needs_manual_review"] = True
         return
     # Other/absent old scores: leave untouched under conservative mode.
 
@@ -1120,8 +1131,10 @@ def apply_c5_adjudication(
 
     Returns ``(out_rows, counts)``. ``append_only`` never changes
     ``sig_foreign_hq_score_for_next_scoring`` / ``needs_manual_review``;
-    ``conservative_adjustment`` may confirm/downgrade score-3 positives but never
-    auto-upgrades score-0 rows.
+    ``conservative_adjustment`` may confirm/downgrade score-3 positives, and
+    upgrades a score-0 row to 3 only when C5 itself confirms a foreign
+    parent with High/Medium confidence and a matched target company — see
+    ``_apply_conservative_adjustment``.
     """
     from run_hq_sonnet_adjudication_probe import adjudicate_row  # lazy; keeps C5 removable
 
@@ -1515,6 +1528,16 @@ def _run_gated_full_enrichment(
             out_row = flatten_result_for_excel(
                 result, row, source_index, True, "", config.include_raw_ai_json,
             )
+            # flatten_result_for_excel overwrites sig_foreign_hq_score_for_next_scoring
+            # with this Phase-3 call's OWN fresh HQ (re)detection -- prioritize_single_lead
+            # redoes the full C1-C4 HQ pass internally and doesn't know about Phase 1/2's
+            # already-final score (including any C5 upgrade _apply_conservative_adjustment
+            # just applied). Phase 1+2 already produced the authoritative, gating score for
+            # this row (that's what got it into Phase 3 in the first place via
+            # is_confirmed_foreign_hq_for_full_enrichment) -- restore it so Phase 3 can never
+            # silently re-suppress (or otherwise change) the score it was gated on.
+            out_row["sig_foreign_hq_score_for_next_scoring"] = row.get(
+                "sig_foreign_hq_score_for_next_scoring")
             evidence_rows.extend(flatten_evidence_for_excel(result, source_index))
             signal_rows.extend(flatten_signals_for_excel(result, source_index))
             p3_success += 1
@@ -1741,10 +1764,14 @@ def run_batch_foreign_hq_only(
     post-C4/post-C5 ``sig_foreign_hq_score_for_next_scoring`` is 3.0 (the only
     path when C5 is disabled), or C5 explicitly confirmed a foreign parent for
     the target company (foreign_parent_confirmed + target match yes +
-    recommended HQ score 3). The eligibility gate never mutates scores: C4
-    suppression and the C5 no-auto-upgrade rule for
-    ``sig_foreign_hq_score_for_next_scoring`` still hold — a C5-confirmed
-    score-0 row is enriched but its screening score is not rewritten.
+    recommended HQ score 3). ``_apply_conservative_adjustment`` (Phase 2)
+    upgrades a C4-suppressed score-0 row to 3 exactly when C5 confirms it
+    this way (High/Medium confidence) -- the same bar this eligibility gate
+    uses -- so a row's commercial fit score is never computed as if it had
+    no HQ signal while it's simultaneously being exported as a confirmed
+    foreign HQ. Phase 3 (this function's own full-enrichment call) redoes
+    its own HQ detection internally but never gets to overwrite that
+    Phase 1+2 score: see ``_run_gated_full_enrichment``'s restore.
 
     Rows that are not eligible are kept in the output, unenriched, with
     ``enrichment_skipped=True`` and a specific ``enrichment_skip_reason``
@@ -2016,14 +2043,22 @@ def _non_english_export_decision(row: dict) -> dict:
 # ("does this row get full v2 enrichment?"). The audit of Australia runs
 # showed that "no" was hiding good NEC-style leads: C5 can confirm
 # ``foreign_parent_confirmed`` + a target-company match against a
-# non-English parent, yet the FINAL post-C4/post-C5 HQ score can still be
-# 0 (the conservative C5 scoring rule never auto-upgrades a score-0 row —
-# see ``_apply_conservative_adjustment`` — by design). Those rows were being
-# silently dropped into the same "Not confirmed foreign HQ" skip bucket as
-# genuine non-matches.
+# non-English parent, yet the FINAL post-C4/post-C5 HQ score used to stay 0
+# regardless (the conservative C5 scoring rule never auto-upgraded a
+# score-0 row). Those rows were being silently dropped into the same "Not
+# confirmed foreign HQ" skip bucket as genuine non-matches.
+#
+# ``_apply_conservative_adjustment`` now upgrades a High/Medium-confidence
+# C5 confirmation straight to score 3 (see its docstring — this was the
+# Germany-export follow-up fix, so a row's commercial fit score can't be
+# computed as HQ-signal-less while it's exported as confirmed foreign HQ),
+# which resolves most of these at the score level: a still-score-0 row here
+# means C5 either wasn't confident enough to upgrade it or wasn't run for
+# this row at all, so this layer's manual-review bucket remains the catch
+# for exactly that narrower case, not the general one it started as.
 #
 # This layer adds a strictly-additive export/review classification on top:
-# it never changes C4, never changes C5, and never changes
+# it never changes C4, never changes C5, and never itself changes
 # ``sig_foreign_hq_score_for_next_scoring``. It only decides which
 # "bucket" a row is shown in and whether it gets full v2 enrichment
 # (still ONLY ``direct_target`` rows do — identical gate to before).
@@ -2276,6 +2311,12 @@ def run_batch_non_english_foreign_hq_only(
             out_row = flatten_result_for_excel(
                 result, out_row, source_index, True, "", config.include_raw_ai_json,
             )
+            # See _run_gated_full_enrichment's identical restore: this Phase-3 call
+            # redoes its own HQ (re)detection internally and would otherwise silently
+            # overwrite the authoritative Phase 1+2 score (including any C5 upgrade)
+            # this row was already gated into full enrichment on.
+            out_row["sig_foreign_hq_score_for_next_scoring"] = row.get(
+                "sig_foreign_hq_score_for_next_scoring")
             evidence_rows.extend(flatten_evidence_for_excel(result, source_index))
             signal_rows.extend(flatten_signals_for_excel(result, source_index))
             p3_success += 1

@@ -1517,16 +1517,34 @@ class TestC5Conservative:
         assert counts["c5_downgraded_score_3_count"] == 1
         assert "downgraded" in out[0]["hq_reason"].lower()
 
-    def test_does_not_auto_upgrade_old_score_0(self):
+    def test_upgrades_old_score_0_when_c5_confirms(self):
+        # A row whose Phase-1 HQ signal was suppressed to 0 (e.g. a risky/
+        # domain-mismatched evidence source) gets its score upgraded to 3
+        # once C5 independently confirms a foreign parent with High/Medium
+        # confidence and a matched target company -- the same bar
+        # is_confirmed_foreign_hq_for_full_enrichment already uses to
+        # include the row in the foreign-HQ-only export. Before this fix the
+        # score stayed at 0 even though the row was already being exported
+        # as "confirmed foreign HQ", silently pulling ~1/5 of a real export
+        # below score 4 despite every one of them having a confirmed parent.
         rows = [_enriched_rows()[1]]  # score 0
         with _patch_adjudicator(_mk_result("foreign_parent_confirmed", "High", "yes")):
             out, counts = apply_c5_adjudication(
                 rows, anthropic_api_key="k", model_used="m", model_tier="sonnet",
                 scoring_behavior="conservative_adjustment", scope="all_rows")
-        assert out[0]["sig_foreign_hq_score_for_next_scoring"] == 0.0
+        assert out[0]["sig_foreign_hq_score_for_next_scoring"] == 3.0
         assert out[0]["c5_possible_foreign_parent_for_review"] is True
         assert out[0]["needs_manual_review"] is True
         assert counts["c5_possible_foreign_parent_for_review_count"] == 1
+
+    def test_does_not_upgrade_old_score_0_when_c5_confidence_is_low(self):
+        rows = [_enriched_rows()[1]]  # score 0
+        with _patch_adjudicator(_mk_result("foreign_parent_confirmed", "Low", "yes")):
+            out, counts = apply_c5_adjudication(
+                rows, anthropic_api_key="k", model_used="m", model_tier="sonnet",
+                scoring_behavior="conservative_adjustment", scope="all_rows")
+        assert out[0]["sig_foreign_hq_score_for_next_scoring"] == 0.0
+        assert counts["c5_possible_foreign_parent_for_review_count"] == 0
 
     def test_failure_old_3_downgrades_old_0_stays_with_error(self):
         rows = _enriched_rows()  # [score3, score0]
@@ -1780,10 +1798,16 @@ class TestForeignHQOnlyMode:
 
     def test_c5_confirmed_score0_row_is_now_enriched(self):
         # Old HQ score 0; C5 confirms a foreign parent (target match yes,
-        # High confidence → recommended score 3). The score is still never
-        # auto-upgraded, but the row IS now eligible for full enrichment —
-        # this was the Brazil bug where 22 C5-confirmed rows were skipped
-        # with "Not confirmed foreign HQ".
+        # High confidence → recommended score 3). The row IS now eligible
+        # for full enrichment -- this was the Brazil bug where 22
+        # C5-confirmed rows were skipped with "Not confirmed foreign HQ".
+        # The screening score is ALSO now upgraded to 3 (the Germany-export
+        # follow-up fix: a C5-confirmed row was being fully enriched and
+        # exported as "confirmed foreign HQ" while its own commercial fit
+        # score still scored it as having no HQ signal at all, since
+        # sig_foreign_hq carries the largest single coefficient in the
+        # scoring model -- silently pulling ~1/5 of a real foreign-HQ
+        # export below score 4 despite every one of them being confirmed).
         fake = _fake_prioritize_for_foreign_hq(
             {"Confirmed Foreign Co": 3.0, "Local Domestic Co": 0.0})
         with patch("lead_prioritizer_batch_core.prioritize_single_lead", side_effect=fake), \
@@ -1797,11 +1821,16 @@ class TestForeignHQOnlyMode:
         row = rows.loc["Local Domestic Co"]
         assert row["enrichment_skipped"] == False  # noqa: E712
         assert row["enrichment_skip_reason"] == ""
+        # The score is now genuinely 3 (upgraded by _apply_conservative_adjustment
+        # in Phase 2), so the gate's simpler "final HQ score 3" branch fires --
+        # this row is no longer merely C5-confirmed-with-a-lingering-0-score.
         assert row["full_enrichment_gate_reason"] == \
-            "Confirmed by C5 foreign-parent adjudication"
+            "Confirmed foreign HQ (final HQ score 3)"
         assert row["final_commercial_fit_score"] == 99.0
-        # The screening score itself is never rewritten by the gate.
-        assert row["sig_foreign_hq_score_for_next_scoring"] == 0.0
+        # Upgraded by _apply_conservative_adjustment in Phase 2, and NOT
+        # clobbered by Phase 3's own fresh (and here, still-suppressed)
+        # HQ redetection -- see _run_gated_full_enrichment's restore.
+        assert row["sig_foreign_hq_score_for_next_scoring"] == 3.0
         summary = out["run_summary"].iloc[0].to_dict()
         assert summary["confirmed_foreign_hq_count"] == 2
         assert summary["full_enrichment_attempted_count"] == 2
@@ -2209,11 +2238,15 @@ class TestGatedFullEnrichmentInRunBatchDataframe:
         rows = out["enriched_leads"].set_index("company_name")
         row = rows.loc["Local Domestic Co"]
         assert row["enrichment_skipped"] == False  # noqa: E712
+        # The score is now genuinely 3 (upgraded by _apply_conservative_adjustment
+        # in Phase 2), so the gate's simpler "final HQ score 3" branch fires.
         assert row["full_enrichment_gate_reason"] == \
-            "Confirmed by C5 foreign-parent adjudication"
+            "Confirmed foreign HQ (final HQ score 3)"
         assert row["final_commercial_fit_score"] == 99.0
-        # The screening score itself is never rewritten by the gate.
-        assert row["sig_foreign_hq_score_for_next_scoring"] == 0.0
+        # Upgraded by _apply_conservative_adjustment, and not clobbered by
+        # Phase 3's own fresh HQ redetection -- see the restore in
+        # _run_gated_full_enrichment.
+        assert row["sig_foreign_hq_score_for_next_scoring"] == 3.0
         summary = out["run_summary"].iloc[0].to_dict()
         assert summary["c5_enabled"] is True
         assert summary["c5_foreign_parent_confirmed_count"] == 2
@@ -3199,7 +3232,15 @@ class TestNonEnglishForeignHqExportBuckets:
         for col in ("export_bucket", "non_english_foreign_hq_review", "review_priority"):
             assert col not in out["enriched_leads"].columns
 
-    def test_c5_conservative_adjustment_never_upgrades_score_0_to_3(self):
+    def test_c5_conservative_adjustment_upgrades_score_0_to_3_when_confirmed(self):
+        # Companion to the Germany-export fix: a C5-confirmed foreign parent
+        # (High/Medium confidence, matched target) now upgrades the
+        # suppressed HQ score to 3 instead of leaving it at 0 -- which also
+        # means the NEC-style near-miss this manual-review bucket layer was
+        # built for (see the "Australia audit fix" note above) now resolves
+        # itself at the score level: Japan lands as a genuine direct_target
+        # with full enrichment, not stuck in manual_review with a score that
+        # contradicted its own "confirmed foreign HQ" export classification.
         rows = {"JapanCo": (0.0, "Japan")}
         df = pd.DataFrame({"company": ["JapanCo"], "domain": ["japanco.com"]})
         cfg = BatchRunConfig(company_name_column="company", domain_column="domain",
@@ -3213,15 +3254,30 @@ class TestNonEnglishForeignHqExportBuckets:
                 c5_scoring_behavior="conservative_adjustment", c5_scope="all_rows",
                 c5_model_used="claude-sonnet-5", c5_model_tier="sonnet")
         row = out["enriched_leads"].iloc[0]
-        # Conservative C5 never auto-upgrades a score-0 row to 3 ...
+        assert row["sig_foreign_hq_score_for_next_scoring"] == 3.0
+        assert row["enrichment_skipped"] == False  # noqa: E712
+        assert row["export_bucket"] == "direct_target"
+        assert row["non_english_foreign_hq_review"] == False  # noqa: E712
+
+    def test_c5_conservative_adjustment_does_not_upgrade_low_confidence(self):
+        # Low confidence still falls through to manual review, same as
+        # before -- only High/Medium confidence auto-upgrades the score.
+        rows = {"JapanCo": (0.0, "Japan")}
+        df = pd.DataFrame({"company": ["JapanCo"], "domain": ["japanco.com"]})
+        cfg = BatchRunConfig(company_name_column="company", domain_column="domain",
+                             run_mode=NON_ENGLISH_FOREIGN_HQ_ONLY_MODE, row_limit=1,
+                             default_input_country="Australia")
+        with patch("lead_prioritizer_batch_core.prioritize_single_lead",
+                   side_effect=_fake_prioritize_for_au(rows)), \
+             _patch_adjudicator(_mk_result("foreign_parent_confirmed", "Low", "yes")):
+            out = run_batch_non_english_foreign_hq_only(
+                df, cfg, "S", "A", c5_enabled=True,
+                c5_scoring_behavior="conservative_adjustment", c5_scope="all_rows",
+                c5_model_used="claude-sonnet-5", c5_model_tier="sonnet")
+        row = out["enriched_leads"].iloc[0]
         assert row["sig_foreign_hq_score_for_next_scoring"] == 0.0
-        # ... but the row is still surfaced as a high-priority manual review
-        # instead of silently disappearing (this is the whole point of the
-        # export-bucket layer).
         assert row["enrichment_skipped"] == True  # noqa: E712
         assert row["export_bucket"] == "manual_review"
-        assert row["review_priority"] == "high"
-        assert row["non_english_foreign_hq_review"] == True  # noqa: E712
 
     def test_run_summary_includes_new_bucket_counts(self):
         rows = {"GermanCo": (3.0, "Germany"), "USCo": (3.0, "United States")}
