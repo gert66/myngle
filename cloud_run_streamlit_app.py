@@ -695,6 +695,28 @@ def finish_run_merge(bucket: str, project: str, run_id: str, task_count: int, wo
 
     run_capture(build_upload_command(
         str(final_local), join_path(output_dir, "final", FINAL_OUTPUT_NAME), project))
+    # cmr.main() also wrote a local final/manifest_done.json (status "done",
+    # final_output_uri, row_count, ...) -- upload it too, or determine_run_stage
+    # never sees this merge as done: it reads that GCS manifest to decide
+    # between "ready_to_merge" and "merged", so a run that merged successfully
+    # here would otherwise keep showing the merge button forever on every
+    # later status refresh, as if nothing had happened.
+    local_manifest = local_run_dir / "final" / "manifest_done.json"
+    try:
+        manifest_data = json.loads(local_manifest.read_text(encoding="utf-8"))
+        # cmr.main() ran against local_run_dir (a temp dir, since this merge
+        # downloads parts/status locally first), so its own final_output_uri/
+        # output_dir point at that temp path -- rewrite them to the real GCS
+        # location before uploading, or "Eindresultaat ophalen" on a later
+        # visit to this run (once final_bytes has dropped out of session
+        # state) would try to download from a temp dir that's long gone.
+        manifest_data["final_output_uri"] = join_path(output_dir, "final", FINAL_OUTPUT_NAME)
+        manifest_data["output_dir"] = output_dir
+        local_manifest.write_text(json.dumps(manifest_data, ensure_ascii=False, indent=2), encoding="utf-8")
+    except Exception:
+        pass
+    run_capture(build_upload_command(
+        str(local_manifest), join_path(output_dir, "final", "manifest_done.json"), project))
 
     return {"ok": True, "final_local": final_local, "output_dir": output_dir,
             "row_count": row_count, "error": None}

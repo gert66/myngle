@@ -16,6 +16,8 @@ from unittest.mock import MagicMock, patch
 import pandas as pd
 import pytest
 
+from cloud_job_runner import ROW_INDEX_COL
+
 from cloud_run_streamlit_app import (
     ProcessTimeout,
     _download_existing_current_export,
@@ -31,6 +33,7 @@ from cloud_run_streamlit_app import (
     count_task_statuses,
     determine_run_stage,
     extract_execution_name,
+    finish_run_merge,
     gcs_incoming_uri,
     gcs_output_dir,
     known_enriched_company_ids,
@@ -57,6 +60,54 @@ def test_build_upload_command_includes_project():
         _gcloud_executable(), "storage", "cp", "C:\\leads.xlsx", "gs://b/incoming/leads.xlsx",
         "--project", "proj-1",
     ]
+
+
+def test_finish_run_merge_uploads_manifest_with_gcs_paths_rewritten(tmp_path, monkeypatch):
+    """finish_run_merge merges locally (cmr.main() runs against a temp dir
+    it downloaded parts/status into), then must upload BOTH the final Excel
+    AND the manifest_done.json cmr.main() wrote back to GCS -- otherwise
+    determine_run_stage never sees the merge as done and the "Mergen &
+    afronden" button keeps reappearing forever on every later refresh, even
+    though the merge itself succeeded (exactly what happened for the
+    Germany 200+ run: the final Excel landed in GCS, the manifest never
+    did). The manifest's final_output_uri/output_dir must also be rewritten
+    from cmr.main()'s local temp path to the real GCS location, or a later
+    "Eindresultaat ophalen" (once final_bytes has dropped out of session
+    state) would try to download from a temp dir that's long gone."""
+    import cloud_run_streamlit_app as app_mod
+
+    uploaded: dict[str, bytes] = {}
+
+    def fake_run_capture(cmd):
+        src, dest = cmd[3], cmd[4]
+        if src.startswith("gs://"):
+            dest_dir = Path(dest.rstrip("/"))
+            dest_dir.mkdir(parents=True, exist_ok=True)
+            if "parts" in src:
+                pd.DataFrame({"company_name": ["Acme"], ROW_INDEX_COL: [0]}).to_excel(
+                    dest_dir / "part_0000.xlsx", sheet_name="Enriched Leads", index=False)
+                return (0, "")
+            if "_done.json" in src:
+                (dest_dir / "part_0000_done.json").write_text(
+                    json.dumps({"task_index": 0, "status": "done"}), encoding="utf-8")
+                return (0, "")
+            return (1, "no matches")  # the _failed.json glob: nothing to find
+        uploaded[dest] = Path(src).read_bytes()
+        return (0, "")
+
+    monkeypatch.setattr(app_mod, "run_capture", fake_run_capture)
+
+    result = finish_run_merge("my-bucket", "proj-1", "run-1", 1, tmp_path / "work")
+
+    assert result["ok"] is True
+    final_uri = "gs://my-bucket/runs/run-1/final/lead_prioritizer_final.xlsx"
+    manifest_uri = "gs://my-bucket/runs/run-1/final/manifest_done.json"
+    assert final_uri in uploaded
+    assert manifest_uri in uploaded
+    manifest = json.loads(uploaded[manifest_uri])
+    assert manifest["status"] == "done"
+    assert manifest["final_output_uri"] == final_uri
+    assert manifest["output_dir"] == "gs://my-bucket/runs/run-1"
 
 
 def test_build_execute_command_sets_all_env_vars_and_does_not_wait_by_default():
