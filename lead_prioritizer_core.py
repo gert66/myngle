@@ -14,7 +14,7 @@ from typing import Optional
 
 from lead_output_schema import LeadInput, LeadPrioritizationResult, HQDetectionResult
 from hq_simple_detector import build_simple_hq_query, is_hosted_careers_platform_domain
-from lead_country_config import gl_hl_for_hq_country
+from lead_country_config import gl_hl_for_hq_country, std_country
 from lead_hq_ai_interpreter import call_serper_for_hq, interpret_hq_with_ai
 from lead_hq_firecrawl_source import collect_own_domain_hq_pages
 from lead_hq_location_summary import build_hq_location_summary
@@ -43,6 +43,24 @@ from lead_legacy_enrichment import run_legacy_enrichment
 from lead_public_source_signal_enrichment import collect_public_source_signal_evidence
 
 _DEFAULT_AI_MODEL = "claude-haiku-4-5-20251001"
+
+#: commercial_fit_scoring profile is per-country: "italy_register_icp_only"
+#: was calibrated specifically for the Italian company-register source (size
+#: excluded because that input list is pre-filtered for 100+ employees, and
+#: a flat sigmoid_k=1 fitted to Italy's own probability distribution). Every
+#: other country must use the "default" profile (size included, sigmoid_k=10)
+#: -- see commercial_fit_scoring.SCORING_PROFILES.
+_ITALY_ONLY_SCORING_PROFILE = "italy_register_icp_only"
+_DEFAULT_SCORING_PROFILE = "default"
+
+
+def _scoring_profile_for_country(country: "str | None") -> str:
+    """Return the commercial_fit_scoring profile for the lead's effective
+    input country: Italy keeps its register-calibrated profile, every other
+    country gets the default (size-inclusive, sigmoid_k=10) profile."""
+    if std_country(country or "") == "Italy":
+        return _ITALY_ONLY_SCORING_PROFILE
+    return _DEFAULT_SCORING_PROFILE
 
 
 def _quality_flags_for_result(result: LeadPrioritizationResult) -> list[str]:
@@ -127,8 +145,11 @@ def prioritize_single_lead(
 
     ``calculate_commercial_score_flag`` (default ``False``) enables Step-5
     commercial scoring for this single lead via
-    ``commercial_fit_scoring.score_company`` (profile
-    ``italy_register_icp_only``).  It maps the v2 HQ/non-HQ signals already on
+    ``commercial_fit_scoring.score_company``. The profile is chosen per the
+    lead's effective ``input_country`` (see ``_scoring_profile_for_country``):
+    ``italy_register_icp_only`` for Italy (register-calibrated: company size
+    excluded, flat sigmoid), ``default`` (size-inclusive, sigmoid_k=10) for
+    every other country. It maps the v2 HQ/non-HQ signals already on
     the result and fills only the scoring output fields; if no non-HQ signals
     were extracted, scoring still runs from the HQ signal plus zeros.  It never
     collects evidence, extracts signals, or builds summaries implicitly, and does
@@ -590,8 +611,12 @@ def prioritize_single_lead(
     # Maps the v2 signals already on `result` into commercial_fit_scoring and
     # fills only the scoring output fields. Runs from HQ + zeros for missing
     # non-HQ signals. Does not change batch ranking or legacy scoring.
+    # Profile is per-country (see _scoring_profile_for_country): only Italy
+    # keeps the register-calibrated "italy_register_icp_only" profile; every
+    # other country scores with "default" (size-inclusive, sigmoid_k=10).
     if calculate_commercial_score_flag:
-        score_out = score_lead_v2_result(result, scoring_profile="italy_register_icp_only")
+        score_out = score_lead_v2_result(
+            result, scoring_profile=_scoring_profile_for_country(result.input_country))
         result.final_commercial_fit_score = score_out.get("final_commercial_fit_score")
         result.commercial_tier = score_out.get("commercial_tier")
         result.icp_similarity_score = score_out.get("icp_similarity_score")

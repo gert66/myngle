@@ -131,6 +131,30 @@ FOREIGN_HQ_REBALANCED_COEFFICIENTS: dict[str, float] = {
 WHEN_ORDER: list[str] = ["Huidig", "Nieuw"]
 WHEN_COLORS: dict[str, str] = {"Huidig": "#8c8c8c", "Nieuw": "#1f77b4"}
 
+# Foreign/domestic HQ split used to stack the score-distribution histogram
+# within each Huidig/Nieuw facet — sig_foreign_hq_score is the dominant
+# scoring coefficient (see FOREIGN_HQ_REBALANCED_COEFFICIENTS above), so
+# seeing which side of that split drives a score band matters more than the
+# raw huidig/nieuw shift alone.
+HQ_CATEGORY_ORDER: list[str] = ["Foreign HQ", "Domestic HQ", "Onbekend"]
+HQ_CATEGORY_COLORS: dict[str, str] = {
+    "Foreign HQ": "#1f77b4", "Domestic HQ": "#ff7f0e", "Onbekend": "#bbbbbb",
+}
+
+
+def hq_category(detail: dict) -> str:
+    """"Foreign HQ" / "Domestic HQ" / "Onbekend" label from a company-details
+    record's ``foreign_hq_detected_for_export`` flag. "Onbekend" covers
+    records where that flag was never resolved (``None``/missing) — kept
+    distinct from "Domestic HQ" rather than defaulted into it, since an
+    unresolved HQ call is not the same claim as a confirmed domestic one."""
+    val = detail.get("foreign_hq_detected_for_export")
+    if val is True:
+        return "Foreign HQ"
+    if val is False:
+        return "Domestic HQ"
+    return "Onbekend"
+
 
 # =============================================================================
 # Pure helpers — no Streamlit/Plotly import required
@@ -188,18 +212,21 @@ def validate_tier_thresholds(hot: float, warm: float, cool: float) -> "Optional[
 
 
 def score_distribution_dataframe(original_by_id: dict, rescored_by_id: dict) -> pd.DataFrame:
-    """Long-form ``(company_id, when, commercial_fit_score)`` table for an
-    overlaid before/after histogram."""
+    """Long-form ``(company_id, when, commercial_fit_score, hq_category)``
+    table for the before/after histogram, faceted by ``when`` and stacked by
+    ``hq_category`` (see ``hq_category()``)."""
     rows = []
     for cid, detail in original_by_id.items():
         rows.append({
             "company_id": cid, "when": "Huidig",
             "commercial_fit_score": detail.get("commercial_fit_score"),
+            "hq_category": hq_category(detail),
         })
     for cid, detail in rescored_by_id.items():
         rows.append({
             "company_id": cid, "when": "Nieuw",
             "commercial_fit_score": detail.get("commercial_fit_score"),
+            "hq_category": hq_category(detail),
         })
     return pd.DataFrame(rows)
 
@@ -800,21 +827,36 @@ def main() -> None:  # pragma: no cover - exercised only under `streamlit run`
         dist_df = score_distribution_dataframe(original_by_id, rescored_by_id)
         if not dist_df.empty:
             dist_df = dist_df.dropna(subset=["commercial_fit_score"])
-        st.subheader("Scoreverdeling: huidig vs. nieuw")
+        st.subheader("Scoreverdeling: huidig vs. nieuw, per HQ-status")
         if dist_df.empty:
             st.info("Geen bedrijven met een score om te tonen.")
         else:
-            st.plotly_chart(
-                px.histogram(
-                    dist_df, x="commercial_fit_score", color="when",
-                    barmode="group", nbins=20,
-                    category_orders={"when": WHEN_ORDER},
-                    color_discrete_map=WHEN_COLORS,
-                    labels={"commercial_fit_score": "commercial_fit_score", "when": ""},
-                ),
-                use_container_width=True,
-                key=f"{key_prefix}_dist_chart",
+            # One figure: score on the x-axis, huidig/nieuw as side-by-side
+            # facets, foreign/domestic HQ stacked within each facet's bars —
+            # replaces the old two-color grouped histogram (huidig vs.
+            # nieuw only) so the HQ split that drives the score (see
+            # HQ_CATEGORY_ORDER above) is visible directly on this chart
+            # instead of requiring a separate breakdown.
+            dist_fig = px.histogram(
+                dist_df, x="commercial_fit_score", color="hq_category",
+                facet_col="when", barmode="stack", nbins=20,
+                category_orders={"when": WHEN_ORDER, "hq_category": HQ_CATEGORY_ORDER},
+                color_discrete_map=HQ_CATEGORY_COLORS,
+                labels={"commercial_fit_score": "commercial_fit_score", "hq_category": "HQ"},
             )
+            # Facet subplot titles default to "when=Huidig" / "when=Nieuw" —
+            # strip the "when=" prefix for a cleaner label.
+            dist_fig.for_each_annotation(
+                lambda a: a.update(text=a.text.split("=", 1)[-1]))
+            st.plotly_chart(
+                dist_fig, use_container_width=True, key=f"{key_prefix}_dist_chart",
+            )
+
+        # Extra vertical breathing room between the two charts -- they used
+        # to sit right on top of each other with only a subheader between
+        # them, which read as one cluttered block rather than two distinct
+        # comparisons.
+        st.divider()
 
         tier_df = tier_distribution_dataframe(original_by_id, rescored_by_id)
         st.subheader("Tier-verdeling: huidig vs. nieuw")
@@ -831,6 +873,40 @@ def main() -> None:  # pragma: no cover - exercised only under `streamlit run`
                 use_container_width=True,
                 key=f"{key_prefix}_tier_chart",
             )
+
+    def render_param_diff_table(rows: list[tuple[str, float, float]]) -> None:
+        """Compact "origineel vs. actueel" table for one parameter group.
+
+        ``rows`` is ``[(label, original_value, current_value), ...]`` —
+        "origineel" is always ``default_params()``, the fixed baseline the
+        UI session starts from; "actueel" is whatever ``st.session_state
+        ["rescore_params"]`` holds right now. That current value is
+        identical whether it got there via a manual slider drag or a
+        programmatic auto-calibrate/auto-optimize button (Sigmoid tab's
+        anchor calibration, Impact tab's intercept+K fit, Tier tab's
+        percentile suggestion) — all of them write into the same params
+        dict — so this one table covers both without needing to know which
+        one touched a given value.
+        """
+        diff_df = pd.DataFrame([
+            {
+                "Parameter": label,
+                "Origineel": round(orig, 4),
+                "Actueel": round(cur, 4),
+                "Δ": round(cur - orig, 4),
+            }
+            for label, orig, cur in rows
+        ])
+        st.dataframe(
+            diff_df.style.apply(
+                lambda col: [
+                    "font-weight: bold; color: #d9534f" if v != 0 else ""
+                    for v in diff_df["Δ"]
+                ] if col.name == "Δ" else [""] * len(diff_df),
+                axis=0,
+            ),
+            use_container_width=True, hide_index=True,
+        )
 
     st.set_page_config(page_title="Re-score Explorer", page_icon="🎛️", layout="wide")
     st.title("🎛️ Commercial Fit Re-score Explorer")
@@ -1202,6 +1278,22 @@ def main() -> None:  # pragma: no cover - exercised only under `streamlit run`
             st.caption(COEFFICIENT_LABELS.get(field, ""))
         params["coefficients"] = new_coeffs
 
+        # Rendered AFTER the sliders above (not before) so it reflects the
+        # value a just-dragged slider wrote into `params` THIS run --
+        # reading params["intercept"]/["coefficients"] before the st.slider()
+        # calls that assign them shows last run's value, one interaction
+        # behind whatever the user just moved.
+        _defaults = default_params()
+        with st.expander("🔍 Origineel vs. actueel", expanded=False):
+            render_param_diff_table(
+                [("intercept", _defaults["intercept"], float(params["intercept"]))]
+                + [
+                    (field, _defaults["coefficients"][field],
+                     float(params["coefficients"].get(field, _defaults["coefficients"][field])))
+                    for field in LEAN_COEFFICIENTS
+                ]
+            )
+
     # ── Sigmoid & blend ──────────────────────────────────────────────────────
     with tab_sigmoid:
         st.subheader("Sigmoid steilheid (K) & ICP/grootte-blend")
@@ -1224,6 +1316,22 @@ def main() -> None:  # pragma: no cover - exercised only under `streamlit run`
                 "Grootte-gewicht (size_weight, uit Lucia/Lusha-data)",
                 params["size_weight"],
             )
+
+        # Rendered AFTER the sliders above (see the Coëfficiënten tab for why:
+        # reading params before the st.slider() assignments shows last run's
+        # value, one interaction behind). sigmoid_p_lo/p_hi are never set by a
+        # widget in this tab body -- only by the auto-calibrate button below,
+        # which applies its update at the top of the NEXT run -- so they're
+        # already current at any point here.
+        _defaults = default_params()
+        with st.expander("🔍 Origineel vs. actueel", expanded=False):
+            render_param_diff_table([
+                ("sigmoid_k", _defaults["sigmoid_k"], float(params["sigmoid_k"])),
+                ("model_weight", _defaults["model_weight"], float(params["model_weight"])),
+                ("size_weight", _defaults["size_weight"], float(params["size_weight"])),
+                ("sigmoid_p_lo", _defaults["sigmoid_p_lo"], float(params["sigmoid_p_lo"])),
+                ("sigmoid_p_hi", _defaults["sigmoid_p_hi"], float(params["sigmoid_p_hi"])),
+            ])
         st.caption(
             "model_weight + size_weight telt altijd op tot 1 — het "
             "grootte-gewicht past zich automatisch aan (zoals in de "
@@ -1343,6 +1451,19 @@ def main() -> None:  # pragma: no cover - exercised only under `streamlit run`
                 [hot, "🥇 Hot"], [warm, "🥈 Warm"], [cool, "🥉 Cool"], [0.0, "❄️ Pass"],
             ]
         st.caption("Onder Cool valt een bedrijf automatisch in ❄️ Pass.")
+
+        # Rendered AFTER the number_inputs above and reads hot/warm/cool
+        # directly (not thresholds_by_label, which is derived from
+        # params["tier_thresholds"] BEFORE those widgets update it this run)
+        # -- same one-run-behind lag as the Coëfficiënten tab.
+        _default_thresholds_by_label = {
+            label: score for score, label in default_params()["tier_thresholds"]}
+        with st.expander("🔍 Origineel vs. actueel", expanded=False):
+            render_param_diff_table([
+                ("🥇 Hot", _default_thresholds_by_label.get("🥇 Hot", 0.0), float(hot)),
+                ("🥈 Warm", _default_thresholds_by_label.get("🥈 Warm", 0.0), float(warm)),
+                ("🥉 Cool", _default_thresholds_by_label.get("🥉 Cool", 0.0), float(cool)),
+            ])
 
         st.divider()
         if st.button(

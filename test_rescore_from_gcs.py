@@ -15,8 +15,10 @@ import pytest
 
 from commercial_fit_scoring import LEAN_COEFFICIENTS, score_company
 from rescore_from_gcs import (
+    C5_UPGRADE_HQ_SCORE,
     CURRENT_MANIFEST_FILENAME,
     LIST_FILENAME,
+    apply_c5_foreign_hq_upgrade,
     build_rescore_manifest,
     build_rescored_run,
     default_rescore_run_folder,
@@ -74,6 +76,87 @@ def fixture_detail(company_id="c1", **signal_overrides) -> dict:
     }
 
 
+def fixture_c5_detail(company_id="c1", adjudication="foreign_parent_confirmed",
+                       confidence="Medium", sig_foreign_hq_score=None, **overrides) -> dict:
+    detail = fixture_detail(company_id, sig_foreign_hq_score=sig_foreign_hq_score, **overrides)
+    detail["c5_adjudication"] = adjudication
+    detail["c5_confidence"] = confidence
+    detail["sig_foreign_hq_score_for_next_scoring"] = None
+    return detail
+
+
+# ---------------------------------------------------------------------------
+# apply_c5_foreign_hq_upgrade
+# ---------------------------------------------------------------------------
+
+class TestApplyC5ForeignHqUpgrade:
+    def test_confirmed_medium_confidence_gets_upgraded(self):
+        detail = fixture_c5_detail(confidence="Medium")
+        upgraded = apply_c5_foreign_hq_upgrade(detail)
+        assert upgraded["scoring_inputs"]["signals"]["sig_foreign_hq_score"] == C5_UPGRADE_HQ_SCORE
+        assert upgraded["sig_foreign_hq_score_for_next_scoring"] == C5_UPGRADE_HQ_SCORE
+        assert upgraded["c5_upgrade_applied"] is True
+
+    def test_confirmed_high_confidence_gets_upgraded(self):
+        detail = fixture_c5_detail(confidence="High")
+        upgraded = apply_c5_foreign_hq_upgrade(detail)
+        assert upgraded["scoring_inputs"]["signals"]["sig_foreign_hq_score"] == C5_UPGRADE_HQ_SCORE
+
+    def test_low_confidence_is_not_upgraded(self):
+        detail = fixture_c5_detail(confidence="Low")
+        upgraded = apply_c5_foreign_hq_upgrade(detail)
+        assert upgraded is detail
+        assert upgraded["scoring_inputs"]["signals"]["sig_foreign_hq_score"] is None
+
+    def test_unclear_adjudication_is_not_upgraded(self):
+        detail = fixture_c5_detail(adjudication="unclear", confidence="High")
+        upgraded = apply_c5_foreign_hq_upgrade(detail)
+        assert upgraded is detail
+
+    def test_domestic_confirmed_is_not_upgraded(self):
+        detail = fixture_c5_detail(adjudication="domestic_confirmed", confidence="High")
+        upgraded = apply_c5_foreign_hq_upgrade(detail)
+        assert upgraded is detail
+
+    def test_no_c5_fields_is_not_upgraded(self):
+        detail = fixture_detail(sig_foreign_hq_score=None)
+        upgraded = apply_c5_foreign_hq_upgrade(detail)
+        assert upgraded is detail
+
+    def test_existing_signal_is_never_overridden(self):
+        # The pipeline already produced a real (even if low/zero) signal --
+        # a C5 recommendation must never override actual scoring output.
+        detail = fixture_c5_detail(sig_foreign_hq_score=1.0)
+        upgraded = apply_c5_foreign_hq_upgrade(detail)
+        assert upgraded is detail
+        assert upgraded["scoring_inputs"]["signals"]["sig_foreign_hq_score"] == 1.0
+
+    def test_does_not_mutate_input(self):
+        detail = fixture_c5_detail()
+        original = json.loads(json.dumps(detail))
+        apply_c5_foreign_hq_upgrade(detail)
+        assert detail == original
+
+    def test_wired_through_rescore_detail_record_when_flag_set(self):
+        detail = fixture_c5_detail(confidence="High")
+        rescored = rescore_detail_record(
+            detail, params={}, now_iso="2026-07-12T00:00:00Z", apply_c5_upgrade=True)
+        assert rescored["c5_upgrade_applied"] is True
+        assert rescored["rescore_audit"]["c5_upgrade_applied"] is True
+        # The upgraded signal must actually have moved the score.
+        not_upgraded = rescore_detail_record(
+            fixture_c5_detail(confidence="High"), params={}, now_iso="2026-07-12T00:00:00Z",
+            apply_c5_upgrade=False)
+        assert rescored["commercial_fit_score"] > not_upgraded["commercial_fit_score"]
+
+    def test_not_applied_when_flag_is_false(self):
+        detail = fixture_c5_detail(confidence="High")
+        rescored = rescore_detail_record(
+            detail, params={}, now_iso="2026-07-12T00:00:00Z", apply_c5_upgrade=False)
+        assert not rescored.get("c5_upgrade_applied")
+        assert rescored["scoring_inputs"]["signals"]["sig_foreign_hq_score"] is None
+
+
 # ---------------------------------------------------------------------------
 # Pure re-scoring logic
 # ---------------------------------------------------------------------------
@@ -118,6 +201,31 @@ class TestRescoreDetailRecord:
             detail, params={"intercept": -99.0}, now_iso="2026-07-08T00:00:00Z")
         assert rescored["commercial_fit_score"] != detail["commercial_fit_score"]
         assert rescored["commercial_tier"] == "❄️ Pass"
+
+    def test_app_facing_score_and_tier_are_updated_too(self):
+        # commercial_fit_score_app / commercial_tier_app are the fields the
+        # Company Hub frontend actually reads (it prioritizes them over the
+        # canonical commercial_fit_score/commercial_tier) -- a re-score must
+        # update them too, or the app keeps showing the pre-rescore number.
+        detail = fixture_detail(sig_foreign_hq_score=3, sig_explicit_lnd_score=3)
+        detail["commercial_fit_score_app"] = detail["commercial_fit_score"]
+        detail["commercial_tier_app"] = detail["commercial_tier"]
+
+        rescored = rescore_detail_record(
+            detail, params={"intercept": -99.0}, now_iso="2026-07-08T00:00:00Z")
+
+        assert rescored["commercial_fit_score_app"] == rescored["commercial_fit_score"]
+        assert rescored["commercial_tier_app"] == rescored["commercial_tier"]
+        assert rescored["commercial_fit_score_app"] != detail["commercial_fit_score_app"]
+
+    def test_missing_app_facing_fields_are_not_invented(self):
+        # An older export that never had the _app fields stays that way --
+        # a re-score never introduces new keys the original export lacked.
+        detail = fixture_detail()
+        assert "commercial_fit_score_app" not in detail
+        rescored = rescore_detail_record(detail, params={}, now_iso="2026-07-08T00:00:00Z")
+        assert "commercial_fit_score_app" not in rescored
+        assert "commercial_tier_app" not in rescored
 
     def test_does_not_mutate_input_detail(self):
         detail = fixture_detail()
@@ -290,6 +398,19 @@ class TestRescoreListItems:
         updated = rescore_list_items(list_items, rescored_by_id={})
         assert updated[0] == list_items[0]
         assert updated[0] is not list_items[0]
+
+    def test_mirrors_app_facing_score_and_tier_when_present(self):
+        list_items = [{
+            "company_id": "c1", "commercial_fit_score": 1.0, "commercial_tier": "X",
+            "commercial_fit_score_app": 1.0, "commercial_tier_app": "X",
+        }]
+        rescored_by_id = {"c1": {
+            "commercial_fit_score": 9.9, "commercial_tier": "\U0001f947 Hot",
+            "commercial_fit_score_app": 9.9, "commercial_tier_app": "\U0001f947 Hot",
+        }}
+        updated = rescore_list_items(list_items, rescored_by_id)
+        assert updated[0]["commercial_fit_score_app"] == 9.9
+        assert updated[0]["commercial_tier_app"] == "\U0001f947 Hot"
 
 
 class TestTierDistribution:
@@ -568,7 +689,24 @@ def _fake_gcs_tool_for_local_dir(remote_root: Path):
             return MagicMock(returncode=0, stdout="\n".join(lines) + ("\n" if lines else ""), stderr="")
         if "cp" in cmd:
             cp_idx = cmd.index("cp")
-            args = cmd[cp_idx + 1:]
+            # Strip flags (e.g. --cache-control=...) and any preceding value
+            # they take (e.g. gsutil's "-h" "Cache-Control:...") -- real
+            # gcloud storage cp / gsutil cp accept flags in any position, so
+            # this fake must too instead of only ever handling a bare
+            # "cp source... dest" invocation.
+            raw_args = cmd[cp_idx + 1:]
+            args = []
+            skip_next = False
+            for tok in raw_args:
+                if skip_next:
+                    skip_next = False
+                    continue
+                if tok.startswith("--"):
+                    continue
+                if tok == "-h":
+                    skip_next = True
+                    continue
+                args.append(tok)
             *sources, dest = args
             if len(sources) > 1 or dest.endswith("/"):
                 # Batch form: many sources -> one destination directory.

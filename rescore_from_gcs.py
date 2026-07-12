@@ -78,6 +78,51 @@ def rehydrate_scoring_row(scoring_inputs: dict) -> dict:
     return row
 
 
+#: lead_hq_sonnet_adjudicator.build_c5_recommendation()'s own upgrade value
+#: and qualifying-confidence set, mirrored here so an applied upgrade always
+#: matches what that (review-only) recommendation would have proposed.
+C5_UPGRADE_HQ_SCORE = 3.0
+C5_UPGRADE_QUALIFYING_CONFIDENCE = ("High", "Medium")
+
+
+def apply_c5_foreign_hq_upgrade(detail: dict) -> dict:
+    """Promote a reviewed C5 foreign-parent confirmation into the actual
+    scoring signal, when the pipeline's automatic HQ detection left it
+    missing. Returns a NEW dict — ``detail`` is never mutated.
+
+    ``lead_hq_sonnet_adjudicator.build_c5_recommendation()`` deliberately
+    never writes production scores itself ("this is a recommendation for
+    review only; it does not alter any production score") — by design, a
+    human is meant to review the C5 adjudication before it affects ranking.
+    This is the separate, explicit "apply the reviewed recommendation" step,
+    scoped to exactly that function's qualifying criteria: ``c5_adjudication
+    == "foreign_parent_confirmed"`` and ``c5_confidence`` in
+    ``C5_UPGRADE_QUALIFYING_CONFIDENCE``. A company whose
+    ``scoring_inputs.signals.sig_foreign_hq_score`` is already set (not
+    missing) is left completely untouched — this never overrides a signal
+    the pipeline already produced, it only fills a gap.
+    """
+    if detail.get("c5_adjudication") != "foreign_parent_confirmed":
+        return detail
+    if detail.get("c5_confidence") not in C5_UPGRADE_QUALIFYING_CONFIDENCE:
+        return detail
+    scoring_inputs = detail.get("scoring_inputs") or {}
+    signals = scoring_inputs.get("signals") or {}
+    if signals.get("sig_foreign_hq_score") is not None:
+        return detail
+
+    new_signals = dict(signals)
+    new_signals["sig_foreign_hq_score"] = C5_UPGRADE_HQ_SCORE
+    new_scoring_inputs = dict(scoring_inputs)
+    new_scoring_inputs["signals"] = new_signals
+
+    new_detail = dict(detail)
+    new_detail["scoring_inputs"] = new_scoring_inputs
+    new_detail["sig_foreign_hq_score_for_next_scoring"] = C5_UPGRADE_HQ_SCORE
+    new_detail["c5_upgrade_applied"] = True
+    return new_detail
+
+
 def resolve_detail_employee_range(detail: dict) -> "tuple[str | None, str]":
     """``(employee_range, source)`` for one company-details record.
 
@@ -111,17 +156,30 @@ def resolve_detail_employee_range(detail: dict) -> "tuple[str | None, str]":
     return None, "missing"
 
 
-def rescore_detail_record(detail: dict, params: dict, *, now_iso: str) -> dict:
+def rescore_detail_record(
+    detail: dict, params: dict, *, now_iso: str, apply_c5_upgrade: bool = False,
+) -> dict:
     """Re-score one company-details record from its persisted
     ``scoring_inputs``. Returns a NEW dict — ``detail`` is never mutated.
 
     The new ``final_commercial_fit_score``/``commercial_tier`` become the
     record's ``commercial_fit_score``/``commercial_tier`` fields (these ARE
-    the new numbers — that is the point of a re-score run); a
+    the new numbers — that is the point of a re-score run), and are mirrored
+    onto ``commercial_fit_score_app``/``commercial_tier_app`` when present
+    (the app-facing copies the Company Hub frontend actually reads — see
+    ``lead_caller_app_fields_builder.build_caller_app_fields``); a
     ``rescore_audit`` block alongside them keeps the previous values, the
     params used, and which signals were missing, for a full before/after
     trail.
+
+    ``apply_c5_upgrade`` (default ``False``) runs ``apply_c5_foreign_hq_upgrade``
+    on ``detail`` first, so a reviewed C5 foreign-parent confirmation that
+    never made it into the scoring signal is promoted into it before this
+    re-score's own scoring pass — see that function's docstring.
     """
+    if apply_c5_upgrade:
+        detail = apply_c5_foreign_hq_upgrade(detail)
+
     scoring_inputs = detail.get("scoring_inputs")
     if not scoring_inputs or "signals" not in scoring_inputs:
         raise ValueError(
@@ -140,6 +198,19 @@ def rescore_detail_record(detail: dict, params: dict, *, now_iso: str) -> dict:
     new_detail = dict(detail)
     new_detail["commercial_fit_score"] = result["final_commercial_fit_score"]
     new_detail["commercial_tier"] = result["commercial_tier"]
+    # commercial_fit_score_app / commercial_tier_app are pure copies of the
+    # canonical fields taken at original export time (see
+    # lead_caller_app_fields_builder.build_caller_app_fields:
+    # "commercial_fit_score_app": result.final_commercial_fit_score). The
+    # Company Hub app's display logic prioritizes the _app field over the
+    # canonical one, so a re-score that only updates commercial_fit_score
+    # leaves the app showing the stale pre-rescore number even though the
+    # canonical field is correct. Only touch them when the original export
+    # actually has the key (older exports may predate these fields).
+    if "commercial_fit_score_app" in new_detail:
+        new_detail["commercial_fit_score_app"] = result["final_commercial_fit_score"]
+    if "commercial_tier_app" in new_detail:
+        new_detail["commercial_tier_app"] = result["commercial_tier"]
     # Backfill the app-facing size fields when the original export left them
     # blank (v2-era exports) — an explicit value from the original export is
     # never overwritten. The label derives from the same employee_range the
@@ -164,11 +235,14 @@ def rescore_detail_record(detail: dict, params: dict, *, now_iso: str) -> dict:
         "scoring_notes": result["scoring_notes"],
         "employee_range_used": employee_range,
         "employee_range_source": employee_range_source,
+        "c5_upgrade_applied": bool(detail.get("c5_upgrade_applied")),
     }
     return new_detail
 
 
-def rescore_details_bucket(bucket: dict, params: dict, *, now_iso: str) -> dict:
+def rescore_details_bucket(
+    bucket: dict, params: dict, *, now_iso: str, apply_c5_upgrade: bool = False,
+) -> dict:
     """Re-score every ``company_id -> detail`` record in one
     ``company-details-*.json`` bucket file. Returns a NEW dict.
 
@@ -184,7 +258,8 @@ def rescore_details_bucket(bucket: dict, params: dict, *, now_iso: str) -> dict:
     result = {}
     for company_id, detail in bucket.items():
         try:
-            result[company_id] = rescore_detail_record(detail, params, now_iso=now_iso)
+            result[company_id] = rescore_detail_record(
+                detail, params, now_iso=now_iso, apply_c5_upgrade=apply_c5_upgrade)
         except ValueError as exc:
             skipped = dict(detail)
             skipped["rescore_audit"] = {
@@ -223,6 +298,14 @@ def rescore_list_items(list_items: list[dict], rescored_by_id: dict) -> list[dic
         if rescored is not None:
             new_item["commercial_fit_score"] = rescored["commercial_fit_score"]
             new_item["commercial_tier"] = rescored["commercial_tier"]
+            if "commercial_fit_score_app" in new_item and "commercial_fit_score_app" in rescored:
+                new_item["commercial_fit_score_app"] = rescored["commercial_fit_score_app"]
+            if "commercial_tier_app" in new_item and "commercial_tier_app" in rescored:
+                new_item["commercial_tier_app"] = rescored["commercial_tier_app"]
+            if rescored.get("c5_upgrade_applied"):
+                new_item["sig_foreign_hq_score_for_next_scoring"] = rescored[
+                    "sig_foreign_hq_score_for_next_scoring"]
+                new_item["c5_upgrade_applied"] = True
             for field in ("employee_range", "size_category_app",
                           "display_size_category_app"):
                 if (not str(new_item.get(field) or "").strip()
@@ -435,10 +518,38 @@ def download_files_batch(tool: list[str], sources: list[str], dest_dir: str) -> 
     }
 
 
-def upload_file(tool: list[str], local_path: str, destination: str) -> dict:
+#: current/ objects are re-read live by the Lovable app on every page load;
+#: without an explicit Cache-Control, GCS's default (public, max-age=3600)
+#: lets an already-open client keep serving a pre-promote copy for up to an
+#: hour. Mirrors lovable_gcs_upload.CURRENT_CACHE_CONTROL.
+CURRENT_CACHE_CONTROL = "no-cache, max-age=0, must-revalidate"
+
+
+def _cp_argv(tool: list[str], local_path: str, destination: str,
+             cache_control: "str | None") -> list[str]:
+    """Build the ``cp`` argv for either ``gcloud storage`` or ``gsutil``,
+    optionally setting the uploaded object's Cache-Control header.
+
+    ``gcloud storage cp`` accepts ``--cache-control`` on the ``cp``
+    subcommand directly; ``gsutil`` has no per-subcommand header flag and
+    needs a top-level ``-h "Cache-Control:..."`` flag BEFORE its subcommand
+    -- ``tool`` here is ``[gsutil_path]`` (see ``resolve_gcs_tool``), so that
+    flag goes right after ``tool[0]``.
+    """
+    if not cache_control:
+        return [*tool, "cp", local_path, destination]
+    if Path(tool[0]).stem.lower() == "gsutil":
+        return [tool[0], "-h", f"Cache-Control:{cache_control}",
+                *tool[1:], "cp", local_path, destination]
+    return [*tool, "cp", f"--cache-control={cache_control}", local_path, destination]
+
+
+def upload_file(tool: list[str], local_path: str, destination: str,
+                 cache_control: "str | None" = None) -> dict:
     """Upload one local file via subprocess (no ``shell=True``). Mirrors
     ``lovable_gcs_upload.upload_file`` — verifies the local file exists
-    before shelling out; never raises."""
+    before shelling out; never raises. ``cache_control`` (default ``None``)
+    sets the uploaded object's Cache-Control header — see ``_cp_argv``."""
     if not Path(local_path).exists():
         return {
             "success": False, "local_path": local_path, "destination": destination,
@@ -446,7 +557,7 @@ def upload_file(tool: list[str], local_path: str, destination: str) -> dict:
         }
     try:
         proc = subprocess.run(
-            [*tool, "cp", local_path, destination],
+            _cp_argv(tool, local_path, destination, cache_control),
             capture_output=True, text=True, timeout=120,
         )
     except Exception as exc:
@@ -550,6 +661,7 @@ def build_rescored_run(
     country_folder: str,
     run_folder: str,
     now_iso: str,
+    apply_c5_upgrade: bool = False,
 ) -> dict:
     """Pure, no-I/O core of a re-score: turn an already-loaded ``current``
     bundle (the ``dict`` returned by ``download_current_run`` — or an
@@ -560,9 +672,14 @@ def build_rescored_run(
     Kept separate from ``rescore_country`` so callers that already have the
     current run loaded (interactive tools, notebooks) can re-run this many
     times cheaply and only download/upload once.
+
+    ``apply_c5_upgrade`` (default ``False``) is passed straight through to
+    ``rescore_details_bucket``/``rescore_detail_record`` — see
+    ``apply_c5_foreign_hq_upgrade``.
     """
     rescored_details_by_file = {
-        filename: rescore_details_bucket(bucket_dict, params, now_iso=now_iso)
+        filename: rescore_details_bucket(
+            bucket_dict, params, now_iso=now_iso, apply_c5_upgrade=apply_c5_upgrade)
         for filename, bucket_dict in current["detail_files"].items()
     }
     original_by_id = {
@@ -701,7 +818,9 @@ def promote_run_to_current(
                 local_path.write_text(
                     json.dumps(manifest, ensure_ascii=False, indent=2, default=str),
                     encoding="utf-8")
-            upload_result = upload_file(tool, str(local_path), f"{current_dir}/{filename}")
+            upload_result = upload_file(
+                tool, str(local_path), f"{current_dir}/{filename}",
+                cache_control=CURRENT_CACHE_CONTROL)
             results.append({**upload_result, "target": "current", "phase": "upload"})
         return {
             "country_folder": country_folder,
@@ -724,6 +843,7 @@ def rescore_country(
     work_dir: "str | Path | None" = None,
     upload: bool = True,
     now: "datetime | None" = None,
+    apply_c5_upgrade: bool = False,
 ) -> dict:
     """End-to-end re-score for one country folder.
 
@@ -733,6 +853,9 @@ def rescore_country(
     folder, never ``current/`` and never an existing run. Returns the new
     run's manifest (with an added ``upload_results`` list; empty when
     ``upload=False``).
+
+    ``apply_c5_upgrade`` (default ``False``) is passed straight through to
+    ``build_rescored_run`` — see ``apply_c5_foreign_hq_upgrade``.
     """
     now = now or datetime.now(timezone.utc)
     now_iso = now.strftime("%Y-%m-%dT%H:%M:%SZ")
@@ -744,7 +867,7 @@ def rescore_country(
         current = download_current_run(bucket, country_folder, staging / "current")
         rescored_run = build_rescored_run(
             current, params, country_folder=country_folder,
-            run_folder=run_folder, now_iso=now_iso,
+            run_folder=run_folder, now_iso=now_iso, apply_c5_upgrade=apply_c5_upgrade,
         )
         out_dir = write_rescored_run(rescored_run, staging / "out")
 
@@ -769,6 +892,7 @@ def rescore_all_countries(
     run_folder: "str | None" = None,
     upload: bool = True,
     now: "datetime | None" = None,
+    apply_c5_upgrade: bool = False,
 ) -> dict:
     """Re-score every requested country folder (or every folder currently in
     the bucket when ``countries`` is ``None``). Returns
@@ -785,6 +909,7 @@ def rescore_all_countries(
             results[country_folder] = rescore_country(
                 bucket, country_folder, params,
                 run_folder=run_folder, upload=upload, now=now,
+                apply_c5_upgrade=apply_c5_upgrade,
             )
         except Exception as exc:
             results[country_folder] = {"error": str(exc)}
@@ -832,6 +957,14 @@ def main() -> None:
     ap.add_argument(
         "--dry-run", action="store_true",
         help="Re-score and write local output only; never uploads to GCS.")
+    ap.add_argument(
+        "--apply-c5-foreign-hq-upgrade", action="store_true",
+        help="Promote a reviewed C5 foreign-parent confirmation "
+             "(c5_adjudication == foreign_parent_confirmed, c5_confidence "
+             "High/Medium) into the scoring signal before re-scoring, when "
+             "the pipeline's automatic HQ detection left it missing. Never "
+             "overrides a signal the pipeline already produced. See "
+             "apply_c5_foreign_hq_upgrade().")
     args = ap.parse_args()
 
     params = _load_params(args)
@@ -861,6 +994,7 @@ def main() -> None:
                 args.bucket, country_folder, params,
                 run_folder=run_folder, work_dir=args.work_dir,
                 upload=not args.dry_run,
+                apply_c5_upgrade=args.apply_c5_foreign_hq_upgrade,
             )
         except Exception as exc:
             print(f"  ERROR                    {country_folder}: {exc}")

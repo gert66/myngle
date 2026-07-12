@@ -309,9 +309,34 @@ def describe_gcloud_environment() -> dict:
     return {"account": account, "project": project}
 
 
-def build_upload_command(tool_cmd: list[str], local_path: str, destination: str) -> list[str]:
-    """Build the argv list for one file upload. Never uses ``shell=True``."""
-    return [*tool_cmd, local_path, destination]
+#: current/ objects are re-read live by the Lovable app on every page load;
+#: without an explicit Cache-Control, GCS's default (public, max-age=3600)
+#: lets an already-open client keep serving a pre-promote/pre-export copy for
+#: up to an hour. Archive (runs/<run_folder>/) objects are immutable
+#: snapshots and deliberately keep GCS's default caching.
+CURRENT_CACHE_CONTROL = "no-cache, max-age=0, must-revalidate"
+
+
+def build_upload_command(
+    tool_cmd: list[str], local_path: str, destination: str,
+    cache_control: Optional[str] = None,
+) -> list[str]:
+    """Build the argv list for one file upload. Never uses ``shell=True``.
+
+    ``cache_control`` (default ``None``, meaning "leave GCS's default
+    caching alone") sets the uploaded object's ``Cache-Control`` header.
+    ``gcloud storage cp`` accepts ``--cache-control`` on the ``cp``
+    subcommand directly; ``gsutil`` has no per-subcommand header flag and
+    instead needs a top-level ``-h "Cache-Control:..."`` flag BEFORE its
+    subcommand -- so the two tools' argv shapes differ here even though
+    every other call in this module treats them interchangeably.
+    """
+    if not cache_control:
+        return [*tool_cmd, local_path, destination]
+    if Path(tool_cmd[0]).stem.lower() == "gsutil":
+        return [tool_cmd[0], "-h", f"Cache-Control:{cache_control}",
+                *tool_cmd[1:], local_path, destination]
+    return [*tool_cmd, f"--cache-control={cache_control}", local_path, destination]
 
 
 def build_upload_plan(
@@ -349,19 +374,24 @@ def build_upload_plan(
     return jobs
 
 
-def upload_file(tool_cmd: list[str], local_path: str, destination: str) -> dict:
+def upload_file(
+    tool_cmd: list[str], local_path: str, destination: str,
+    cache_control: Optional[str] = None,
+) -> dict:
     """Upload one local file via subprocess (no ``shell=True``).
 
     Verifies the local file exists before shelling out. Never raises — any
     failure (missing file, missing CLI, non-zero exit, timeout) comes back
     as ``{"success": False, ...}`` with a concise, secret-free error/stderr.
+    ``cache_control`` (default ``None``) is passed straight through to
+    ``build_upload_command`` — see its docstring.
     """
     if not Path(local_path).exists():
         return {
             "success": False, "local_path": local_path, "destination": destination,
             "error": f"Local file not found: {local_path}",
         }
-    cmd = build_upload_command(tool_cmd, local_path, destination)
+    cmd = build_upload_command(tool_cmd, local_path, destination, cache_control=cache_control)
     try:
         proc = subprocess.run(cmd, capture_output=True, text=True, timeout=120)
     except Exception as exc:
@@ -539,7 +569,9 @@ def run_upload_plan(jobs: list[dict]) -> list[dict]:
         ]
     results = []
     for job in jobs:
-        result = upload_file(tool_cmd, job["local_path"], job["destination"])
+        cache_control = CURRENT_CACHE_CONTROL if job.get("target") == "current" else None
+        result = upload_file(
+            tool_cmd, job["local_path"], job["destination"], cache_control=cache_control)
         result["target"] = job.get("target")
         results.append(result)
     return results

@@ -1390,6 +1390,19 @@ def _enriched_rows():
     ]
 
 
+def _enriched_row_none_score():
+    """A row selected for C5 via needs_manual_review whose HQ signal was
+    never determined at all (None, not the explicit 0.0 the other fixture
+    rows carry) -- e.g. a company the automatic AI HQ interpreter couldn't
+    confidently classify either way."""
+    return {
+        "company_name": "Stellar Data Recovery", "domain": "stellar.nl",
+        "input_country": "Netherlands", "sig_foreign_hq_score_for_next_scoring": None,
+        "needs_manual_review": True, "hq_positive_score_suppressed_for_review": "No",
+        "hq_detected_country": "", "ai_parent_hq_country": "",
+    }
+
+
 def _mk_result(adjudication="unclear", confidence="Low", target="unclear",
                call_success=True, error="", model="claude-sonnet-5"):
     return SonnetHQAdjudicationResult(
@@ -1544,6 +1557,32 @@ class TestC5Conservative:
                 rows, anthropic_api_key="k", model_used="m", model_tier="sonnet",
                 scoring_behavior="conservative_adjustment", scope="all_rows")
         assert out[0]["sig_foreign_hq_score_for_next_scoring"] == 0.0
+        assert counts["c5_possible_foreign_parent_for_review_count"] == 0
+
+    def test_upgrades_none_score_when_c5_confirms(self):
+        # Same bug as test_upgrades_old_score_0_when_c5_confirms, but for a
+        # row whose HQ signal was never determined (None) rather than
+        # explicitly suppressed to 0 -- e.g. selected via needs_manual_review
+        # rather than the score-3 path. Before this fix, None fell through
+        # to "leave untouched", so a C5-confirmed foreign parent never made
+        # it into sig_foreign_hq_score_for_next_scoring at all.
+        rows = [_enriched_row_none_score()]
+        with _patch_adjudicator(_mk_result("foreign_parent_confirmed", "High", "yes")):
+            out, counts = apply_c5_adjudication(
+                rows, anthropic_api_key="k", model_used="m", model_tier="sonnet",
+                scoring_behavior="conservative_adjustment", scope="all_rows")
+        assert out[0]["sig_foreign_hq_score_for_next_scoring"] == 3.0
+        assert out[0]["c5_possible_foreign_parent_for_review"] is True
+        assert out[0]["needs_manual_review"] is True
+        assert counts["c5_possible_foreign_parent_for_review_count"] == 1
+
+    def test_does_not_upgrade_none_score_when_c5_unclear(self):
+        rows = [_enriched_row_none_score()]
+        with _patch_adjudicator(_mk_result("unclear", "Low", "unclear")):
+            out, counts = apply_c5_adjudication(
+                rows, anthropic_api_key="k", model_used="m", model_tier="sonnet",
+                scoring_behavior="conservative_adjustment", scope="all_rows")
+        assert out[0]["sig_foreign_hq_score_for_next_scoring"] is None
         assert counts["c5_possible_foreign_parent_for_review_count"] == 0
 
     def test_failure_old_3_downgrades_old_0_stays_with_error(self):

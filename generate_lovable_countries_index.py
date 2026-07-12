@@ -23,6 +23,7 @@ from typing import Optional
 
 from lovable_gcs_upload import (
     COUNTRIES_INDEX_FILENAME,
+    CURRENT_CACHE_CONTROL,
     DEFAULT_GCS_BUCKET,
     check_gcloud_available,
     country_folder_slug,
@@ -128,7 +129,7 @@ def main(argv: Optional[list[str]] = None) -> int:
 
     tool_cmd = resolve_gcs_upload_tool()
     destination = gcs_manifest_path(args.bucket)
-    result = upload_file(tool_cmd, str(output_path), destination)
+    result = upload_file(tool_cmd, str(output_path), destination, cache_control=CURRENT_CACHE_CONTROL)
     if not result["success"]:
         print(f"ERROR: upload failed: {result.get('error') or result.get('stderr')}",
               file=sys.stderr)

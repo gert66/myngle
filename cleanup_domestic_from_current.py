@@ -115,7 +115,9 @@ def main() -> None:
     print(f"\nUploading {len(filenames)} file(s) to current/ ...")
     for filename in filenames:
         dest = lovable_gcs.gcs_current_path(args.bucket, country_folder, filename)
-        result = lovable_gcs.upload_file(tool_cmd, str(out_dir / filename), dest)
+        result = lovable_gcs.upload_file(
+            tool_cmd, str(out_dir / filename), dest,
+            cache_control=lovable_gcs.CURRENT_CACHE_CONTROL)
         status = "OK" if result["success"] else f"FAILED: {result.get('stderr') or result.get('error')}"
         print(f"  {filename} -> {dest}: {status}")
         if not result["success"]:

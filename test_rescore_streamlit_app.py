@@ -35,6 +35,7 @@ from rescore_streamlit_app import (
     compute_model_probabilities,
     default_params,
     employee_range_options,
+    hq_category,
     multi_country_summary_dataframe,
     percentile_sample_ids,
     sample_current_bundle,
@@ -110,6 +111,20 @@ class TestValidateTierThresholds:
         assert validate_tier_thresholds(9.0, 9.0, 4.0) is not None
 
 
+class TestHqCategory:
+    def test_true_is_foreign(self):
+        assert hq_category({"foreign_hq_detected_for_export": True}) == "Foreign HQ"
+
+    def test_false_is_domestic(self):
+        assert hq_category({"foreign_hq_detected_for_export": False}) == "Domestic HQ"
+
+    def test_missing_is_onbekend(self):
+        assert hq_category({}) == "Onbekend"
+
+    def test_none_is_onbekend(self):
+        assert hq_category({"foreign_hq_detected_for_export": None}) == "Onbekend"
+
+
 class TestScoreDistributionDataframe:
     def test_produces_long_form_before_after_rows(self):
         original = {"c1": {"commercial_fit_score": 3.0}}
@@ -118,6 +133,19 @@ class TestScoreDistributionDataframe:
         assert len(df) == 2
         assert set(df["when"]) == {"Huidig", "Nieuw"}
         assert sorted(df["commercial_fit_score"]) == [3.0, 7.0]
+
+    def test_includes_hq_category_column(self):
+        original = {
+            "c1": {"commercial_fit_score": 3.0, "foreign_hq_detected_for_export": True},
+            "c2": {"commercial_fit_score": 5.0, "foreign_hq_detected_for_export": False},
+        }
+        rescored = {
+            "c1": {"commercial_fit_score": 7.0, "foreign_hq_detected_for_export": True},
+            "c2": {"commercial_fit_score": 4.0, "foreign_hq_detected_for_export": False},
+        }
+        df = score_distribution_dataframe(original, rescored)
+        assert set(df["hq_category"]) == {"Foreign HQ", "Domestic HQ"}
+        assert set(df[df["company_id"] == "c1"]["hq_category"]) == {"Foreign HQ"}
 
 
 class TestTierDistributionDataframe:

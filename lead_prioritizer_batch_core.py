@@ -1109,6 +1109,27 @@ def _apply_conservative_adjustment(enriched: dict, result, counts: dict) -> None
                 # Row was selected for C5 but the call/parse failed → stay safe.
                 enriched["needs_manual_review"] = True
         return
+
+    if old is None and confirmed:
+        # A row whose HQ signal was never determined at all (distinct from
+        # old == 0.0's explicit suppression) is just as blind to
+        # sig_foreign_hq_score -- the dominant scoring coefficient -- as a
+        # suppressed 0 is. Without this, a row that reached C5 with a None
+        # signal (e.g. selected via needs_manual_review rather than the
+        # score-3 path) stayed unscored on this signal even after C5
+        # confirmed a foreign parent, silently reproducing the same
+        # "confirmed foreign HQ but scored as having none" bug the old ==
+        # 0.0 branch above was written to fix. Unconfirmed/None stays
+        # untouched (falls through), same as before this branch existed --
+        # there is no prior explicit 0 to preserve or correct.
+        enriched["sig_foreign_hq_score_for_next_scoring"] = 3.0
+        enriched["c5_possible_foreign_parent_for_review"] = True
+        enriched["needs_manual_review"] = True
+        _append_hq_reason(
+            enriched,
+            "C5 confirmed foreign parent; upgraded from unresolved HQ signal.")
+        counts["c5_possible_foreign_parent_for_review_count"] += 1
+        return
     # Other/absent old scores: leave untouched under conservative mode.
 
 
