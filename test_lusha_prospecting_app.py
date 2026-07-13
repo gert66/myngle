@@ -50,6 +50,73 @@ def test_build_prospecting_request_no_exclude_block_when_none():
     assert "exclude" not in body["filters"]["companies"]
 
 
+def test_build_prospecting_request_included_main_industry_ids():
+    body = app.build_prospecting_request(
+        location=_URUGUAY, size_bands=app.SIZE_BANDS, page=0,
+        included_main_industry_ids=[17],
+    )
+    assert body["filters"]["companies"]["include"]["mainIndustriesIds"] == [17]
+    assert "exclude" not in body["filters"]["companies"]
+
+
+def test_build_prospecting_request_include_and_exclude_can_coexist():
+    body = app.build_prospecting_request(
+        location=_URUGUAY, size_bands=app.SIZE_BANDS, page=0,
+        included_main_industry_ids=[17], excluded_industry_ids=[5],
+    )
+    assert body["filters"]["companies"]["include"]["mainIndustriesIds"] == [17]
+    assert body["filters"]["companies"]["exclude"] == {"mainIndustriesIds": [5]}
+
+
+# ---------------------------------------------------------------------------
+# fetch_main_industries / resolve_industry_labels
+# ---------------------------------------------------------------------------
+
+_INDUSTRIES_RESPONSE = {
+    "values": [
+        {"main_industry": "Government", "main_industry_id": 10,
+         "sub_industries": [{"value": "Military", "id": 53}]},
+        {"main_industry": "Community & Nonprofit Organizations", "main_industry_id": 5,
+         "sub_industries": [{"value": "Fundraising", "id": 7}]},
+        {"main_industry": "Technology, Information & Media", "main_industry_id": 17,
+         "sub_industries": []},
+    ],
+}
+
+
+class _FakeGetResponse:
+    def __init__(self, payload):
+        self._payload = payload
+
+    def raise_for_status(self):
+        pass
+
+    def json(self):
+        return self._payload
+
+
+def test_fetch_main_industries_returns_values_list(monkeypatch):
+    monkeypatch.setattr(
+        app.requests, "get", lambda *a, **k: _FakeGetResponse(_INDUSTRIES_RESPONSE))
+    values = app.fetch_main_industries("key")
+    assert [v["main_industry_id"] for v in values] == [10, 5, 17]
+
+
+def test_resolve_industry_labels_maps_by_main_industry_id(monkeypatch):
+    monkeypatch.setattr(
+        app.requests, "get", lambda *a, **k: _FakeGetResponse(_INDUSTRIES_RESPONSE))
+    labels = app.resolve_industry_labels("key", [5, 10])
+    assert labels == {10: "Government", 5: "Community & Nonprofit Organizations"}
+
+
+def test_resolve_industry_labels_empty_on_error(monkeypatch):
+    def boom(*a, **k):
+        raise RuntimeError("network down")
+
+    monkeypatch.setattr(app.requests, "get", boom)
+    assert app.resolve_industry_labels("key", [5, 10]) == {}
+
+
 # ---------------------------------------------------------------------------
 # fetch_all_companies -- pagination / dedup / stopping conditions
 # ---------------------------------------------------------------------------
@@ -159,3 +226,73 @@ def test_fetch_all_companies_retries_on_rate_limit(monkeypatch):
 
     assert len(calls) == 2  # one 429, one success, same page retried
     assert [c["id"] for c in companies] == ["1"]
+
+
+# ---------------------------------------------------------------------------
+# fetch_companies_by_sector
+# ---------------------------------------------------------------------------
+
+_MAIN_INDUSTRIES = [
+    {"main_industry": "Technology, Information & Media", "main_industry_id": 17},
+    {"main_industry": "Finance", "main_industry_id": 9},
+]
+
+
+def test_fetch_companies_by_sector_labels_each_result(monkeypatch):
+    def fake_fetch_all_companies(key, *, location, size_bands, included_main_industry_ids=None,
+                                  excluded_industry_ids=None, progress_callback=None, stop_flag=None):
+        industry_id = included_main_industry_ids[0]
+        if industry_id == 17:
+            return [{"id": "1"}, {"id": "2"}], {"credits_charged": 2}
+        return [{"id": "3"}], {"credits_charged": 1}
+
+    monkeypatch.setattr(app, "fetch_all_companies", fake_fetch_all_companies)
+
+    companies, stats = app.fetch_companies_by_sector(
+        "key", location=_URUGUAY, size_bands=app.SIZE_BANDS, main_industries=_MAIN_INDUSTRIES)
+
+    by_id = {c["id"]: c for c in companies}
+    assert by_id["1"]["main_industry"] == "Technology, Information & Media"
+    assert by_id["1"]["main_industry_id"] == 17
+    assert by_id["3"]["main_industry"] == "Finance"
+    assert by_id["3"]["main_industry_id"] == 9
+    assert stats["credits_charged"] == 3
+    assert stats["companies_collected"] == 3
+    assert stats["per_industry"] == {17: 2, 9: 1}
+
+
+def test_fetch_companies_by_sector_dedupes_across_industries(monkeypatch):
+    # Same company id returned by two different industry loops (shouldn't
+    # normally happen -- Lusha assigns one main industry per company -- but
+    # must not be double-counted if it does).
+    def fake_fetch_all_companies(key, *, location, size_bands, included_main_industry_ids=None,
+                                  excluded_industry_ids=None, progress_callback=None, stop_flag=None):
+        return [{"id": "1"}], {"credits_charged": 1}
+
+    monkeypatch.setattr(app, "fetch_all_companies", fake_fetch_all_companies)
+
+    companies, stats = app.fetch_companies_by_sector(
+        "key", location=_URUGUAY, size_bands=app.SIZE_BANDS, main_industries=_MAIN_INDUSTRIES)
+
+    assert len(companies) == 1
+    assert stats["companies_collected"] == 1
+    # First industry to claim the id keeps it -- second loop's find is a dupe.
+    assert stats["per_industry"] == {17: 1, 9: 0}
+
+
+def test_fetch_companies_by_sector_calls_progress_callback(monkeypatch):
+    def fake_fetch_all_companies(key, *, location, size_bands, included_main_industry_ids=None,
+                                  excluded_industry_ids=None, progress_callback=None, stop_flag=None):
+        return [{"id": str(included_main_industry_ids[0])}], {"credits_charged": 1}
+
+    monkeypatch.setattr(app, "fetch_all_companies", fake_fetch_all_companies)
+
+    seen = []
+    app.fetch_companies_by_sector(
+        "key", location=_URUGUAY, size_bands=app.SIZE_BANDS, main_industries=_MAIN_INDUSTRIES,
+        progress_callback=lambda i, n, label, collected: seen.append((i, n, label, collected)),
+    )
+    assert seen == [
+        (0, 2, "Technology, Information & Media", 1),
+        (1, 2, "Finance", 2),
+    ]

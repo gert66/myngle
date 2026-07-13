@@ -113,22 +113,33 @@ def find_locations(key: str, query: str) -> list[dict]:
     return values if isinstance(values, list) else []
 
 
+def fetch_main_industries(key: str) -> list[dict]:
+    """Live list of Lusha's main industries, each with its
+    ``sub_industries``. Confirmed live shape (2026-07-13, 17 main
+    industries): ``{"main_industry": "Government", "main_industry_id": 10,
+    "sub_industries": [{"value": "Military", "id": 53}, ...]}``. Raises on
+    failure -- unlike ``resolve_industry_labels`` this feeds an actual
+    query, so a silent empty result would look identical to "no industries
+    excluded" and change what gets fetched without any error shown."""
+    resp = requests.get(
+        _BASE_URL + _INDUSTRY_LABELS_ENDPOINT, headers=_headers(key), timeout=_REQUEST_TIMEOUT)
+    resp.raise_for_status()
+    values = resp.json().get("values")
+    return values if isinstance(values, list) else []
+
+
 def resolve_industry_labels(key: str, ids: list[int]) -> dict[int, str]:
-    """Best-effort id -> label lookup for display only ("excluding:
-    Government, Community"). Returns a partial/empty dict rather than
-    raising on an unexpected response shape -- cosmetic, not required for
-    the actual prospecting query to work."""
+    """Best-effort main_industry_id -> main_industry label lookup for
+    display only ("excluding: Government, Community"). Returns a partial/
+    empty dict rather than raising on an unexpected response shape --
+    cosmetic, not required for the actual prospecting query to work."""
     try:
-        resp = requests.get(
-            _BASE_URL + _INDUSTRY_LABELS_ENDPOINT, headers=_headers(key), timeout=_REQUEST_TIMEOUT)
-        resp.raise_for_status()
-        values = resp.json().get("values")
-        out: dict[int, str] = {}
-        if isinstance(values, list):
-            for v in values:
-                if isinstance(v, dict) and v.get("id") in ids:
-                    out[v["id"]] = v.get("label") or v.get("name") or str(v.get("id"))
-        return out
+        values = fetch_main_industries(key)
+        return {
+            v["main_industry_id"]: v.get("main_industry", str(v["main_industry_id"]))
+            for v in values
+            if isinstance(v, dict) and v.get("main_industry_id") in ids
+        }
     except Exception:
         return {}
 
@@ -136,9 +147,19 @@ def resolve_industry_labels(key: str, ids: list[int]) -> dict[int, str]:
 def build_prospecting_request(
     *, location: dict, size_bands: list[dict], page: int,
     excluded_industry_ids: "list[int] | None" = None,
+    included_main_industry_ids: "list[int] | None" = None,
 ) -> dict:
     """One page of a companies/prospecting request body, in the shape of
-    the working curl templates this app replaces."""
+    the working curl templates this app replaces.
+
+    ``included_main_industry_ids`` and ``excluded_industry_ids`` are
+    mutually exclusive query strategies, not meant to be combined: pass
+    the exclude list to fetch everyone except a few industries (results
+    carry no industry label), or the include list to fetch exactly one/a
+    few industries at a time (see ``fetch_companies_by_sector`` -- the
+    result set has NO industry field either way, but a caller looping the
+    include filter one industry-id at a time already knows the label from
+    which call found it, for free, without a paid Enrich call)."""
     body: dict = {
         "pagination": {"page": page, "size": _PAGE_SIZE},
         "filters": {
@@ -150,11 +171,30 @@ def build_prospecting_request(
             },
         },
     }
+    if included_main_industry_ids:
+        body["filters"]["companies"]["include"]["mainIndustriesIds"] = list(included_main_industry_ids)
     if excluded_industry_ids:
         body["filters"]["companies"]["exclude"] = {
             "mainIndustriesIds": list(excluded_industry_ids),
         }
     return body
+
+
+def resolve_secret(secrets, key_name: str) -> str:
+    """``os.environ`` takes priority (explicit override), then a
+    Streamlit-``st.secrets``-like mapping (``.streamlit/secrets.toml``,
+    auto-loaded by Streamlit -- ``secrets`` may be ``None`` outside a
+    running app, or when no secrets.toml exists at all), else empty.
+    Never raises."""
+    value = os.environ.get(key_name, "")
+    if value:
+        return value
+    if secrets is None:
+        return ""
+    try:
+        return str(secrets.get(key_name, "") or "")
+    except Exception:
+        return ""
 
 
 def fetch_prospecting_page(key: str, body: dict) -> dict:
@@ -169,6 +209,7 @@ def fetch_prospecting_page(key: str, body: dict) -> dict:
 def fetch_all_companies(
     key: str, *, location: dict, size_bands: list[dict],
     excluded_industry_ids: "list[int] | None" = None,
+    included_main_industry_ids: "list[int] | None" = None,
     progress_callback=None, stop_flag=None,
 ) -> "tuple[list[dict], dict]":
     """Page through /v3/companies/prospecting until exhausted, using the
@@ -195,6 +236,7 @@ def fetch_all_companies(
         body = build_prospecting_request(
             location=location, size_bands=size_bands, page=page,
             excluded_industry_ids=excluded_industry_ids,
+            included_main_industry_ids=included_main_industry_ids,
         )
         try:
             data = fetch_prospecting_page(key, body)
@@ -233,6 +275,70 @@ def fetch_all_companies(
     return companies, stats
 
 
+def fetch_companies_by_sector(
+    key: str, *, location: dict, size_bands: list[dict],
+    main_industries: list[dict], progress_callback=None,
+) -> "tuple[list[dict], dict]":
+    """Fetch every company matching ``location``/``size_bands``, one main
+    industry at a time (``include.mainIndustriesIds=[id]`` per call rather
+    than the single ``exclude``-based call). Each result is annotated with
+    ``main_industry``/``main_industry_id`` from the loop iteration that
+    found it -- known for free, since we filtered for exactly that
+    industry, with no separate (paid) Enrich call needed.
+
+    Trade-off, by construction: a company Lusha has NOT tagged with ANY
+    main industry can never match an ``include.mainIndustriesIds`` filter,
+    so it is never returned by this function at all -- unlike the single
+    exclude-based call (``fetch_all_companies`` with
+    ``excluded_industry_ids``), which returns everyone regardless of
+    whether they have an industry label. Use ``fetch_all_companies`` first
+    and diff by id against this function's results if you need to find
+    that "no industry assigned" remainder too.
+
+    ``progress_callback(industry_index, industry_count, industry_label,
+    companies_collected_so_far)`` is called after each industry finishes.
+
+    Returns ``(companies, stats)`` where ``stats`` has
+    ``{"credits_charged", "companies_collected", "per_industry"}`` --
+    ``per_industry`` is ``{main_industry_id: company_count}``.
+    """
+    seen_ids: set = set()
+    companies: list[dict] = []
+    credits_charged = 0
+    per_industry: dict = {}
+
+    for i, industry in enumerate(main_industries):
+        industry_id = industry["main_industry_id"]
+        industry_label = industry.get("main_industry", str(industry_id))
+        batch, batch_stats = fetch_all_companies(
+            key, location=location, size_bands=size_bands,
+            included_main_industry_ids=[industry_id],
+        )
+        credits_charged += batch_stats["credits_charged"]
+        new_count = 0
+        for c in batch:
+            cid = c.get("id")
+            if cid is not None:
+                if cid in seen_ids:
+                    continue
+                seen_ids.add(cid)
+            c = dict(c)
+            c["main_industry"] = industry_label
+            c["main_industry_id"] = industry_id
+            companies.append(c)
+            new_count += 1
+        per_industry[industry_id] = new_count
+        if progress_callback is not None:
+            progress_callback(i, len(main_industries), industry_label, len(companies))
+
+    stats = {
+        "credits_charged": credits_charged,
+        "companies_collected": len(companies),
+        "per_industry": per_industry,
+    }
+    return companies, stats
+
+
 def main() -> None:  # pragma: no cover - exercised only under `streamlit run`
     import io
 
@@ -252,11 +358,12 @@ def main() -> None:  # pragma: no cover - exercised only under `streamlit run`
 
     with st.sidebar:
         st.header("API-key")
-        env_key = os.environ.get("LUSHA_API_KEY", "")
+        default_key = resolve_secret(getattr(st, "secrets", None), "LUSHA_API_KEY")
         api_key = st.text_input(
-            "Lusha API-key", value=env_key, type="password",
-            help="Standaard gevuld vanuit de omgevingsvariabele LUSHA_API_KEY "
-                 "als die gezet is; overschrijf hier voor een eenmalige sessie.",
+            "Lusha API-key", value=default_key, type="password",
+            help="Standaard gevuld vanuit de omgevingsvariabele LUSHA_API_KEY, "
+                 "anders .streamlit/secrets.toml; overschrijf hier voor een "
+                 "eenmalige sessie.",
         )
         if st.button("\U0001f4b3 Account & prijzen testen", disabled=not api_key):
             try:

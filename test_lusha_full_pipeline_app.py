@@ -140,6 +140,23 @@ def test_run_input_cleaning_does_not_reexclude_government_or_nonprofit():
     assert result["selected_df"]["domain"].tolist() == ["cityhall.gov.uy"]
 
 
+def test_run_input_cleaning_works_on_thin_sector_loop_records():
+    # fetch_companies_by_sector records only ever carry id/name/domain/
+    # main_industry -- no Description, no employees. Main Industry is
+    # already known (no blank-industry rows), so nothing is eligible for
+    # Haiku regardless of run_prescreen.
+    records = [
+        {"id": "1", "name": "ACME BV", "domain": "acme.com", "main_industry": "Finance"},
+        {"id": "2", "name": "Escuela Publica", "domain": "escuela.edu.uy", "main_industry": "Education"},
+    ]
+    df = app.lusha_sector_records_to_dataframe(records)
+    result = app.run_input_cleaning(df, run_prescreen=True, anthropic_key="unused")
+
+    assert result["prescreen_ran"] is False  # nothing eligible -- every row has a Main Industry
+    assert result["selected_df"]["domain"].tolist() == ["acme.com"]
+    assert result["funnel"]["Uitgesloten op industrie"] == 1
+
+
 def test_run_input_cleaning_raises_on_missing_required_columns():
     df = pd.DataFrame([{"foo": "bar"}])
     with pytest.raises(ValueError):

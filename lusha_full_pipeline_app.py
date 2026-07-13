@@ -1,22 +1,32 @@
 """
 lusha_full_pipeline_app.py
 ---------------------------
-End-to-end pipeline, one Streamlit app: Lusha Prospecting -> Lusha Enrich ->
-Input Cleaner · Lusha Edition (with optional Haiku prescreen) -> Cloud Run
+End-to-end pipeline, one Streamlit app: Lusha Prospecting (one main
+industry at a time) -> Input Cleaner · Lusha Edition curation -> Cloud Run
 Job -> (automatic) merge + Lovable export/upload into current/ -> country
 visibility in the Lovable Company Hub.
 
 This module does NOT reimplement any of those stages -- it imports and
 chains the existing, already-tested building blocks:
-  - lusha_prospecting_app: Prospecting search + pagination.
-  - (this file) enrich_companies / lusha_enrich_records_to_dataframe: the
-    one genuinely new piece -- Prospecting alone returns only id/name/domain,
-    which is not enough for the Input Cleaner's industry-exclusion rules or
-    the Haiku prescreen (both need Main Industry / Description). Enrich
-    fills that gap, at Enrich's own (higher) per-result credit cost.
+  - lusha_prospecting_app.fetch_companies_by_sector: fetches every main
+    industry (except Government/Community) as its own
+    ``include.mainIndustriesIds=[id]`` Prospecting call, so Main Industry is
+    known for free from which loop iteration found a company -- no paid
+    Enrich call needed for the Input Cleaner's industry-exclusion rules.
+    Trade-off, by construction: a company Lusha has NOT tagged with ANY
+    main industry can never match any of these calls, so it is silently
+    never fetched at all -- a deliberate, accepted gap (not a bug), since
+    finding it would require a separate broad exclude-only call that bills
+    every already-found company a second time. (this file) enrich_companies
+    / lusha_enrich_records_to_dataframe remain available as building blocks
+    for a future targeted Enrich pass over that leftover group, but are not
+    used by the pipeline below today.
   - input_cleaner_lusha_edition: dedupe -> industry exclusion -> hot list ->
     optional Haiku prescreen -> sort -> the same 4-sheet workbook a human
-    would produce with that standalone app.
+    would produce with that standalone app. In this sector-loop pipeline
+    every row already has a known Main Industry, so Haiku's prescreen
+    (which only looks at *unlabelled* rows) never finds anything to do --
+    that's expected here, not a bug.
   - cloud_run_streamlit_app: job submission (upload + execute, exactly the
     same gcloud-subprocess commands the manual dashboard uses) and the
     existing Autopilot machinery (finish_run_merge -> Lovable export ->
@@ -64,9 +74,12 @@ from lusha_prospecting_app import (
     _BASE_URL,
     _headers,
     fetch_all_companies,
+    fetch_companies_by_sector,
+    fetch_main_industries,
     find_locations,
     get_account_usage,
     resolve_industry_labels,
+    resolve_secret,
     size_band_label,
 )
 
@@ -127,6 +140,41 @@ def lusha_enrich_records_to_dataframe(records: list[dict]):
             "Company Country": location.get("country") or "",
             "Company linkedin URL": social.get("linkedin") or "",
             "Company Intent Topics": "",  # not present on Enrich responses
+            "_lusha_id": r.get("id") or "",
+        })
+    return pd.DataFrame(rows)
+
+
+def lusha_sector_records_to_dataframe(records: list[dict]):
+    """``fetch_companies_by_sector`` results -> the same Lusha "full
+    export"-style DataFrame shape ``lusha_enrich_records_to_dataframe``
+    produces, but from the much thinner sector-loop records (id, name,
+    domain, main_industry, main_industry_id -- no Description, no
+    employees, no sub-industry). Main Industry is already known for free
+    (the loop iteration that found each record), so no Enrich call is
+    needed for this data at all.
+
+    Trade-off: without a Description field, Haiku's prescreen
+    (``eligible_for_prescreen`` in ``input_cleaner_lusha_edition``) never
+    finds anything eligible here -- there is nothing for it to do, since
+    every row already carries a known Main Industry. That's expected, not
+    a bug: this dataframe only ever contains companies
+    ``fetch_companies_by_sector`` actually found, which by construction all
+    have an assigned sector."""
+    import pandas as pd
+
+    rows = []
+    for r in records:
+        rows.append({
+            "Company Name": r.get("name") or "",
+            "Company Domain": r.get("domain") or "",
+            "Company Description": "",
+            "Company Number of Employees": "",
+            "Company Main Industry": r.get("main_industry") or "",
+            "Company Sub Industry": "",
+            "Company Country": "",
+            "Company linkedin URL": "",
+            "Company Intent Topics": "",
             "_lusha_id": r.get("id") or "",
         })
     return pd.DataFrame(rows)
@@ -500,11 +548,12 @@ def main() -> None:  # pragma: no cover - exercised only under `streamlit run`
 
     with st.sidebar:
         st.header("API-keys")
+        secrets = getattr(st, "secrets", None)
         lusha_key = st.text_input(
-            "Lusha API-key", value=os.environ.get("LUSHA_API_KEY", ""), type="password")
+            "Lusha API-key", value=resolve_secret(secrets, "LUSHA_API_KEY"), type="password")
         anthropic_key = st.text_input(
             "Anthropic API-key (voor Haiku-prescreen)",
-            value=os.environ.get("ANTHROPIC_API_KEY", ""), type="password")
+            value=resolve_secret(secrets, "ANTHROPIC_API_KEY"), type="password")
 
         st.divider()
         st.header("1. Land")
@@ -547,8 +596,12 @@ def main() -> None:  # pragma: no cover - exercised only under `streamlit run`
         st.divider()
         st.header("4. Curatie")
         run_prescreen = st.checkbox(
-            "Haiku-prescreen (extra Enrich-kosten voor Description/Industrie)",
-            value=True, key="pl_run_prescreen",
+            "Haiku-prescreen", value=True, key="pl_run_prescreen",
+            help="In deze sector-per-sector opzet heeft elk opgehaald "
+                 "bedrijf al een bekende Main Industry, dus Haiku vindt hier "
+                 "normaliter niets te classificeren — dit vinkje is vooral "
+                 "toekomstbestendig voor als er ook een Enrich-stap voor de "
+                 "sectorloze restgroep wordt toegevoegd.",
         )
 
         st.divider()
@@ -588,19 +641,39 @@ def main() -> None:  # pragma: no cover - exercised only under `streamlit run`
         st.error("Minimaal één cold caller is verplicht.")
         return
 
-    # ── Stage 1: Prospecting ─────────────────────────────────────────────
-    st.subheader("1/5 — Lusha Prospecting")
+    # ── Stage 1: Prospecting, sector-voor-sector ──────────────────────────
+    # Elke sector wordt apart opgevraagd (include.mainIndustriesIds=[id])
+    # in plaats van één brede aanroep met een exclude-filter -- zo is de
+    # Main Industry al bekend uit welke lus een bedrijf vond, zonder een
+    # (veel duurdere) Enrich-aanroep. Bedrijven zonder ENIGE sector in
+    # Lusha's database worden hierdoor NOOIT opgehaald (er is geen "sector
+    # is leeg"-filter) -- een bewuste, geaccepteerde beperking, geen bug.
+    st.subheader("1/4 — Lusha Prospecting (per sector)")
+    with st.spinner("Sectorlijst ophalen…"):
+        try:
+            all_industries = fetch_main_industries(lusha_key)
+        except Exception as exc:
+            st.error(f"Kon sectorlijst niet ophalen: {exc}")
+            return
+    loop_industries = [
+        ind for ind in all_industries
+        if ind.get("main_industry_id") not in DEFAULT_EXCLUDED_INDUSTRY_IDS
+    ]
+    st.caption(
+        f"{len(loop_industries)} sectoren worden apart opgevraagd "
+        f"(overheid/community overgeslagen). Bedrijven zonder sector in "
+        "Lusha worden hierdoor niet opgehaald."
+    )
     prog1 = st.progress(0.0)
     status1 = st.empty()
 
-    def _prospect_progress(page, collected, total):
-        prog1.progress(min(1.0, collected / total) if total else 0.0)
-        status1.text(f"Pagina {page + 1} — {collected} van {total or '?'} bedrijven…")
+    def _sector_progress(i, n, label, collected):
+        prog1.progress((i + 1) / n if n else 0.0)
+        status1.text(f"Sector {i + 1}/{n} — {label} — {collected} bedrijven totaal…")
 
-    companies, prospect_stats = fetch_all_companies(
+    companies, prospect_stats = fetch_companies_by_sector(
         lusha_key, location=location, size_bands=chosen_bands,
-        excluded_industry_ids=DEFAULT_EXCLUDED_INDUSTRY_IDS,
-        progress_callback=_prospect_progress,
+        main_industries=loop_industries, progress_callback=_sector_progress,
     )
     st.success(
         f"{prospect_stats['companies_collected']} bedrijven opgehaald "
@@ -609,17 +682,10 @@ def main() -> None:  # pragma: no cover - exercised only under `streamlit run`
     if not companies:
         st.warning("Geen bedrijven gevonden voor deze filters — pipeline gestopt.")
         return
-
-    # ── Stage 1.5: Enrich ─────────────────────────────────────────────────
-    st.subheader("2/5 — Lusha Enrich (Industrie/Description voor curatie)")
-    ids = [c["id"] for c in companies if c.get("id")]
-    with st.spinner(f"{len(ids)} bedrijven verrijken…"):
-        enriched = enrich_companies(lusha_key, ids)
-    df = lusha_enrich_records_to_dataframe(enriched)
-    st.success(f"{len(df)} bedrijven verrijkt met firmografie.")
+    df = lusha_sector_records_to_dataframe(companies)
 
     # ── Stage 2: Input Cleaner · Lusha Edition ───────────────────────────
-    st.subheader("3/5 — Curatie (Input Cleaner · Lusha Edition)")
+    st.subheader("2/4 — Curatie (Input Cleaner · Lusha Edition)")
     prog2 = st.progress(0.0)
     status2 = st.empty()
 
@@ -647,7 +713,7 @@ def main() -> None:  # pragma: no cover - exercised only under `streamlit run`
     local_input.write_bytes(cleaning["excel_bytes"])
 
     # ── Stage 3: Cloud Run Job ───────────────────────────────────────────
-    st.subheader("4/5 — Cloud Run Job")
+    st.subheader("3/4 — Cloud Run Job")
     task_count = suggest_task_count(len(selected_df))
     with st.spinner("Uploaden en Cloud Run Job starten…"):
         submission = submit_cloud_run_job(
@@ -691,7 +757,7 @@ def main() -> None:  # pragma: no cover - exercised only under `streamlit run`
     st.success("Merge + Lovable-export + current/-upload voltooid.")
 
     # ── Stage 5: country visibility ──────────────────────────────────────
-    st.subheader("5/5 — Land zichtbaar maken")
+    st.subheader("4/4 — Land zichtbaar maken")
     diff = register_country_in_source(country_query.strip())
     if diff:
         st.warning(diff)
