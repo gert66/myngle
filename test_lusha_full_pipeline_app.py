@@ -96,6 +96,49 @@ def test_lusha_enrich_records_to_dataframe_handles_missing_optional_fields():
 
 
 # ---------------------------------------------------------------------------
+# lusha_prospecting_records_to_dataframe -- plain /companies/prospecting
+# results already carry employeeCount/industry/location for free (per the
+# full V3CompanyPreview schema, confirmed live 2026-07-13), unlike Lusha's
+# own truncated API-docs example.
+# ---------------------------------------------------------------------------
+
+def test_lusha_prospecting_records_to_dataframe_maps_fields():
+    records = [{
+        "id": "1", "name": "Movistar", "domain": "movistar.com.ar",
+        "employeeCount": {"exact": 10164, "min": 10001, "max": 100000},
+        "industry": "Technology, Information & Media",
+        "location": {"city": "Montevideo", "country": "Uruguay", "continent": "South America"},
+        "socialLinks": {"linkedin": "https://www.linkedin.com/company/movistar-ar"},
+    }]
+    df = app.lusha_prospecting_records_to_dataframe(records)
+    row = df.iloc[0]
+    assert row["Company Name"] == "Movistar"
+    assert row["Company Domain"] == "movistar.com.ar"
+    assert row["Company Number of Employees"] == 10164
+    assert row["Company Main Industry"] == "Technology, Information & Media"
+    assert row["Company Country"] == "Uruguay"
+    assert row["Company linkedin URL"] == "https://www.linkedin.com/company/movistar-ar"
+    # Not available on plain prospecting results -- requires Enrich.
+    assert row["Company Description"] == ""
+    assert row["Company Sub Industry"] == ""
+
+
+def test_lusha_prospecting_records_to_dataframe_falls_back_to_max_when_no_exact():
+    records = [{"id": "1", "name": "X", "domain": "x.com", "employeeCount": {"min": 51, "max": 200}}]
+    df = app.lusha_prospecting_records_to_dataframe(records)
+    assert df.iloc[0]["Company Number of Employees"] == 200
+
+
+def test_lusha_prospecting_records_to_dataframe_handles_missing_optional_fields():
+    records = [{"id": "1", "name": "X", "domain": "x.com"}]
+    df = app.lusha_prospecting_records_to_dataframe(records)
+    row = df.iloc[0]
+    assert row["Company Number of Employees"] == ""
+    assert row["Company Main Industry"] == ""
+    assert row["Company Country"] == ""
+
+
+# ---------------------------------------------------------------------------
 # run_input_cleaning
 # ---------------------------------------------------------------------------
 
@@ -140,20 +183,23 @@ def test_run_input_cleaning_does_not_reexclude_government_or_nonprofit():
     assert result["selected_df"]["domain"].tolist() == ["cityhall.gov.uy"]
 
 
-def test_run_input_cleaning_works_on_thin_sector_loop_records():
-    # fetch_companies_by_sector records only ever carry id/name/domain/
-    # main_industry -- no Description, no employees. Main Industry is
-    # already known (no blank-industry rows), so nothing is eligible for
-    # Haiku regardless of run_prescreen.
+def test_run_input_cleaning_works_on_plain_prospecting_records():
+    # Plain prospecting records carry industry/employeeCount but no
+    # Description -- Main Industry is already known (no blank-industry
+    # rows here), so nothing is eligible for Haiku regardless of
+    # run_prescreen.
     records = [
-        {"id": "1", "name": "ACME BV", "domain": "acme.com", "main_industry": "Finance"},
-        {"id": "2", "name": "Escuela Publica", "domain": "escuela.edu.uy", "main_industry": "Education"},
+        {"id": "1", "name": "ACME BV", "domain": "acme.com",
+         "employeeCount": {"exact": 500}, "industry": "Finance"},
+        {"id": "2", "name": "Escuela Publica", "domain": "escuela.edu.uy",
+         "employeeCount": {"exact": 60}, "industry": "Education"},
     ]
-    df = app.lusha_sector_records_to_dataframe(records)
+    df = app.lusha_prospecting_records_to_dataframe(records)
     result = app.run_input_cleaning(df, run_prescreen=True, anthropic_key="unused")
 
     assert result["prescreen_ran"] is False  # nothing eligible -- every row has a Main Industry
     assert result["selected_df"]["domain"].tolist() == ["acme.com"]
+    assert result["selected_df"]["Company Number of Employees"].tolist() == [500]
     assert result["funnel"]["Uitgesloten op industrie"] == 1
 
 

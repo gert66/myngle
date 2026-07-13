@@ -1,32 +1,36 @@
 """
 lusha_full_pipeline_app.py
 ---------------------------
-End-to-end pipeline, one Streamlit app: Lusha Prospecting (one main
-industry at a time) -> Input Cleaner · Lusha Edition curation -> Cloud Run
-Job -> (automatic) merge + Lovable export/upload into current/ -> country
-visibility in the Lovable Company Hub.
+End-to-end pipeline, one Streamlit app: Lusha Prospecting -> Input Cleaner
+· Lusha Edition curation -> Cloud Run Job -> (automatic) merge + Lovable
+export/upload into current/ -> country visibility in the Lovable Company
+Hub.
 
 This module does NOT reimplement any of those stages -- it imports and
 chains the existing, already-tested building blocks:
-  - lusha_prospecting_app.fetch_companies_by_sector: fetches every main
-    industry (except Government/Community) as its own
-    ``include.mainIndustriesIds=[id]`` Prospecting call, so Main Industry is
-    known for free from which loop iteration found a company -- no paid
-    Enrich call needed for the Input Cleaner's industry-exclusion rules.
-    Trade-off, by construction: a company Lusha has NOT tagged with ANY
-    main industry can never match any of these calls, so it is silently
-    never fetched at all -- a deliberate, accepted gap (not a bug), since
-    finding it would require a separate broad exclude-only call that bills
-    every already-found company a second time. (this file) enrich_companies
-    / lusha_enrich_records_to_dataframe remain available as building blocks
-    for a future targeted Enrich pass over that leftover group, but are not
-    used by the pipeline below today.
+  - lusha_prospecting_app.fetch_all_companies (a single, broad
+    exclude-based Prospecting call): despite Lusha's own API docs showing a
+    truncated example with only id/name/domain, the full response schema
+    -- confirmed live 2026-07-13 -- already includes employeeCount and
+    industry (Main Industry) on every result, at no extra cost. An earlier
+    version of this pipeline looped one Prospecting call per main industry
+    (lusha_prospecting_app.fetch_companies_by_sector/fetch_main_industries)
+    specifically to get Main Industry "for free" -- that turned out to be
+    unnecessary (industry was already free) and strictly worse (15x more
+    calls, and silently drops companies with no industry assigned at all).
+    Those functions remain available as building blocks (e.g. future
+    sub-industry-level work) but are no longer used here. Still NOT
+    included in plain Prospecting results (each result's own
+    "has"/"canReveal" list confirms this): Description and Sub Industry --
+    those still require a paid Enrich call; enrich_companies /
+    lusha_enrich_records_to_dataframe remain available for that, but are
+    not used by the pipeline below today.
   - input_cleaner_lusha_edition: dedupe -> industry exclusion -> hot list ->
     optional Haiku prescreen -> sort -> the same 4-sheet workbook a human
-    would produce with that standalone app. In this sector-loop pipeline
-    every row already has a known Main Industry, so Haiku's prescreen
-    (which only looks at *unlabelled* rows) never finds anything to do --
-    that's expected here, not a bug.
+    would produce with that standalone app. Without a Description field,
+    Haiku's prescreen (which only looks at unlabelled rows with a
+    description to judge) never finds anything eligible here -- expected,
+    not a bug, given the above.
   - cloud_run_streamlit_app: job submission (upload + execute, exactly the
     same gcloud-subprocess commands the manual dashboard uses) and the
     existing Autopilot machinery (finish_run_merge -> Lovable export ->
@@ -74,8 +78,6 @@ from lusha_prospecting_app import (
     _BASE_URL,
     _headers,
     fetch_all_companies,
-    fetch_companies_by_sector,
-    fetch_main_industries,
     find_locations,
     get_account_usage,
     resolve_industry_labels,
@@ -145,35 +147,43 @@ def lusha_enrich_records_to_dataframe(records: list[dict]):
     return pd.DataFrame(rows)
 
 
-def lusha_sector_records_to_dataframe(records: list[dict]):
-    """``fetch_companies_by_sector`` results -> the same Lusha "full
+def lusha_prospecting_records_to_dataframe(records: list[dict]):
+    """Plain ``/v3/companies/prospecting`` results -> the same Lusha "full
     export"-style DataFrame shape ``lusha_enrich_records_to_dataframe``
-    produces, but from the much thinner sector-loop records (id, name,
-    domain, main_industry, main_industry_id -- no Description, no
-    employees, no sub-industry). Main Industry is already known for free
-    (the loop iteration that found each record), so no Enrich call is
-    needed for this data at all.
+    produces.
 
-    Trade-off: without a Description field, Haiku's prescreen
-    (``eligible_for_prescreen`` in ``input_cleaner_lusha_edition``) never
-    finds anything eligible here -- there is nothing for it to do, since
-    every row already carries a known Main Industry. That's expected, not
-    a bug: this dataframe only ever contains companies
-    ``fetch_companies_by_sector`` actually found, which by construction all
-    have an assigned sector."""
+    IMPORTANT: despite Lusha's own API docs showing a truncated example
+    with only id/name/domain, the full ``V3CompanyPreview`` response schema
+    -- confirmed live 2026-07-13 -- already includes ``employeeCount``,
+    ``industry`` (Main Industry) and ``location`` on every prospecting
+    result, at NO extra cost. This makes ``fetch_companies_by_sector``'s
+    per-industry looping unnecessary for Main Industry/size specifically;
+    it is kept as a building block (e.g. for future sub-industry-level
+    work) but is no longer the default path here.
+
+    Still NOT included in plain prospecting results (see each result's own
+    ``"has"``/``"canReveal"`` list -- these require a paid Enrich call):
+    Description and Sub Industry. Left blank here, same as before -- Haiku
+    prescreen and the sub-industry-dependent exclusion rules (Education
+    exceptions, care-delivery) still can't do anything without a targeted
+    Enrich pass over this data."""
     import pandas as pd
 
     rows = []
     for r in records:
+        employee_count = r.get("employeeCount") or {}
+        location = r.get("location") or {}
+        social = r.get("socialLinks") or {}
         rows.append({
             "Company Name": r.get("name") or "",
             "Company Domain": r.get("domain") or "",
             "Company Description": "",
-            "Company Number of Employees": "",
-            "Company Main Industry": r.get("main_industry") or "",
+            "Company Number of Employees": employee_count.get("exact")
+                or employee_count.get("max") or employee_count.get("min") or "",
+            "Company Main Industry": r.get("industry") or "",
             "Company Sub Industry": "",
-            "Company Country": "",
-            "Company linkedin URL": "",
+            "Company Country": location.get("country") or "",
+            "Company linkedin URL": social.get("linkedin") or "",
             "Company Intent Topics": "",
             "_lusha_id": r.get("id") or "",
         })
@@ -648,32 +658,24 @@ def main() -> None:  # pragma: no cover - exercised only under `streamlit run`
     # (veel duurdere) Enrich-aanroep. Bedrijven zonder ENIGE sector in
     # Lusha's database worden hierdoor NOOIT opgehaald (er is geen "sector
     # is leeg"-filter) -- een bewuste, geaccepteerde beperking, geen bug.
-    st.subheader("1/4 — Lusha Prospecting (per sector)")
-    with st.spinner("Sectorlijst ophalen…"):
-        try:
-            all_industries = fetch_main_industries(lusha_key)
-        except Exception as exc:
-            st.error(f"Kon sectorlijst niet ophalen: {exc}")
-            return
-    loop_industries = [
-        ind for ind in all_industries
-        if ind.get("main_industry_id") not in DEFAULT_EXCLUDED_INDUSTRY_IDS
-    ]
+    st.subheader("1/4 — Lusha Prospecting")
     st.caption(
-        f"{len(loop_industries)} sectoren worden apart opgevraagd "
-        f"(overheid/community overgeslagen). Bedrijven zonder sector in "
-        "Lusha worden hierdoor niet opgehaald."
+        "Eén brede aanroep (overheid/community uitgesloten) -- "
+        "employeeCount en industry komen standaard mee in elk resultaat, "
+        "dus geen aparte sector-per-sector aanroepen of Enrich-stap nodig "
+        "voor bedrijfsgrootte/hoofdsector."
     )
     prog1 = st.progress(0.0)
     status1 = st.empty()
 
-    def _sector_progress(i, n, label, collected):
-        prog1.progress((i + 1) / n if n else 0.0)
-        status1.text(f"Sector {i + 1}/{n} — {label} — {collected} bedrijven totaal…")
+    def _prospect_progress(page, collected, total):
+        prog1.progress(min(1.0, collected / total) if total else 0.0)
+        status1.text(f"Pagina {page + 1} — {collected} van {total or '?'} bedrijven…")
 
-    companies, prospect_stats = fetch_companies_by_sector(
+    companies, prospect_stats = fetch_all_companies(
         lusha_key, location=location, size_bands=chosen_bands,
-        main_industries=loop_industries, progress_callback=_sector_progress,
+        excluded_industry_ids=DEFAULT_EXCLUDED_INDUSTRY_IDS,
+        progress_callback=_prospect_progress,
     )
     st.success(
         f"{prospect_stats['companies_collected']} bedrijven opgehaald "
@@ -682,7 +684,7 @@ def main() -> None:  # pragma: no cover - exercised only under `streamlit run`
     if not companies:
         st.warning("Geen bedrijven gevonden voor deze filters — pipeline gestopt.")
         return
-    df = lusha_sector_records_to_dataframe(companies)
+    df = lusha_prospecting_records_to_dataframe(companies)
 
     # ── Stage 2: Input Cleaner · Lusha Edition ───────────────────────────
     st.subheader("2/4 — Curatie (Input Cleaner · Lusha Edition)")
