@@ -488,31 +488,33 @@ def calibrate_intercept_and_k(
     hi_pct: float = 95.0, lo_pct: float = 5.0,
     max_companies: int = 300,
 ) -> "dict | None":
-    """Find the (intercept, sigmoid K) pair under which the loaded
+    """Find the (intercept, sigmoid K, offset) triple under which the loaded
     population's final-score distribution hits the requested spread: its
     ``hi_pct``-percentile company lands near ``target_hi`` (so the very top
     ranges 9–10) and its ``lo_pct``-percentile company near ``target_lo``.
 
-    ONLY the intercept and K move. Coefficients (signal weights), the
-    ICP/size blend, the sigmoid anchors and the offset are read from
-    ``params`` and left exactly as they are — this is the "tune K and
-    intercept, keep the signal weights" calibration, deliberately different
-    from ``auto_calibrate_sigmoid_anchors`` (which moves the anchors
-    instead). Any non-zero ``params["offset"]`` is folded into the internal
-    simulation (added to each candidate's final score, same as
-    ``score_company`` does) so the search still lands intercept+K on
-    whatever combination makes the *post-offset* p95/p5 hit the targets,
-    instead of overshooting by the offset amount.
+    Two-phase search. Phase 1 is the original intercept+K grid (offset held
+    at 0), so the model's own shape does the heavy lifting — coefficients
+    (signal weights), the ICP/size blend and the sigmoid anchors are read
+    from ``params`` and left exactly as they are; this is deliberately
+    different from ``auto_calibrate_sigmoid_anchors`` (which moves the
+    anchors instead). Phase 2 sweeps a flat offset on top of the winning
+    intercept/K to close whatever gap phase 1's grid resolution — or the
+    intercept/K sliders' own bounds — leave against the targets. Ties on
+    loss prefer the smallest ``|offset|``, so a clean intercept/K fit keeps
+    offset at 0 instead of drifting for no reason; offset only moves when
+    intercept/K genuinely can't reach the target on their own.
 
-    Deterministic grid search (intercept −3.0…1.0, K 1.0…25.0 — the UI
-    sliders' own ranges and step grids) with an intercept refinement pass
-    around the best coarse hit; on ties the lower (gentler) K wins. Large
-    populations are thinned to ``max_companies`` evenly-spaced companies
-    over the signal-sum ranking, so the search stays fast and reproducible.
+    Deterministic grid search (intercept −3.0…1.0, K 1.0…25.0, offset
+    −3.0…3.0 — the UI sliders' own ranges and step grids) with a refinement
+    pass around each coarse optimum; on intercept/K ties the lower (gentler)
+    K wins. Large populations are thinned to ``max_companies`` evenly-spaced
+    companies over the signal-sum ranking, so the search stays fast and
+    reproducible.
 
-    Returns ``{"intercept", "sigmoid_k", "achieved_hi", "achieved_lo",
-    "achieved_median", "n_companies_used", ...}`` or ``None`` when fewer
-    than 2 scorable companies are available."""
+    Returns ``{"intercept", "sigmoid_k", "offset", "achieved_hi",
+    "achieved_lo", "achieved_median", "n_companies_used", ...}`` or
+    ``None`` when fewer than 2 scorable companies are available."""
     features = collect_calibration_features(details_by_id, params)
     if len(features) < 2:
         return None
@@ -525,9 +527,8 @@ def calibrate_intercept_and_k(
     p_hi_anchor = float(params.get("sigmoid_p_hi", _SIGMOID_P_HI))
     w_model = float(params.get("model_weight", ICP_SIMILARITY_WEIGHT))
     w_size = float(params.get("size_weight", COMPANY_SIZE_WEIGHT))
-    offset = float(params.get("offset", SCORE_OFFSET))
 
-    def _evaluate(intercept: float, k: float):
+    def _evaluate(intercept: float, k: float, offset: float = 0.0):
         s_min = 1.0 / (1.0 + math.exp(-k * (p_lo_anchor - 0.5)))
         s_max = 1.0 / (1.0 + math.exp(-k * (p_hi_anchor - 0.5)))
         denom = s_max - s_min if abs(s_max - s_min) > 1e-9 else 1.0
@@ -570,9 +571,33 @@ def calibrate_intercept_and_k(
                 best = candidate
 
     loss, k, intercept, hi, lo, med = best
+
+    # ── Phase 2: fine offset sweep on top of the winning intercept/K ────────
+    # hi/lo/med here still hold the offset == 0 result from phase 1.
+    offset_grid = [round(-3.0 + 0.05 * i, 2) for i in range(121)]  # −3.0 … 3.0
+    best_offset, best_scored = 0.0, (loss, 0.0)
+    for candidate_offset in offset_grid:
+        o_loss, o_hi, o_lo, o_med = _evaluate(intercept, k, candidate_offset)
+        scored = (o_loss, abs(candidate_offset))
+        if scored < best_scored:
+            best_offset, best_scored = candidate_offset, scored
+            hi, lo, med = o_hi, o_lo, o_med
+    # Local refinement (slider step 0.05, so ±2 steps at 0.01 resolution).
+    for i in range(-5, 6):
+        candidate_offset = round(best_offset + 0.01 * i, 2)
+        if not (-3.0 <= candidate_offset <= 3.0):
+            continue
+        o_loss, o_hi, o_lo, o_med = _evaluate(intercept, k, candidate_offset)
+        scored = (o_loss, abs(candidate_offset))
+        if scored < best_scored:
+            best_offset, best_scored = candidate_offset, scored
+            hi, lo, med = o_hi, o_lo, o_med
+    loss = best_scored[0]
+
     return {
         "intercept": intercept,
         "sigmoid_k": k,
+        "offset": best_offset,
         "achieved_hi": round(hi, 2),
         "achieved_lo": round(lo, 2),
         "achieved_median": round(med, 2),
@@ -629,9 +654,11 @@ def score_percentile_summary_dataframe(
 
 def top_companies_dataframe(
     original_by_id: dict, rescored_by_id: dict, top_n: int = 25,
+    ascending: bool = False,
 ) -> pd.DataFrame:
-    """The best companies under the NEW scoring, ranked high → low — the
-    direct answer to "do our top companies now score close to 10?". Same
+    """The best (or, with ``ascending=True``, the worst) companies under the
+    NEW scoring — the direct answer to "do our top companies now score
+    close to 10?" (or, in reverse, "how bad does the bottom get?"). Same
     columns as ``biggest_movers_dataframe`` plus a rank."""
     rows = []
     for cid, new_detail in rescored_by_id.items():
@@ -652,7 +679,7 @@ def top_companies_dataframe(
     df = pd.DataFrame(rows)
     if df.empty:
         return df
-    df = df.sort_values("score_nieuw", ascending=False).head(top_n)
+    df = df.sort_values("score_nieuw", ascending=ascending).head(top_n)
     df.insert(0, "rang", range(1, len(df) + 1))
     return df.reset_index(drop=True)
 
@@ -1139,19 +1166,21 @@ def main() -> None:  # pragma: no cover - exercised only under `streamlit run`
                 help="Dichter bij 0 = symmetrischer verdeling.",
             )
 
-            st.subheader("🎯 Auto-kalibratie: K + intercept")
+            st.subheader("🎯 Auto-kalibratie: K + intercept + offset")
             st.caption(
-                "Zoekt de intercept en sigmoid-K waarbij de geladen verdeling "
-                "de gewenste spreiding krijgt: het p95-bedrijf op het doel "
-                "voor de top (de echte top loopt dan door tot ~10) en het "
-                "p5-bedrijf op het doel voor de onderkant. "
+                "Zoekt de intercept, sigmoid-K en offset waarbij de geladen "
+                "verdeling de gewenste spreiding krijgt: het p95-bedrijf op "
+                "het doel voor de top (de echte top loopt dan door tot ~10) "
+                "en het p5-bedrijf op het doel voor de onderkant. "
                 "**Signaalgewichten, ICP/grootte-blend en ankers blijven "
-                "onaangeroerd** — alleen K en intercept bewegen, tenzij je "
-                "hieronder bewust de foreign-HQ-herverdeling aanvinkt. Staat "
-                "er op de tab 'Coëfficiënten' een offset ingesteld, dan houdt "
-                "de kalibratie daar rekening mee: intercept + K worden zo "
-                "gekozen dat p95/p5 **na** die offset alsnog op de doelen "
-                "uitkomen."
+                "onaangeroerd** — behalve als je hieronder bewust de "
+                "foreign-HQ-herverdeling aanvinkt. Eerst worden intercept en "
+                "K gezocht (offset op 0); daarna schuift een fijne "
+                "offset-correctie de uitkomst nog net iets dichter naar de "
+                "doelen — bij een even goede uitkomst kiest hij de kleinste "
+                "offset, dus offset beweegt alleen als intercept/K er zelf "
+                "niet uitkomen. Overschrijft de huidige offset-slider op de "
+                "tab 'Coëfficiënten'."
             )
             t1, t2 = st.columns(2)
             with t1:
@@ -1173,12 +1202,12 @@ def main() -> None:  # pragma: no cover - exercised only under `streamlit run`
                      "herverdeelde set — eigen slider-aanpassingen op de "
                      "coëfficiënten-tab gaan daarbij verloren.",
             )
-            if st.button("🎯 Auto-kalibreer K + intercept", type="primary",
+            if st.button("🎯 Auto-kalibreer K + intercept + offset", type="primary",
                          key="calibrate_k_intercept_btn"):
                 calib_params = dict(params)
                 if rebalance_hq:
                     calib_params["coefficients"] = dict(FOREIGN_HQ_REBALANCED_COEFFICIENTS)
-                with st.spinner("Beste intercept + K zoeken…"):
+                with st.spinner("Beste intercept + K + offset zoeken…"):
                     calib = calibrate_intercept_and_k(
                         all_details_by_id, calib_params,
                         target_hi=calib_target_hi, target_lo=calib_target_lo)
@@ -1191,10 +1220,12 @@ def main() -> None:  # pragma: no cover - exercised only under `streamlit run`
                         "params": {
                             "intercept": calib["intercept"],
                             "sigmoid_k": calib["sigmoid_k"],
+                            "offset": calib["offset"],
                         },
                         "widgets": {
                             "intercept_slider": calib["intercept"],
                             "k_slider": calib["sigmoid_k"],
+                            "offset_slider": calib["offset"],
                         },
                     }
                     if rebalance_hq:
@@ -1212,7 +1243,8 @@ def main() -> None:  # pragma: no cover - exercised only under `streamlit run`
             if _last_calib:
                 st.success(
                     f"Laatste kalibratie: intercept **{_last_calib['intercept']:+.2f}**, "
-                    f"K **{_last_calib['sigmoid_k']:g}** — bereikt: "
+                    f"K **{_last_calib['sigmoid_k']:g}**, "
+                    f"offset **{_last_calib['offset']:+.2f}** — bereikt: "
                     f"p95 ≈ {_last_calib['achieved_hi']}, "
                     f"p5 ≈ {_last_calib['achieved_lo']}, "
                     f"mediaan ≈ {_last_calib['achieved_median']} "
@@ -1243,6 +1275,14 @@ def main() -> None:  # pragma: no cover - exercised only under `streamlit run`
                 st.info("Geen bedrijven met een score.")
             else:
                 st.dataframe(top_df, use_container_width=True, hide_index=True)
+
+            st.subheader("Laagste-scorende bedrijven (nieuw, laag → hoog)")
+            bottom_df = top_companies_dataframe(
+                original_by_id, rescored_by_id, ascending=True)
+            if bottom_df.empty:
+                st.info("Geen bedrijven met een score.")
+            else:
+                st.dataframe(bottom_df, use_container_width=True, hide_index=True)
 
             coverage = size_coverage_summary(all_details_by_id)
             if coverage["n_total"]:
