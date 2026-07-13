@@ -1148,7 +1148,7 @@ def main() -> None:  # pragma: no cover - exercised only under `streamlit run`
                     value=CALIBRATION_TARGET_HI, step=0.1, key="calib_target_hi")
             with t2:
                 calib_target_lo = st.number_input(
-                    "Doel-score onderkant (p5)", min_value=1.0, max_value=6.0,
+                    "Doel-score onderkant (p5)", min_value=1.0, max_value=8.5,
                     value=CALIBRATION_TARGET_LO, step=0.1, key="calib_target_lo")
             rebalance_hq = st.checkbox(
                 "Foreign-HQ-gewicht licht verlagen (0.7465 → 0.65; de vijf "
