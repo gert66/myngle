@@ -41,6 +41,7 @@ from commercial_fit_scoring import (
     ICP_SIMILARITY_WEIGHT,
     INTERCEPT,
     LEAN_COEFFICIENTS,
+    SCORE_OFFSET,
     SIGMOID_K,
     SIZE_BAND_LOOKUP,
     TIER_THRESHOLDS,
@@ -167,6 +168,7 @@ def default_params() -> dict:
     before any slider is touched."""
     return {
         "intercept": INTERCEPT,
+        "offset": SCORE_OFFSET,
         "coefficients": dict(LEAN_COEFFICIENTS),
         "model_weight": ICP_SIMILARITY_WEIGHT,
         "size_weight": COMPANY_SIZE_WEIGHT,
@@ -492,10 +494,15 @@ def calibrate_intercept_and_k(
     ranges 9–10) and its ``lo_pct``-percentile company near ``target_lo``.
 
     ONLY the intercept and K move. Coefficients (signal weights), the
-    ICP/size blend and the sigmoid anchors are read from ``params`` and
-    left exactly as they are — this is the "tune K and intercept, keep the
-    signal weights" calibration, deliberately different from
-    ``auto_calibrate_sigmoid_anchors`` (which moves the anchors instead).
+    ICP/size blend, the sigmoid anchors and the offset are read from
+    ``params`` and left exactly as they are — this is the "tune K and
+    intercept, keep the signal weights" calibration, deliberately different
+    from ``auto_calibrate_sigmoid_anchors`` (which moves the anchors
+    instead). Any non-zero ``params["offset"]`` is folded into the internal
+    simulation (added to each candidate's final score, same as
+    ``score_company`` does) so the search still lands intercept+K on
+    whatever combination makes the *post-offset* p95/p5 hit the targets,
+    instead of overshooting by the offset amount.
 
     Deterministic grid search (intercept −3.0…1.0, K 1.0…25.0 — the UI
     sliders' own ranges and step grids) with an intercept refinement pass
@@ -518,6 +525,7 @@ def calibrate_intercept_and_k(
     p_hi_anchor = float(params.get("sigmoid_p_hi", _SIGMOID_P_HI))
     w_model = float(params.get("model_weight", ICP_SIMILARITY_WEIGHT))
     w_size = float(params.get("size_weight", COMPANY_SIZE_WEIGHT))
+    offset = float(params.get("offset", SCORE_OFFSET))
 
     def _evaluate(intercept: float, k: float):
         s_min = 1.0 / (1.0 + math.exp(-k * (p_lo_anchor - 0.5)))
@@ -529,7 +537,7 @@ def calibrate_intercept_and_k(
             p = 1.0 / (1.0 + math.exp(-z))
             s = 1.0 / (1.0 + math.exp(-k * (p - 0.5)))
             icp = max(1.0, min(10.0, 1.0 + 9.0 * (s - s_min) / denom))
-            finals.append(max(1.0, min(10.0, w_model * icp + w_size * size_score)))
+            finals.append(max(1.0, min(10.0, w_model * icp + w_size * size_score + offset)))
         finals.sort()
         hi = _percentile_from_sorted(finals, hi_pct)
         lo = _percentile_from_sorted(finals, lo_pct)
@@ -930,7 +938,7 @@ def main() -> None:  # pragma: no cover - exercised only under `streamlit run`
     # suggestion, reset) therefore queue their updates here and st.rerun();
     # this block applies them at the top of the next run.
     _WIDGET_KEYS = (
-        ["intercept_slider", "k_slider", "model_weight_slider",
+        ["intercept_slider", "offset_slider", "k_slider", "model_weight_slider",
          "tier_hot", "tier_warm", "tier_cool"]
         + [f"coef_{field}" for field in LEAN_COEFFICIENTS]
     )
@@ -1139,7 +1147,11 @@ def main() -> None:  # pragma: no cover - exercised only under `streamlit run`
                 "p5-bedrijf op het doel voor de onderkant. "
                 "**Signaalgewichten, ICP/grootte-blend en ankers blijven "
                 "onaangeroerd** — alleen K en intercept bewegen, tenzij je "
-                "hieronder bewust de foreign-HQ-herverdeling aanvinkt."
+                "hieronder bewust de foreign-HQ-herverdeling aanvinkt. Staat "
+                "er op de tab 'Coëfficiënten' een offset ingesteld, dan houdt "
+                "de kalibratie daar rekening mee: intercept + K worden zo "
+                "gekozen dat p95/p5 **na** die offset alsnog op de doelen "
+                "uitkomen."
             )
             t1, t2 = st.columns(2)
             with t1:
@@ -1271,6 +1283,14 @@ def main() -> None:  # pragma: no cover - exercised only under `streamlit run`
             value=float(params["intercept"]), step=0.01, key="intercept_slider",
             help="Basiswaarde van de log-odds vóór enig signaal wordt meegeteld.",
         )
+        params["offset"] = st.slider(
+            "Offset (schuift de eindscore direct op/neer)", min_value=-3.0, max_value=3.0,
+            value=float(params["offset"]), step=0.05, key="offset_slider",
+            help="Anders dan de intercept — die de onderliggende kans vóór de "
+                 "sigmoid bijstelt — telt de offset rechtstreeks bij de "
+                 "eindscore (1–10) op, ná de ICP/grootte-blend en vóór de "
+                 "1–10-afkap en de tier-indeling. 0 = geen verschuiving.",
+        )
         new_coeffs = {}
         for field, default_val in LEAN_COEFFICIENTS.items():
             current_val = params["coefficients"].get(field, default_val)
@@ -1289,7 +1309,8 @@ def main() -> None:  # pragma: no cover - exercised only under `streamlit run`
         _defaults = default_params()
         with st.expander("🔍 Origineel vs. actueel", expanded=False):
             render_param_diff_table(
-                [("intercept", _defaults["intercept"], float(params["intercept"]))]
+                [("intercept", _defaults["intercept"], float(params["intercept"])),
+                 ("offset", _defaults["offset"], float(params["offset"]))]
                 + [
                     (field, _defaults["coefficients"][field],
                      float(params["coefficients"].get(field, _defaults["coefficients"][field])))

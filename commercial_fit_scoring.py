@@ -55,6 +55,13 @@ _warnings.simplefilter("ignore", _PerformanceWarning)
 #: LR intercept.
 INTERCEPT: float = -0.35
 
+#: Flat post-blend score shift (added to the 1-10 final score, before the
+#: 1-10 clamp, then tier thresholds are evaluated against the shifted
+#: score). Unlike INTERCEPT — which nudges the underlying model probability
+#: and gets compressed/stretched by the sigmoid — this is a direct, linear
+#: "move every score up/down by X" lever. 0.0 = no shift.
+SCORE_OFFSET: float = 0.0
+
 #: Coefficients applied to normalised signals (clamp(v, 0, 3) / 3).
 #: IMPORTANT: uses sig_employer_branding_score — NOT sig_merger_acq_score.
 LEAN_COEFFICIENTS: dict[str, float] = {
@@ -291,6 +298,7 @@ SCORE_OUTPUT_COLS: list[str] = [
     "size_weight",
     "weighted_model_component",
     "weighted_size_component",
+    "score_offset_applied",
     # ── Composite profile scores (display-only) ───────────────────────────────
     "global_complexity_score",
     "people_development_score",
@@ -546,6 +554,7 @@ def score_company(
     _sig_k       = float(p.get("sigmoid_k",    _profile["sigmoid_k"]))
     _p_lo        = float(p.get("sigmoid_p_lo", _profile.get("sigmoid_p_lo", _SIGMOID_P_LO)))
     _p_hi        = float(p.get("sigmoid_p_hi", _profile.get("sigmoid_p_hi", _SIGMOID_P_HI)))
+    offset       = float(p.get("offset", SCORE_OFFSET))
 
     if isinstance(row, pd.Series):
         row = row.to_dict()
@@ -632,7 +641,7 @@ def score_company(
     # ── 5. Blend — profile-controlled weights ────────────────────────────────
     w_model = _model_w * icp_sim
     w_size  = _size_w  * size_score
-    final   = _clamp(w_model + w_size, 1.0, 10.0)
+    final   = _clamp(w_model + w_size + offset, 1.0, 10.0)
     # Legacy 75/25 formula — kept for ranking-impact audit (default profile only).
     _legacy_final = _clamp(
         _LEGACY_MODEL_WEIGHT * icp_sim + _LEGACY_SIZE_WEIGHT * size_score,
@@ -685,6 +694,7 @@ def score_company(
     elif manual_rev:
         notes.append("Flagged for manual review; score reliability is reduced.")
 
+    _offset_suffix = f" + offset {offset:+.2f}" if offset != 0.0 else ""
     if _profile_name == "italy_register_icp_only":
         notes.append(
             f"Final score = ICP signal only (Italy register profile, size excluded). "
@@ -696,7 +706,7 @@ def score_company(
             f"Final score = {round(_model_w*100):.0f}% ICP signal similarity + "
             f"{round(_size_w*100):.0f}% company size "
             f"({round(icp_sim, 2)} × {_model_w} + {round(size_score, 2)} × {_size_w}"
-            f" = {round(final, 2)}/10)."
+            f"{_offset_suffix} = {round(final, 2)}/10)."
         )
 
     # ── Assemble result ───────────────────────────────────────────────────────
@@ -726,6 +736,7 @@ def score_company(
         "size_weight":               _size_w,
         "weighted_model_component":  round(w_model, 4),
         "weighted_size_component":   round(w_size, 4),
+        "score_offset_applied":      offset,
         "scoring_profile":           _profile_name,
         # Composite
         "global_complexity_score":     global_complexity,
