@@ -737,12 +737,17 @@ def suggest_tier_thresholds(
 
 def build_multi_country_preview(
     current_by_country: dict[str, dict], params: dict, *, now_iso: str,
+    apply_c5_upgrade: bool = False,
 ) -> dict:
     """Re-score every already-loaded country's companies against the same
     ``params``, purely in memory — no download, no upload. Returns
     ``{"original_by_id", "rescored_by_id"}`` with ids prefixed
     ``"<country_folder>:<company_id>"`` so companies from different
     countries never collide in the aggregated preview.
+
+    ``apply_c5_upgrade`` is passed straight through to
+    ``rescore_details_bucket``/``rescore_detail_record`` — see
+    ``apply_c5_foreign_hq_upgrade``.
 
     Upload always stays per-country (via ``build_rescored_run`` +
     ``upload_rescored_run`` on one country's own unprefixed ids) — this
@@ -751,7 +756,8 @@ def build_multi_country_preview(
     rescored_by_id: dict = {}
     for country, current in current_by_country.items():
         rescored_by_file = {
-            filename: rescore_details_bucket(bucket_dict, params, now_iso=now_iso)
+            filename: rescore_details_bucket(
+                bucket_dict, params, now_iso=now_iso, apply_c5_upgrade=apply_c5_upgrade)
             for filename, bucket_dict in current["detail_files"].items()
         }
         for bucket_dict in current["detail_files"].values():
@@ -765,6 +771,7 @@ def build_multi_country_preview(
 
 def build_multi_country_rescored_runs(
     current_by_country: dict[str, dict], params: dict, *, run_folder: str, now_iso: str,
+    apply_c5_upgrade: bool = False,
 ) -> dict[str, dict]:
     """Re-score every already-loaded country against the same ``params`` and
     target ``run_folder``, purely in memory. Unlike ``build_multi_country_preview``
@@ -781,6 +788,7 @@ def build_multi_country_rescored_runs(
     return {
         country: build_rescored_run(
             current, params, country_folder=country, run_folder=run_folder, now_iso=now_iso,
+            apply_c5_upgrade=apply_c5_upgrade,
         )
         for country, current in current_by_country.items()
     }
@@ -1063,7 +1071,24 @@ def main() -> None:  # pragma: no cover - exercised only under `streamlit run`
             st.success(f"{len(loaded)} landen geladen, {n_total} bedrijven totaal.")
 
         st.divider()
-        st.header("3. Preview-instellingen")
+        st.header("3. C5-adjudicatie")
+        apply_c5_upgrade = st.checkbox(
+            "C5-bevestigde buitenlandse HQ meetellen in de score",
+            value=False, key="apply_c5_upgrade_cb",
+            help="Een bedrijf waarvoor C5 (de Sonnet HQ-adjudicatie) een "
+                 "buitenlandse moeder heeft bevestigd (High/Medium "
+                 "confidence), maar waarvan het scoring-signaal "
+                 "sig_foreign_hq_score nog leeg/0 staat — bijvoorbeeld omdat "
+                 "de automatische detectie het miste — krijgt dat signaal "
+                 "hiermee alsnog op 3 gezet vóór het herscoren. Zonder dit "
+                 "vinkje blijft een C5-bevestiging puur ter review staan en "
+                 "telt hij niet mee (bewuste 'mens controleert eerst'-grens "
+                 "uit apply_c5_foreign_hq_upgrade). Bedrijven met een al "
+                 "ingevuld sig_foreign_hq_score worden nooit overschreven.",
+        )
+
+        st.divider()
+        st.header("4. Preview-instellingen")
         fast_preview = st.checkbox(
             "⚡ Snelle preview (percentiel-steekproef)", value=True,
             key="fast_preview_cb",
@@ -1117,6 +1142,7 @@ def main() -> None:  # pragma: no cover - exercised only under `streamlit run`
             country_folder=st.session_state.get("_current_country", ""),
             run_folder="preview",
             now_iso=_now_iso,
+            apply_c5_upgrade=apply_c5_upgrade,
         )
         original_by_id = {
             cid: d for b in preview_current["detail_files"].values() for cid, d in b.items()}
@@ -1165,6 +1191,31 @@ def main() -> None:  # pragma: no cover - exercised only under `streamlit run`
                 delta_color="inverse",
                 help="Dichter bij 0 = symmetrischer verdeling.",
             )
+
+            n_c5_upgraded = sum(
+                1 for d in rescored_by_id.values() if d.get("c5_upgrade_applied"))
+            if apply_c5_upgrade:
+                if n_c5_upgraded:
+                    st.info(
+                        f"🇰🇷 C5-upgrade actief: {n_c5_upgraded} bedrijf/bedrijven "
+                        "kregen alsnog sig_foreign_hq_score = 3 omdat C5 een "
+                        "buitenlandse moeder bevestigde (High/Medium) terwijl "
+                        "het scoring-signaal nog leeg stond — hun score "
+                        "hierboven is al mét die correctie."
+                    )
+                else:
+                    st.caption(
+                        "C5-upgrade staat aan, maar geen enkel bedrijf in deze "
+                        "preview kwam ervoor in aanmerking (geen C5-bevestiging "
+                        "zonder al ingevuld sig_foreign_hq_score)."
+                    )
+            elif any(d.get("c5_adjudication") == "foreign_parent_confirmed" for d in all_details_by_id.values()):
+                st.caption(
+                    "ℹ️ Er staan C5-bevestigde buitenlandse HQ's in dit land "
+                    "die nog niet meetellen in de score — zet 'C5-bevestigde "
+                    "buitenlandse HQ meetellen' aan in de zijbalk om ze mee "
+                    "te nemen."
+                )
 
             st.subheader("🎯 Auto-kalibratie: K + intercept + offset")
             st.caption(
@@ -1682,7 +1733,9 @@ def main() -> None:  # pragma: no cover - exercised only under `streamlit run`
                 )
             else:
                 preview_source = all_countries_current
-            preview = build_multi_country_preview(preview_source, params, now_iso=_now_iso_all)
+            preview = build_multi_country_preview(
+                preview_source, params, now_iso=_now_iso_all,
+                apply_c5_upgrade=apply_c5_upgrade)
             p_original = preview["original_by_id"]
             p_rescored = preview["rescored_by_id"]
             summary_df = multi_country_summary_dataframe(p_original, p_rescored)
@@ -1734,6 +1787,7 @@ def main() -> None:  # pragma: no cover - exercised only under `streamlit run`
                 per_country_runs = build_multi_country_rescored_runs(
                     all_countries_current, params,
                     run_folder=all_run_folder, now_iso=_now_iso_upload,
+                    apply_c5_upgrade=apply_c5_upgrade,
                 )
                 progress = st.progress(0.0)
                 result_rows = []
@@ -1827,6 +1881,7 @@ def main() -> None:  # pragma: no cover - exercised only under `streamlit run`
                             country_folder=country_folder,
                             run_folder=run_folder,
                             now_iso=_now_iso_up,
+                            apply_c5_upgrade=apply_c5_upgrade,
                         )
                     manifest = full_run["manifest"]
                     u1, u2 = st.columns(2)
