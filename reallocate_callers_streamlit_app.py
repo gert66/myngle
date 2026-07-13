@@ -288,6 +288,45 @@ def main() -> None:  # pragma: no cover - exercised only under `streamlit run`
             "in a different unit; they all operate on the same underlying "
             "ranking. On overlap, the last caller in the list above wins."
         )
+
+        top_n_key = f"_top_n::{country_folder}"
+        col_topn, col_autosplit = st.columns([3, 1])
+        top_n = col_topn.number_input(
+            "Quick setup — top N to distribute (the rest is left unassigned "
+            "and hidden from every caller)",
+            min_value=1, max_value=total_companies,
+            value=min(int(st.session_state.get(top_n_key, total_companies)), total_companies),
+            key=top_n_key,
+            help="E.g. with 3 callers and top N = 300, 'Auto-split evenly' "
+                 "below gives each caller a contiguous block of 100 "
+                 "(rank 1-100, 101-200, 201-300). Anyone ranked below 300 "
+                 "falls outside every range and stays hidden from all "
+                 "callers.",
+        )
+        col_autosplit.write("")  # vertical spacer to align the button with the input
+        col_autosplit.write("")
+        if col_autosplit.button(
+            "🔀 Auto-split evenly",
+            help="Overwrites every caller's range below with equal, "
+                 "contiguous blocks over rank 1–{}.".format(top_n),
+        ):
+            settings = default_range_settings(new_callers, top_n)
+            st.session_state[settings_key] = settings
+            # The per-caller widgets below hold their own session_state under
+            # these keys, which otherwise win over `settings` on rerun (a
+            # widget's `value=`/`index=` is only honored on its first render)
+            # — clear them so the sliders actually pick up the new split.
+            for caller in new_callers:
+                for widget_key in (
+                    f"_range_mode::{country_folder}::{caller}",
+                    f"_range_count::{country_folder}::{caller}",
+                    f"_range_pct::{country_folder}::{caller}",
+                    f"_range_cohort_size::{country_folder}::{caller}",
+                    f"_range_cohort_idx::{country_folder}::{caller}",
+                ):
+                    st.session_state.pop(widget_key, None)
+            st.rerun()
+
         for caller in new_callers:
             cfg = settings.setdefault(
                 caller, {"mode": "count", "start": 1, "end": total_companies, "cohort_size": 100})
