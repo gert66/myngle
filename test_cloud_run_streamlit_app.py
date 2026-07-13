@@ -19,6 +19,7 @@ import pytest
 from cloud_job_runner import ROW_INDEX_COL
 
 from cloud_run_streamlit_app import (
+    FALLBACK_COLD_CALLER,
     ProcessTimeout,
     _download_existing_current_export,
     _gcloud_executable,
@@ -38,9 +39,11 @@ from cloud_run_streamlit_app import (
     gcs_output_dir,
     known_enriched_company_ids,
     list_existing_gcs_files,
+    lovable_export_args_from_manifest,
     parse_execution_status,
     parse_run_ids_from_manifest_listing,
     read_gcs_json,
+    run_autopilot_merge_and_export,
     run_streaming,
     split_rows_by_existing_enrichment,
     suggest_task_count,
@@ -794,3 +797,159 @@ def test_run_streaming_kills_process_and_raises_on_timeout():
             [sys.executable, "-c", "import time; time.sleep(30)"],
             timeout_seconds=0.3,
         )
+
+
+# ── lovable_export_args_from_manifest (Autopilot defaults) ─────────────────
+
+class TestLovableExportArgsFromManifest:
+    def test_uses_every_explicit_manifest_field_when_present(self):
+        manifest = {
+            "config": {
+                "gate_full_enrichment_on_foreign_hq": False,
+                "lovable_export": {
+                    "country": "Germany",
+                    "cold_callers": ["Anna", "Ben"],
+                    "foreign_hq_only": True,
+                    "gcs_bucket": "custom-bucket",
+                    "gcs_prefix": "custom/prefix",
+                    "gcs_run_folder": "custom_folder",
+                    "merge_current": False,
+                },
+            },
+        }
+        args = lovable_export_args_from_manifest("run-1", manifest)
+        assert args == {
+            "country": "Germany",
+            "cold_callers_raw": "Anna, Ben",
+            "foreign_hq_only": True,
+            "gcs_bucket": "custom-bucket",
+            "gcs_prefix": "custom/prefix",
+            "gcs_run_folder": "custom_folder",
+            "merge_current": False,
+        }
+
+    def test_missing_country_falls_back_to_filename_guess_from_run_id(self):
+        manifest = {"config": {"lovable_export": {"cold_callers": ["Anna"]}}}
+        args = lovable_export_args_from_manifest("20260101_120000_Germany_cleaned", manifest)
+        assert args["country"] == "Germany"
+
+    def test_missing_cold_callers_falls_back_to_default_cold_callers_text(self):
+        from lead_prioritizer_batch_app import DEFAULT_COLD_CALLERS_TEXT
+
+        manifest = {"config": {"lovable_export": {"country": "Spain"}}}
+        args = lovable_export_args_from_manifest("run-1", manifest)
+        assert args["cold_callers_raw"] == DEFAULT_COLD_CALLERS_TEXT
+
+    def test_missing_foreign_hq_only_falls_back_to_gate_setting(self):
+        manifest = {
+            "config": {
+                "gate_full_enrichment_on_foreign_hq": True,
+                "lovable_export": {"country": "Spain", "cold_callers": ["Anna"]},
+            },
+        }
+        args = lovable_export_args_from_manifest("run-1", manifest)
+        assert args["foreign_hq_only"] is True
+
+    def test_missing_merge_current_defaults_to_true_for_safety(self):
+        # A hands-off Autopilot run should default to merging (never touches
+        # assigned_cold_caller of companies already in current/) rather than
+        # overwriting -- see lovable_export_args_from_manifest's docstring.
+        manifest = {"config": {"lovable_export": {"country": "Spain", "cold_callers": ["Anna"]}}}
+        args = lovable_export_args_from_manifest("run-1", manifest)
+        assert args["merge_current"] is True
+
+    def test_missing_gcs_fields_fall_back_to_defaults_derived_from_country(self):
+        import lovable_gcs_upload as lovable_gcs
+        from lead_prioritizer_batch_app import default_gcs_country_prefix
+
+        manifest = {"config": {"lovable_export": {"country": "Spain", "cold_callers": ["Anna"]}}}
+        args = lovable_export_args_from_manifest("run-42", manifest)
+        assert args["gcs_bucket"] == lovable_gcs.DEFAULT_GCS_BUCKET
+        assert args["gcs_prefix"] == default_gcs_country_prefix("Spain")
+        assert args["gcs_run_folder"] == "run-42"
+
+    def test_none_manifest_never_raises_and_returns_usable_defaults(self):
+        args = lovable_export_args_from_manifest("run-1", None)
+        assert args["country"] == ""
+        assert args["cold_callers_raw"]  # never empty -- see FALLBACK_COLD_CALLER
+        assert args["foreign_hq_only"] is False
+        assert args["merge_current"] is True
+
+    def test_empty_cold_callers_list_in_manifest_still_falls_back(self):
+        # A manifest that explicitly stored an empty list (e.g. a blanked-out
+        # "Cold callers" field) must not leave Autopilot with zero callers.
+        manifest = {"config": {"lovable_export": {"country": "Spain", "cold_callers": []}}}
+        args = lovable_export_args_from_manifest("run-1", manifest)
+        assert args["cold_callers_raw"]
+
+    def test_fallback_cold_caller_constant_parses_to_a_non_empty_caller_list(self):
+        # The last-resort fallback (only reachable if DEFAULT_COLD_CALLERS_TEXT
+        # were ever emptied out) must itself be a usable, parseable value.
+        from lead_prioritizer_batch_app import parse_cold_callers
+
+        assert parse_cold_callers(FALLBACK_COLD_CALLER) == ["Cold Caller 1"]
+
+
+# ── run_autopilot_merge_and_export (merge -> export chaining) ──────────────
+
+class TestRunAutopilotMergeAndExport:
+    def _call(self, tmp_path):
+        return run_autopilot_merge_and_export(
+            "my-bucket", "proj-1", "run-1", 10, tmp_path,
+            "Germany", "Anna, Ben", True, 500, "en",
+            "gcs-bucket", "germany", "run-1", True,
+        )
+
+    def test_export_skipped_and_ok_false_when_merge_fails(self, tmp_path, monkeypatch):
+        import cloud_run_streamlit_app as app_mod
+
+        monkeypatch.setattr(app_mod, "finish_run_merge", lambda *a, **k: {
+            "ok": False, "final_local": None, "output_dir": "gs://x", "row_count": None,
+            "error": "merge kapot",
+        })
+        monkeypatch.setattr(app_mod, "run_lovable_export_and_upload", lambda *a, **k: pytest.fail(
+            "export should never run when the merge itself already failed"))
+
+        result = self._call(tmp_path)
+        assert result["ok"] is False
+        assert result["merge"]["error"] == "merge kapot"
+        assert result["export"] is None
+
+    def test_ok_false_when_merge_succeeds_but_export_fails(self, tmp_path, monkeypatch):
+        import cloud_run_streamlit_app as app_mod
+
+        final_local = tmp_path / "final.xlsx"
+        final_local.write_bytes(b"fake")
+        monkeypatch.setattr(app_mod, "finish_run_merge", lambda *a, **k: {
+            "ok": True, "final_local": final_local, "output_dir": "gs://x",
+            "row_count": 3, "error": None,
+        })
+        monkeypatch.setattr(app_mod, "run_lovable_export_and_upload", lambda *a, **k: {
+            "ok": False, "error": "export kapot",
+        })
+
+        result = self._call(tmp_path)
+        assert result["ok"] is False
+        assert result["merge"]["ok"] is True
+        assert result["export"]["error"] == "export kapot"
+
+    def test_ok_true_and_export_called_with_merged_final_local_when_both_succeed(self, tmp_path, monkeypatch):
+        import cloud_run_streamlit_app as app_mod
+
+        final_local = tmp_path / "final.xlsx"
+        final_local.write_bytes(b"fake")
+        monkeypatch.setattr(app_mod, "finish_run_merge", lambda *a, **k: {
+            "ok": True, "final_local": final_local, "output_dir": "gs://x",
+            "row_count": 3, "error": None,
+        })
+        captured_args = {}
+
+        def fake_export(final_local_arg, *args, **kwargs):
+            captured_args["final_local"] = final_local_arg
+            return {"ok": True}
+
+        monkeypatch.setattr(app_mod, "run_lovable_export_and_upload", fake_export)
+
+        result = self._call(tmp_path)
+        assert result["ok"] is True
+        assert captured_args["final_local"] == final_local

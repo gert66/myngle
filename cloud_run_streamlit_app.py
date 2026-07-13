@@ -665,7 +665,8 @@ def _merge_export_into_existing_current(
 
 
 # =============================================================================
-# Run lifecycle: non-blocking dispatch + on-demand merge/export.
+# Run lifecycle: non-blocking dispatch + merge/export triggered from the
+# status panel.
 #
 # main()'s "Start Cloud Run" button only uploads the input and starts the
 # Cloud Run Job execution (build_execute_command's wait=False) -- it no
@@ -675,7 +676,12 @@ def _merge_export_into_existing_current(
 # ?run_id= query param (see main()). The Cloud Run Job itself keeps running
 # server-side regardless of whether this Streamlit process is even alive,
 # so a laptop going to sleep mid-run never loses anything -- merging and
-# exporting simply happen whenever you come back to this page.
+# exporting simply happen whenever you come back to this page: either
+# automatically (the "Autopilot" checkbox in main(), see
+# run_autopilot_merge_and_export/lovable_export_args_from_manifest below --
+# _render_run_status runs the merge+export combo itself, without a button
+# click, the next time the status page for this run is opened/refreshed
+# once all tasks are done), or on demand via the manual buttons/form.
 # =============================================================================
 
 def finish_run_merge(bucket: str, project: str, run_id: str, task_count: int, work_dir: Path) -> dict:
@@ -855,6 +861,101 @@ def run_lovable_export_and_upload(
 
 
 # =============================================================================
+# Autopilot: chain merge -> Lovable JSON-export -> current/-upload into one
+# call, using sensible defaults (falling back to a placeholder cold caller
+# and a guessed export country) so a run can go from "all tasks done" to
+# "visible in the live Lovable app" without a human coming back to fill in a
+# form. See _render_run_status's "ready_to_merge"/"merged" handling in
+# main() for how this gets triggered (either automatically, when the run's
+# manifest.json has config.autopilot=true, or on demand via the "Mergen +
+# Lovable JSON-export" button).
+# =============================================================================
+
+#: Used only as a last-resort fallback when a run's manifest carries no
+#: cold_callers at all (e.g. an older run started before this field existed).
+#: DEFAULT_COLD_CALLERS_TEXT (lead_prioritizer_batch_app) is preferred
+#: whenever available -- this exists so Autopilot never simply fails for
+#: lack of a caller name to assign.
+FALLBACK_COLD_CALLER = "Cold Caller 1"
+
+
+def lovable_export_args_from_manifest(run_id: str, manifest: Optional[dict]) -> dict:
+    """Derive the arguments run_lovable_export_and_upload needs from a run's
+    manifest.json, falling back to sensible defaults for anything the
+    manifest doesn't carry (e.g. a run started before a field existed, or
+    started via the Eventarc/dispatcher path with a thinner config). Never
+    raises and never returns an empty cold_callers_raw -- that's the one
+    input run_lovable_export_and_upload hard-fails on, and the whole point
+    of Autopilot is to not get stuck on a missing setting."""
+    from lead_prioritizer_batch_app import default_gcs_country_prefix, suggest_country_from_filename, \
+        SUPPORTED_DEFAULT_INPUT_COUNTRIES, DEFAULT_COLD_CALLERS_TEXT
+    import lovable_gcs_upload as lovable_gcs
+
+    cfg = (manifest or {}).get("config") or {}
+    lovable_cfg = cfg.get("lovable_export") or {}
+
+    country = lovable_cfg.get("country") or suggest_country_from_filename(
+        run_id, SUPPORTED_DEFAULT_INPUT_COUNTRIES)
+    cold_callers_list = lovable_cfg.get("cold_callers") or []
+    cold_callers_raw = (
+        ", ".join(cold_callers_list) if cold_callers_list
+        else (DEFAULT_COLD_CALLERS_TEXT or FALLBACK_COLD_CALLER)
+    )
+    foreign_hq_only = lovable_cfg.get("foreign_hq_only")
+    if foreign_hq_only is None:
+        foreign_hq_only = bool(cfg.get("gate_full_enrichment_on_foreign_hq"))
+    merge_current = lovable_cfg.get("merge_current")
+    if merge_current is None:
+        # Safer default for a hands-off flow than "Overschrijven": a merge
+        # never touches assigned_cold_caller/assigned_cold_caller_rank of
+        # companies already in current/, so Autopilot can never silently
+        # wipe out manual caller assignments made since the last run.
+        merge_current = True
+
+    return {
+        "country": country,
+        "cold_callers_raw": cold_callers_raw,
+        "foreign_hq_only": bool(foreign_hq_only),
+        "gcs_bucket": lovable_cfg.get("gcs_bucket") or lovable_gcs.DEFAULT_GCS_BUCKET,
+        "gcs_prefix": lovable_cfg.get("gcs_prefix") or default_gcs_country_prefix(country),
+        "gcs_run_folder": lovable_cfg.get("gcs_run_folder") or run_id,
+        "merge_current": bool(merge_current),
+    }
+
+
+def run_autopilot_merge_and_export(
+    bucket: str, project: str, run_id: str, task_count: int, work_dir: Path,
+    export_country: str, cold_callers_raw: str, foreign_hq_only_export: bool,
+    bucket_size: int, content_language: str, export_gcs_bucket: str,
+    export_gcs_prefix: str, export_gcs_run_folder: str, merge_current: bool,
+) -> dict:
+    """Chain finish_run_merge -> run_lovable_export_and_upload in one call:
+    merge this run's parts into a final Excel, then immediately export +
+    upload it as Lovable JSON (both current/ and archive/) -- the "one
+    button" version of what otherwise takes a "Mergen & afronden" click
+    followed by separately opening and filling in the on-demand export form.
+
+    Returns ``{"ok": bool, "merge": <finish_run_merge result>,
+    "export": <run_lovable_export_and_upload result | None>}`` -- "ok" is
+    only True if both steps succeeded; "export" is None if the merge itself
+    already failed (nothing to export yet). Never raises: both underlying
+    functions already capture their own failures in their return dicts.
+    """
+    merge_result = finish_run_merge(bucket, project, run_id, task_count, work_dir)
+    if not merge_result["ok"]:
+        return {"ok": False, "merge": merge_result, "export": None}
+
+    export_result = run_lovable_export_and_upload(
+        merge_result["final_local"], work_dir, export_country, cold_callers_raw,
+        foreign_hq_only_export, bucket_size, content_language,
+        export_gcs_bucket, export_gcs_prefix, export_gcs_run_folder,
+        merge_current=merge_current, upload_current=True, upload_archive=True,
+        project=project,
+    )
+    return {"ok": bool(export_result.get("ok")), "merge": merge_result, "export": export_result}
+
+
+# =============================================================================
 # Skip-already-enriched pre-filter: cheaper reruns when merging (only
 # processes rows whose company isn't already fully enriched in current/,
 # instead of re-running the whole pipeline every time and merging after the
@@ -939,6 +1040,7 @@ def main() -> None:  # pragma: no cover - exercised only under `streamlit run`
         default_gcs_country_prefix,
         suggest_country_from_filename,
         SUPPORTED_DEFAULT_INPUT_COUNTRIES,
+        parse_cold_callers,
     )
 
     st.set_page_config(page_title="Lead Prioritizer — Cloud Run", page_icon="☁️", layout="wide")
@@ -1000,6 +1102,27 @@ def main() -> None:  # pragma: no cover - exercised only under `streamlit run`
              "filter tegelijk.",
     )
     gate_full_enrichment_on_foreign_hq = scope_choice == "Alleen buitenlands HQ"
+
+    st.subheader("Automatisering")
+    autopilot_enabled = st.checkbox(
+        "🤖 Autopilot — automatisch mergen + Lovable JSON-exporteren zodra deze run klaar is",
+        value=True,
+        help=(
+            "Zonder Autopilot moet je na afloop zelf terugkomen op de "
+            "status-pagina van deze run, op 'Mergen & afronden' klikken, en "
+            "daarna nog los het Lovable-exportformulier invullen. Met "
+            "Autopilot aan doet de app dat automatisch zodra alle taken "
+            "klaar zijn — je hoeft alleen later deze pagina (opnieuw) te "
+            "openen of op 'Ververs status' te klikken, en de resultaten "
+            "staan vanzelf in de live current/-lijst. Gebruikt de 'Export "
+            "country'/'Cold callers'-instellingen hieronder in de sidebar "
+            "(met een default cold caller als je die leeg laat) en het "
+            "'current/-gedrag' verderop op deze pagina. Vereist wel dat "
+            "'Export country' hieronder een land heeft (auto-geraden uit de "
+            "bestandsnaam, of zelf gekozen) — zonder land is er niets om "
+            "naartoe te publiceren en blijft mergen/exporteren handmatig."
+        ),
+    )
 
     with st.sidebar:
         st.header("Instellingen")
@@ -1114,6 +1237,7 @@ def main() -> None:  # pragma: no cover - exercised only under `streamlit run`
         auto_lovable_export_enabled = st.checkbox(
             "Skip-filter/archive-check hieronder gebruiken", value=True)
         export_country = ""
+        cold_callers_default_raw = DEFAULT_COLD_CALLERS_TEXT
         # Derived from the "Scope" choice above, not a separate checkbox --
         # see the comment there for why these two must never drift apart.
         foreign_hq_only_export = gate_full_enrichment_on_foreign_hq
@@ -1139,6 +1263,17 @@ def main() -> None:  # pragma: no cover - exercised only under `streamlit run`
                 help="Automatisch geraden uit de bestandsnaam; pas aan indien nodig. "
                      "Bepaalt ook het GCS-pad hieronder (gs://<bucket>/<dit land>/...) "
                      "— leeg laten stuurt de export naar .../unknown/.")
+            cold_callers_default_raw = st.text_input(
+                "Cold callers (comma-separated, default voor Autopilot)",
+                value=DEFAULT_COLD_CALLERS_TEXT,
+                key=f"cold_callers_default_{_uploaded_key}",
+                help="Gebruikt door Autopilot (en de 'Mergen + Lovable "
+                     "JSON-export'-knop) zodra de run klaar is — vul hier "
+                     "gerust een simpele placeholder in (bv. 'Cold Caller 1') "
+                     "als je nog geen echte namen hebt; dat blokkeert de "
+                     "rest van de automatisering dan niet. Minimaal één "
+                     "naam is verplicht.",
+            )
             st.caption(
                 "Foreign-HQ-only export: "
                 f"**{'aan' if foreign_hq_only_export else 'uit'}** "
@@ -1284,6 +1419,22 @@ def main() -> None:  # pragma: no cover - exercised only under `streamlit run`
         stage = determine_run_stage(counts, expected_task_count, merge_manifest)
         reported = counts["done"] + counts["failed"]
 
+        # Autopilot: only kicks in when the run was started with the
+        # "Autopilot" checkbox on AND it has an actual export target
+        # (country) to publish to -- see the "Automatisering" section in
+        # main() for where these get set. export_done_marker distinguishes
+        # "already exported by Autopilot" from "not yet" across page
+        # reloads, so a finished export is never silently redone, and a
+        # merge that succeeded but whose export step failed (e.g. a bad GCS
+        # prefix) gets retried automatically on the next visit instead of
+        # getting stuck forever in "merged, but never actually published".
+        autopilot_cfg = (manifest or {}).get("config") or {}
+        autopilot_ready = bool(autopilot_cfg.get("autopilot")) and bool(
+            (autopilot_cfg.get("lovable_export") or {}).get("country")
+        )
+        export_done_marker = read_gcs_json(
+            join_path(output_dir, "final", "lovable_export_done.json"), project)
+
         if stage == "no_status_yet":
             with st.status(
                 "Nog geen enkele taak heeft gerapporteerd — de job wordt mogelijk nog geprovisioneerd.",
@@ -1354,18 +1505,106 @@ def main() -> None:  # pragma: no cover - exercised only under `streamlit run`
                 )
         elif stage == "ready_to_merge":
             st.success(f"✅ Alle {expected_task_count} taken zijn klaar, geen fouten.")
-            if st.button("🔀 Mergen & afronden", key=f"merge_{run_id}", type="primary"):
-                work_dir = Path(tempfile.mkdtemp(prefix="cloud_run_status_merge_"))
-                with st.spinner("Resultaten mergen…"):
-                    merge_result = finish_run_merge(bucket, project, run_id, expected_task_count, work_dir)
-                if not merge_result["ok"]:
-                    st.error(merge_result["error"])
+
+            def _run_combo(spinner_text: str) -> None:
+                args = lovable_export_args_from_manifest(run_id, manifest)
+                work_dir = Path(tempfile.mkdtemp(prefix="cloud_run_autopilot_"))
+                with st.spinner(spinner_text):
+                    combo_result = run_autopilot_merge_and_export(
+                        bucket, project, run_id, expected_task_count, work_dir,
+                        args["country"], args["cold_callers_raw"], args["foreign_hq_only"],
+                        500, lovable_export.DEFAULT_CONTENT_LANGUAGE,
+                        args["gcs_bucket"], args["gcs_prefix"], args["gcs_run_folder"],
+                        args["merge_current"],
+                    )
+                if not combo_result["ok"]:
+                    merge_err = (combo_result["merge"] or {}).get("error")
+                    export_err = (combo_result.get("export") or {}).get("error")
+                    st.error(f"Autopilot mislukt: {merge_err or export_err or 'onbekende fout.'}")
                 else:
-                    st.session_state[f"final_bytes_{run_id}"] = merge_result["final_local"].read_bytes()
+                    st.session_state[f"final_bytes_{run_id}"] = \
+                        combo_result["merge"]["final_local"].read_bytes()
+                    marker_local = work_dir / "lovable_export_done.json"
+                    marker_local.write_text(json.dumps({
+                        "status": "done",
+                        "completed_at": datetime.now(timezone.utc).isoformat(),
+                    }), encoding="utf-8")
+                    run_capture(build_upload_command(
+                        str(marker_local),
+                        join_path(output_dir, "final", "lovable_export_done.json"), project))
                     st.rerun()
+
+            if autopilot_ready:
+                st.info(
+                    "🤖 Autopilot staat aan voor deze run — mergen en Lovable "
+                    "JSON-exporteren gebeurt hieronder automatisch, geen klik nodig."
+                )
+                _run_combo("🤖 Autopilot: mergen + Lovable JSON-export…")
+            else:
+                col_merge, col_combo = st.columns(2)
+                with col_merge:
+                    if st.button("🔀 Mergen & afronden", key=f"merge_{run_id}", type="primary"):
+                        work_dir = Path(tempfile.mkdtemp(prefix="cloud_run_status_merge_"))
+                        with st.spinner("Resultaten mergen…"):
+                            merge_result = finish_run_merge(
+                                bucket, project, run_id, expected_task_count, work_dir)
+                        if not merge_result["ok"]:
+                            st.error(merge_result["error"])
+                        else:
+                            st.session_state[f"final_bytes_{run_id}"] = \
+                                merge_result["final_local"].read_bytes()
+                            st.rerun()
+                with col_combo:
+                    if st.button(
+                        "🤖 Mergen + Lovable JSON-export (auto, default instellingen)",
+                        key=f"autopilot_now_{run_id}",
+                    ):
+                        _run_combo("Mergen + Lovable JSON-export…")
         elif stage == "merged":
             row_count = merge_manifest.get("row_count") if merge_manifest else None
             st.success(f"✅ Klaar — {row_count if row_count is not None else '?'} rijen samengevoegd.")
+
+            if autopilot_ready and not export_done_marker:
+                args = lovable_export_args_from_manifest(run_id, manifest)
+                final_bytes = st.session_state.get(f"final_bytes_{run_id}")
+                catchup_dir = Path(tempfile.mkdtemp(prefix="cloud_run_autopilot_catchup_"))
+                if not final_bytes:
+                    final_output_uri = (merge_manifest or {}).get("final_output_uri")
+                    if final_output_uri:
+                        local_final = catchup_dir / Path(final_output_uri).name
+                        rc, output = run_capture(
+                            build_download_command(final_output_uri, str(local_final), project))
+                        if rc == 0:
+                            final_bytes = local_final.read_bytes()
+                            st.session_state[f"final_bytes_{run_id}"] = final_bytes
+                if final_bytes:
+                    local_final_for_export = catchup_dir / "final.xlsx"
+                    local_final_for_export.write_bytes(final_bytes)
+                    with st.spinner("🤖 Autopilot: Lovable JSON-export…"):
+                        export_result = run_lovable_export_and_upload(
+                            local_final_for_export, catchup_dir, args["country"],
+                            args["cold_callers_raw"], args["foreign_hq_only"], 500,
+                            lovable_export.DEFAULT_CONTENT_LANGUAGE,
+                            args["gcs_bucket"], args["gcs_prefix"], args["gcs_run_folder"],
+                            merge_current=args["merge_current"],
+                            upload_current=True, upload_archive=True, project=project,
+                        )
+                    if export_result.get("ok"):
+                        marker_local = catchup_dir / "lovable_export_done.json"
+                        marker_local.write_text(json.dumps({
+                            "status": "done",
+                            "completed_at": datetime.now(timezone.utc).isoformat(),
+                        }), encoding="utf-8")
+                        run_capture(build_upload_command(
+                            str(marker_local),
+                            join_path(output_dir, "final", "lovable_export_done.json"), project))
+                        st.success("🤖 Autopilot: Lovable JSON-export voltooid — resultaten staan in current/.")
+                        st.rerun()
+                    else:
+                        st.error(f"🤖 Autopilot Lovable-export mislukt: {export_result.get('error')}")
+            elif export_done_marker:
+                st.caption("✅ Lovable JSON-export (Autopilot) al voltooid voor deze run.")
+
             final_bytes = st.session_state.get(f"final_bytes_{run_id}")
             if not final_bytes and st.button("⬇️ Eindresultaat ophalen", key=f"fetch_final_{run_id}"):
                 final_output_uri = (merge_manifest or {}).get("final_output_uri")
@@ -1708,8 +1947,18 @@ def main() -> None:  # pragma: no cover - exercised only under `streamlit run`
         # merge+export as a bucket-upload-triggered run, once the Eventarc
         # trigger on the runs bucket is active. Country is best-effort
         # guessed from the filename (same helper the sidebar uses) when the
-        # sidebar's own "Export country" selectbox was left blank.
+        # sidebar's own "Export country" selectbox was left blank. Also
+        # drives this dashboard's own Autopilot (see _render_run_status) --
+        # not just the Eventarc/dispatcher path.
         _manifest_export_country = export_country or _guessed_export_country
+        # Falls back to DEFAULT_COLD_CALLERS_TEXT (and, if that's ever
+        # empty too, FALLBACK_COLD_CALLER via lovable_export_args_from_manifest)
+        # so a blanked-out "Cold callers" field can never leave Autopilot
+        # stuck with zero callers to assign.
+        _manifest_cold_callers = (
+            parse_cold_callers(cold_callers_default_raw)
+            or parse_cold_callers(DEFAULT_COLD_CALLERS_TEXT)
+        )
         run_manifest = {
             "run_id": run_id, "input_uri": input_uri, "output_dir": output_dir,
             "task_count": int(task_count), "mode": mode,
@@ -1718,14 +1967,17 @@ def main() -> None:  # pragma: no cover - exercised only under `streamlit run`
             "execution_name": execution_name,
             "config": {
                 "gate_full_enrichment_on_foreign_hq": bool(gate_full_enrichment_on_foreign_hq),
+                "autopilot": bool(autopilot_enabled),
                 "lovable_export": {
                     "enabled": bool(_manifest_export_country),
                     "country": _manifest_export_country,
-                    "cold_callers": [
-                        c.strip() for c in DEFAULT_COLD_CALLERS_TEXT.split(",") if c.strip()
-                    ],
+                    "cold_callers": _manifest_cold_callers,
                     "foreign_hq_only": bool(foreign_hq_only_export),
                     "bucket_size": 500,
+                    "gcs_bucket": export_gcs_bucket or lovable_gcs.DEFAULT_GCS_BUCKET,
+                    "gcs_prefix": export_gcs_prefix or default_gcs_country_prefix(_manifest_export_country),
+                    "gcs_run_folder": export_gcs_run_folder or run_id,
+                    "merge_current": bool(merge_current),
                 },
             },
         }

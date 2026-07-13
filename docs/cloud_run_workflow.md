@@ -16,11 +16,57 @@ browser-sessie, op een ander moment) laat het "Status van een run"-paneel
 opnieuw de actuele status uit GCS ophalen (task-counts, gemergd of niet),
 en biedt van daaruit: opnieuw draaien van alleen de mislukte shards
 (idempotent — gelukte delen worden overgeslagen), mergen zodra alles klaar
-is, en de Lovable JSON-export — allemaal on-demand, niet meer automatisch
-inline na de run. Is de URL kwijt, dan vindt de "Recente runs"-lijst
-(gebaseerd op elke run's `manifest.json` in GCS) 'm terug. Zie
+is, en de Lovable JSON-export. Is de URL kwijt, dan vindt de "Recente
+runs"-lijst (gebaseerd op elke run's `manifest.json` in GCS) 'm terug. Zie
 `cloud_run_streamlit_app.finish_run_merge`/`run_lovable_export_and_upload`/
 `determine_run_stage` voor de onderliggende logica.
+
+### Autopilot: mergen + Lovable JSON-export zonder handmatige klikken
+
+Boven de "Scope"-keuze staat "🤖 Autopilot" (standaard aan). Staat hij aan
+én is er een "Export country" bekend (auto-geraden uit de bestandsnaam, of
+zelf gekozen in de sidebar), dan doet de app zelf — zodra alle taken van de
+run klaar zijn en je (op een later moment) de status-pagina van deze run
+opnieuw opent of op "Ververs status" klikt — automatisch achter elkaar: 1)
+mergen tot één finale Excel, en 2) de Lovable JSON-export + upload naar
+zowel het archief (`runs/<run_folder>/`) als de live `current/`-lijst.
+Geen aparte "Mergen & afronden"-klik meer, en geen los in te vullen
+exportformulier — je hoeft alleen terug te komen op de statuspagina (of
+de "Recente runs"-link) nadat de run klaar is. Mislukt de export-stap ondanks
+een geslaagde merge (bv. een foute GCS-prefix), dan probeert de app dat bij
+een volgend bezoek aan de statuspagina automatisch opnieuw — een
+`final/lovable_export_done.json`-markeerbestand in GCS voorkomt dat een al
+geslaagde export nogmaals wordt uitgevoerd.
+
+Instellingen voor Autopilot:
+- **Cold callers**: sidebar-veld "Cold callers (comma-separated, default
+  voor Autopilot)", voorgevuld met de app-brede default
+  (`DEFAULT_COLD_CALLERS_TEXT`) — laat 'm gewoon staan, of vul een simpele
+  placeholder in (bv. "Cold Caller 1") als er nog geen echte namen bekend
+  zijn; leeg laten blokkeert Autopilot niet, er wordt dan alsnog op de
+  default teruggevallen.
+- **current/-gedrag**: Autopilot hergebruikt de "current/-gedrag"-keuze die
+  je bij het starten van de run maakt (Overschrijven/Mergen); is die keuze
+  niet gemaakt (bv. geen bestand geüpload in dezelfde sessie, of een oudere
+  run zonder dit veld in `manifest.json`), dan valt Autopilot terug op
+  **Mergen** — veiliger voor een onbemand proces, omdat een merge
+  `assigned_cold_caller`/`assigned_cold_caller_rank` van bestaande
+  bedrijven nooit aanpast (zie "current/ mergen in plaats van
+  overschrijven" verderop).
+- Staat Autopilot uit (of ontbreekt de "Export country"), dan verschijnen
+  in plaats daarvan twee knoppen zodra de run klaar is: de bestaande
+  "🔀 Mergen & afronden" (alleen mergen, downloaden), en een nieuwe
+  "🤖 Mergen + Lovable JSON-export (auto, default instellingen)" die
+  dezelfde merge+export-combinatie in één klik uitvoert met dezelfde
+  defaults, zonder het losse exportformulier te hoeven invullen. Het losse
+  exportformulier ("📤 Lovable JSON-export (on-demand)") blijft ook
+  hierna nog gewoon beschikbaar voor een losse test-export met andere
+  instellingen.
+
+Zie `cloud_run_streamlit_app.run_autopilot_merge_and_export`/
+`lovable_export_args_from_manifest` voor de onderliggende logica, en
+`config.autopilot`/`config.lovable_export` in `manifest.json` voor wat er
+per run wordt opgeslagen.
 
 ## De Streamlit-dashboard zelf naar Cloud Run (geen laptop meer nodig, ook niet om 'm te bedienen)
 
