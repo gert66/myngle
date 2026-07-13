@@ -19,8 +19,11 @@ performed by the operator afterwards, so a bad re-score always has a
 fallback.
 
 Uses the same ``gcloud storage``/``gsutil`` CLI approach as
-``lovable_gcs_upload.py`` — no ``google-cloud-storage`` Python dependency,
-no ``shell=True``, no secrets ever printed.
+``lovable_gcs_upload.py`` when the CLI is on PATH — no ``shell=True``, no
+secrets ever printed. On hosts without the Google Cloud SDK (Streamlit
+Community Cloud), it falls back to the ``google-cloud-storage`` library
+with credentials from Streamlit secrets / the environment — see
+``gcs_python_backend``.
 
 Missing vs. genuine-zero signals
 ---------------------------------
@@ -45,6 +48,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
 
+import gcs_python_backend
 from commercial_fit_scoring import (
     resolve_employee_range_value,
     resolve_size_category,
@@ -367,8 +371,21 @@ def default_rescore_run_folder(now: "datetime | None" = None) -> str:
 
 
 # =============================================================================
-# GCS I/O — same gcloud storage/gsutil CLI approach as lovable_gcs_upload.py
+# GCS I/O — gcloud storage/gsutil CLI when on PATH (same approach as
+# lovable_gcs_upload.py), otherwise the google-cloud-storage fallback
+# (gcs_python_backend) so hosted Streamlit apps work without the SDK.
 # =============================================================================
+
+#: Raised (inside a RuntimeError) when neither the CLI nor the Python
+#: fallback can reach GCS — tells the operator every way to fix it.
+NO_GCS_ACCESS_MESSAGE = (
+    "No GCS access available: neither gcloud nor gsutil was found on PATH, "
+    "and no google-cloud-storage credentials could be resolved. Either "
+    "install/authenticate the Google Cloud SDK, or provide a service-account "
+    f"key via st.secrets['{gcs_python_backend.SERVICE_ACCOUNT_SECRET_KEY}'] / "
+    f"the {gcs_python_backend.SERVICE_ACCOUNT_ENV_VAR} environment variable "
+    "(see .streamlit/secrets.toml.example)."
+)
 
 
 def resolve_gcs_tool() -> "Optional[list[str]]":
@@ -397,11 +414,11 @@ def gcs_run_dir(bucket: str, country_folder: str, run_folder: str) -> str:
 
 def list_country_folders(bucket: str) -> list[str]:
     """Country-folder slugs currently present at the bucket root. Returns an
-    empty list (never raises) if no CLI tool is on PATH or the listing
-    fails."""
+    empty list (never raises) if the listing fails. Without a CLI tool on
+    PATH, falls back to the google-cloud-storage backend."""
     tool = resolve_gcs_tool()
     if tool is None:
-        return []
+        return gcs_python_backend.list_country_folders(bucket)
     try:
         proc = subprocess.run(
             [*tool, "ls", f"gs://{bucket}/"],
@@ -422,11 +439,11 @@ def list_country_folders(bucket: str) -> list[str]:
 
 def list_current_files(bucket: str, country_folder: str) -> list[str]:
     """Filenames present in ``<country_folder>/current/`` right now. Returns
-    an empty list (never raises) if no CLI tool is on PATH or the listing
-    fails."""
+    an empty list (never raises) if the listing fails. Without a CLI tool
+    on PATH, falls back to the google-cloud-storage backend."""
     tool = resolve_gcs_tool()
     if tool is None:
-        return []
+        return gcs_python_backend.list_files(bucket, f"{country_folder}/current")
     current_dir = gcs_current_dir(bucket, country_folder)
     try:
         proc = subprocess.run(
@@ -448,11 +465,13 @@ def list_current_files(bucket: str, country_folder: str) -> list[str]:
 
 def list_run_files(bucket: str, country_folder: str, run_folder: str) -> list[str]:
     """Filenames present in ``<country_folder>/runs/<run_folder>/`` right
-    now. Returns an empty list (never raises) if no CLI tool is on PATH or
-    the listing fails — mirrors ``list_current_files``."""
+    now. Returns an empty list (never raises) if the listing fails —
+    mirrors ``list_current_files``, including the google-cloud-storage
+    fallback when no CLI tool is on PATH."""
     tool = resolve_gcs_tool()
     if tool is None:
-        return []
+        return gcs_python_backend.list_files(
+            bucket, f"{country_folder}/runs/{run_folder}")
     run_dir = gcs_run_dir(bucket, country_folder, run_folder)
     try:
         proc = subprocess.run(
@@ -588,16 +607,13 @@ def download_current_run(bucket: str, country_folder: str, work_dir) -> dict:
 
     Returns ``{"manifest": dict|None, "list_items": list, "detail_files":
     {filename: dict}}``. Raises ``RuntimeError`` (with a clear message, no
-    secrets) if no GCS CLI tool is available, the current folder is empty,
-    or the download fails — a partial re-score input is worse than no
-    re-score at all.
+    secrets) if neither the GCS CLI nor the google-cloud-storage fallback
+    is available, the current folder is empty, or the download fails — a
+    partial re-score input is worse than no re-score at all.
     """
     tool = resolve_gcs_tool()
-    if tool is None:
-        raise RuntimeError(
-            "Neither gcloud nor gsutil was found on PATH. Install/authenticate "
-            "the Google Cloud SDK and try again."
-        )
+    if tool is None and not gcs_python_backend.available():
+        raise RuntimeError(NO_GCS_ACCESS_MESSAGE)
 
     work_dir = Path(work_dir)
     work_dir.mkdir(parents=True, exist_ok=True)
@@ -615,8 +631,12 @@ def download_current_run(bucket: str, country_folder: str, work_dir) -> dict:
             "current run?"
         )
 
-    sources = [f"{current_dir}/{filename}" for filename in relevant]
-    batch_result = download_files_batch(tool, sources, f"{work_dir}/")
+    if tool is not None:
+        sources = [f"{current_dir}/{filename}" for filename in relevant]
+        batch_result = download_files_batch(tool, sources, f"{work_dir}/")
+    else:
+        batch_result = gcs_python_backend.download_files_batch(
+            bucket, [f"{country_folder}/current/{f}" for f in relevant], work_dir)
     if not batch_result["success"]:
         raise RuntimeError(
             f"Failed to download files from {current_dir}: "
@@ -734,16 +754,20 @@ def upload_rescored_run(
 ) -> list[dict]:
     """Upload every file in ``out_dir`` (as written by ``write_rescored_run``)
     to ``gs://<bucket>/<country_folder>/runs/<run_folder>/``. Raises
-    ``RuntimeError`` if no GCS CLI tool is available; never touches
-    ``current/`` or any other run folder."""
+    ``RuntimeError`` if neither the GCS CLI nor the google-cloud-storage
+    fallback is available; never touches ``current/`` or any other run
+    folder."""
     tool = resolve_gcs_tool()
-    if tool is None:
-        raise RuntimeError(
-            "Neither gcloud nor gsutil was found on PATH. "
-            "Install/authenticate the Google Cloud SDK and try again."
-        )
+    if tool is None and not gcs_python_backend.available():
+        raise RuntimeError(NO_GCS_ACCESS_MESSAGE)
     run_dir = gcs_run_dir(bucket, country_folder, run_folder)
     out_dir = Path(out_dir)
+    if tool is None:
+        return [
+            gcs_python_backend.upload_file(
+                bucket, str(path), f"{country_folder}/runs/{run_folder}/{path.name}")
+            for path in sorted(out_dir.iterdir())
+        ]
     return [
         upload_file(tool, str(path), f"{run_dir}/{path.name}")
         for path in sorted(out_dir.iterdir())
@@ -772,16 +796,14 @@ def promote_run_to_current(
     and ``promoted_at``) before being uploaded, so ``current/``'s manifest
     always reflects reality. Never touches any other run folder.
 
-    Raises ``RuntimeError`` if no GCS CLI tool is available or the run
-    folder has no promotable files (e.g. a missing/misspelled run folder) —
-    a silent no-op promotion would be worse than a loud failure.
+    Raises ``RuntimeError`` if neither the GCS CLI nor the
+    google-cloud-storage fallback is available, or the run folder has no
+    promotable files (e.g. a missing/misspelled run folder) — a silent
+    no-op promotion would be worse than a loud failure.
     """
     tool = resolve_gcs_tool()
-    if tool is None:
-        raise RuntimeError(
-            "Neither gcloud nor gsutil was found on PATH. "
-            "Install/authenticate the Google Cloud SDK and try again."
-        )
+    if tool is None and not gcs_python_backend.available():
+        raise RuntimeError(NO_GCS_ACCESS_MESSAGE)
 
     run_dir = gcs_run_dir(bucket, country_folder, run_folder)
     filenames = list_run_files(bucket, country_folder, run_folder)
@@ -806,7 +828,13 @@ def promote_run_to_current(
         results = []
         for filename in relevant:
             local_path = staging / filename
-            download_result = download_file(tool, f"{run_dir}/{filename}", str(local_path))
+            if tool is not None:
+                download_result = download_file(
+                    tool, f"{run_dir}/{filename}", str(local_path))
+            else:
+                download_result = gcs_python_backend.download_file(
+                    bucket, f"{country_folder}/runs/{run_folder}/{filename}",
+                    str(local_path))
             if not download_result["success"]:
                 results.append({**download_result, "target": "current", "phase": "download"})
                 continue
@@ -818,9 +846,14 @@ def promote_run_to_current(
                 local_path.write_text(
                     json.dumps(manifest, ensure_ascii=False, indent=2, default=str),
                     encoding="utf-8")
-            upload_result = upload_file(
-                tool, str(local_path), f"{current_dir}/{filename}",
-                cache_control=CURRENT_CACHE_CONTROL)
+            if tool is not None:
+                upload_result = upload_file(
+                    tool, str(local_path), f"{current_dir}/{filename}",
+                    cache_control=CURRENT_CACHE_CONTROL)
+            else:
+                upload_result = gcs_python_backend.upload_file(
+                    bucket, str(local_path), f"{country_folder}/current/{filename}",
+                    cache_control=CURRENT_CACHE_CONTROL)
             results.append({**upload_result, "target": "current", "phase": "upload"})
         return {
             "country_folder": country_folder,

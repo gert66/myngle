@@ -373,15 +373,23 @@ def _fake_gcs_tool_for_local_dir(remote_root: Path):
             lines = [f"{target.rstrip('/')}/{p.name}" for p in sorted(local_dir.iterdir())]
             return MagicMock(returncode=0, stdout="\n".join(lines) + ("\n" if lines else ""), stderr="")
         if "cp" in cmd:
-            source, dest = cmd[-2], cmd[-1]
-            if source.startswith("gs://"):
-                rel = source.replace("gs://bucket-a/", "")
-                Path(dest).write_bytes((remote_root / rel).read_bytes())
+            # Handles both the single-source form (upload_file: ``cp source
+            # dest_file``) and the batch download form (download_files_batch:
+            # ``cp source1 source2 ... dest_dir/``) — same as
+            # test_rescore_from_gcs's helper.
+            cp_idx = cmd.index("cp")
+            sources, dest = cmd[cp_idx + 1:-1], cmd[-1]
+            if sources[0].startswith("gs://"):
+                dest_dir = Path(dest.rstrip("/")) if dest.endswith("/") else None
+                for source in sources:
+                    rel = source.replace("gs://bucket-a/", "")
+                    target = dest_dir / Path(rel).name if dest_dir else Path(dest)
+                    target.write_bytes((remote_root / rel).read_bytes())
             else:
                 rel = dest.replace("gs://bucket-a/", "")
                 remote_path = remote_root / rel
                 remote_path.parent.mkdir(parents=True, exist_ok=True)
-                remote_path.write_bytes(Path(source).read_bytes())
+                remote_path.write_bytes(Path(sources[0]).read_bytes())
             return MagicMock(returncode=0, stdout="", stderr="")
         raise AssertionError(f"unexpected command: {cmd}")
 

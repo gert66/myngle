@@ -955,8 +955,11 @@ def main() -> None:  # pragma: no cover - exercised only under `streamlit run`
                 st.session_state["_available_countries"] = list_country_folders(bucket)
             if not st.session_state.get("_available_countries"):
                 st.warning(
-                    "Geen land-folders gevonden. Is gcloud/gsutil geïnstalleerd "
-                    "en ingelogd (`gcloud auth login`)?"
+                    "Geen land-folders gevonden. Lokaal: is gcloud/gsutil "
+                    "geïnstalleerd en ingelogd (`gcloud auth login`)? Op "
+                    "Streamlit Cloud: voeg een `[gcp_service_account]` "
+                    "service-accountsleutel toe aan de Secrets van de app — "
+                    "zie `.streamlit/secrets.toml.example`."
                 )
 
         countries = st.session_state.get("_available_countries", [])
