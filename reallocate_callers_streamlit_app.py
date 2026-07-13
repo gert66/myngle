@@ -33,6 +33,7 @@ from caller_range_assignment import (
     even_count_ranges,
     resolve_range_bounds,
 )
+import gcs_python_backend
 from reallocate_callers_from_gcs import (
     assign_callers,
     build_reallocated_run_from_assignment,
@@ -43,6 +44,7 @@ from reallocate_callers_from_gcs import (
     list_country_folders,
     normalize_cold_callers,
     reallocation_movers,
+    resolve_gcs_tool,
 )
 from rescore_from_gcs import DEFAULT_GCS_BUCKET, promote_run_to_current
 
@@ -183,8 +185,12 @@ def main() -> None:  # pragma: no cover - exercised only under `streamlit run`
                     "installed and authenticated (`gcloud auth login`)? On "
                     "Streamlit Cloud: add a `[gcp_service_account]` "
                     "service-account key to the app's Secrets — see "
-                    "`.streamlit/secrets.toml.example`."
+                    "`.streamlit/secrets.toml.example`. The connection "
+                    "status below shows what's missing."
                 )
+
+        with st.expander("🩺 GCS connection status"):
+            _render_gcs_status(st)
 
         countries = st.session_state.get("_available_countries", [])
         if countries:
@@ -485,6 +491,42 @@ def main() -> None:  # pragma: no cover - exercised only under `streamlit run`
             st.dataframe(pd.DataFrame(promote_results), use_container_width=True, hide_index=True)
         except Exception as exc:
             st.error(f"Promotion failed: {exc}")
+
+
+def _render_gcs_status(st) -> None:  # pragma: no cover - pure Streamlit UI
+    """Sidebar panel showing exactly which GCS access route is active and,
+    when nothing works, which link in the chain is broken — a hosted app
+    swallows listing errors into an empty country list, which is
+    undebuggable without this."""
+    tool = resolve_gcs_tool()
+    if tool is not None:
+        st.success(f"gcloud/gsutil CLI found (`{tool[0]}`) — the CLI handles "
+                   "all GCS access; the checks below don't apply.")
+        return
+    st.info("No gcloud/gsutil CLI on PATH — the google-cloud-storage "
+            "fallback is used (normal on Streamlit Cloud).")
+    diag = gcs_python_backend.diagnostics()
+    check = lambda ok: "✅" if ok else "❌"  # noqa: E731
+    st.markdown(
+        f"{check(diag['library_installed'])} `google-cloud-storage` library "
+        "installed\n\n"
+        f"{check(diag['secret_present'])} `[gcp_service_account]` present in "
+        "Streamlit secrets\n\n"
+        f"{check(diag['env_var_present'])} `GCP_SERVICE_ACCOUNT_JSON` "
+        "environment variable set\n\n"
+        f"{check(diag['client_ready'])} GCS client ready"
+        + (f" as `{diag['service_account_email']}`"
+           if diag["client_ready"] and diag["service_account_email"] else "")
+    )
+    if diag["last_error"]:
+        st.caption("Most recent error:")
+        st.code(diag["last_error"], language=None)
+    elif not diag["client_ready"]:
+        st.caption(
+            "No credentials found yet: add the `[gcp_service_account]` block "
+            "to the app's Secrets (see `.streamlit/secrets.toml.example`) "
+            "and rerun."
+        )
 
 
 def _moved(assignment: dict, item: dict) -> dict:

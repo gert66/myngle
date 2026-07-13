@@ -46,6 +46,22 @@ NO_CLIENT_ERROR = (
 
 _client = None
 
+#: Most recent credential/listing failure, for the UI status panel — silent
+#: fallbacks (empty listings, unavailable client) are impossible to debug
+#: from a hosted app without this. Never contains key material: only
+#: exception type + message.
+_last_error: "Optional[str]" = None
+
+
+def _record_error(exc: Exception) -> None:
+    global _last_error
+    _last_error = f"{type(exc).__name__}: {exc}"
+
+
+def last_error() -> "Optional[str]":
+    """The most recent client-build or listing failure, or ``None``."""
+    return _last_error
+
 
 def _service_account_info() -> "Optional[dict]":
     """Service-account key dict from Streamlit secrets or the environment,
@@ -91,7 +107,8 @@ def get_client():
     if _client is None:
         try:
             _client = build_client()
-        except Exception:
+        except Exception as exc:
+            _record_error(exc)
             return None
     return _client
 
@@ -100,6 +117,38 @@ def available() -> bool:
     """True when a client can be built — i.e. this backend can serve as the
     fallback for a missing gcloud/gsutil CLI."""
     return get_client() is not None
+
+
+def _secret_service_account_present() -> bool:
+    try:
+        import streamlit as st
+
+        return SERVICE_ACCOUNT_SECRET_KEY in st.secrets
+    except Exception:
+        return False
+
+
+def diagnostics() -> dict:
+    """Health snapshot for a UI status panel: which credential sources are
+    visible, whether a client can actually be built, and the most recent
+    error. Never raises and never includes key material — safe to render
+    verbatim in a hosted app."""
+    try:
+        import google.cloud.storage  # noqa: F401
+
+        library_installed = True
+    except Exception:
+        library_installed = False
+    info = _service_account_info()
+    client_ready = get_client() is not None
+    return {
+        "library_installed": library_installed,
+        "secret_present": _secret_service_account_present(),
+        "env_var_present": bool(os.environ.get(SERVICE_ACCOUNT_ENV_VAR, "").strip()),
+        "service_account_email": (info or {}).get("client_email"),
+        "client_ready": client_ready,
+        "last_error": _last_error,
+    }
 
 
 # =============================================================================
@@ -117,7 +166,8 @@ def list_country_folders(bucket: str) -> list[str]:
         blobs = client.list_blobs(bucket, delimiter="/")
         list(blobs)  # consume the iterator so .prefixes is populated
         return sorted(p.rstrip("/") for p in blobs.prefixes)
-    except Exception:
+    except Exception as exc:
+        _record_error(exc)
         return []
 
 
@@ -135,7 +185,8 @@ def list_files(bucket: str, prefix: str) -> list[str]:
             if name:
                 names.append(name)
         return sorted(names)
-    except Exception:
+    except Exception as exc:
+        _record_error(exc)
         return []
 
 
