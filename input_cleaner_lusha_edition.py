@@ -41,14 +41,6 @@ except ImportError:
 
 from lead_hq_ai_interpreter import estimate_ai_cost_usd
 
-# ── Page config ───────────────────────────────────────────────────────────────
-st.set_page_config(
-    page_title="Input Cleaner · Lusha Edition",
-    page_icon="🏢",
-    layout="wide",
-    initial_sidebar_state="expanded",
-)
-
 # Same default Haiku model as lead_hq_ai_interpreter.py's AI-first HQ strategy
 # (kept as a local constant rather than importing the private original, same
 # convention as lead_prioritizer_core.py's own _DEFAULT_AI_MODEL).
@@ -790,6 +782,12 @@ def _funnel_metrics(funnel: dict) -> None:
 
 
 def main():
+    st.set_page_config(
+        page_title="Input Cleaner · Lusha Edition",
+        page_icon="🏢",
+        layout="wide",
+        initial_sidebar_state="expanded",
+    )
     st.title("🏢 Input Cleaner · Lusha Edition")
     st.caption(
         "Layer 0 · mYngle Sales Intelligence · Prefilter raw Lusha company "
