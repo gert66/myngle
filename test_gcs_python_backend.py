@@ -244,6 +244,56 @@ class TestUploadFile:
 
 
 # ---------------------------------------------------------------------------
+# Diagnostics — the UI status panel's data source
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture
+def _clean_backend_state(monkeypatch):
+    """Reset the module-level client cache and error between tests."""
+    monkeypatch.setattr(gcs_python_backend, "_client", None)
+    monkeypatch.setattr(gcs_python_backend, "_last_error", None)
+
+
+class TestDiagnostics:
+    def test_build_failure_is_recorded_and_reported(self, _clean_backend_state, monkeypatch):
+        def _boom():
+            raise RuntimeError("no credentials anywhere")
+        monkeypatch.setattr(gcs_python_backend, "build_client", _boom)
+        diag = gcs_python_backend.diagnostics()
+        assert diag["client_ready"] is False
+        assert "no credentials anywhere" in diag["last_error"]
+        assert "no credentials anywhere" in gcs_python_backend.last_error()
+
+    def test_listing_failure_is_recorded(self, _clean_backend_state):
+        class Boom:
+            def list_blobs(self, *a, **k):
+                raise PermissionError("caller does not have storage.objects.list")
+        with _patched_client(Boom()):
+            assert list_country_folders("bucket-a") == []
+        assert "storage.objects.list" in gcs_python_backend.last_error()
+
+    def test_ready_client_reports_service_account_email(self, _clean_backend_state, monkeypatch):
+        fake = FakeClient({"bucket-a": {}})
+        monkeypatch.setattr(gcs_python_backend, "build_client", lambda: fake)
+        monkeypatch.setattr(
+            gcs_python_backend, "_service_account_info",
+            lambda: {"client_email": "streamlit@p.iam.gserviceaccount.com"})
+        diag = gcs_python_backend.diagnostics()
+        assert diag["client_ready"] is True
+        assert diag["service_account_email"] == "streamlit@p.iam.gserviceaccount.com"
+        assert diag["last_error"] is None
+
+    def test_diagnostics_never_raises_without_anything(self, _clean_backend_state, monkeypatch):
+        monkeypatch.delenv(gcs_python_backend.SERVICE_ACCOUNT_ENV_VAR, raising=False)
+        diag = gcs_python_backend.diagnostics()
+        assert set(diag) == {
+            "library_installed", "secret_present", "env_var_present",
+            "service_account_email", "client_ready", "last_error",
+        }
+
+
+# ---------------------------------------------------------------------------
 # Credential resolution
 # ---------------------------------------------------------------------------
 
