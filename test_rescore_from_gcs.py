@@ -519,8 +519,9 @@ class TestListCountryFolders:
              patch("rescore_from_gcs.subprocess.run", return_value=mock_proc):
             assert list_country_folders("bucket-a") == ["brazil", "italy"]
 
-    def test_no_tool_returns_empty_without_subprocess(self):
+    def test_no_tool_and_no_python_backend_returns_empty_without_subprocess(self):
         with patch("rescore_from_gcs.resolve_gcs_tool", return_value=None), \
+             patch("gcs_python_backend.get_client", return_value=None), \
              patch("rescore_from_gcs.subprocess.run") as mock_run:
             assert list_country_folders("bucket-a") == []
         mock_run.assert_not_called()
@@ -748,8 +749,9 @@ class TestDownloadCurrentRun:
         assert "company-details-000.json" in current["detail_files"]
         assert set(current["detail_files"]["company-details-000.json"]) == {"company-a", "company-b"}
 
-    def test_no_tool_raises_clear_error(self, tmp_path):
-        with patch("rescore_from_gcs.resolve_gcs_tool", return_value=None):
+    def test_no_tool_and_no_python_backend_raises_clear_error(self, tmp_path):
+        with patch("rescore_from_gcs.resolve_gcs_tool", return_value=None), \
+             patch("gcs_python_backend.get_client", return_value=None):
             with pytest.raises(RuntimeError, match="gcloud"):
                 download_current_run("bucket-a", "brazil", tmp_path / "work")
 
@@ -863,9 +865,10 @@ class TestBuildRescoredRunPureCore:
             r["destination"].startswith("gs://bucket-a/brazil/runs/2026-07-08_rescore/")
             for r in results)
 
-    def test_upload_rescored_run_raises_without_gcs_tool(self, tmp_path):
+    def test_upload_rescored_run_raises_without_gcs_tool_or_python_backend(self, tmp_path):
         (tmp_path / LIST_FILENAME).write_text("[]")
-        with patch("rescore_from_gcs.resolve_gcs_tool", return_value=None):
+        with patch("rescore_from_gcs.resolve_gcs_tool", return_value=None), \
+             patch("gcs_python_backend.get_client", return_value=None):
             with pytest.raises(RuntimeError, match="gcloud"):
                 upload_rescored_run(tmp_path, "bucket-a", "brazil", "run1")
 
@@ -1004,8 +1007,9 @@ class TestListRunFiles:
         assert set(names) == {
             LIST_FILENAME, CURRENT_MANIFEST_FILENAME, "company-details-000.json"}
 
-    def test_no_tool_returns_empty_list(self):
-        with patch("rescore_from_gcs.resolve_gcs_tool", return_value=None):
+    def test_no_tool_and_no_python_backend_returns_empty_list(self):
+        with patch("rescore_from_gcs.resolve_gcs_tool", return_value=None), \
+             patch("gcs_python_backend.get_client", return_value=None):
             assert list_run_files("bucket-a", "brazil", "run1") == []
 
     def test_missing_run_folder_returns_empty_list(self, tmp_path):
@@ -1050,8 +1054,9 @@ class TestPromoteRunToCurrent:
              CURRENT_MANIFEST_FILENAME).read_text(encoding="utf-8"))
         assert "promoted_to_current" not in source_manifest
 
-    def test_no_tool_raises_clear_error(self, tmp_path):
-        with patch("rescore_from_gcs.resolve_gcs_tool", return_value=None):
+    def test_no_tool_and_no_python_backend_raises_clear_error(self, tmp_path):
+        with patch("rescore_from_gcs.resolve_gcs_tool", return_value=None), \
+             patch("gcs_python_backend.get_client", return_value=None):
             with pytest.raises(RuntimeError, match="gcloud"):
                 promote_run_to_current("bucket-a", "brazil", "run1")
 
