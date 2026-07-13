@@ -29,8 +29,10 @@ from caller_range_assignment import (
     CallerRange,
     RANGE_MODES,
     assign_callers_by_ranges,
+    assign_callers_round_robin_by_cohort_window,
     caller_ranges_coverage,
     even_count_ranges,
+    resolve_cohort_window,
     resolve_range_bounds,
 )
 import gcs_python_backend
@@ -281,7 +283,52 @@ def main() -> None:  # pragma: no cover - exercised only under `streamlit run`
     now_iso = pd.Timestamp.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ")
 
     if mode == "round_robin":
-        assignment = assign_callers(original_list_items, new_callers, rerank_by_score=rerank)
+        use_cohort_window = st.checkbox(
+            "Restrict to a cohort window (release only part of the ranking)",
+            value=False, key="_rr_use_cohort",
+            help="Leave unchecked for a plain round-robin across every "
+                 "company. When checked, only companies inside the chosen "
+                 "cohort window are round-robin split across the caller "
+                 "pool — the rest stay unassigned until a later window "
+                 "covers them. A company's caller never changes as you "
+                 "advance the window, since the round-robin formula still "
+                 "keys off its global rank.",
+        )
+        if use_cohort_window:
+            size_col, range_col = st.columns([1, 3])
+            cohort_size = size_col.number_input(
+                "Cohort size", min_value=1,
+                value=int(st.session_state.get("_rr_cohort_size", 100)),
+                key="_rr_cohort_size",
+            )
+            max_cohort = max(1, math.ceil(total_companies / cohort_size))
+            prev_start, prev_end = st.session_state.get(
+                "_rr_cohort_range", (1, max_cohort))
+            cohort_start, cohort_end = range_col.slider(
+                "Cohort range", min_value=1, max_value=max_cohort,
+                value=(
+                    min(int(prev_start), max_cohort),
+                    min(int(prev_end), max_cohort),
+                ),
+                key="_rr_cohort_range",
+            )
+            start_rank, end_rank = resolve_cohort_window(
+                cohort_size, cohort_start, cohort_end, total_companies)
+            n_in_window = max(0, end_rank - start_rank + 1)
+            st.caption(
+                f"→ rank {start_rank}–{end_rank} ({n_in_window} of "
+                f"{total_companies} companies released; the rest stay "
+                "unassigned)."
+            )
+            assignment = assign_callers_round_robin_by_cohort_window(
+                original_list_items, new_callers,
+                cohort_size=cohort_size, cohort_start=cohort_start,
+                cohort_end=cohort_end, rerank_by_score=rerank,
+                unassigned_label=UNASSIGNED_LABEL,
+            )
+        else:
+            assignment = assign_callers(
+                original_list_items, new_callers, rerank_by_score=rerank)
     else:
         settings_key = f"_range_settings::{country_folder}"
         settings = st.session_state.get(settings_key)

@@ -31,7 +31,7 @@ import math
 from dataclasses import dataclass
 from typing import Optional
 
-from reallocate_callers_from_gcs import compute_caller_ranks
+from reallocate_callers_from_gcs import compute_caller_ranks, normalize_cold_callers
 
 RANGE_MODES = ("count", "percentile", "cohort")
 
@@ -140,6 +140,63 @@ def assign_callers_by_ranges(
             if start_rank <= rank <= end_rank:
                 caller = cr.caller
         result[cid] = (caller, rank)
+    return result
+
+
+def resolve_cohort_window(
+    cohort_size: int, cohort_start: int, cohort_end: int, total: int,
+) -> tuple[int, int]:
+    """Resolve a cohort ``cohort_size`` + 1-based ``[cohort_start,
+    cohort_end]`` index range to 1-based inclusive rank bounds against
+    ``total`` — the same cohort math as ``CallerRange``'s ``"cohort"`` mode,
+    exposed without a per-caller ``CallerRange`` for callers (like the
+    round-robin cohort window below) that share one window across the whole
+    pool rather than assigning it to a single caller."""
+    window = CallerRange(
+        caller="", mode="cohort", start=cohort_start, end=cohort_end,
+        cohort_size=cohort_size)
+    return resolve_range_bounds(window, total)
+
+
+def assign_callers_round_robin_by_cohort_window(
+    list_items: list[dict],
+    cold_callers: list[str],
+    *,
+    cohort_size: int,
+    cohort_start: int,
+    cohort_end: int,
+    rerank_by_score: bool = False,
+    unassigned_label: str = "",
+) -> dict:
+    """Round-robin assignment restricted to a single GLOBAL cohort window of
+    the score ranking, shared across the whole caller pool.
+
+    Only companies whose rank falls inside the resolved cohort window (see
+    ``resolve_cohort_window``) are released and round-robin split across
+    ``cold_callers`` with the exact same formula ``assign_callers`` uses
+    (``cold_callers[(rank - 1) % len(cold_callers)]``, keyed off the GLOBAL
+    rank, not a position within the window) — so a company's caller never
+    changes as the window is advanced to release later cohorts. Every
+    company outside the window gets ``unassigned_label`` (still with its
+    rank) rather than being dropped, matching ``assign_callers_by_ranges``'s
+    gap handling.
+
+    Raises ``ValueError`` if ``cold_callers`` is empty, same as
+    ``assign_callers``.
+    """
+    callers = normalize_cold_callers(cold_callers)
+    if not callers:
+        raise ValueError("At least one cold caller is required.")
+    ranks = compute_caller_ranks(list_items, rerank_by_score=rerank_by_score)
+    total = len(ranks)
+    start_rank, end_rank = resolve_cohort_window(
+        cohort_size, cohort_start, cohort_end, total)
+    result: dict = {}
+    for cid, rank in ranks.items():
+        if start_rank <= rank <= end_rank:
+            result[cid] = (callers[(rank - 1) % len(callers)], rank)
+        else:
+            result[cid] = (unassigned_label, rank)
     return result
 
 
