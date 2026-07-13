@@ -29,10 +29,13 @@ from caller_range_assignment import (
     CallerRange,
     RANGE_MODES,
     assign_callers_by_ranges,
+    assign_callers_round_robin_by_cohort_window,
     caller_ranges_coverage,
     even_count_ranges,
+    resolve_cohort_window,
     resolve_range_bounds,
 )
+import gcs_python_backend
 from reallocate_callers_from_gcs import (
     assign_callers,
     build_reallocated_run_from_assignment,
@@ -43,6 +46,7 @@ from reallocate_callers_from_gcs import (
     list_country_folders,
     normalize_cold_callers,
     reallocation_movers,
+    resolve_gcs_tool,
 )
 from rescore_from_gcs import DEFAULT_GCS_BUCKET, promote_run_to_current
 
@@ -179,9 +183,16 @@ def main() -> None:  # pragma: no cover - exercised only under `streamlit run`
                 st.session_state["_available_countries"] = list_country_folders(bucket)
             if not st.session_state.get("_available_countries"):
                 st.warning(
-                    "No country folders found. Is gcloud/gsutil installed "
-                    "and authenticated (`gcloud auth login`)?"
+                    "No country folders found. Locally: is gcloud/gsutil "
+                    "installed and authenticated (`gcloud auth login`)? On "
+                    "Streamlit Cloud: add a `[gcp_service_account]` "
+                    "service-account key to the app's Secrets — see "
+                    "`.streamlit/secrets.toml.example`. The connection "
+                    "status below shows what's missing."
                 )
+
+        with st.expander("🩺 GCS connection status"):
+            _render_gcs_status(st)
 
         countries = st.session_state.get("_available_countries", [])
         if countries:
@@ -272,7 +283,52 @@ def main() -> None:  # pragma: no cover - exercised only under `streamlit run`
     now_iso = pd.Timestamp.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ")
 
     if mode == "round_robin":
-        assignment = assign_callers(original_list_items, new_callers, rerank_by_score=rerank)
+        use_cohort_window = st.checkbox(
+            "Restrict to a cohort window (release only part of the ranking)",
+            value=False, key="_rr_use_cohort",
+            help="Leave unchecked for a plain round-robin across every "
+                 "company. When checked, only companies inside the chosen "
+                 "cohort window are round-robin split across the caller "
+                 "pool — the rest stay unassigned until a later window "
+                 "covers them. A company's caller never changes as you "
+                 "advance the window, since the round-robin formula still "
+                 "keys off its global rank.",
+        )
+        if use_cohort_window:
+            size_col, range_col = st.columns([1, 3])
+            cohort_size = size_col.number_input(
+                "Cohort size", min_value=1,
+                value=int(st.session_state.get("_rr_cohort_size", 100)),
+                key="_rr_cohort_size",
+            )
+            max_cohort = max(1, math.ceil(total_companies / cohort_size))
+            prev_start, prev_end = st.session_state.get(
+                "_rr_cohort_range", (1, max_cohort))
+            cohort_start, cohort_end = range_col.slider(
+                "Cohort range", min_value=1, max_value=max_cohort,
+                value=(
+                    min(int(prev_start), max_cohort),
+                    min(int(prev_end), max_cohort),
+                ),
+                key="_rr_cohort_range",
+            )
+            start_rank, end_rank = resolve_cohort_window(
+                cohort_size, cohort_start, cohort_end, total_companies)
+            n_in_window = max(0, end_rank - start_rank + 1)
+            st.caption(
+                f"→ rank {start_rank}–{end_rank} ({n_in_window} of "
+                f"{total_companies} companies released; the rest stay "
+                "unassigned)."
+            )
+            assignment = assign_callers_round_robin_by_cohort_window(
+                original_list_items, new_callers,
+                cohort_size=cohort_size, cohort_start=cohort_start,
+                cohort_end=cohort_end, rerank_by_score=rerank,
+                unassigned_label=UNASSIGNED_LABEL,
+            )
+        else:
+            assignment = assign_callers(
+                original_list_items, new_callers, rerank_by_score=rerank)
     else:
         settings_key = f"_range_settings::{country_folder}"
         settings = st.session_state.get(settings_key)
@@ -521,6 +577,42 @@ def main() -> None:  # pragma: no cover - exercised only under `streamlit run`
             st.dataframe(pd.DataFrame(promote_results), use_container_width=True, hide_index=True)
         except Exception as exc:
             st.error(f"Promotion failed: {exc}")
+
+
+def _render_gcs_status(st) -> None:  # pragma: no cover - pure Streamlit UI
+    """Sidebar panel showing exactly which GCS access route is active and,
+    when nothing works, which link in the chain is broken — a hosted app
+    swallows listing errors into an empty country list, which is
+    undebuggable without this."""
+    tool = resolve_gcs_tool()
+    if tool is not None:
+        st.success(f"gcloud/gsutil CLI found (`{tool[0]}`) — the CLI handles "
+                   "all GCS access; the checks below don't apply.")
+        return
+    st.info("No gcloud/gsutil CLI on PATH — the google-cloud-storage "
+            "fallback is used (normal on Streamlit Cloud).")
+    diag = gcs_python_backend.diagnostics()
+    check = lambda ok: "✅" if ok else "❌"  # noqa: E731
+    st.markdown(
+        f"{check(diag['library_installed'])} `google-cloud-storage` library "
+        "installed\n\n"
+        f"{check(diag['secret_present'])} `[gcp_service_account]` present in "
+        "Streamlit secrets\n\n"
+        f"{check(diag['env_var_present'])} `GCP_SERVICE_ACCOUNT_JSON` "
+        "environment variable set\n\n"
+        f"{check(diag['client_ready'])} GCS client ready"
+        + (f" as `{diag['service_account_email']}`"
+           if diag["client_ready"] and diag["service_account_email"] else "")
+    )
+    if diag["last_error"]:
+        st.caption("Most recent error:")
+        st.code(diag["last_error"], language=None)
+    elif not diag["client_ready"]:
+        st.caption(
+            "No credentials found yet: add the `[gcp_service_account]` block "
+            "to the app's Secrets (see `.streamlit/secrets.toml.example`) "
+            "and rerun."
+        )
 
 
 def _moved(assignment: dict, item: dict) -> dict:

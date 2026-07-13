@@ -955,8 +955,11 @@ def main() -> None:  # pragma: no cover - exercised only under `streamlit run`
                 st.session_state["_available_countries"] = list_country_folders(bucket)
             if not st.session_state.get("_available_countries"):
                 st.warning(
-                    "Geen land-folders gevonden. Is gcloud/gsutil geïnstalleerd "
-                    "en ingelogd (`gcloud auth login`)?"
+                    "Geen land-folders gevonden. Lokaal: is gcloud/gsutil "
+                    "geïnstalleerd en ingelogd (`gcloud auth login`)? Op "
+                    "Streamlit Cloud: voeg een `[gcp_service_account]` "
+                    "service-accountsleutel toe aan de Secrets van de app — "
+                    "zie `.streamlit/secrets.toml.example`."
                 )
 
         countries = st.session_state.get("_available_countries", [])
@@ -1145,7 +1148,7 @@ def main() -> None:  # pragma: no cover - exercised only under `streamlit run`
                     value=CALIBRATION_TARGET_HI, step=0.1, key="calib_target_hi")
             with t2:
                 calib_target_lo = st.number_input(
-                    "Doel-score onderkant (p5)", min_value=1.0, max_value=6.0,
+                    "Doel-score onderkant (p5)", min_value=1.0, max_value=8.5,
                     value=CALIBRATION_TARGET_LO, step=0.1, key="calib_target_lo")
             rebalance_hq = st.checkbox(
                 "Foreign-HQ-gewicht licht verlagen (0.7465 → 0.65; de vijf "
