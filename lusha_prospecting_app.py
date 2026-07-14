@@ -9,12 +9,19 @@ by hand in batches of ~1000 via Lusha's own UI).
 
 Only ever calls /v3/companies/prospecting (id/name/domain + basic
 firmographics) -- never /v3/companies/enrich or any contact endpoint, so
-this app can never trigger a per-field contact-reveal charge. Per Lusha's
-own API docs, companies/prospecting itself IS billed per result via the
-`api_search` action (their published example shows 1 credit/result) --
-that may differ from what your actual contract charges, which is exactly
-why this app calls /v3/account/usage first and shows your real balance and
-pricing before any bulk pull runs.
+this app can never trigger a per-field contact-reveal charge. Companies/
+prospecting itself IS billed, via the `companySearch` entry in
+/v3/account/usage's `pricing` block. Confirmed live (2026-07-14) to be
+1 credit per 25 results, rounded up PER PAGE CALL -- not per company, and
+not a flat per-result rate as Lusha's public docs example suggests. A
+partial last page (e.g. 30 of a possible 50) still rounds up to the same
+credit cost as a full page, which `estimate_credits_for_download` mirrors.
+This app calls /v3/account/usage first and shows your real balance and
+pricing before any bulk pull runs -- note that the account-wide "remaining"
+balance itself lags real usage by some delay (confirmed empirically: it
+does not decrement immediately after a call that reports a nonzero
+`billing.creditsCharged`), so trust the per-call/per-run credit counts this
+app surfaces over the sidebar balance for "what did this run just cost".
 
 Country -> {country, continent, countryGrouping} is resolved through
 Lusha's own filter-discovery endpoint rather than hand-built, since the
@@ -38,6 +45,7 @@ Run with:
 
 from __future__ import annotations
 
+import math
 import os
 import time
 from typing import Optional
@@ -82,6 +90,23 @@ class RateLimited(Exception):
 
 def size_band_label(band: dict) -> str:
     return f"{band['min']}+" if "max" not in band else f"{band['min']}–{band['max']}"
+
+
+def estimate_credits_for_download(total_results: int, page_size: int = _PAGE_SIZE) -> int:
+    """Estimate the credits ``fetch_all_companies`` will spend to pull
+    ``total_results`` results, from Lusha's confirmed ``companySearch``
+    pricing: 1 credit per 25 results, rounded up PER PAGE CALL rather than
+    over the total. A partial last page (e.g. 30 of a possible 50-result
+    page) still rounds up to the same cost as a full page, so this mirrors
+    ``fetch_all_companies``'s actual page-by-page billing instead of a
+    naive ``ceil(total_results / 25)``."""
+    if total_results <= 0:
+        return 0
+    full_pages, remainder = divmod(total_results, page_size)
+    credits = full_pages * math.ceil(page_size / 25)
+    if remainder:
+        credits += math.ceil(remainder / 25)
+    return credits
 
 
 def _headers(key: str) -> dict:
@@ -351,9 +376,9 @@ def main() -> None:  # pragma: no cover - exercised only under `streamlit run`
         "Fetches only companies/prospecting results (id, name, domain, "
         "basic firmographics) — never companies/enrich or a contact "
         "endpoint, so this never triggers a per-field reveal charge for "
-        "email/phone. Prospecting itself IS billed per result according to "
-        "Lusha's own API docs (example: 1 credit/result) — check that "
-        "below against your own account before pulling everything."
+        "email/phone. Prospecting itself IS billed — confirmed via live "
+        "testing to be 1 credit per 25 results, rounded up per page call — "
+        "check that below against your own account before pulling everything."
     )
 
     with st.sidebar:
@@ -377,15 +402,21 @@ def main() -> None:  # pragma: no cover - exercised only under `streamlit run`
             c1.metric("Credits remaining", credits.get("remaining", "?"))
             c2.metric("Credits total", credits.get("total", "?"))
             pricing = usage.get("pricing", {})
-            search_price = pricing.get("apiSearch") or pricing.get("api_search")
+            search_price = pricing.get("companySearch")
             if search_price:
-                st.caption(f"Price per prospecting result on this plan: {search_price}")
+                st.caption(
+                    f"Price per prospecting page on this plan: "
+                    f"{search_price.get('credits', '?')} credit(s) per "
+                    f"{search_price.get('perQuantity', '?')} results, "
+                    "rounded up per page call."
+                )
             else:
                 st.caption(
                     "Could not get the exact companies/prospecting price "
-                    "from the account info — Lusha's public example shows "
-                    "1 credit/result; verify this against your own "
-                    "contract before pulling at scale."
+                    "from the account info — confirmed via live testing to "
+                    "typically be 1 credit per 25 results, rounded up per "
+                    "page call; verify this against your own contract "
+                    "before pulling at scale."
                 )
 
     if not api_key:
@@ -458,13 +489,30 @@ def main() -> None:  # pragma: no cover - exercised only under `streamlit run`
             data = fetch_prospecting_page(api_key, body)
             pagination = data.get("pagination", {})
             billing = data.get("billing", {})
-            st.success(
-                f"Total matches reported by Lusha: {pagination.get('total', '?')} — "
+            total = pagination.get("total")
+            msg = (
+                f"Total matches reported by Lusha: {total if total is not None else '?'} — "
                 f"credits for this test page: {billing.get('creditsCharged', '?')}"
             )
+            if total is not None:
+                st.session_state["_lusha_preview_total"] = total
+                msg += (
+                    f" — estimated credits to fetch all {total} results: "
+                    f"~{estimate_credits_for_download(total)}"
+                )
+            st.success(msg)
             st.dataframe(pd.DataFrame(data.get("results") or []), use_container_width=True)
         except Exception as exc:
             st.error(f"Test call failed: {exc}")
+
+    preview_total = st.session_state.get("_lusha_preview_total")
+    if preview_total is not None:
+        st.caption(
+            f"\U0001f4ca Last checked: {preview_total} matching results — "
+            f"estimated cost to fetch all of them: ~{estimate_credits_for_download(preview_total)} credits. "
+            "(Re-run 'Test 1 page first' if you changed the filters above — "
+            "this number won't update on its own.)"
+        )
 
     if st.button("\U0001f680 Fetch everything", type="primary", disabled=not ready):
         progress_bar = st.progress(0.0)

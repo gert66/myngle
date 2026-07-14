@@ -18,6 +18,49 @@ def test_size_band_label_open_ended():
 
 
 # ---------------------------------------------------------------------------
+# estimate_credits_for_download
+# ---------------------------------------------------------------------------
+
+def test_estimate_credits_zero_results():
+    assert app.estimate_credits_for_download(0) == 0
+
+
+def test_estimate_credits_single_result_rounds_up_to_one_block():
+    assert app.estimate_credits_for_download(1) == 1
+
+
+def test_estimate_credits_exact_quantity_boundary():
+    assert app.estimate_credits_for_download(25) == 1
+
+
+def test_estimate_credits_just_over_boundary_rounds_up():
+    assert app.estimate_credits_for_download(26) == 2
+
+
+def test_estimate_credits_full_page_costs_two():
+    assert app.estimate_credits_for_download(50) == 2
+
+
+def test_estimate_credits_partial_last_page_rounds_up_per_page():
+    # 1 full page (50 -> 2 credits) + a 1-result second page (-> 1 credit),
+    # not a naive ceil(51 / 25) == 3 coincidence -- confirms per-page
+    # rounding, not per-total rounding.
+    assert app.estimate_credits_for_download(51) == 3
+
+
+def test_estimate_credits_matches_observed_real_run():
+    # Confirmed empirically: 80 results over 2 pages (50 + 30) cost
+    # 2 + 2 = 4 credits, not ceil(80 / 25) == 4 by coincidence -- a 30-result
+    # partial page still rounds up to the same 2 credits as a full page.
+    assert app.estimate_credits_for_download(80) == 4
+
+
+def test_estimate_credits_matches_observed_paraguay_total():
+    # Confirmed empirically against a live Paraguay query: total=1144.
+    assert app.estimate_credits_for_download(1144) == 46
+
+
+# ---------------------------------------------------------------------------
 # build_prospecting_request
 # ---------------------------------------------------------------------------
 
