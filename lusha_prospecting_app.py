@@ -60,6 +60,14 @@ _ACCOUNT_USAGE_ENDPOINT = "/v3/account/usage"
 _REQUEST_TIMEOUT = 30  # seconds
 _PAGE_SIZE = 50  # Lusha's documented max results per page
 _MAX_PAGES = 1000  # Lusha's documented cap (1000 x 50 = 50,000 results)
+#: Lusha rejects any pagination.size below 10 (400 Bad Request) -- this is
+#: the cheapest possible companies/prospecting call: still returns the true
+#: pagination.total, but rounds up to at most 1 credit (0 if the query has
+#: no matches at all) versus up to 2 at the default _PAGE_SIZE. There is no
+#: documented or discovered credits-free way to get just a count -- checked
+#: Lusha's API docs/help center (2026-07-14) and confirmed empirically that
+#: every companies/prospecting call, even at this minimum size, is billed.
+_PREVIEW_PAGE_SIZE = 10
 
 #: The 7 employee-size bands used in every prospecting query run so far
 #: (Germany, Uruguay, ...) -- together they cover 51+ employees without
@@ -480,19 +488,26 @@ def main() -> None:  # pragma: no cover - exercised only under `streamlit run`
     if not ready:
         st.caption("First choose a country (look it up) and at least one size band.")
 
-    if st.button("\U0001f9ea Test 1 page first", disabled=not ready):
+    if st.button(
+        "\U0001f50d Check count & cost (cheapest possible call)", disabled=not ready,
+        help="Lusha has no free count-only option -- this uses the smallest "
+             "page size Lusha allows (10) so the check itself costs at most "
+             "1 credit (0 if nothing matches), instead of up to 2 for a "
+             "full-size page.",
+    ):
         try:
             body = build_prospecting_request(
                 location=location, size_bands=chosen_bands, page=0,
                 excluded_industry_ids=excluded_ids,
             )
+            body["pagination"]["size"] = _PREVIEW_PAGE_SIZE
             data = fetch_prospecting_page(api_key, body)
             pagination = data.get("pagination", {})
             billing = data.get("billing", {})
             total = pagination.get("total")
             msg = (
                 f"Total matches reported by Lusha: {total if total is not None else '?'} — "
-                f"credits for this test page: {billing.get('creditsCharged', '?')}"
+                f"credits for this check: {billing.get('creditsCharged', '?')}"
             )
             if total is not None:
                 st.session_state["_lusha_preview_total"] = total
@@ -501,16 +516,17 @@ def main() -> None:  # pragma: no cover - exercised only under `streamlit run`
                     f"~{estimate_credits_for_download(total)}"
                 )
             st.success(msg)
+            st.caption(f"Sample of the first {_PREVIEW_PAGE_SIZE} matches:")
             st.dataframe(pd.DataFrame(data.get("results") or []), use_container_width=True)
         except Exception as exc:
-            st.error(f"Test call failed: {exc}")
+            st.error(f"Check failed: {exc}")
 
     preview_total = st.session_state.get("_lusha_preview_total")
     if preview_total is not None:
         st.caption(
             f"\U0001f4ca Last checked: {preview_total} matching results — "
             f"estimated cost to fetch all of them: ~{estimate_credits_for_download(preview_total)} credits. "
-            "(Re-run 'Test 1 page first' if you changed the filters above — "
+            "(Re-run 'Check count & cost' if you changed the filters above — "
             "this number won't update on its own.)"
         )
 
