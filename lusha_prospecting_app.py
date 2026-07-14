@@ -346,59 +346,59 @@ def main() -> None:  # pragma: no cover - exercised only under `streamlit run`
     import streamlit as st
 
     st.set_page_config(page_title="Lusha Prospecting", page_icon="\U0001f50e", layout="wide")
-    st.title("\U0001f50e Lusha Prospecting — bulk bedrijven ophalen")
+    st.title("\U0001f50e Lusha Prospecting — bulk company download")
     st.caption(
-        "Haalt uitsluitend companies/prospecting-resultaten op (id, naam, "
-        "domein, basisfirmografie) — nooit companies/enrich of een "
-        "contact-endpoint, dus nooit een per-veld reveal-kost voor e-mail/"
-        "telefoon. Prospecting zelf wordt volgens Lusha's eigen API-docs wel "
-        "per resultaat gerekend (voorbeeld: 1 credit/resultaat) — "
-        "controleer dat hieronder tegen je eigen account voor je alles ophaalt."
+        "Fetches only companies/prospecting results (id, name, domain, "
+        "basic firmographics) — never companies/enrich or a contact "
+        "endpoint, so this never triggers a per-field reveal charge for "
+        "email/phone. Prospecting itself IS billed per result according to "
+        "Lusha's own API docs (example: 1 credit/result) — check that "
+        "below against your own account before pulling everything."
     )
 
     with st.sidebar:
-        st.header("API-key")
+        st.header("API key")
         default_key = resolve_secret(getattr(st, "secrets", None), "LUSHA_API_KEY")
         api_key = st.text_input(
-            "Lusha API-key", value=default_key, type="password",
-            help="Standaard gevuld vanuit de omgevingsvariabele LUSHA_API_KEY, "
-                 "anders .streamlit/secrets.toml; overschrijf hier voor een "
-                 "eenmalige sessie.",
+            "Lusha API key", value=default_key, type="password",
+            help="Defaults from the LUSHA_API_KEY environment variable, "
+                 "otherwise .streamlit/secrets.toml; override here for a "
+                 "one-off session.",
         )
-        if st.button("\U0001f4b3 Account & prijzen testen", disabled=not api_key):
+        if st.button("\U0001f4b3 Test account & pricing", disabled=not api_key):
             try:
                 st.session_state["_lusha_account_usage"] = get_account_usage(api_key)
             except Exception as exc:
-                st.error(f"Kon account-info niet ophalen: {exc}")
+                st.error(f"Could not fetch account info: {exc}")
         usage = st.session_state.get("_lusha_account_usage")
         if usage:
             credits = usage.get("credits", {})
             c1, c2 = st.columns(2)
-            c1.metric("Credits over", credits.get("remaining", "?"))
-            c2.metric("Credits totaal", credits.get("total", "?"))
+            c1.metric("Credits remaining", credits.get("remaining", "?"))
+            c2.metric("Credits total", credits.get("total", "?"))
             pricing = usage.get("pricing", {})
             search_price = pricing.get("apiSearch") or pricing.get("api_search")
             if search_price:
-                st.caption(f"Prijs per prospecting-resultaat op dit plan: {search_price}")
+                st.caption(f"Price per prospecting result on this plan: {search_price}")
             else:
                 st.caption(
-                    "Kon de exacte prijs voor companies/prospecting niet uit "
-                    "de account-info halen — Lusha's publieke voorbeeld "
-                    "toont 1 credit/resultaat; verifieer dit tegen je eigen "
-                    "contract voor je op grote schaal ophaalt."
+                    "Could not get the exact companies/prospecting price "
+                    "from the account info — Lusha's public example shows "
+                    "1 credit/result; verify this against your own "
+                    "contract before pulling at scale."
                 )
 
     if not api_key:
-        st.info("Vul links een API-key in om te beginnen.")
+        st.info("Enter an API key on the left to get started.")
         return
 
-    st.subheader("1. Land")
-    country_query = st.text_input("Land", value="Uruguay", key="country_query")
-    if st.button("\U0001f50d Land opzoeken", disabled=not country_query):
+    st.subheader("1. Country")
+    country_query = st.text_input("Country", value="Uruguay", key="country_query")
+    if st.button("\U0001f50d Look up country", disabled=not country_query):
         try:
             st.session_state["_location_matches"] = find_locations(api_key, country_query)
         except Exception as exc:
-            st.error(f"Opzoeken mislukt: {exc}")
+            st.error(f"Lookup failed: {exc}")
 
     matches = st.session_state.get("_location_matches") or []
     location = None
@@ -409,47 +409,47 @@ def main() -> None:  # pragma: no cover - exercised only under `streamlit run`
             for m in matches
         ]
         idx = st.selectbox(
-            "Kies de exacte match (rechtstreeks van Lusha)", options=list(range(len(matches))),
+            "Choose the exact match (straight from Lusha)", options=list(range(len(matches))),
             format_func=lambda i: labels[i], key="location_select",
         )
         location = matches[idx]
     elif country_query:
-        st.caption("Klik '\U0001f50d Land opzoeken' om de exacte Lusha-locatie te bepalen.")
+        st.caption("Click '\U0001f50d Look up country' to resolve the exact Lusha location.")
 
-    st.subheader("2. Bedrijfsgrootte (medewerkers)")
+    st.subheader("2. Company size (employees)")
     chosen_bands: list[dict] = []
     cols = st.columns(len(SIZE_BANDS))
     for i, band in enumerate(SIZE_BANDS):
         if cols[i].checkbox(size_band_label(band), value=True, key=f"size_band_{i}"):
             chosen_bands.append(band)
 
-    st.subheader("3. Industrie-uitsluiting")
+    st.subheader("3. Industry exclusion")
     exclude_on = st.checkbox(
-        "Overheid & community uitsluiten (industrie-ID's 5 en 10 — zoals "
-        "in de bestaande query's)",
+        "Exclude Government & Community (industry IDs 5 and 10 — as in "
+        "the existing queries)",
         value=True, key="exclude_industries_cb",
     )
     excluded_ids = list(DEFAULT_EXCLUDED_INDUSTRY_IDS) if exclude_on else []
     if exclude_on:
         labels_map = resolve_industry_labels(api_key, excluded_ids)
         if labels_map:
-            st.caption("Wordt uitgesloten: " + ", ".join(
+            st.caption("Will be excluded: " + ", ".join(
                 f"{labels_map.get(i, i)} (id {i})" for i in excluded_ids))
 
     if location and chosen_bands:
-        with st.expander("\U0001f4c4 Voorbeeld van de API-aanroep (pagina 0)"):
+        with st.expander("\U0001f4c4 Preview of the API call (page 0)"):
             st.json(build_prospecting_request(
                 location=location, size_bands=chosen_bands, page=0,
                 excluded_industry_ids=excluded_ids,
             ))
 
     st.divider()
-    st.subheader("4. Ophalen")
+    st.subheader("4. Fetch")
     ready = bool(location and chosen_bands)
     if not ready:
-        st.caption("Kies eerst een land (opzoeken) en minstens één grootteband.")
+        st.caption("First choose a country (look it up) and at least one size band.")
 
-    if st.button("\U0001f9ea Eerst 1 pagina testen", disabled=not ready):
+    if st.button("\U0001f9ea Test 1 page first", disabled=not ready):
         try:
             body = build_prospecting_request(
                 location=location, size_bands=chosen_bands, page=0,
@@ -459,20 +459,20 @@ def main() -> None:  # pragma: no cover - exercised only under `streamlit run`
             pagination = data.get("pagination", {})
             billing = data.get("billing", {})
             st.success(
-                f"Totaal aantal matches volgens Lusha: {pagination.get('total', '?')} — "
-                f"credits voor deze testpagina: {billing.get('creditsCharged', '?')}"
+                f"Total matches reported by Lusha: {pagination.get('total', '?')} — "
+                f"credits for this test page: {billing.get('creditsCharged', '?')}"
             )
             st.dataframe(pd.DataFrame(data.get("results") or []), use_container_width=True)
         except Exception as exc:
-            st.error(f"Testaanroep mislukt: {exc}")
+            st.error(f"Test call failed: {exc}")
 
-    if st.button("\U0001f680 Alles ophalen", type="primary", disabled=not ready):
+    if st.button("\U0001f680 Fetch everything", type="primary", disabled=not ready):
         progress_bar = st.progress(0.0)
         status = st.empty()
 
         def _progress(page, collected, total):
             progress_bar.progress(min(1.0, collected / total) if total else 0.0)
-            status.text(f"Pagina {page + 1} — {collected} van {total or '?'} bedrijven opgehaald…")
+            status.text(f"Page {page + 1} — {collected} of {total or '?'} companies fetched…")
 
         try:
             companies, stats = fetch_all_companies(
@@ -480,25 +480,25 @@ def main() -> None:  # pragma: no cover - exercised only under `streamlit run`
                 excluded_industry_ids=excluded_ids, progress_callback=_progress,
             )
         except Exception as exc:
-            st.error(f"Ophalen mislukt: {exc}")
+            st.error(f"Fetch failed: {exc}")
         else:
             st.session_state["_lusha_results"] = companies
             st.success(
-                f"Klaar: {stats['companies_collected']} bedrijven opgehaald over "
-                f"{stats['pages_fetched']} pagina('s) (van {stats['total_reported']} "
-                f"gerapporteerd totaal), {stats['credits_charged']} credits gebruikt."
+                f"Done: {stats['companies_collected']} companies fetched over "
+                f"{stats['pages_fetched']} page(s) (of {stats['total_reported']} "
+                f"reported total), {stats['credits_charged']} credits used."
             )
 
     results = st.session_state.get("_lusha_results")
     if results:
         df = pd.DataFrame(results)
-        st.subheader(f"Resultaten ({len(df)})")
+        st.subheader(f"Results ({len(df)})")
         st.dataframe(df, use_container_width=True)
         buf = io.BytesIO()
         with pd.ExcelWriter(buf, engine="openpyxl") as writer:
             df.to_excel(writer, index=False, sheet_name="Companies")
         st.download_button(
-            "⬇️ Download als Excel", data=buf.getvalue(),
+            "⬇️ Download as Excel", data=buf.getvalue(),
             file_name=f"lusha_prospecting_{country_query.strip().lower().replace(' ', '_')}.xlsx",
             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         )
