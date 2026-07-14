@@ -111,6 +111,23 @@ class ContactResponse(BaseModel):
     message:  Optional[str] = None
 
 
+class RevealRequest(BaseModel):
+    contactId: str
+
+    @model_validator(mode="after")
+    def require_contact_id(self) -> "RevealRequest":
+        if not self.contactId.strip():
+            raise ValueError("contactId is required.")
+        return self
+
+
+class RevealResponse(BaseModel):
+    status:  str
+    email:   Optional[str] = None
+    phone:   Optional[str] = None
+    message: Optional[str] = None
+
+
 # ---------------------------------------------------------------------------
 # Endpoints
 # ---------------------------------------------------------------------------
@@ -126,8 +143,11 @@ def get_contacts(req: ContactRequest) -> ContactResponse:
     Look up decision-maker contacts for a single company via Lusha,
     rank them for mYngle relevance, and return the normalised result.
 
-    Raw Lusha data is never returned. Email/phone are included only
-    when Lusha reveals them (depends on plan/credits).
+    Raw Lusha data is never returned. This is a free preview only — Lusha's
+    decision-makers search never includes actual email/phone values, only
+    an emailAvailable/phoneAvailable flag per contact (from its canReveal
+    list). Call POST /api/lusha/reveal with a contact's contactId to
+    actually reveal its email/phone (billed separately, on demand).
     """
     try:
         raw_contacts = lc.find_contacts(
@@ -164,3 +184,35 @@ def get_contacts(req: ContactRequest) -> ContactResponse:
     ]
 
     return ContactResponse(status="ok", contacts=clean)
+
+
+@app.post("/api/lusha/reveal", response_model=RevealResponse)
+def reveal_contact(req: RevealRequest) -> RevealResponse:
+    """
+    Reveal email + phone for ONE specific contact already returned by
+    /api/lusha/contacts (pass its contactId). Explicit user action only —
+    never called automatically for every contact in a list, since phone
+    reveal is billed 5x an email reveal on Lusha's own pricing.
+    """
+    try:
+        revealed = lc.reveal_contact_details([req.contactId])
+    except RuntimeError as exc:
+        return RevealResponse(status="error", message=str(exc))
+    except Exception:
+        return RevealResponse(
+            status="error",
+            message="An unexpected error occurred while contacting Lusha.",
+        )
+
+    details = revealed.get(req.contactId)
+    if not details:
+        return RevealResponse(
+            status="not_found",
+            message="Lusha has no revealable email or phone for this contact.",
+        )
+
+    return RevealResponse(
+        status="ok",
+        email=details.get("email") or None,
+        phone=details.get("phone") or None,
+    )
