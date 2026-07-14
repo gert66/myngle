@@ -462,31 +462,83 @@ def main() -> None:  # pragma: no cover - exercised only under `streamlit run`
         if cols[i].checkbox(size_band_label(band), value=True, key=f"size_band_{i}"):
             chosen_bands.append(band)
 
-    st.subheader("3. Industry exclusion")
-    exclude_on = st.checkbox(
-        "Exclude Government & Community (industry IDs 5 and 10 — as in "
-        "the existing queries)",
-        value=True, key="exclude_industries_cb",
+    st.subheader("3. Industry filter")
+    industry_mode = st.radio(
+        "Industry filter mode",
+        options=["Exclude a couple of industries (default)", "Only fetch specific sectors"],
+        key="industry_mode",
+        help="'Only fetch specific sectors' runs one paginated query per "
+             "selected sector (see fetch_companies_by_sector) -- companies "
+             "with no industry assigned to them at all are never returned "
+             "in this mode, and each sector's own partial last page still "
+             "rounds up to a full credit block, so picking many narrow "
+             "sectors costs more than one broad exclude-based query.",
     )
-    excluded_ids = list(DEFAULT_EXCLUDED_INDUSTRY_IDS) if exclude_on else []
-    if exclude_on:
-        labels_map = resolve_industry_labels(api_key, excluded_ids)
-        if labels_map:
-            st.caption("Will be excluded: " + ", ".join(
-                f"{labels_map.get(i, i)} (id {i})" for i in excluded_ids))
+    sector_mode = industry_mode == "Only fetch specific sectors"
 
-    if location and chosen_bands:
+    excluded_ids: list[int] = []
+    included_industries: list[dict] = []
+
+    if not sector_mode:
+        exclude_on = st.checkbox(
+            "Exclude Government & Community (industry IDs 5 and 10 — as in "
+            "the existing queries)",
+            value=True, key="exclude_industries_cb",
+        )
+        excluded_ids = list(DEFAULT_EXCLUDED_INDUSTRY_IDS) if exclude_on else []
+        if exclude_on:
+            labels_map = resolve_industry_labels(api_key, excluded_ids)
+            if labels_map:
+                st.caption("Will be excluded: " + ", ".join(
+                    f"{labels_map.get(i, i)} (id {i})" for i in excluded_ids))
+    else:
+        if "_lusha_main_industries" not in st.session_state:
+            try:
+                st.session_state["_lusha_main_industries"] = fetch_main_industries(api_key)
+            except Exception as exc:
+                st.error(f"Could not fetch the sector list: {exc}")
+                st.session_state["_lusha_main_industries"] = []
+        all_industries = st.session_state.get("_lusha_main_industries") or []
+        labels_by_id = {
+            ind["main_industry_id"]: ind.get("main_industry", str(ind["main_industry_id"]))
+            for ind in all_industries
+        }
+        chosen_ids = st.multiselect(
+            "Sectors to include", options=list(labels_by_id.keys()),
+            format_func=lambda i: labels_by_id.get(i, i), key="sector_multiselect",
+        )
+        included_industries = [ind for ind in all_industries if ind["main_industry_id"] in chosen_ids]
+        if all_industries and not included_industries:
+            st.caption("Pick at least one sector to fetch in this mode.")
+
+    if location and chosen_bands and (not sector_mode or included_industries):
         with st.expander("\U0001f4c4 Preview of the API call (page 0)"):
-            st.json(build_prospecting_request(
-                location=location, size_bands=chosen_bands, page=0,
-                excluded_industry_ids=excluded_ids,
-            ))
+            if sector_mode:
+                st.json(build_prospecting_request(
+                    location=location, size_bands=chosen_bands, page=0,
+                    included_main_industry_ids=[included_industries[0]["main_industry_id"]],
+                ))
+                if len(included_industries) > 1:
+                    st.caption(
+                        f"Shown: the request for the first selected sector "
+                        f"({included_industries[0].get('main_industry')}). "
+                        f"{len(included_industries)} sectors selected in total — "
+                        "one such request is sent per sector."
+                    )
+            else:
+                st.json(build_prospecting_request(
+                    location=location, size_bands=chosen_bands, page=0,
+                    excluded_industry_ids=excluded_ids,
+                ))
 
     st.divider()
     st.subheader("4. Fetch")
-    ready = bool(location and chosen_bands)
+    ready = bool(location and chosen_bands and (not sector_mode or included_industries))
     if not ready:
-        st.caption("First choose a country (look it up) and at least one size band.")
+        st.caption(
+            "First choose a country (look it up), at least one size band, "
+            "and — in sector mode — at least one sector."
+        )
 
     if st.button(
         "\U0001f50d Check count & cost (cheapest possible call)", disabled=not ready,
@@ -496,36 +548,65 @@ def main() -> None:  # pragma: no cover - exercised only under `streamlit run`
              "full-size page.",
     ):
         try:
-            body = build_prospecting_request(
-                location=location, size_bands=chosen_bands, page=0,
-                excluded_industry_ids=excluded_ids,
-            )
-            body["pagination"]["size"] = _PREVIEW_PAGE_SIZE
-            data = fetch_prospecting_page(api_key, body)
-            pagination = data.get("pagination", {})
-            billing = data.get("billing", {})
-            total = pagination.get("total")
-            msg = (
-                f"Total matches reported by Lusha: {total if total is not None else '?'} — "
-                f"credits for this check: {billing.get('creditsCharged', '?')}"
-            )
-            if total is not None:
+            if sector_mode:
+                per_sector_rows = []
+                for ind in included_industries:
+                    body = build_prospecting_request(
+                        location=location, size_bands=chosen_bands, page=0,
+                        included_main_industry_ids=[ind["main_industry_id"]],
+                    )
+                    body["pagination"]["size"] = _PREVIEW_PAGE_SIZE
+                    data = fetch_prospecting_page(api_key, body)
+                    total_i = (data.get("pagination") or {}).get("total") or 0
+                    credits_i = (data.get("billing") or {}).get("creditsCharged", 0) or 0
+                    per_sector_rows.append({
+                        "sector": ind.get("main_industry"),
+                        "matches": total_i,
+                        "check_cost_credits": credits_i,
+                        "est_download_credits": estimate_credits_for_download(total_i),
+                    })
+                total = sum(r["matches"] for r in per_sector_rows)
+                check_cost = sum(r["check_cost_credits"] for r in per_sector_rows)
+                estimate = sum(r["est_download_credits"] for r in per_sector_rows)
                 st.session_state["_lusha_preview_total"] = total
-                msg += (
-                    f" — estimated credits to fetch all {total} results: "
-                    f"~{estimate_credits_for_download(total)}"
+                st.session_state["_lusha_preview_estimate"] = estimate
+                st.success(
+                    f"Total matches across {len(included_industries)} selected sector(s): "
+                    f"{total} — credits for this check: {check_cost} — "
+                    f"estimated credits to fetch all of them: ~{estimate}"
                 )
-            st.success(msg)
-            st.caption(f"Sample of the first {_PREVIEW_PAGE_SIZE} matches:")
-            st.dataframe(pd.DataFrame(data.get("results") or []), use_container_width=True)
+                st.dataframe(pd.DataFrame(per_sector_rows), use_container_width=True)
+            else:
+                body = build_prospecting_request(
+                    location=location, size_bands=chosen_bands, page=0,
+                    excluded_industry_ids=excluded_ids,
+                )
+                body["pagination"]["size"] = _PREVIEW_PAGE_SIZE
+                data = fetch_prospecting_page(api_key, body)
+                pagination = data.get("pagination", {})
+                billing = data.get("billing", {})
+                total = pagination.get("total")
+                msg = (
+                    f"Total matches reported by Lusha: {total if total is not None else '?'} — "
+                    f"credits for this check: {billing.get('creditsCharged', '?')}"
+                )
+                if total is not None:
+                    estimate = estimate_credits_for_download(total)
+                    st.session_state["_lusha_preview_total"] = total
+                    st.session_state["_lusha_preview_estimate"] = estimate
+                    msg += f" — estimated credits to fetch all {total} results: ~{estimate}"
+                st.success(msg)
+                st.caption(f"Sample of the first {_PREVIEW_PAGE_SIZE} matches:")
+                st.dataframe(pd.DataFrame(data.get("results") or []), use_container_width=True)
         except Exception as exc:
             st.error(f"Check failed: {exc}")
 
     preview_total = st.session_state.get("_lusha_preview_total")
-    if preview_total is not None:
+    preview_estimate = st.session_state.get("_lusha_preview_estimate")
+    if preview_total is not None and preview_estimate is not None:
         st.caption(
             f"\U0001f4ca Last checked: {preview_total} matching results — "
-            f"estimated cost to fetch all of them: ~{estimate_credits_for_download(preview_total)} credits. "
+            f"estimated cost to fetch all of them: ~{preview_estimate} credits. "
             "(Re-run 'Check count & cost' if you changed the filters above — "
             "this number won't update on its own.)"
         )
@@ -534,24 +615,40 @@ def main() -> None:  # pragma: no cover - exercised only under `streamlit run`
         progress_bar = st.progress(0.0)
         status = st.empty()
 
-        def _progress(page, collected, total):
-            progress_bar.progress(min(1.0, collected / total) if total else 0.0)
-            status.text(f"Page {page + 1} — {collected} of {total or '?'} companies fetched…")
-
         try:
-            companies, stats = fetch_all_companies(
-                api_key, location=location, size_bands=chosen_bands,
-                excluded_industry_ids=excluded_ids, progress_callback=_progress,
-            )
+            if sector_mode:
+                def _sector_progress(i, n, label, collected):
+                    progress_bar.progress(min(1.0, (i + 1) / n) if n else 0.0)
+                    status.text(f"Sector {i + 1}/{n} ({label}) — {collected} companies fetched so far…")
+
+                companies, stats = fetch_companies_by_sector(
+                    api_key, location=location, size_bands=chosen_bands,
+                    main_industries=included_industries, progress_callback=_sector_progress,
+                )
+            else:
+                def _page_progress(page, collected, total):
+                    progress_bar.progress(min(1.0, collected / total) if total else 0.0)
+                    status.text(f"Page {page + 1} — {collected} of {total or '?'} companies fetched…")
+
+                companies, stats = fetch_all_companies(
+                    api_key, location=location, size_bands=chosen_bands,
+                    excluded_industry_ids=excluded_ids, progress_callback=_page_progress,
+                )
         except Exception as exc:
             st.error(f"Fetch failed: {exc}")
         else:
             st.session_state["_lusha_results"] = companies
-            st.success(
-                f"Done: {stats['companies_collected']} companies fetched over "
-                f"{stats['pages_fetched']} page(s) (of {stats['total_reported']} "
-                f"reported total), {stats['credits_charged']} credits used."
-            )
+            if sector_mode:
+                st.success(
+                    f"Done: {stats['companies_collected']} companies fetched across "
+                    f"{len(included_industries)} sector(s), {stats['credits_charged']} credits used."
+                )
+            else:
+                st.success(
+                    f"Done: {stats['companies_collected']} companies fetched over "
+                    f"{stats['pages_fetched']} page(s) (of {stats['total_reported']} "
+                    f"reported total), {stats['credits_charged']} credits used."
+                )
 
     results = st.session_state.get("_lusha_results")
     if results:
