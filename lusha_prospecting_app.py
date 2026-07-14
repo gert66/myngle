@@ -629,44 +629,72 @@ def main() -> None:  # pragma: no cover - exercised only under `streamlit run`
             "this number won't update on its own.)"
         )
 
-    if st.button("\U0001f680 Fetch everything", type="primary", disabled=not ready):
-        progress_bar = st.progress(0.0)
-        status = st.empty()
-
-        try:
-            if sector_mode:
-                def _sector_progress(i, n, label, collected):
-                    progress_bar.progress(min(1.0, (i + 1) / n) if n else 0.0)
-                    status.text(f"Sector {i + 1}/{n} ({label}) — {collected} companies fetched so far…")
-
-                companies, stats = fetch_companies_by_sector(
-                    api_key, location=location, size_bands=chosen_bands,
-                    main_industries=included_industries, progress_callback=_sector_progress,
-                )
-            else:
-                def _page_progress(page, collected, total):
-                    progress_bar.progress(min(1.0, collected / total) if total else 0.0)
-                    status.text(f"Page {page + 1} — {collected} of {total or '?'} companies fetched…")
-
-                companies, stats = fetch_all_companies(
-                    api_key, location=location, size_bands=chosen_bands,
-                    excluded_industry_ids=excluded_ids, progress_callback=_page_progress,
-                )
-        except Exception as exc:
-            st.error(f"Fetch failed: {exc}")
+    if not st.session_state.get("_lusha_fetch_armed"):
+        if st.button("\U0001f680 Fetch everything", type="primary", disabled=not ready):
+            st.session_state["_lusha_fetch_armed"] = True
+            st.rerun()
+    else:
+        if preview_total is not None and preview_estimate is not None:
+            st.warning(
+                f"⚠️ Are you sure? This will fetch **{preview_total} companies** "
+                f"for an estimated **~{preview_estimate} credits** — based on the "
+                "last 'Check count & cost' run. Re-run that check first if you "
+                "changed the filters above since then, otherwise this may be "
+                "wrong (and get billed on the real numbers regardless)."
+            )
         else:
-            st.session_state["_lusha_results"] = companies
-            if sector_mode:
-                st.success(
-                    f"Done: {stats['companies_collected']} companies fetched across "
-                    f"{len(included_industries)} sector(s), {stats['credits_charged']} credits used."
-                )
+            st.warning(
+                "⚠️ Are you sure? No 'Check count & cost' has been run "
+                "yet for these filters, so the size and cost of this fetch are "
+                "unknown. Consider cancelling and checking first."
+            )
+        confirm_col, cancel_col = st.columns(2)
+        confirmed = confirm_col.button("✅ Yes, fetch now", type="primary")
+        cancelled = cancel_col.button("Cancel")
+
+        if cancelled:
+            st.session_state["_lusha_fetch_armed"] = False
+            st.rerun()
+
+        if confirmed:
+            st.session_state["_lusha_fetch_armed"] = False
+            progress_bar = st.progress(0.0)
+            status = st.empty()
+
+            try:
+                if sector_mode:
+                    def _sector_progress(i, n, label, collected):
+                        progress_bar.progress(min(1.0, (i + 1) / n) if n else 0.0)
+                        status.text(f"Sector {i + 1}/{n} ({label}) — {collected} companies fetched so far…")
+
+                    companies, stats = fetch_companies_by_sector(
+                        api_key, location=location, size_bands=chosen_bands,
+                        main_industries=included_industries, progress_callback=_sector_progress,
+                    )
+                else:
+                    def _page_progress(page, collected, total):
+                        progress_bar.progress(min(1.0, collected / total) if total else 0.0)
+                        status.text(f"Page {page + 1} — {collected} of {total or '?'} companies fetched…")
+
+                    companies, stats = fetch_all_companies(
+                        api_key, location=location, size_bands=chosen_bands,
+                        excluded_industry_ids=excluded_ids, progress_callback=_page_progress,
+                    )
+            except Exception as exc:
+                st.error(f"Fetch failed: {exc}")
             else:
-                st.success(
-                    f"Done: {stats['companies_collected']} companies fetched over "
-                    f"{stats['pages_fetched']} page(s) (of {stats['total_reported']} "
-                    f"reported total), {stats['credits_charged']} credits used."
-                )
+                st.session_state["_lusha_results"] = companies
+                if sector_mode:
+                    st.success(
+                        f"Done: {stats['companies_collected']} companies fetched across "
+                        f"{len(included_industries)} sector(s), {stats['credits_charged']} credits used."
+                    )
+                else:
+                    st.success(
+                        f"Done: {stats['companies_collected']} companies fetched over "
+                        f"{stats['pages_fetched']} page(s) (of {stats['total_reported']} "
+                        f"reported total), {stats['credits_charged']} credits used."
+                    )
 
     results = st.session_state.get("_lusha_results")
     if results:
