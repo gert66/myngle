@@ -570,11 +570,11 @@ def main() -> None:  # pragma: no cover - exercised only under `streamlit run`
                 estimate = sum(r["est_download_credits"] for r in per_sector_rows)
                 st.session_state["_lusha_preview_total"] = total
                 st.session_state["_lusha_preview_estimate"] = estimate
-                st.success(
-                    f"Total matches across {len(included_industries)} selected sector(s): "
-                    f"{total} — credits for this check: {check_cost} — "
-                    f"estimated credits to fetch all of them: ~{estimate}"
-                )
+                st.caption(f"Across {len(included_industries)} selected sector(s):")
+                m1, m2, m3 = st.columns(3)
+                m1.metric("\U0001f3e2 Matching companies", total)
+                m2.metric("Credits spent on this check", check_cost)
+                m3.metric("Est. credits to fetch all of them", f"~{estimate}")
                 st.dataframe(pd.DataFrame(per_sector_rows), use_container_width=True)
             else:
                 body = build_prospecting_request(
@@ -586,16 +586,14 @@ def main() -> None:  # pragma: no cover - exercised only under `streamlit run`
                 pagination = data.get("pagination", {})
                 billing = data.get("billing", {})
                 total = pagination.get("total")
-                msg = (
-                    f"Total matches reported by Lusha: {total if total is not None else '?'} — "
-                    f"credits for this check: {billing.get('creditsCharged', '?')}"
-                )
+                m1, m2, m3 = st.columns(3)
+                m1.metric("\U0001f3e2 Matching companies", total if total is not None else "?")
+                m2.metric("Credits spent on this check", billing.get("creditsCharged", "?"))
                 if total is not None:
                     estimate = estimate_credits_for_download(total)
                     st.session_state["_lusha_preview_total"] = total
                     st.session_state["_lusha_preview_estimate"] = estimate
-                    msg += f" — estimated credits to fetch all {total} results: ~{estimate}"
-                st.success(msg)
+                    m3.metric("Est. credits to fetch all of them", f"~{estimate}")
                 st.caption(f"Sample of the first {_PREVIEW_PAGE_SIZE} matches:")
                 st.dataframe(pd.DataFrame(data.get("results") or []), use_container_width=True)
         except Exception as exc:
@@ -605,8 +603,8 @@ def main() -> None:  # pragma: no cover - exercised only under `streamlit run`
     preview_estimate = st.session_state.get("_lusha_preview_estimate")
     if preview_total is not None and preview_estimate is not None:
         st.caption(
-            f"\U0001f4ca Last checked: {preview_total} matching results — "
-            f"estimated cost to fetch all of them: ~{preview_estimate} credits. "
+            f"\U0001f4ca Last checked: **{preview_total} companies** match these filters — "
+            f"fetching all of them is estimated to cost **~{preview_estimate} credits**. "
             "(Re-run 'Check count & cost' if you changed the filters above — "
             "this number won't update on its own.)"
         )
