@@ -18,6 +18,46 @@ def test_size_band_label_open_ended():
 
 
 # ---------------------------------------------------------------------------
+# location_match_label
+# ---------------------------------------------------------------------------
+
+def test_location_match_label_plain_country():
+    assert app.location_match_label(
+        {"country_grouping": "emea", "continent": "Europe", "country": "Italy"}
+    ) == "Italy — continent: Europe, grouping: emea"
+
+
+def test_location_match_label_disambiguates_city_inside_country():
+    # Confirmed live bug: searching "Italy" also matches a city literally
+    # named "Italy" inside Italy -- without state/city in the label these
+    # two matches were indistinguishable, and the country match's total was
+    # 2154 companies versus 0 for the city match.
+    country_only = app.location_match_label(
+        {"country_grouping": "emea", "continent": "Europe", "country": "Italy"}
+    )
+    city_match = app.location_match_label(
+        {"country_grouping": "emea", "continent": "Europe", "country": "Italy", "city": "Italy"}
+    )
+    assert country_only != city_match
+    assert "Italy" in city_match and city_match != country_only
+
+
+def test_location_match_label_includes_state_and_city():
+    label = app.location_match_label(
+        {"country_grouping": "na", "continent": "North America",
+         "country": "United States", "state": "Texas", "city": "Italy"}
+    )
+    assert label == "United States, Texas, Italy — continent: North America, grouping: na"
+
+
+def test_location_match_label_uses_snake_case_grouping_field():
+    # The schema's own docstrings once assumed camelCase `countryGrouping`;
+    # the real field Lusha returns is snake_case `country_grouping`.
+    label = app.location_match_label({"country": "Chile", "country_grouping": "latam"})
+    assert "grouping: latam" in label
+
+
+# ---------------------------------------------------------------------------
 # estimate_credits_for_download
 # ---------------------------------------------------------------------------
 

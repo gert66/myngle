@@ -100,6 +100,23 @@ def size_band_label(band: dict) -> str:
     return f"{band['min']}+" if "max" not in band else f"{band['min']}–{band['max']}"
 
 
+def location_match_label(m: dict) -> str:
+    """Human-readable label for one ``find_locations`` match, disambiguating
+    same-named places. Two matches can otherwise render identically: e.g.
+    searching "Italy" returns both the whole country AND an unrelated
+    ``state``/``city`` match nested inside it (also literally named
+    "Italy") -- without ``state``/``city`` in the label, both show as
+    "Italy — continent: Europe" even though one covers the entire country
+    and the other a single town, which can silently return 0 results.
+    Uses the confirmed live field name ``country_grouping`` (snake_case,
+    not the ``countryGrouping`` camelCase the schema docs suggest)."""
+    place = m.get("country", "?")
+    for key in ("state", "city"):
+        if m.get(key):
+            place += f", {m[key]}"
+    return f"{place} — continent: {m.get('continent', '?')}, grouping: {m.get('country_grouping', '?')}"
+
+
 def estimate_credits_for_download(total_results: int, page_size: int = _PAGE_SIZE) -> int:
     """Estimate the credits ``fetch_all_companies`` will spend to pull
     ``total_results`` results, from Lusha's confirmed ``companySearch``
@@ -436,20 +453,23 @@ def main() -> None:  # pragma: no cover - exercised only under `streamlit run`
     if st.button("\U0001f50d Look up country", disabled=not country_query):
         try:
             st.session_state["_location_matches"] = find_locations(api_key, country_query)
+            st.session_state["_location_matches_query"] = country_query
         except Exception as exc:
             st.error(f"Lookup failed: {exc}")
 
     matches = st.session_state.get("_location_matches") or []
     location = None
     if matches:
-        labels = [
-            f"{m.get('country', '?')} — continent: {m.get('continent', '?')}, "
-            f"grouping: {m.get('countryGrouping', '?')}"
-            for m in matches
-        ]
+        labels = [location_match_label(m) for m in matches]
         idx = st.selectbox(
-            "Choose the exact match (straight from Lusha)", options=list(range(len(matches))),
-            format_func=lambda i: labels[i], key="location_select",
+            "Choose the exact match (straight from Lusha) — note state/city, "
+            "not just the country name: a search can also match a same-named "
+            "place *inside* another country",
+            options=list(range(len(matches))), format_func=lambda i: labels[i],
+            # Keyed on the looked-up country so a fresh lookup always starts
+            # back at index 0, instead of Streamlit silently carrying over
+            # the previously-selected index into an unrelated match list.
+            key=f"location_select_{st.session_state.get('_location_matches_query', '')}",
         )
         location = matches[idx]
     elif country_query:
