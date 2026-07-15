@@ -55,13 +55,6 @@ _warnings.simplefilter("ignore", _PerformanceWarning)
 #: LR intercept.
 INTERCEPT: float = -0.35
 
-#: Flat post-blend score shift (added to the 1-10 final score, before the
-#: 1-10 clamp, then tier thresholds are evaluated against the shifted
-#: score). Unlike INTERCEPT — which nudges the underlying model probability
-#: and gets compressed/stretched by the sigmoid — this is a direct, linear
-#: "move every score up/down by X" lever. 0.0 = no shift.
-SCORE_OFFSET: float = 0.0
-
 #: Coefficients applied to normalised signals (clamp(v, 0, 3) / 3).
 #: IMPORTANT: uses sig_employer_branding_score — NOT sig_merger_acq_score.
 LEAN_COEFFICIENTS: dict[str, float] = {
@@ -171,6 +164,16 @@ SIZE_WEIGHT:  float = COMPANY_SIZE_WEIGHT
 _LEGACY_MODEL_WEIGHT: float = 0.75
 _LEGACY_SIZE_WEIGHT:  float = 0.25
 
+#: Default value of score_offset — a uniform additive shift applied to
+#: final_commercial_fit_score AFTER the full model calculation (LR +
+#: sigmoid + ICP/size blend), re-clamped to 1–10, and BEFORE tier
+#: assignment (see score_company() step 5b). Never touches the LR
+#: coefficients, intercept, sigmoid shape/anchors or the blend weights —
+#: those all run exactly as before. Overridable per call via
+#: params["score_offset"]; absent from params (e.g. any profile/run created
+#: before this feature existed) behaves identically to 0.0.
+SCORE_OFFSET_DEFAULT: float = 0.0
+
 #: Tier thresholds — 75/25 blend, percentile cutoffs from Results1.xlsx
 #: ("Score Methodology" / "Validation" tabs): top 10% / next 20% / next 30%.
 TIER_THRESHOLDS: list[tuple[float, str]] = [
@@ -248,6 +251,8 @@ SCORE_OUTPUT_COLS: list[str] = [
     "company_size_score",
     "company_size_missing",
     "final_commercial_fit_score",
+    "final_commercial_fit_score_before_offset",  # audit: score before score_offset
+    "score_offset_applied",                      # audit: the score_offset actually used
     "final_commercial_fit_score_75_25_legacy",   # audit comparison — temporary
     "commercial_tier",
     # ── Backward-compat aliases ──────────────────────────────────────────────
@@ -554,7 +559,7 @@ def score_company(
     _sig_k       = float(p.get("sigmoid_k",    _profile["sigmoid_k"]))
     _p_lo        = float(p.get("sigmoid_p_lo", _profile.get("sigmoid_p_lo", _SIGMOID_P_LO)))
     _p_hi        = float(p.get("sigmoid_p_hi", _profile.get("sigmoid_p_hi", _SIGMOID_P_HI)))
-    offset       = float(p.get("offset", SCORE_OFFSET))
+    score_offset = float(p.get("score_offset", SCORE_OFFSET_DEFAULT))
 
     if isinstance(row, pd.Series):
         row = row.to_dict()
@@ -641,14 +646,20 @@ def score_company(
     # ── 5. Blend — profile-controlled weights ────────────────────────────────
     w_model = _model_w * icp_sim
     w_size  = _size_w  * size_score
-    final   = _clamp(w_model + w_size + offset, 1.0, 10.0)
+    final_before_offset = _clamp(w_model + w_size, 1.0, 10.0)
     # Legacy 75/25 formula — kept for ranking-impact audit (default profile only).
     _legacy_final = _clamp(
         _LEGACY_MODEL_WEIGHT * icp_sim + _LEGACY_SIZE_WEIGHT * size_score,
         1.0, 10.0,
     )
 
-    # ── 6. Tier ───────────────────────────────────────────────────────────────
+    # ── 5b. Score offset — a uniform additive shift applied AFTER the full
+    # model calculation above, re-clamped to the same 1–10 range. Does not
+    # touch the LR coefficients/intercept, sigmoid shape/anchors or the
+    # blend weights — final_before_offset already reflects all of those.
+    final = _clamp(final_before_offset + score_offset, 1.0, 10.0)
+
+    # ── 6. Tier — assigned from the OFFSET-ADJUSTED score ────────────────────
     tier = TIER_THRESHOLDS[-1][1]
     for threshold, label in tiers:
         if final >= threshold:
@@ -694,11 +705,11 @@ def score_company(
     elif manual_rev:
         notes.append("Flagged for manual review; score reliability is reduced.")
 
-    _offset_suffix = f" + offset {offset:+.2f}" if offset != 0.0 else ""
     if _profile_name == "italy_register_icp_only":
         notes.append(
             f"Final score = ICP signal only (Italy register profile, size excluded). "
-            f"icp_similarity={round(icp_sim, 2)}/10, K={_sig_k} → final={round(final, 2)}/10. "
+            f"icp_similarity={round(icp_sim, 2)}/10, K={_sig_k} → "
+            f"final={round(final_before_offset, 2)}/10. "
             "Company size is audit/context data only; input list is register-filtered for 100+ employees."
         )
     else:
@@ -706,7 +717,12 @@ def score_company(
             f"Final score = {round(_model_w*100):.0f}% ICP signal similarity + "
             f"{round(_size_w*100):.0f}% company size "
             f"({round(icp_sim, 2)} × {_model_w} + {round(size_score, 2)} × {_size_w}"
-            f"{_offset_suffix} = {round(final, 2)}/10)."
+            f" = {round(final_before_offset, 2)}/10)."
+        )
+    if abs(score_offset) > 1e-9:
+        notes.append(
+            f"Score offset {score_offset:+.2f} applied after model calculation: "
+            f"{round(final_before_offset, 2)} → {round(final, 2)}/10."
         )
 
     # ── Assemble result ───────────────────────────────────────────────────────
@@ -717,9 +733,11 @@ def score_company(
         "icp_similarity_score":        round(icp_sim, 2),
         "company_size_score":          round(size_score, 2),
         "company_size_missing":        size_missing,
-        "final_commercial_fit_score":              round(final, 2),
-        "final_commercial_fit_score_75_25_legacy": round(_legacy_final, 2),
-        "commercial_tier":                         tier,
+        "final_commercial_fit_score":                round(final, 2),
+        "final_commercial_fit_score_before_offset":  round(final_before_offset, 2),
+        "score_offset_applied":                      round(score_offset, 4),
+        "final_commercial_fit_score_75_25_legacy":   round(_legacy_final, 2),
+        "commercial_tier":                           tier,
         # Backward-compat aliases (derived from canonical — not a separate calculation)
         "lean_model_logit":            round(lr_z, 6),
         "model_probability":           round(lean_model_prob, 7),
@@ -736,7 +754,6 @@ def score_company(
         "size_weight":               _size_w,
         "weighted_model_component":  round(w_model, 4),
         "weighted_size_component":   round(w_size, 4),
-        "score_offset_applied":      offset,
         "scoring_profile":           _profile_name,
         # Composite
         "global_complexity_score":     global_complexity,
@@ -1106,6 +1123,82 @@ if __name__ == "__main__":
          score_company({"lusha_employee_range": "1001 - 5000"})["company_size_score"]
          == score_company({"employee_range": resolve_employee_range_value(
              {"lusha_employee_range": "1001 - 5000"})})["company_size_score"])
+
+    # ── Smoke Test 15: score_offset ───────────────────────────────────────────
+    _section("Smoke Test 15: score_offset — additive shift after full model calculation")
+
+    def _expected_after_offset(before: float, offset: float) -> float:
+        return round(_clamp(before + offset, 1.0, 10.0), 2)
+
+    r15_base = score_company(capgemini)
+    _chk("no score_offset key -> score_offset_applied == 0.0",
+         r15_base["score_offset_applied"] == 0.0, str(r15_base["score_offset_applied"]))
+    _chk("no score_offset key -> final == final_before_offset (backward compatible)",
+         r15_base["final_commercial_fit_score"] == r15_base["final_commercial_fit_score_before_offset"],
+         f"{r15_base['final_commercial_fit_score']} vs "
+         f"{r15_base['final_commercial_fit_score_before_offset']}")
+
+    r15_explicit_zero = score_company(capgemini, params={"score_offset": 0.0})
+    _chk("offset 0.0 leaves the score unchanged",
+         r15_explicit_zero["final_commercial_fit_score"] == r15_base["final_commercial_fit_score"],
+         f"{r15_explicit_zero['final_commercial_fit_score']} vs {r15_base['final_commercial_fit_score']}")
+
+    r15_weak_base = score_company(weak)
+    r15_weak_plus = score_company(weak, params={"score_offset": 0.5})
+    r15_weak_minus = score_company(weak, params={"score_offset": -0.5})
+    _chk("offset +0.5 shifts the final score by exactly +0.5",
+         r15_weak_plus["final_commercial_fit_score"]
+         == _expected_after_offset(r15_weak_base["final_commercial_fit_score"], 0.5),
+         f"{r15_weak_base['final_commercial_fit_score']} +0.5 -> "
+         f"{r15_weak_plus['final_commercial_fit_score']}")
+    _chk("offset -0.5 shifts the final score by exactly -0.5",
+         r15_weak_minus["final_commercial_fit_score"]
+         == _expected_after_offset(r15_weak_base["final_commercial_fit_score"], -0.5),
+         f"{r15_weak_base['final_commercial_fit_score']} -0.5 -> "
+         f"{r15_weak_minus['final_commercial_fit_score']}")
+
+    r15_strong_base = score_company(strong)
+    r15_strong_plus = score_company(strong, params={"score_offset": 0.5})
+    _chk("near-ceiling score + offset +0.5 caps at 10.0",
+         r15_strong_plus["final_commercial_fit_score"] == 10.0,
+         str(r15_strong_plus["final_commercial_fit_score"]))
+    _chk("capped case: final_commercial_fit_score_before_offset keeps the true pre-offset value",
+         r15_strong_plus["final_commercial_fit_score_before_offset"]
+         == r15_strong_base["final_commercial_fit_score"],
+         f"{r15_strong_plus['final_commercial_fit_score_before_offset']} vs "
+         f"{r15_strong_base['final_commercial_fit_score']}")
+
+    # Tier assignment must use the OFFSET-ADJUSTED score, not the pre-offset one.
+    tier_cross_row = {f: 0 for f in LEAN_COEFFICIENTS}
+    tier_cross_row["lusha_api_employee_range"] = "1001 - 5000"  # size_score = 6.63
+    tier_params_base = {"model_weight": 0.0, "size_weight": 1.0}
+    r15_tier_base = score_company(tier_cross_row, params=tier_params_base)
+    r15_tier_offset = score_company(
+        tier_cross_row, params={**tier_params_base, "score_offset": 1.0})
+    _chk("pre-offset: size_score 6.63 alone -> tier Cool",
+         r15_tier_base["commercial_tier"] == "🥉 Cool", r15_tier_base["commercial_tier"])
+    _chk("offset +1.0 crosses the Warm threshold (6.63+1.0=7.63 >= 7.32) -> tier Warm",
+         r15_tier_offset["commercial_tier"] == "🥈 Warm", r15_tier_offset["commercial_tier"])
+    _chk("offset-driven tier change leaves final_commercial_fit_score_before_offset untouched",
+         r15_tier_offset["final_commercial_fit_score_before_offset"] == 6.63,
+         str(r15_tier_offset["final_commercial_fit_score_before_offset"]))
+
+    # Backward compatibility: params dicts without a "score_offset" key (every
+    # profile/params dict that existed before this feature) behave exactly as
+    # before -- offset applied is 0, final == final_before_offset.
+    for _label, _row, _extra in [
+        ("capgemini", capgemini, None),
+        ("strong", strong, None),
+        ("weak", weak, None),
+        ("italy_register_icp_only profile", capgemini,
+         {"scoring_profile": "italy_register_icp_only"}),
+    ]:
+        _r = score_company(_row, params=_extra)
+        _chk(f"backward compat [{_label}]: score_offset_applied == 0.0",
+             _r["score_offset_applied"] == 0.0, str(_r["score_offset_applied"]))
+        _chk(f"backward compat [{_label}]: final == final_before_offset",
+             _r["final_commercial_fit_score"] == _r["final_commercial_fit_score_before_offset"],
+             f"{_r['final_commercial_fit_score']} vs {_r['final_commercial_fit_score_before_offset']}")
 
     # ── Summary ───────────────────────────────────────────────────────────────
     print(f"\n{'═'*60}")

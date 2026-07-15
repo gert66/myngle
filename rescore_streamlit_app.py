@@ -41,10 +41,9 @@ from commercial_fit_scoring import (
     ICP_SIMILARITY_WEIGHT,
     INTERCEPT,
     LEAN_COEFFICIENTS,
-    SCORE_OFFSET,
+    SCORE_OFFSET_DEFAULT,
     SIGMOID_K,
     SIZE_BAND_LOOKUP,
-    TIER_THRESHOLDS,
     _FIELD_TO_COMPONENT,
     _SIGMOID_P_HI,
     _SIGMOID_P_LO,
@@ -90,6 +89,25 @@ COEFFICIENT_LABELS: dict[str, str] = {
 }
 
 TIER_LABELS: list[str] = ["🥇 Hot", "🥈 Warm", "🥉 Cool", "❄️ Pass"]
+
+#: New default tier-threshold preset for the Re-score Explorer's OWN
+#: baseline (default_params() / the "Tier-drempels" tab) — deliberately
+#: scoped to this app only. commercial_fit_scoring.TIER_THRESHOLDS
+#: (8.86/7.32/5.04), used by the rest of the pipeline (exports,
+#: lead_prioritizer_core.py, opportunity_radar.py, ...), is left untouched.
+DEFAULT_TIER_THRESHOLDS: list[list] = [
+    [8.5, "🥇 Hot"], [6.5, "🥈 Warm"], [4.5, "🥉 Cool"], [0.0, "❄️ Pass"],
+]
+
+#: score_offset UI bounds (Sigmoid & blend tab) — a uniform additive shift
+#: applied to final_commercial_fit_score AFTER the full model calculation,
+#: re-clamped to 1–10 (see commercial_fit_scoring.score_company step 5b).
+#: Matches the auto-calibration's own offset search range/grid
+#: (calibrate_intercept_and_k's offset_grid: -3.0..3.0 step 0.05) so a
+#: calibrated offset always fits back into this single control.
+SCORE_OFFSET_MIN: float = -3.0
+SCORE_OFFSET_MAX: float = 3.0
+SCORE_OFFSET_STEP: float = 0.05
 
 #: Percentiles used by the anchor auto-calibration (Sigmoid tab):
 #: everything at/above the high percentile clamps to icp 10, everything
@@ -168,14 +186,14 @@ def default_params() -> dict:
     before any slider is touched."""
     return {
         "intercept": INTERCEPT,
-        "offset": SCORE_OFFSET,
         "coefficients": dict(LEAN_COEFFICIENTS),
         "model_weight": ICP_SIMILARITY_WEIGHT,
         "size_weight": COMPANY_SIZE_WEIGHT,
         "sigmoid_k": SIGMOID_K,
         "sigmoid_p_lo": _SIGMOID_P_LO,
         "sigmoid_p_hi": _SIGMOID_P_HI,
-        "tier_thresholds": [list(t) for t in TIER_THRESHOLDS],
+        "tier_thresholds": [list(t) for t in DEFAULT_TIER_THRESHOLDS],
+        "score_offset": SCORE_OFFSET_DEFAULT,
     }
 
 
@@ -248,6 +266,56 @@ def tier_distribution_dataframe(original_by_id: dict, rescored_by_id: dict) -> p
         rows.append({"tier": tier, "when": "Huidig", "count": before.get(tier, 0)})
         rows.append({"tier": tier, "when": "Nieuw", "count": after.get(tier, 0)})
     return pd.DataFrame(rows)
+
+
+def tier_for_score(score: float, tier_thresholds: list) -> str:
+    """Tier label ``score`` would get under ``tier_thresholds`` (``[[threshold,
+    label], ...]``, highest threshold first) — mirrors
+    ``commercial_fit_scoring.score_company``'s own tier loop exactly, so it
+    can be re-applied to a DIFFERENT score (e.g. a company's
+    ``final_commercial_fit_score_before_offset``) without re-scoring the
+    company from scratch. Returns ``""`` for an empty threshold list."""
+    for threshold, label in tier_thresholds:
+        if score >= threshold:
+            return label
+    return tier_thresholds[-1][1] if tier_thresholds else ""
+
+
+def offset_impact_summary(rescored_by_id: dict, tier_thresholds: list) -> dict:
+    """Isolates ``score_offset``'s own effect on an already-rescored
+    population, reading the before/after-offset audit fields
+    ``commercial_fit_scoring.score_company()`` attaches to every rescored
+    detail record (``final_commercial_fit_score_before_offset`` /
+    ``commercial_fit_score``) — no re-scoring needed. Companies missing
+    either field (e.g. skipped, no ``scoring_inputs``) are excluded.
+
+    Returns ``{"n_companies", "max_before", "max_after", "avg_before",
+    "avg_after", "n_capped_at_10", "n_tier_changed_by_offset"}``; the score
+    keys are ``None`` when there are no scorable companies."""
+    before_scores: list = []
+    after_scores: list = []
+    n_capped = 0
+    n_tier_changed = 0
+    for detail in rescored_by_id.values():
+        after = detail.get("commercial_fit_score")
+        before = detail.get("final_commercial_fit_score_before_offset")
+        if after is None or before is None:
+            continue
+        before_scores.append(before)
+        after_scores.append(after)
+        if after == 10.0:
+            n_capped += 1
+        if tier_for_score(before, tier_thresholds) != detail.get("commercial_tier"):
+            n_tier_changed += 1
+    return {
+        "n_companies": len(after_scores),
+        "max_before": max(before_scores) if before_scores else None,
+        "max_after": max(after_scores) if after_scores else None,
+        "avg_before": sum(before_scores) / len(before_scores) if before_scores else None,
+        "avg_after": sum(after_scores) / len(after_scores) if after_scores else None,
+        "n_capped_at_10": n_capped,
+        "n_tier_changed_by_offset": n_tier_changed,
+    }
 
 
 def biggest_movers_dataframe(
@@ -973,7 +1041,7 @@ def main() -> None:  # pragma: no cover - exercised only under `streamlit run`
     # suggestion, reset) therefore queue their updates here and st.rerun();
     # this block applies them at the top of the next run.
     _WIDGET_KEYS = (
-        ["intercept_slider", "offset_slider", "k_slider", "model_weight_slider",
+        ["intercept_slider", "k_slider", "model_weight_slider", "score_offset_input",
          "tier_hot", "tier_warm", "tier_cool"]
         + [f"coef_{field}" for field in LEAN_COEFFICIENTS]
     )
@@ -1217,6 +1285,33 @@ def main() -> None:  # pragma: no cover - exercised only under `streamlit run`
                     "te nemen."
                 )
 
+            st.divider()
+            st.subheader("🎚️ Score-offset impact")
+            st.caption(
+                f"Effect van de 'Final score offset' (huidige waarde: "
+                f"{params.get('score_offset', 0.0):+.2f}, instelbaar op de "
+                "tab '📈 Sigmoid & blend') in isolatie — vóór/na de "
+                "optelling, los van de rest van de herscoring."
+            )
+            offset_stats = offset_impact_summary(rescored_by_id, params["tier_thresholds"])
+            if offset_stats["n_companies"] == 0:
+                st.info("Geen bedrijven met score-offset-auditdata om te tonen.")
+            else:
+                o1, o2, o3, o4 = st.columns(4)
+                o1.metric("Max score — vóór offset", f"{offset_stats['max_before']:.2f}")
+                o2.metric(
+                    "Max score — ná offset", f"{offset_stats['max_after']:.2f}",
+                    delta=f"{offset_stats['max_after'] - offset_stats['max_before']:+.2f}",
+                )
+                o3.metric("Gemiddelde — vóór offset", f"{offset_stats['avg_before']:.2f}")
+                o4.metric(
+                    "Gemiddelde — ná offset", f"{offset_stats['avg_after']:.2f}",
+                    delta=f"{offset_stats['avg_after'] - offset_stats['avg_before']:+.2f}",
+                )
+                o5, o6 = st.columns(2)
+                o5.metric("Gecapt op 10 (ná offset)", offset_stats["n_capped_at_10"])
+                o6.metric("Tier gewijzigd door offset", offset_stats["n_tier_changed_by_offset"])
+
             st.subheader("🎯 Auto-kalibratie: K + intercept + offset")
             st.caption(
                 "Zoekt de intercept, sigmoid-K en offset waarbij de geladen "
@@ -1271,12 +1366,12 @@ def main() -> None:  # pragma: no cover - exercised only under `streamlit run`
                         "params": {
                             "intercept": calib["intercept"],
                             "sigmoid_k": calib["sigmoid_k"],
-                            "offset": calib["offset"],
+                            "score_offset": calib["offset"],
                         },
                         "widgets": {
                             "intercept_slider": calib["intercept"],
                             "k_slider": calib["sigmoid_k"],
-                            "offset_slider": calib["offset"],
+                            "score_offset_input": calib["offset"],
                         },
                     }
                     if rebalance_hq:
@@ -1374,14 +1469,6 @@ def main() -> None:  # pragma: no cover - exercised only under `streamlit run`
             value=float(params["intercept"]), step=0.01, key="intercept_slider",
             help="Basiswaarde van de log-odds vóór enig signaal wordt meegeteld.",
         )
-        params["offset"] = st.slider(
-            "Offset (schuift de eindscore direct op/neer)", min_value=-3.0, max_value=3.0,
-            value=float(params["offset"]), step=0.05, key="offset_slider",
-            help="Anders dan de intercept — die de onderliggende kans vóór de "
-                 "sigmoid bijstelt — telt de offset rechtstreeks bij de "
-                 "eindscore (1–10) op, ná de ICP/grootte-blend en vóór de "
-                 "1–10-afkap en de tier-indeling. 0 = geen verschuiving.",
-        )
         new_coeffs = {}
         for field, default_val in LEAN_COEFFICIENTS.items():
             current_val = params["coefficients"].get(field, default_val)
@@ -1400,8 +1487,7 @@ def main() -> None:  # pragma: no cover - exercised only under `streamlit run`
         _defaults = default_params()
         with st.expander("🔍 Origineel vs. actueel", expanded=False):
             render_param_diff_table(
-                [("intercept", _defaults["intercept"], float(params["intercept"])),
-                 ("offset", _defaults["offset"], float(params["offset"]))]
+                [("intercept", _defaults["intercept"], float(params["intercept"]))]
                 + [
                     (field, _defaults["coefficients"][field],
                      float(params["coefficients"].get(field, _defaults["coefficients"][field])))
@@ -1432,6 +1518,17 @@ def main() -> None:  # pragma: no cover - exercised only under `streamlit run`
                 params["size_weight"],
             )
 
+        st.divider()
+        params["score_offset"] = st.number_input(
+            "Final score offset",
+            min_value=SCORE_OFFSET_MIN, max_value=SCORE_OFFSET_MAX,
+            value=float(params.get("score_offset", SCORE_OFFSET_DEFAULT)),
+            step=SCORE_OFFSET_STEP, key="score_offset_input",
+            help="Adds a fixed amount to every final score after the model "
+                 "calculation. This preserves ranking and score spacing, "
+                 "except where scores are capped at 1 or 10.",
+        )
+
         # Rendered AFTER the sliders above (see the Coëfficiënten tab for why:
         # reading params before the st.slider() assignments shows last run's
         # value, one interaction behind). sigmoid_p_lo/p_hi are never set by a
@@ -1446,6 +1543,7 @@ def main() -> None:  # pragma: no cover - exercised only under `streamlit run`
                 ("size_weight", _defaults["size_weight"], float(params["size_weight"])),
                 ("sigmoid_p_lo", _defaults["sigmoid_p_lo"], float(params["sigmoid_p_lo"])),
                 ("sigmoid_p_hi", _defaults["sigmoid_p_hi"], float(params["sigmoid_p_hi"])),
+                ("score_offset", _defaults["score_offset"], float(params["score_offset"])),
             ])
         st.caption(
             "model_weight + size_weight telt altijd op tot 1 — het "
@@ -1550,13 +1648,13 @@ def main() -> None:  # pragma: no cover - exercised only under `streamlit run`
         st.subheader("Tier-drempels (final_commercial_fit_score)")
         thresholds_by_label = {label: score for score, label in params["tier_thresholds"]}
         hot = st.number_input(
-            "🥇 Hot vanaf", value=float(thresholds_by_label.get("🥇 Hot", 8.86)),
+            "🥇 Hot vanaf", value=float(thresholds_by_label.get("🥇 Hot", 8.5)),
             step=0.01, key="tier_hot")
         warm = st.number_input(
-            "🥈 Warm vanaf", value=float(thresholds_by_label.get("🥈 Warm", 7.32)),
+            "🥈 Warm vanaf", value=float(thresholds_by_label.get("🥈 Warm", 6.5)),
             step=0.01, key="tier_warm")
         cool = st.number_input(
-            "🥉 Cool vanaf", value=float(thresholds_by_label.get("🥉 Cool", 5.04)),
+            "🥉 Cool vanaf", value=float(thresholds_by_label.get("🥉 Cool", 4.5)),
             step=0.01, key="tier_cool")
         error = validate_tier_thresholds(hot, warm, cool)
         if error:

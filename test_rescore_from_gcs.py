@@ -256,6 +256,71 @@ class TestRescoreDetailRecord:
         assert isinstance(audit["scoring_notes"], str) and audit["scoring_notes"]
 
 
+class TestScoreOffsetInRescoreDetailRecord:
+    """score_offset flows through rescore_detail_record into both the
+    top-level commercial_fit_score and the rescore_audit trail — see
+    commercial_fit_scoring.score_company's score_offset step and
+    rescore_streamlit_app's "Final score offset" control."""
+
+    def test_offset_shifts_score_and_preserves_before_offset_audit_fields(self):
+        detail = fixture_detail(**{f: 0 for f in LEAN_COEFFICIENTS})
+        baseline = rescore_detail_record(detail, params={}, now_iso="2026-07-13T00:00:00Z")
+        offset_result = rescore_detail_record(
+            detail, params={"score_offset": 0.5}, now_iso="2026-07-13T00:00:00Z")
+
+        assert offset_result["final_commercial_fit_score_before_offset"] == \
+            baseline["commercial_fit_score"]
+        assert offset_result["score_offset_applied"] == 0.5
+        assert offset_result["commercial_fit_score"] == \
+            round(min(10.0, baseline["commercial_fit_score"] + 0.5), 2)
+
+    def test_offset_audit_fields_mirrored_into_rescore_audit(self):
+        detail = fixture_detail(**{f: 0 for f in LEAN_COEFFICIENTS})
+        rescored = rescore_detail_record(
+            detail, params={"score_offset": -0.5}, now_iso="2026-07-13T00:00:00Z")
+        audit = rescored["rescore_audit"]
+        assert audit["score_offset_applied"] == -0.5
+        assert audit["final_commercial_fit_score_before_offset"] == \
+            rescored["final_commercial_fit_score_before_offset"]
+
+    def test_no_offset_in_params_defaults_to_zero_backward_compatible(self):
+        # Every params dict that existed before this feature (no
+        # "score_offset" key) must behave exactly as before.
+        detail = fixture_detail(sig_foreign_hq_score=2)
+        rescored = rescore_detail_record(detail, params={}, now_iso="2026-07-13T00:00:00Z")
+        assert rescored["score_offset_applied"] == 0.0
+        assert rescored["final_commercial_fit_score_before_offset"] == \
+            rescored["commercial_fit_score"]
+
+    def test_tier_assignment_uses_the_offset_adjusted_score(self):
+        detail = fixture_detail(**{f: 0 for f in LEAN_COEFFICIENTS})
+        params = {"model_weight": 0.0, "size_weight": 1.0}  # size_score 6.63 -> Cool
+        baseline = rescore_detail_record(detail, params=params, now_iso="2026-07-13T00:00:00Z")
+        with_offset = rescore_detail_record(
+            detail, params={**params, "score_offset": 1.0}, now_iso="2026-07-13T00:00:00Z")
+        assert baseline["commercial_tier"] == "🥉 Cool"
+        assert with_offset["commercial_tier"] == "🥈 Warm"
+
+    def test_params_persisted_in_manifest_and_rescore_audit_include_score_offset(self):
+        # "saved parameter metadata" / "uploaded rescore run configuration":
+        # both build_rescore_manifest and rescore_audit persist the FULL
+        # params dict verbatim, so score_offset travels with the run without
+        # any extra plumbing.
+        detail = fixture_detail(sig_foreign_hq_score=1)
+        rescored = rescore_detail_record(
+            detail, params={"score_offset": 0.3}, now_iso="2026-07-13T00:00:00Z")
+        assert rescored["rescore_audit"]["params"]["score_offset"] == 0.3
+
+        manifest = build_rescore_manifest(
+            country_folder="brazil", source_current_manifest=None,
+            params={"score_offset": 0.3}, run_folder="run1",
+            original_details_by_id={"c1": detail},
+            rescored_details_by_id={"c1": rescored},
+            generated_at="2026-07-13T00:00:00Z",
+        )
+        assert manifest["params"]["score_offset"] == 0.3
+
+
 class TestEmployeeRangeRecovery:
     """v2-era exports (Spain, ...) persisted scoring_inputs.employee_range as
     None — the exporter read only the employee_range column while the v2

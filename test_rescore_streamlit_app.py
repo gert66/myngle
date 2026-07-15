@@ -15,16 +15,20 @@ from commercial_fit_scoring import (
     ICP_SIMILARITY_WEIGHT,
     INTERCEPT,
     LEAN_COEFFICIENTS,
+    SCORE_OFFSET_DEFAULT,
     SIGMOID_K,
     SIZE_BAND_LOOKUP,
-    TIER_THRESHOLDS,
     score_company,
 )
 from commercial_fit_scoring import _SIGMOID_P_HI, _SIGMOID_P_LO
 from rescore_streamlit_app import (
     CALIBRATION_TARGET_HI,
     CALIBRATION_TARGET_LO,
+    DEFAULT_TIER_THRESHOLDS,
     FOREIGN_HQ_REBALANCED_COEFFICIENTS,
+    SCORE_OFFSET_MAX,
+    SCORE_OFFSET_MIN,
+    SCORE_OFFSET_STEP,
     TIER_LABELS,
     auto_calibrate_sigmoid_anchors,
     biggest_movers_dataframe,
@@ -37,6 +41,7 @@ from rescore_streamlit_app import (
     employee_range_options,
     hq_category,
     multi_country_summary_dataframe,
+    offset_impact_summary,
     percentile_sample_ids,
     sample_current_bundle,
     score_component_breakdown,
@@ -49,6 +54,7 @@ from rescore_streamlit_app import (
     size_coverage_summary,
     suggest_tier_thresholds,
     tier_distribution_dataframe,
+    tier_for_score,
     top_companies_dataframe,
     validate_tier_thresholds,
 )
@@ -64,7 +70,20 @@ class TestDefaultParams:
         assert params["sigmoid_k"] == SIGMOID_K
         assert params["sigmoid_p_lo"] == _SIGMOID_P_LO
         assert params["sigmoid_p_hi"] == _SIGMOID_P_HI
-        assert [tuple(t) for t in params["tier_thresholds"]] == TIER_THRESHOLDS
+
+    def test_tier_thresholds_use_the_apps_own_default_preset(self):
+        # Deliberately scoped to this app: DEFAULT_TIER_THRESHOLDS
+        # (8.5/6.5/4.5) is its own baseline, NOT
+        # commercial_fit_scoring.TIER_THRESHOLDS (8.86/7.32/5.04), which the
+        # rest of the pipeline (exports, lead_prioritizer_core.py, ...)
+        # still uses untouched.
+        params = default_params()
+        assert [tuple(t) for t in params["tier_thresholds"]] == \
+            [tuple(t) for t in DEFAULT_TIER_THRESHOLDS]
+
+    def test_includes_score_offset_default(self):
+        params = default_params()
+        assert params["score_offset"] == SCORE_OFFSET_DEFAULT == 0.0
 
     def test_returns_independent_copies(self):
         a = default_params()
@@ -160,6 +179,95 @@ class TestTierDistributionDataframe:
         # Known tiers should appear in Hot -> Warm -> Cool -> Pass order.
         seen_tiers = list(dict.fromkeys(df["tier"]))
         assert seen_tiers == [t for t in TIER_LABELS if t in seen_tiers]
+
+
+class TestScoreOffsetConstants:
+    def test_ui_bounds_match_the_spec(self):
+        # Matches calibrate_intercept_and_k's own offset search range/grid
+        # (-3.0..3.0 step 0.05) so a calibrated offset always fits back into
+        # this single, unified control.
+        assert SCORE_OFFSET_MIN == -3.0
+        assert SCORE_OFFSET_MAX == 3.0
+        assert SCORE_OFFSET_STEP == 0.05
+
+
+class TestTierForScore:
+    def test_returns_matching_tier_label(self):
+        thresholds = [[8.5, "🥇 Hot"], [6.5, "🥈 Warm"], [4.5, "🥉 Cool"], [0.0, "❄️ Pass"]]
+        assert tier_for_score(9.0, thresholds) == "🥇 Hot"
+        assert tier_for_score(8.5, thresholds) == "🥇 Hot"
+        assert tier_for_score(7.0, thresholds) == "🥈 Warm"
+        assert tier_for_score(5.0, thresholds) == "🥉 Cool"
+        assert tier_for_score(1.0, thresholds) == "❄️ Pass"
+
+    def test_matches_score_company_tier_assignment(self):
+        # Same threshold list, same boundary logic as score_company()'s own
+        # tier loop -- this helper exists to re-apply that exact logic to a
+        # DIFFERENT score (the pre-offset one) without re-scoring.
+        row = {f: 2 for f in LEAN_COEFFICIENTS}
+        result = score_company(row, params={"tier_thresholds": DEFAULT_TIER_THRESHOLDS})
+        assert tier_for_score(
+            result["final_commercial_fit_score"], DEFAULT_TIER_THRESHOLDS
+        ) == result["commercial_tier"]
+
+    def test_empty_thresholds_returns_empty_string(self):
+        assert tier_for_score(5.0, []) == ""
+
+
+class TestOffsetImpactSummary:
+    def test_computes_max_avg_capped_and_tier_changes(self):
+        thresholds = [[8.5, "🥇 Hot"], [6.5, "🥈 Warm"], [4.5, "🥉 Cool"], [0.0, "❄️ Pass"]]
+        rescored_by_id = {
+            # Offset pushed this one past the 10.0 ceiling -> capped.
+            "c1": {"commercial_fit_score": 10.0,
+                   "final_commercial_fit_score_before_offset": 9.8,
+                   "commercial_tier": "🥇 Hot"},
+            # Offset crossed it from Cool into Warm.
+            "c2": {"commercial_fit_score": 7.0,
+                   "final_commercial_fit_score_before_offset": 6.0,
+                   "commercial_tier": "🥈 Warm"},
+            # No tier change, no capping.
+            "c3": {"commercial_fit_score": 3.5,
+                   "final_commercial_fit_score_before_offset": 3.0,
+                   "commercial_tier": "❄️ Pass"},
+        }
+        stats = offset_impact_summary(rescored_by_id, thresholds)
+        assert stats["n_companies"] == 3
+        assert stats["max_before"] == 9.8
+        assert stats["max_after"] == 10.0
+        assert stats["avg_before"] == pytest.approx((9.8 + 6.0 + 3.0) / 3)
+        assert stats["avg_after"] == pytest.approx((10.0 + 7.0 + 3.5) / 3)
+        assert stats["n_capped_at_10"] == 1
+        assert stats["n_tier_changed_by_offset"] == 1
+
+    def test_zero_offset_leaves_before_equal_after_no_tier_changes(self):
+        thresholds = [[8.5, "🥇 Hot"], [6.5, "🥈 Warm"], [4.5, "🥉 Cool"], [0.0, "❄️ Pass"]]
+        rescored_by_id = {
+            "c1": {"commercial_fit_score": 7.0,
+                   "final_commercial_fit_score_before_offset": 7.0,
+                   "commercial_tier": "🥈 Warm"},
+        }
+        stats = offset_impact_summary(rescored_by_id, thresholds)
+        assert stats["max_before"] == stats["max_after"] == 7.0
+        assert stats["n_capped_at_10"] == 0
+        assert stats["n_tier_changed_by_offset"] == 0
+
+    def test_companies_missing_audit_fields_are_excluded(self):
+        rescored_by_id = {
+            "legacy": {"commercial_fit_score": 5.0, "commercial_tier": "🥉 Cool"},
+        }
+        stats = offset_impact_summary(rescored_by_id, DEFAULT_TIER_THRESHOLDS)
+        assert stats["n_companies"] == 0
+        assert stats["max_before"] is None
+        assert stats["max_after"] is None
+
+    def test_empty_input_returns_zero_counts_and_none_scores(self):
+        stats = offset_impact_summary({}, DEFAULT_TIER_THRESHOLDS)
+        assert stats == {
+            "n_companies": 0, "max_before": None, "max_after": None,
+            "avg_before": None, "avg_after": None,
+            "n_capped_at_10": 0, "n_tier_changed_by_offset": 0,
+        }
 
 
 class TestBiggestMoversDataframe:
@@ -394,6 +502,18 @@ class TestScoreComponentBreakdown:
             row, params={"coefficients": {"sig_foreign_hq_score": 0.0}})
         assert default_breakdown["result"]["lr_z_score"] != \
             custom_breakdown["result"]["lr_z_score"]
+
+    def test_score_offset_shifts_the_final_score_not_the_lr_z_score(self):
+        row = {f: 2 for f in LEAN_COEFFICIENTS}
+        base = score_component_breakdown(row, params={})
+        with_offset = score_component_breakdown(row, params={"score_offset": 0.5})
+        # The offset is applied AFTER the LR/sigmoid/blend pipeline -- the
+        # waterfall (lr_z_score build-up) must be untouched.
+        assert with_offset["result"]["lr_z_score"] == base["result"]["lr_z_score"]
+        assert with_offset["result"]["final_commercial_fit_score"] != \
+            base["result"]["final_commercial_fit_score"]
+        assert with_offset["result"]["final_commercial_fit_score_before_offset"] == \
+            base["result"]["final_commercial_fit_score"]
 
 
 class TestEmployeeRangeOptions:

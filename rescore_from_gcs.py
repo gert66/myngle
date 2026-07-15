@@ -202,6 +202,13 @@ def rescore_detail_record(
     new_detail = dict(detail)
     new_detail["commercial_fit_score"] = result["final_commercial_fit_score"]
     new_detail["commercial_tier"] = result["commercial_tier"]
+    # Audit trail for the score_offset: the score before the offset was
+    # applied and the offset actually used, so a re-score run can always
+    # show/undo the offset's own effect (see rescore_streamlit_app's Impact
+    # tab) without re-scoring from scratch.
+    new_detail["final_commercial_fit_score_before_offset"] = \
+        result["final_commercial_fit_score_before_offset"]
+    new_detail["score_offset_applied"] = result["score_offset_applied"]
     # commercial_fit_score_app / commercial_tier_app are pure copies of the
     # canonical fields taken at original export time (see
     # lead_caller_app_fields_builder.build_caller_app_fields:
@@ -234,6 +241,9 @@ def rescore_detail_record(
         "previous_commercial_fit_score": detail.get("commercial_fit_score"),
         "previous_commercial_tier": detail.get("commercial_tier"),
         "final_commercial_fit_score": result["final_commercial_fit_score"],
+        "final_commercial_fit_score_before_offset":
+            result["final_commercial_fit_score_before_offset"],
+        "score_offset_applied": result["score_offset_applied"],
         "commercial_tier": result["commercial_tier"],
         "missing_scoring_signals": missing_signals,
         "scoring_notes": result["scoring_notes"],
