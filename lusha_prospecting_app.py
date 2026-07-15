@@ -204,12 +204,15 @@ def build_prospecting_request(
 
     ``included_main_industry_ids`` and ``excluded_industry_ids`` are
     mutually exclusive query strategies, not meant to be combined: pass
-    the exclude list to fetch everyone except a few industries (results
-    carry no industry label), or the include list to fetch exactly one/a
-    few industries at a time (see ``fetch_companies_by_sector`` -- the
-    result set has NO industry field either way, but a caller looping the
-    include filter one industry-id at a time already knows the label from
-    which call found it, for free, without a paid Enrich call)."""
+    the exclude list to fetch everyone except a few industries, or the
+    include list to fetch exactly one/a few industries at a time (see
+    ``fetch_companies_by_sector``). Confirmed live (2026-07-15): every
+    result -- exclude-mode included -- already carries its own top-level
+    ``industry`` string field, no separate (paid) Enrich call needed
+    either way. ``fetch_companies_by_sector``'s per-industry
+    ``main_industry``/``main_industry_id`` tagging is still useful when
+    you want to query one specific sector at a time, but is no longer the
+    only way to get an industry label onto a result."""
     body: dict = {
         "pagination": {"page": page, "size": _PAGE_SIZE},
         "filters": {
