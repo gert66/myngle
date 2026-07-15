@@ -186,6 +186,23 @@ def test_builds_list_json_and_detail_buckets(tmp_path):
     assert (out_dir / "export_manifest.json").exists()
 
 
+def test_channels_field_parses_semicolon_joined_list(tmp_path):
+    enriched = [
+        enriched_row(source_index=1, company_name="BothSource",
+                     domain="both.it", channels="lusha;chamber_of_commerce"),
+        enriched_row(source_index=2, company_name="LushaOnly",
+                     domain="lusha-only.it", channels="lusha"),
+        enriched_row(source_index=3, company_name="NoChannelsColumn",
+                     domain="legacy.com"),  # pre-existing countries never had this column
+    ]
+    manifest, out_dir = run_export(tmp_path, enriched, export_country="Italy")
+
+    list_by_name = {item["company_name"]: item for item in load_list(out_dir)}
+    assert list_by_name["BothSource"]["channels"] == ["lusha", "chamber_of_commerce"]
+    assert list_by_name["LushaOnly"]["channels"] == ["lusha"]
+    assert list_by_name["NoChannelsColumn"]["channels"] == []
+
+
 # ---------------------------------------------------------------------------
 # 3–4: skipped row handling
 # ---------------------------------------------------------------------------

@@ -2121,7 +2121,7 @@ def build_ui_payload_source_urls(
 # Enriched Leads row is preserved under debug.lead_prioritizer_row.
 _CONSUMED_COLUMNS = {
     "source_index", "company_name", "domain", "normalized_domain",
-    "input_country",
+    "input_country", "channels",
     "industry", "employee_range", "size_category_app",
     "display_size_category_app",
     "commercial_fit_score", "commercial_tier",
@@ -2236,6 +2236,11 @@ def _build_list_item(row: dict, company_id: str, export_country: str,
         "display_country_app": export_country,
         "original_input_country": clean_str(row.get("input_country")),
         "export_country": export_country,
+        # Which data source(s) this company came from -- a list, not a
+        # closed enum, so a future channel (e.g. Apollo) is just another
+        # possible list entry. Empty for every pre-existing country/run,
+        # where the channel has always implicitly been Lusha alone.
+        "channels": _split_semicolon_urls(row.get("channels")),
         "assigned_cold_caller": None,       # filled in after sorting
         "assigned_cold_caller_rank": None,  # filled in after sorting
         "foreign_hq_detected_for_export": foreign_hq_detected,
