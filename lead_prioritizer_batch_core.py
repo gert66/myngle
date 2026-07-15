@@ -200,6 +200,45 @@ _ALL_FLAGS = (
 )
 
 
+# Alternate raw-domain columns to fall back to when ``config.domain_column``
+# is blank for a specific row — not just when the column is entirely absent
+# from the input. Guards against input-prep steps that populate a raw
+# domain column (e.g. Lusha's "Company Domain") but never back-fill the
+# normalized "domain" column for every row, which otherwise silently skips
+# the own-domain Firecrawl HQ crawl in lead_prioritizer_core.py (the most
+# trusted HQ-detection source) for exactly those rows. First observed on
+# Chamber-of-Commerce-sourced Italy rows, whose merge into the combined
+# Lusha+CCIAA input never ran input_cleaner_lusha_edition.py's
+# add_batch_app_compatible_columns() domain backfill.
+_DOMAIN_FALLBACK_COLUMNS = ("Company Domain", "company_domain", "Website", "website")
+
+
+def _normalize_fallback_domain(raw) -> str:
+    if not raw or not isinstance(raw, str):
+        return ""
+    d = raw.strip().lower()
+    d = re.sub(r"^https?://", "", d)
+    d = re.sub(r"^www\.", "", d)
+    d = d.split("/")[0].split("?")[0].split("#")[0].strip()
+    return "" if not d or " " in d or d in ("nan", "none") else d
+
+
+def resolve_row_domain(row: dict, config: "BatchRunConfig") -> "str | None":
+    """Domain for one row: ``config.domain_column``, falling back per-row to
+    ``_DOMAIN_FALLBACK_COLUMNS`` when that field is blank for this row (see
+    ``_DOMAIN_FALLBACK_COLUMNS`` docstring)."""
+    primary = str(row.get(config.domain_column, "") or "").strip()
+    if primary:
+        return primary
+    for col in _DOMAIN_FALLBACK_COLUMNS:
+        if col == config.domain_column:
+            continue
+        fallback = _normalize_fallback_domain(row.get(col))
+        if fallback:
+            return fallback
+    return None
+
+
 def resolve_pipeline_flags(run_mode: str) -> dict:
     """Map a run mode to the ``prioritize_single_lead`` flag kwargs."""
     flags = {k: False for k in _ALL_FLAGS}
@@ -823,7 +862,7 @@ def run_batch_dataframe(
     for idx, row in selected.iterrows():
         original = row.to_dict()
         company = str(original.get(config.company_name_column, "") or "").strip()
-        domain = str(original.get(config.domain_column, "") or "").strip() or None
+        domain = resolve_row_domain(original, config)
         country = None
         if config.input_country_column:
             country = str(original.get(config.input_country_column, "") or "").strip() or None
@@ -1528,7 +1567,7 @@ def _run_gated_full_enrichment(
         else:
             gate_reason = "Confirmed by C5 foreign-parent adjudication"
         company = str(row.get(config.company_name_column, "") or "").strip()
-        domain = str(row.get(config.domain_column, "") or "").strip() or None
+        domain = resolve_row_domain(row, config)
         country = None
         if config.input_country_column:
             country = str(row.get(config.input_country_column, "") or "").strip() or None
@@ -2314,7 +2353,7 @@ def run_batch_non_english_foreign_hq_only(
 
         attempted += 1
         company = str(row.get(config.company_name_column, "") or "").strip()
-        domain = str(row.get(config.domain_column, "") or "").strip() or None
+        domain = resolve_row_domain(row, config)
         country = None
         if config.input_country_column:
             country = str(row.get(config.input_country_column, "") or "").strip() or None

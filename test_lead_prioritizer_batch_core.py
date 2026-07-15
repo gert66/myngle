@@ -99,6 +99,40 @@ class TestResolveFlags:
 
 
 # ---------------------------------------------------------------------------
+# resolve_row_domain
+# ---------------------------------------------------------------------------
+
+class TestResolveRowDomain:
+    def _cfg(self):
+        return BatchRunConfig(company_name_column="Company Name", domain_column="domain")
+
+    def test_uses_primary_domain_column_when_present(self):
+        row = {"domain": "example.com", "Company Domain": "other.com"}
+        assert bc.resolve_row_domain(row, self._cfg()) == "example.com"
+
+    def test_falls_back_to_company_domain_when_primary_blank(self):
+        # The bug this guards against: a Chamber-of-Commerce-sourced row
+        # whose merge step populated "Company Domain" but never back-filled
+        # the primary "domain" column — previously this silently skipped
+        # the own-domain Firecrawl HQ crawl for the whole row.
+        row = {"domain": "", "Company Domain": "https://www.Draeger.com/it"}
+        assert bc.resolve_row_domain(row, self._cfg()) == "draeger.com"
+
+    def test_falls_back_when_primary_column_missing_entirely(self):
+        row = {"Company Domain": "acme.it"}
+        assert bc.resolve_row_domain(row, self._cfg()) == "acme.it"
+
+    def test_returns_none_when_nothing_usable(self):
+        row = {"domain": "", "Company Domain": None}
+        assert bc.resolve_row_domain(row, self._cfg()) is None
+
+    def test_does_not_double_check_configured_column_as_its_own_fallback(self):
+        cfg = BatchRunConfig(company_name_column="Company Name", domain_column="Company Domain")
+        row = {"Company Domain": ""}
+        assert bc.resolve_row_domain(row, cfg) is None
+
+
+# ---------------------------------------------------------------------------
 # select_batch_rows
 # ---------------------------------------------------------------------------
 
