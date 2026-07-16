@@ -36,7 +36,6 @@ import ast
 import re
 import subprocess
 import sys
-import textwrap
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).parent
@@ -129,40 +128,36 @@ def country_folder_slug_local(label: str) -> str:
     return slug or "unknown"
 
 
-def build_arg_parser() -> argparse.ArgumentParser:
-    p = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
-    p.add_argument("--label", required=True, help='Country label, e.g. "Luxembourg".')
-    p.add_argument("--enabled", action="store_true",
-                    help="Show it in the Lovable country picker immediately "
-                         "(default: added disabled, matching how every other "
-                         "new country has been rolled out so far).")
-    p.add_argument("--dry-run", action="store_true",
-                    help="Print what would change without writing any file.")
-    p.add_argument("--skip-tests", action="store_true",
-                    help="Skip running the affected pytest files afterwards.")
-    return p
+def build_registration_plan(label: str, enabled: bool) -> dict:
+    """Compute the file edits needed to register ``label`` as a supported
+    country, without writing anything -- the single source of truth both the
+    CLI (:func:`main`) and ``register_new_country_app.py`` (the Streamlit
+    version) build on, so preview and actual write can never drift apart.
 
-
-def main(argv: list[str] | None = None) -> int:
-    args = build_arg_parser().parse_args(argv)
-    label = args.label.strip()
+    Returns ``{"label", "slug", "already_exists", "error", "new_contents"}``.
+    ``new_contents`` (``{Path: new_text}``) is empty whenever
+    ``already_exists`` is true or ``error`` is set -- exactly the two cases
+    where there is nothing to write.
+    """
+    label = label.strip()
+    slug = country_folder_slug_local(label) if label else ""
+    result = {"label": label, "slug": slug, "already_exists": False,
+              "error": None, "new_contents": {}}
     if not label:
-        print("ERROR: --label must not be blank.", file=sys.stderr)
-        return 2
+        result["error"] = "Country label must not be blank."
+        return result
 
     sys.path.insert(0, str(REPO_ROOT))
     from lead_prioritizer_batch_app import SUPPORTED_DEFAULT_INPUT_COUNTRIES
     from generate_lovable_countries_index import MANIFEST_COUNTRY_LABELS, DISABLED_COUNTRY_LABELS
-    from lovable_gcs_upload import _COUNTRY_FOLDER_SLUGS
 
     if any(existing.lower() == label.lower() for existing in SUPPORTED_DEFAULT_INPUT_COUNTRIES):
-        print(f"{label!r} is already a supported country — nothing to do.")
-        return 0
+        result["already_exists"] = True
+        return result
 
     new_batch_list = insert_alphabetically(SUPPORTED_DEFAULT_INPUT_COUNTRIES, label)
     new_manifest_list = insert_alphabetically(MANIFEST_COUNTRY_LABELS, label)
-    new_disabled = set(DISABLED_COUNTRY_LABELS) | ({label} if not args.enabled else set())
-    slug = country_folder_slug_local(label)
+    new_disabled = set(DISABLED_COUNTRY_LABELS) | (set() if enabled else {label})
 
     edits = [
         (BATCH_APP, lambda t: patch_list_literal(t, "SUPPORTED_DEFAULT_INPUT_COUNTRIES", new_batch_list)),
@@ -180,46 +175,80 @@ def main(argv: list[str] | None = None) -> int:
         try:
             new_contents[path] = transform(current)
         except ValueError as exc:
-            print(f"ERROR patching {path.name}: {exc}", file=sys.stderr)
-            return 2
+            result["error"] = f"Could not patch {path.name}: {exc}"
+            return result
 
     for path, content in new_contents.items():
         try:
             ast.parse(content)
         except SyntaxError as exc:
-            print(f"ERROR: patched {path.name} would not be valid Python: {exc}", file=sys.stderr)
-            return 2
+            result["error"] = f"Patched {path.name} would not be valid Python: {exc}"
+            return result
 
-    print(f"Registering {label!r} (slug: {slug!r}, "
+    result["new_contents"] = new_contents
+    return result
+
+
+def run_affected_tests(cwd: Path = REPO_ROOT) -> subprocess.CompletedProcess:
+    """Run the pytest files that guard the four patched lists' consistency."""
+    test_files = [
+        "test_lead_prioritizer_batch_app.py",
+        "test_generate_lovable_countries_index.py",
+        "test_lovable_gcs_upload.py",
+    ]
+    return subprocess.run(
+        [sys.executable, "-m", "pytest", *test_files, "-q"],
+        cwd=cwd, capture_output=True, text=True,
+    )
+
+
+def build_arg_parser() -> argparse.ArgumentParser:
+    p = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
+    p.add_argument("--label", required=True, help='Country label, e.g. "Luxembourg".')
+    p.add_argument("--enabled", action="store_true",
+                    help="Show it in the Lovable country picker immediately "
+                         "(default: added disabled, matching how every other "
+                         "new country has been rolled out so far).")
+    p.add_argument("--dry-run", action="store_true",
+                    help="Print what would change without writing any file.")
+    p.add_argument("--skip-tests", action="store_true",
+                    help="Skip running the affected pytest files afterwards.")
+    return p
+
+
+def main(argv: list[str] | None = None) -> int:
+    args = build_arg_parser().parse_args(argv)
+    plan = build_registration_plan(args.label, enabled=args.enabled)
+
+    if plan["error"]:
+        print(f"ERROR: {plan['error']}", file=sys.stderr)
+        return 2
+    if plan["already_exists"]:
+        print(f"{plan['label']!r} is already a supported country — nothing to do.")
+        return 0
+
+    print(f"Registering {plan['label']!r} (slug: {plan['slug']!r}, "
           f"{'enabled' if args.enabled else 'disabled'} in Lovable):")
-    for path in new_contents:
+    for path in plan["new_contents"]:
         print(f"  - {path.relative_to(REPO_ROOT)}")
 
     if args.dry_run:
         print("\n--dry-run: no files written.")
         return 0
 
-    for path, content in new_contents.items():
+    for path, content in plan["new_contents"].items():
         path.write_text(content, encoding="utf-8")
 
     print(
-        f"\nDone. GCS folder gs://.../{slug}/current/ needs no manual creation "
-        f"-- it appears automatically the first time a run for {label!r} is "
-        f"exported."
+        f"\nDone. GCS folder gs://.../{plan['slug']}/current/ needs no manual "
+        f"creation -- it appears automatically the first time a run for "
+        f"{plan['label']!r} is exported."
     )
 
     if args.skip_tests:
         return 0
 
-    test_files = [
-        "test_lead_prioritizer_batch_app.py",
-        "test_generate_lovable_countries_index.py",
-        "test_lovable_gcs_upload.py",
-    ]
-    proc = subprocess.run(
-        [sys.executable, "-m", "pytest", *test_files, "-q"],
-        cwd=REPO_ROOT, capture_output=True, text=True,
-    )
+    proc = run_affected_tests()
     print(proc.stdout)
     if proc.returncode != 0:
         print(proc.stderr, file=sys.stderr)
