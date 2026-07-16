@@ -21,19 +21,15 @@ Run with:
 from __future__ import annotations
 
 import math
+import threading
+import time
 from typing import Optional
 
 import pandas as pd
 
 from caller_range_assignment import (
-    CallerRange,
-    RANGE_MODES,
-    assign_callers_by_ranges,
     assign_callers_round_robin_by_cohort_window,
-    caller_ranges_coverage,
-    even_count_ranges,
     resolve_cohort_window,
-    resolve_range_bounds,
 )
 import gcs_python_backend
 from reallocate_callers_from_gcs import (
@@ -112,43 +108,6 @@ def movers_dataframe(
     return pd.DataFrame(reallocation_movers(original_list_items, assignment))
 
 
-def default_range_settings(callers: list[str], total: int) -> dict:
-    """Seed the range-mode editor with equal, contiguous ``"count"`` blocks
-    (via ``even_count_ranges``) — a sane starting point an admin then adjusts
-    per caller. Keyed by caller name; each value is the flat dict shape the
-    Streamlit widgets read/write (``mode``, ``start``, ``end``,
-    ``cohort_size``)."""
-    settings: dict = {}
-    for cr in even_count_ranges(callers, total):
-        settings[cr.caller] = {
-            "mode": "count", "start": cr.start, "end": cr.end, "cohort_size": 100,
-        }
-    return settings
-
-
-def caller_ranges_from_settings(
-    callers: list[str], settings: dict,
-) -> list[CallerRange]:
-    """Build the ordered ``CallerRange`` list the assignment/coverage
-    functions expect, from the per-caller settings dict the Streamlit
-    widgets maintain. Callers missing from ``settings`` (e.g. just added to
-    the pool) are skipped rather than raising — they show up as gaps in the
-    coverage check until the admin configures them."""
-    ranges = []
-    for caller in callers:
-        cfg = settings.get(caller)
-        if not cfg:
-            continue
-        ranges.append(CallerRange(
-            caller=caller,
-            mode=cfg["mode"],
-            start=cfg["start"],
-            end=cfg["end"],
-            cohort_size=cfg.get("cohort_size") if cfg["mode"] == "cohort" else None,
-        ))
-    return ranges
-
-
 # =============================================================================
 # Streamlit UI — lazy imports so the helpers above stay testable without them
 # =============================================================================
@@ -172,16 +131,18 @@ def main() -> None:  # pragma: no cover - exercised only under `streamlit run`
     )
 
     # ---------------------------------------------------------------------
-    # Sidebar — GCS data source
+    # Sidebar — country selection. Countries are fetched automatically on
+    # startup (once per session) so the user never sees the bucket or any
+    # other GCS plumbing — just a country to pick.
     # ---------------------------------------------------------------------
     with st.sidebar:
-        st.header("1. GCS source")
-        bucket = st.text_input("Bucket", value=DEFAULT_GCS_BUCKET, key="bucket_input")
+        st.header("1. Country")
 
-        if st.button("🔍 Fetch countries"):
-            with st.spinner("Scanning bucket…"):
-                st.session_state["_available_countries"] = list_country_folders(bucket)
-            if not st.session_state.get("_available_countries"):
+        if "_available_countries" not in st.session_state:
+            with st.spinner("Fetching countries, please wait…"):
+                st.session_state["_available_countries"] = list_country_folders(
+                    DEFAULT_GCS_BUCKET)
+            if not st.session_state["_available_countries"]:
                 st.warning(
                     "No country folders found. Locally: is gcloud/gsutil "
                     "installed and authenticated (`gcloud auth login`)? On "
@@ -191,15 +152,17 @@ def main() -> None:  # pragma: no cover - exercised only under `streamlit run`
                     "status below shows what's missing."
                 )
 
-        with st.expander("🩺 GCS connection status"):
-            _render_gcs_status(st)
-
-        countries = st.session_state.get("_available_countries", [])
+        countries = st.session_state["_available_countries"]
         if countries:
             country_folder = st.selectbox("Country folder", options=countries, key="country_select")
         else:
             country_folder = st.text_input(
                 "Country folder (e.g. brazil)", value="brazil", key="country_text")
+            with st.expander("🩺 GCS connection status"):
+                _render_gcs_status(st)
+            if st.button("🔄 Retry fetching countries"):
+                st.session_state.pop("_available_countries", None)
+                st.rerun()
 
         if st.button("📥 Load current run", type="primary"):
             old_dir = st.session_state.get("_work_dir")
@@ -207,18 +170,21 @@ def main() -> None:  # pragma: no cover - exercised only under `streamlit run`
                 shutil.rmtree(old_dir, ignore_errors=True)
             work_dir = tempfile.mkdtemp(prefix="reallocate_streamlit_")
             st.session_state["_work_dir"] = work_dir
+            progress = st.progress(0, text=f"Downloading {country_folder}/current/…")
             try:
-                with st.spinner(f"Downloading {country_folder}/current/…"):
-                    current = download_current_run(bucket, country_folder, work_dir)
+                current = _download_current_run_with_progress(
+                    DEFAULT_GCS_BUCKET, country_folder, work_dir, progress)
                 st.session_state["_current"] = current
                 st.session_state["_current_country"] = country_folder
-                st.session_state["_current_bucket"] = bucket
+                st.session_state["_current_bucket"] = DEFAULT_GCS_BUCKET
                 n_companies = len(current["list_items"])
+                progress.empty()
                 st.success(f"Loaded {n_companies} companies from {country_folder}/current/.")
                 # Seed the caller box with the run's existing pool.
                 st.session_state["_caller_box"] = ", ".join(
                     existing_cold_callers(current["list_items"]))
             except Exception as exc:
+                progress.empty()
                 st.error(f"Load failed: {exc}")
 
     current = st.session_state.get("_current")
@@ -265,197 +231,59 @@ def main() -> None:  # pragma: no cover - exercised only under `streamlit run`
     st.write("New pool:", " · ".join(f"`{c}`" for c in new_callers))
 
     # ---------------------------------------------------------------------
-    # Assignment method: round-robin, or explicit ranges per caller
+    # Assignment method: round-robin (evenly split across the score ranking)
     # ---------------------------------------------------------------------
     st.subheader("3. Assignment method")
-    mode = st.radio(
-        "How are companies assigned to callers?",
-        options=["round_robin", "ranges"],
-        format_func=lambda v: (
-            "Round-robin (evenly split across the score ranking)" if v == "round_robin"
-            else "Ranges per caller (count / percentile / cohort)"
-        ),
-        key="_assignment_mode",
-        horizontal=True,
-    )
 
     total_companies = len(original_list_items)
     now_iso = pd.Timestamp.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ")
 
-    if mode == "round_robin":
-        use_cohort_window = st.checkbox(
-            "Restrict to a cohort window (release only part of the ranking)",
-            value=False, key="_rr_use_cohort",
-            help="Leave unchecked for a plain round-robin across every "
-                 "company. When checked, only companies inside the chosen "
-                 "cohort window are round-robin split across the caller "
-                 "pool — the rest stay unassigned until a later window "
-                 "covers them. A company's caller never changes as you "
-                 "advance the window, since the round-robin formula still "
-                 "keys off its global rank.",
+    use_cohort_window = st.checkbox(
+        "Restrict to a cohort window (release only part of the ranking)",
+        value=False, key="_rr_use_cohort",
+        help="Leave unchecked for a plain round-robin across every "
+             "company. When checked, only companies inside the chosen "
+             "cohort window are round-robin split across the caller "
+             "pool — the rest stay unassigned until a later window "
+             "covers them. A company's caller never changes as you "
+             "advance the window, since the round-robin formula still "
+             "keys off its global rank.",
+    )
+    if use_cohort_window:
+        size_col, range_col = st.columns([1, 3])
+        cohort_size = size_col.number_input(
+            "Cohort size", min_value=1,
+            value=int(st.session_state.get("_rr_cohort_size", 100)),
+            key="_rr_cohort_size",
         )
-        if use_cohort_window:
-            size_col, range_col = st.columns([1, 3])
-            cohort_size = size_col.number_input(
-                "Cohort size", min_value=1,
-                value=int(st.session_state.get("_rr_cohort_size", 100)),
-                key="_rr_cohort_size",
-            )
-            max_cohort = max(1, math.ceil(total_companies / cohort_size))
-            prev_start, prev_end = st.session_state.get(
-                "_rr_cohort_range", (1, max_cohort))
-            cohort_start, cohort_end = range_col.slider(
-                "Cohort range", min_value=1, max_value=max_cohort,
-                value=(
-                    min(int(prev_start), max_cohort),
-                    min(int(prev_end), max_cohort),
-                ),
-                key="_rr_cohort_range",
-            )
-            start_rank, end_rank = resolve_cohort_window(
-                cohort_size, cohort_start, cohort_end, total_companies)
-            n_in_window = max(0, end_rank - start_rank + 1)
-            st.caption(
-                f"→ rank {start_rank}–{end_rank} ({n_in_window} of "
-                f"{total_companies} companies released; the rest stay "
-                "unassigned)."
-            )
-            assignment = assign_callers_round_robin_by_cohort_window(
-                original_list_items, new_callers,
-                cohort_size=cohort_size, cohort_start=cohort_start,
-                cohort_end=cohort_end, rerank_by_score=rerank,
-                unassigned_label=UNASSIGNED_LABEL,
-            )
-        else:
-            assignment = assign_callers(
-                original_list_items, new_callers, rerank_by_score=rerank)
-    else:
-        settings_key = f"_range_settings::{country_folder}"
-        settings = st.session_state.get(settings_key)
-        if not settings or set(settings) - set(new_callers):
-            # Reseed when the caller pool changed (new/removed caller) so
-            # every caller in the pool always has a starting range.
-            settings = default_range_settings(new_callers, total_companies)
-            st.session_state[settings_key] = settings
-
+        max_cohort = max(1, math.ceil(total_companies / cohort_size))
+        prev_start, prev_end = st.session_state.get(
+            "_rr_cohort_range", (1, max_cohort))
+        cohort_start, cohort_end = range_col.slider(
+            "Cohort range", min_value=1, max_value=max_cohort,
+            value=(
+                min(int(prev_start), max_cohort),
+                min(int(prev_end), max_cohort),
+            ),
+            key="_rr_cohort_range",
+        )
+        start_rank, end_rank = resolve_cohort_window(
+            cohort_size, cohort_start, cohort_end, total_companies)
+        n_in_window = max(0, end_rank - start_rank + 1)
         st.caption(
-            "Each caller gets an explicit range on the score ranking "
-            "(rank 1 = highest score). Ranges can be specified per caller "
-            "in a different unit; they all operate on the same underlying "
-            "ranking. On overlap, the last caller in the list above wins."
+            f"→ rank {start_rank}–{end_rank} ({n_in_window} of "
+            f"{total_companies} companies released; the rest stay "
+            "unassigned)."
         )
-
-        top_n_key = f"_top_n::{country_folder}"
-        col_topn, col_autosplit = st.columns([3, 1])
-        top_n = col_topn.number_input(
-            "Quick setup — top N to distribute (the rest is left unassigned "
-            "and hidden from every caller)",
-            min_value=1, max_value=total_companies,
-            value=min(int(st.session_state.get(top_n_key, total_companies)), total_companies),
-            key=top_n_key,
-            help="E.g. with 3 callers and top N = 300, 'Auto-split evenly' "
-                 "below gives each caller a contiguous block of 100 "
-                 "(rank 1-100, 101-200, 201-300). Anyone ranked below 300 "
-                 "falls outside every range and stays hidden from all "
-                 "callers.",
-        )
-        col_autosplit.write("")  # vertical spacer to align the button with the input
-        col_autosplit.write("")
-        if col_autosplit.button(
-            "🔀 Auto-split evenly",
-            help="Overwrites every caller's range below with equal, "
-                 "contiguous blocks over rank 1–{}.".format(top_n),
-        ):
-            settings = default_range_settings(new_callers, top_n)
-            st.session_state[settings_key] = settings
-            # The per-caller widgets below hold their own session_state under
-            # these keys, which otherwise win over `settings` on rerun (a
-            # widget's `value=`/`index=` is only honored on its first render)
-            # — clear them so the sliders actually pick up the new split.
-            for caller in new_callers:
-                for widget_key in (
-                    f"_range_mode::{country_folder}::{caller}",
-                    f"_range_count::{country_folder}::{caller}",
-                    f"_range_pct::{country_folder}::{caller}",
-                    f"_range_cohort_size::{country_folder}::{caller}",
-                    f"_range_cohort_idx::{country_folder}::{caller}",
-                ):
-                    st.session_state.pop(widget_key, None)
-            st.rerun()
-
-        for caller in new_callers:
-            cfg = settings.setdefault(
-                caller, {"mode": "count", "start": 1, "end": total_companies, "cohort_size": 100})
-            with st.expander(f"Range for **{caller}**", expanded=True):
-                col_mode, col_range = st.columns([1, 3])
-                range_mode = col_mode.selectbox(
-                    "Unit", options=list(RANGE_MODES),
-                    index=list(RANGE_MODES).index(cfg["mode"]),
-                    format_func=lambda v: {
-                        "count": "Count (rank number)",
-                        "percentile": "Percentile (%)",
-                        "cohort": "Cohort",
-                    }[v],
-                    key=f"_range_mode::{country_folder}::{caller}",
-                )
-                cfg["mode"] = range_mode
-                if range_mode == "count":
-                    start, end = col_range.slider(
-                        "Rank range", min_value=1, max_value=max(1, total_companies),
-                        value=(int(cfg["start"]), int(min(cfg["end"], total_companies))),
-                        key=f"_range_count::{country_folder}::{caller}",
-                    )
-                    cfg["start"], cfg["end"] = start, end
-                elif range_mode == "percentile":
-                    start, end = col_range.slider(
-                        "Percentile range (%)", min_value=0.0, max_value=100.0,
-                        value=(float(cfg["start"]), float(cfg["end"])), step=1.0,
-                        key=f"_range_pct::{country_folder}::{caller}",
-                    )
-                    cfg["start"], cfg["end"] = start, end
-                else:  # cohort
-                    size_col, range_col = col_range.columns([1, 2])
-                    cohort_size = size_col.number_input(
-                        "Cohort size", min_value=1, value=int(cfg.get("cohort_size") or 100),
-                        key=f"_range_cohort_size::{country_folder}::{caller}",
-                    )
-                    cfg["cohort_size"] = cohort_size
-                    max_cohort = max(1, math.ceil(total_companies / cohort_size))
-                    start, end = range_col.slider(
-                        "Cohort range", min_value=1, max_value=max_cohort,
-                        value=(
-                            min(int(cfg["start"]), max_cohort),
-                            min(int(cfg["end"]), max_cohort),
-                        ),
-                        key=f"_range_cohort_idx::{country_folder}::{caller}",
-                    )
-                    cfg["start"], cfg["end"] = start, end
-                bounds_preview = CallerRange(
-                    caller=caller, mode=cfg["mode"], start=cfg["start"], end=cfg["end"],
-                    cohort_size=cfg.get("cohort_size") if cfg["mode"] == "cohort" else None,
-                )
-                start_rank, end_rank = resolve_range_bounds(bounds_preview, total_companies)
-                n_in_range = max(0, end_rank - start_rank + 1)
-                st.caption(f"→ rank {start_rank}–{end_rank} ({n_in_range} companies).")
-
-        ranges = caller_ranges_from_settings(new_callers, settings)
-        coverage = caller_ranges_coverage(ranges, total_companies)
-        if coverage["gaps"]:
-            st.warning(
-                f"{len(coverage['gaps'])} companies fall outside every range "
-                "(rank " + ", ".join(str(r) for r in coverage["gaps"][:10]) +
-                (", …" if len(coverage["gaps"]) > 10 else "") +
-                ") and stay unmanaged until a range covers them."
-            )
-        if coverage["overlaps"]:
-            st.info(
-                f"{len(coverage['overlaps'])} companies fall inside more than "
-                "one range — the last caller listed above wins per company."
-            )
-        assignment = assign_callers_by_ranges(
-            original_list_items, ranges, rerank_by_score=rerank,
+        assignment = assign_callers_round_robin_by_cohort_window(
+            original_list_items, new_callers,
+            cohort_size=cohort_size, cohort_start=cohort_start,
+            cohort_end=cohort_end, rerank_by_score=rerank,
             unassigned_label=UNASSIGNED_LABEL,
         )
+    else:
+        assignment = assign_callers(
+            original_list_items, new_callers, rerank_by_score=rerank)
 
     # ---------------------------------------------------------------------
     # Live preview
@@ -491,23 +319,30 @@ def main() -> None:  # pragma: no cover - exercised only under `streamlit run`
         st.dataframe(movers_df, use_container_width=True, hide_index=True)
 
     # ---------------------------------------------------------------------
-    # Apply & upload
+    # Upload & promote — a single combined step, since the two always run
+    # together: write the reallocated run to a new run folder, then
+    # immediately promote it onto current/ so the live Company Hub picks it
+    # up. current/'s previous contents are overwritten by this action.
     # ---------------------------------------------------------------------
     st.divider()
-    st.subheader("4. Upload to GCS")
+    st.subheader("4. Upload & promote")
     st.caption(
-        "Writes to a NEW run folder — current/ and existing runs stay "
-        "unchanged. The live Company Hub only sees this assignment after a "
-        "separate, explicit 'current' promotion."
+        "Writes the new assignment to a run folder, then immediately "
+        "promotes it onto current/ — the live Company Hub shows it right "
+        "away. Other existing runs stay untouched."
     )
     run_folder = st.text_input(
         "Run folder", value=default_reallocate_run_folder(), key="_run_folder")
     confirmed = st.checkbox(
         f"I understand this writes to gs://{bucket}/{country_folder}/runs/"
-        f"{run_folder}/ (current/ stays untouched).",
+        f"{run_folder}/ and immediately overwrites gs://{bucket}/"
+        f"{country_folder}/current/ with it (the live Company Hub will show "
+        "this immediately).",
         key="_upload_confirmed",
     )
-    if st.button("📤 Upload to GCS", type="primary", disabled=not confirmed):
+    if st.button(
+        "🚀 Upload to GCS & promote to current", type="primary", disabled=not confirmed,
+    ):
         from reallocate_callers_from_gcs import (
             upload_reallocated_run,
             write_reallocated_run,
@@ -520,63 +355,74 @@ def main() -> None:  # pragma: no cover - exercised only under `streamlit run`
             out_dir = write_reallocated_run(
                 reallocated_run, st.session_state["_work_dir"] + "/out")
             with st.spinner("Uploading…"):
-                results = upload_reallocated_run(
+                upload_results = upload_reallocated_run(
                     out_dir, bucket, country_folder, run_folder)
-            n_failed = sum(1 for r in results if not r["success"])
-            if n_failed:
-                st.error(f"{n_failed} of {len(results)} uploads failed.")
+            n_upload_failed = sum(1 for r in upload_results if not r["success"])
+            if n_upload_failed:
+                st.error(
+                    f"{n_upload_failed} of {len(upload_results)} uploads "
+                    "failed — promotion skipped."
+                )
+                st.dataframe(pd.DataFrame(upload_results), use_container_width=True, hide_index=True)
             else:
                 st.success(
-                    f"{len(results)} files uploaded to "
+                    f"{len(upload_results)} files uploaded to "
                     f"gs://{bucket}/{country_folder}/runs/{run_folder}/"
                 )
-                st.session_state["_last_uploaded_run_folder"] = run_folder
-            st.dataframe(pd.DataFrame(results), use_container_width=True, hide_index=True)
+                with st.spinner(f"Promoting {run_folder} to current/…"):
+                    promote_result = promote_run_to_current(
+                        bucket, country_folder, run_folder)
+                promote_results = promote_result["results"]
+                n_promote_failed = sum(1 for r in promote_results if not r["success"])
+                if n_promote_failed:
+                    st.error(f"{n_promote_failed} of {len(promote_results)} files not promoted.")
+                else:
+                    st.success(
+                        f"{len(promote_results)} files promoted to "
+                        f"gs://{bucket}/{country_folder}/current/ — the "
+                        "Company Hub now shows this assignment immediately."
+                    )
+                st.dataframe(pd.DataFrame(promote_results), use_container_width=True, hide_index=True)
         except Exception as exc:
-            st.error(f"Upload failed: {exc}")
+            st.error(f"Upload/promote failed: {exc}")
 
-    # ---------------------------------------------------------------------
-    # Promote to current — the deliberate, separate step that makes a run
-    # live in the Company Hub.
-    # ---------------------------------------------------------------------
-    st.divider()
-    st.subheader("5. Promote to current")
-    st.caption(
-        "The live Company Hub only reads from current/. Until you "
-        "explicitly promote here, the run you just uploaded stays invisible "
-        "to the Hub — exactly as stated above."
-    )
-    promote_run_folder = st.text_input(
-        "Run folder to promote",
-        value=st.session_state.get("_last_uploaded_run_folder", run_folder),
-        key="_promote_run_folder",
-    )
-    promote_confirmed = st.checkbox(
-        f"I understand this overwrites gs://{bucket}/{country_folder}/runs/"
-        f"{promote_run_folder}/ onto gs://{bucket}/{country_folder}/"
-        f"current/ (the live Company Hub will show this immediately).",
-        key="_promote_confirmed",
-    )
-    if st.button(
-        "🚀 Promote to current", type="primary", disabled=not promote_confirmed,
-    ):
+
+def _download_current_run_with_progress(
+    bucket: str, country_folder: str, work_dir: str, progress_bar,
+) -> dict:  # pragma: no cover - pure Streamlit UI
+    """Run ``download_current_run`` on a background thread while
+    ``progress_bar`` fills in against a rough time estimate.
+
+    The download is a single batched GCS subprocess call with no
+    byte-level progress to report, so an elapsed-time estimate is the best
+    available "how much longer" signal without reworking the download
+    itself. Caps at 95% until the download actually finishes, then jumps to
+    100%, so it never reads as "done" prematurely.
+    """
+    result: dict = {}
+    error: dict = {}
+
+    def _worker() -> None:
         try:
-            with st.spinner(f"Promoting {promote_run_folder} to current/…"):
-                promote_result = promote_run_to_current(
-                    bucket, country_folder, promote_run_folder)
-            promote_results = promote_result["results"]
-            n_failed = sum(1 for r in promote_results if not r["success"])
-            if n_failed:
-                st.error(f"{n_failed} of {len(promote_results)} files not promoted.")
-            else:
-                st.success(
-                    f"{len(promote_results)} files promoted to "
-                    f"gs://{bucket}/{country_folder}/current/ — the Company "
-                    "Hub now shows this assignment immediately."
-                )
-            st.dataframe(pd.DataFrame(promote_results), use_container_width=True, hide_index=True)
+            result["current"] = download_current_run(bucket, country_folder, work_dir)
         except Exception as exc:
-            st.error(f"Promotion failed: {exc}")
+            error["exc"] = exc
+
+    thread = threading.Thread(target=_worker, daemon=True)
+    thread.start()
+    started = time.monotonic()
+    estimated_seconds = 20.0
+    while thread.is_alive():
+        elapsed = time.monotonic() - started
+        fraction = min(0.95, elapsed / estimated_seconds)
+        progress_bar.progress(
+            fraction, text=f"Downloading {country_folder}/current/… ({elapsed:.0f}s)")
+        time.sleep(0.2)
+    thread.join()
+    if "exc" in error:
+        raise error["exc"]
+    progress_bar.progress(1.0, text="Done.")
+    return result["current"]
 
 
 def _render_gcs_status(st) -> None:  # pragma: no cover - pure Streamlit UI
