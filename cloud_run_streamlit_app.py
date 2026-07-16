@@ -1314,6 +1314,11 @@ def main() -> None:  # pragma: no cover - exercised only under `streamlit run`
     # dispatch below AND the retry-failed-shards button in the status panel
     # can reuse the exact same env overrides without duplicating this dict.
     extra_env = {
+        # Empty when "Export country" above is left blank -- cloud_job_runner.py
+        # treats a blank/absent DEFAULT_INPUT_COUNTRY the same as not set at
+        # all and falls back to lead_prioritizer_batch_cli.py's own "Italy"
+        # default, so this is safe to always include.
+        "DEFAULT_INPUT_COUNTRY": export_country,
         "COMPOSE_CALLER_CONTENT": str(bool(compose_caller_content)).lower(),
         "RICH_ICP_CONTEXT": str(bool(rich_icp_context)).lower(),
         "AI_SIGNAL_SCORING": str(bool(ai_signal_scoring)).lower(),

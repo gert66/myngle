@@ -250,6 +250,7 @@ class RunConfig:
     company_column: Optional[str] = None
     domain_column: Optional[str] = None
     input_country_column: Optional[str] = None
+    default_country: str = "Italy"
     compose_caller_content: bool = False
     deep_dive: bool = False
     deep_dive_min_score: float = 8.0
@@ -294,6 +295,15 @@ def build_arg_parser() -> argparse.ArgumentParser:
                          help="Domain column (default: auto-detected).")
     parser.add_argument("--input-country-column", default=None,
                          help="Optional per-row input country column (default: auto-detected).")
+    parser.add_argument("--default-country", default=None,
+                         help="Country to use when --input-country-column is absent or a row's "
+                              "own value is blank -- passed straight through to "
+                              "lead_prioritizer_batch_cli.py's --default-country, which otherwise "
+                              "falls back to its own hardcoded 'Italy' (default: 'Italy'; env "
+                              "DEFAULT_INPUT_COUNTRY). Cloud Run Job callers (submit_cloud_run_job "
+                              "in lusha_full_pipeline_app.py, the manual dashboard in "
+                              "cloud_run_streamlit_app.py) must set this explicitly -- it is NOT "
+                              "derived from the Lovable export country automatically.")
     parser.add_argument("--compose-caller-content", action="store_true",
                          help="Opt-in Step 3 (default: off; env COMPOSE_CALLER_CONTENT).")
     parser.add_argument("--deep-dive", action="store_true",
@@ -374,6 +384,7 @@ def resolve_config(argv=None) -> RunConfig:
         input_country_column=(
             args.input_country_column or os.environ.get("INPUT_COUNTRY_COLUMN") or None
         ),
+        default_country=args.default_country or os.environ.get("DEFAULT_INPUT_COUNTRY") or "Italy",
         compose_caller_content=args.compose_caller_content or _env_bool("COMPOSE_CALLER_CONTENT"),
         deep_dive=args.deep_dive or _env_bool("DEEP_DIVE"),
         deep_dive_min_score=(
@@ -568,6 +579,7 @@ def main(argv=None) -> int:
                     "--checkpoint-every-rows", str(cfg.checkpoint_every_rows)]
         if country_col:
             cmd += ["--input-country-column", country_col]
+        cmd += ["--default-country", cfg.default_country]
         if cfg.compose_caller_content:
             cmd += ["--compose-caller-content"]
         if cfg.deep_dive:

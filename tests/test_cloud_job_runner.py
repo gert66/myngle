@@ -313,6 +313,7 @@ def test_mode_and_column_overrides_are_forwarded(tmp_path, monkeypatch):
         "--company-column", "Company Name",
         "--domain-column", "Website",
         "--input-country-column", "Land",
+        "--default-country", "Luxembourg",
         "--deep-dive",
         "--rich-icp-context",
         "--ai-signal-scoring",
@@ -324,9 +325,63 @@ def test_mode_and_column_overrides_are_forwarded(tmp_path, monkeypatch):
     assert cmd[cmd.index("--company-column") + 1] == "Company Name"
     assert cmd[cmd.index("--domain-column") + 1] == "Website"
     assert cmd[cmd.index("--input-country-column") + 1] == "Land"
+    assert cmd[cmd.index("--default-country") + 1] == "Luxembourg"
     assert "--deep-dive" in cmd
     assert "--rich-icp-context" in cmd
     assert "--ai-signal-scoring" in cmd
+
+
+def test_default_country_falls_back_to_italy_when_unset(tmp_path, monkeypatch):
+    """Regression guard: a run started without --default-country/env
+    DEFAULT_INPUT_COUNTRY must still forward an EXPLICIT '--default-country
+    Italy' to lead_prioritizer_batch_cli.py -- silently omitting the flag
+    would rely on that script's own hardcoded default matching, which is
+    exactly the drift that let cloud-dispatched runs enrich under the wrong
+    country/locale for every country lacking a working per-row input-country
+    column (see lusha_full_pipeline_app.py / cloud_run_streamlit_app.py,
+    which must set DEFAULT_INPUT_COUNTRY themselves -- this only guards
+    cloud_job_runner.py's own forwarding, not those callers)."""
+    input_path = tmp_path / "input.xlsx"
+    _write_synthetic_excel(input_path, 1)
+    output_dir = tmp_path / "out"
+
+    fake_run = _fake_batch_cli_subprocess()
+    monkeypatch.setattr(cjr.subprocess, "run", fake_run)
+    monkeypatch.delenv("DEFAULT_INPUT_COUNTRY", raising=False)
+
+    rc = cjr.main([
+        "--input", str(input_path),
+        "--output-dir", str(output_dir),
+        "--task-index", "0",
+        "--task-count", "1",
+        "--run-id", "no-default-country-override",
+    ])
+
+    assert rc == 0
+    cmd = fake_run.calls[0]
+    assert cmd[cmd.index("--default-country") + 1] == "Italy"
+
+
+def test_default_country_env_var_is_forwarded(tmp_path, monkeypatch):
+    input_path = tmp_path / "input.xlsx"
+    _write_synthetic_excel(input_path, 1)
+    output_dir = tmp_path / "out"
+
+    fake_run = _fake_batch_cli_subprocess()
+    monkeypatch.setattr(cjr.subprocess, "run", fake_run)
+    monkeypatch.setenv("DEFAULT_INPUT_COUNTRY", "Luxembourg")
+
+    rc = cjr.main([
+        "--input", str(input_path),
+        "--output-dir", str(output_dir),
+        "--task-index", "0",
+        "--task-count", "1",
+        "--run-id", "default-country-via-env",
+    ])
+
+    assert rc == 0
+    cmd = fake_run.calls[0]
+    assert cmd[cmd.index("--default-country") + 1] == "Luxembourg"
 
 
 def test_new_opt_in_flags_are_forwarded(tmp_path, monkeypatch):

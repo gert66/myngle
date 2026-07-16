@@ -354,6 +354,7 @@ def submit_cloud_run_job(
         return {"ok": False, "error": f"Upload mislukt: {output}"}
 
     extra_env = {
+        "DEFAULT_INPUT_COUNTRY": export_country,
         "COMPOSE_CALLER_CONTENT": "true",
         "RICH_ICP_CONTEXT": "true",
         "AI_SIGNAL_SCORING": "true",
