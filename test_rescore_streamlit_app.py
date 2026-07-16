@@ -16,6 +16,7 @@ from commercial_fit_scoring import (
     INTERCEPT,
     LEAN_COEFFICIENTS,
     SCORE_OFFSET_DEFAULT,
+    SCORING_PROFILES,
     SIGMOID_K,
     SIZE_BAND_LOOKUP,
     score_company,
@@ -47,6 +48,7 @@ from rescore_streamlit_app import (
     score_component_breakdown,
     score_distribution_dataframe,
     score_percentile_summary_dataframe,
+    scoring_profile_for_country_folder,
     signal_has_presence,
     signal_split_score_dataframe,
     signal_split_summary,
@@ -71,19 +73,49 @@ class TestDefaultParams:
         assert params["sigmoid_p_lo"] == _SIGMOID_P_LO
         assert params["sigmoid_p_hi"] == _SIGMOID_P_HI
 
-    def test_tier_thresholds_use_the_apps_own_default_preset(self):
-        # Deliberately scoped to this app: DEFAULT_TIER_THRESHOLDS
-        # (8.5/6.5/4.5) is its own baseline, NOT
-        # commercial_fit_scoring.TIER_THRESHOLDS (8.86/7.32/5.04), which the
-        # rest of the pipeline (exports, lead_prioritizer_core.py, ...)
-        # still uses untouched.
+    def test_tier_thresholds_match_the_real_default_profile(self):
+        # default_params() must reproduce the actual production values used
+        # by lead_prioritizer_core.py during real enrichment for non-Italy
+        # countries, NOT some fixed app-only preset -- otherwise "Reset naar
+        # standaardparameters" doesn't reproduce the enrichment scores.
         params = default_params()
         assert [tuple(t) for t in params["tier_thresholds"]] == \
-            [tuple(t) for t in DEFAULT_TIER_THRESHOLDS]
+            [tuple(t) for t in SCORING_PROFILES["default"]["tier_thresholds"]]
 
     def test_includes_score_offset_default(self):
         params = default_params()
         assert params["score_offset"] == SCORE_OFFSET_DEFAULT == 0.0
+
+    def test_includes_scoring_profile_name(self):
+        assert default_params()["scoring_profile"] == "default"
+        assert default_params("italy_register_icp_only")["scoring_profile"] \
+            == "italy_register_icp_only"
+
+    def test_unknown_profile_falls_back_to_default_values(self):
+        # Weights/thresholds fall back to the "default" profile (same as
+        # score_company()'s own SCORING_PROFILES.get(..., ["default"])
+        # fallback); "scoring_profile" keeps the requested name verbatim.
+        unknown = default_params("does_not_exist")
+        known = default_params("default")
+        for key in ("intercept", "coefficients", "model_weight", "size_weight",
+                    "sigmoid_k", "sigmoid_p_lo", "sigmoid_p_hi",
+                    "tier_thresholds", "score_offset"):
+            assert unknown[key] == known[key]
+        assert unknown["scoring_profile"] == "does_not_exist"
+
+    def test_italy_profile_matches_real_enrichment_values(self):
+        # Italy is scored with a different profile during real enrichment
+        # (see lead_prioritizer_core._scoring_profile_for_country) -- K=1,
+        # size excluded, its own tier thresholds. Resetting while an Italy
+        # run is loaded must reproduce THOSE values, not the "default"
+        # profile's.
+        params = default_params("italy_register_icp_only")
+        italy_profile = SCORING_PROFILES["italy_register_icp_only"]
+        assert params["model_weight"] == italy_profile["model_weight"] == 1.0
+        assert params["size_weight"] == italy_profile["size_weight"] == 0.0
+        assert params["sigmoid_k"] == italy_profile["sigmoid_k"] == 1.0
+        assert [tuple(t) for t in params["tier_thresholds"]] == \
+            [tuple(t) for t in italy_profile["tier_thresholds"]]
 
     def test_returns_independent_copies(self):
         a = default_params()
@@ -91,6 +123,26 @@ class TestDefaultParams:
         a["coefficients"]["sig_foreign_hq_score"] = 999.0
         assert b["coefficients"]["sig_foreign_hq_score"] != 999.0
         assert LEAN_COEFFICIENTS["sig_foreign_hq_score"] != 999.0
+
+
+class TestScoringProfileForCountryFolder:
+    def test_italy_maps_to_the_register_profile(self):
+        assert scoring_profile_for_country_folder("italy") == \
+            "italy_register_icp_only"
+
+    def test_is_case_insensitive_and_handles_aliases(self):
+        assert scoring_profile_for_country_folder("Italy") == \
+            "italy_register_icp_only"
+        assert scoring_profile_for_country_folder("ITA") == \
+            "italy_register_icp_only"
+
+    def test_other_countries_map_to_default(self):
+        assert scoring_profile_for_country_folder("brazil") == "default"
+        assert scoring_profile_for_country_folder("germany") == "default"
+
+    def test_empty_or_none_maps_to_default(self):
+        assert scoring_profile_for_country_folder("") == "default"
+        assert scoring_profile_for_country_folder(None) == "default"
 
 
 class TestSigmoidCurveDataframe:

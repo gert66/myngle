@@ -42,13 +42,14 @@ from commercial_fit_scoring import (
     INTERCEPT,
     LEAN_COEFFICIENTS,
     SCORE_OFFSET_DEFAULT,
-    SIGMOID_K,
+    SCORING_PROFILES,
     SIZE_BAND_LOOKUP,
     _FIELD_TO_COMPONENT,
     _SIGMOID_P_HI,
     _SIGMOID_P_LO,
     score_company,
 )
+from lead_country_config import std_country
 from rescore_from_gcs import (
     DEFAULT_GCS_BUCKET,
     build_rescored_run,
@@ -90,14 +91,29 @@ COEFFICIENT_LABELS: dict[str, str] = {
 
 TIER_LABELS: list[str] = ["🥇 Hot", "🥈 Warm", "🥉 Cool", "❄️ Pass"]
 
-#: New default tier-threshold preset for the Re-score Explorer's OWN
-#: baseline (default_params() / the "Tier-drempels" tab) — deliberately
-#: scoped to this app only. commercial_fit_scoring.TIER_THRESHOLDS
-#: (8.86/7.32/5.04), used by the rest of the pipeline (exports,
-#: lead_prioritizer_core.py, opportunity_radar.py, ...), is left untouched.
+#: Convenience fixture threshold set (also commercial_fit_scoring's own
+#: "default" profile values) used by a few pure helpers below/in tests that
+#: just need *some* plausible Hot/Warm/Cool cutoffs. NOT used by
+#: default_params() itself any more -- that now reads the real per-profile
+#: production thresholds from commercial_fit_scoring.SCORING_PROFILES (see
+#: scoring_profile_for_country_folder) so "Reset naar standaardparameters"
+#: reproduces the actual enrichment values for the loaded country.
 DEFAULT_TIER_THRESHOLDS: list[list] = [
     [8.5, "🥇 Hot"], [6.5, "🥈 Warm"], [4.5, "🥉 Cool"], [0.0, "❄️ Pass"],
 ]
+
+
+def scoring_profile_for_country_folder(country_folder: "str | None") -> str:
+    """commercial_fit_scoring profile for a GCS country folder (e.g.
+    "italy", "brazil"), mirroring lead_prioritizer_core.py's
+    ``_scoring_profile_for_country``: Italy keeps its register-calibrated
+    profile during real enrichment, every other country uses "default".
+    Duplicated here rather than imported -- lead_prioritizer_core.py pulls
+    in the full AI/HTTP enrichment stack, which this lightweight Streamlit
+    explorer has no other reason to depend on."""
+    if std_country(country_folder or "") == "Italy":
+        return "italy_register_icp_only"
+    return "default"
 
 #: score_offset UI bounds (Sigmoid & blend tab) — a uniform additive shift
 #: applied to final_commercial_fit_score AFTER the full model calculation,
@@ -180,20 +196,26 @@ def hq_category(detail: dict) -> str:
 # =============================================================================
 
 
-def default_params() -> dict:
-    """Baseline params dict mirroring commercial_fit_scoring's module-level
-    defaults (``SCORING_PROFILES['default']``) — the UI's starting point
-    before any slider is touched."""
+def default_params(profile: str = "default") -> dict:
+    """Baseline params dict for the given commercial_fit_scoring profile
+    (``SCORING_PROFILES[profile]``) — the same profile
+    lead_prioritizer_core.py picks per country during real enrichment (see
+    ``scoring_profile_for_country_folder``). This is what "Reset naar
+    standaardparameters" and every "Origineel vs. actueel" diff compare
+    against, so passing the loaded country's profile here reproduces the
+    actual enrichment values instead of a fixed app-only baseline."""
+    _profile = SCORING_PROFILES.get(profile, SCORING_PROFILES["default"])
     return {
         "intercept": INTERCEPT,
         "coefficients": dict(LEAN_COEFFICIENTS),
-        "model_weight": ICP_SIMILARITY_WEIGHT,
-        "size_weight": COMPANY_SIZE_WEIGHT,
-        "sigmoid_k": SIGMOID_K,
-        "sigmoid_p_lo": _SIGMOID_P_LO,
-        "sigmoid_p_hi": _SIGMOID_P_HI,
-        "tier_thresholds": [list(t) for t in DEFAULT_TIER_THRESHOLDS],
+        "model_weight": _profile["model_weight"],
+        "size_weight": _profile["size_weight"],
+        "sigmoid_k": _profile["sigmoid_k"],
+        "sigmoid_p_lo": _profile.get("sigmoid_p_lo", _SIGMOID_P_LO),
+        "sigmoid_p_hi": _profile.get("sigmoid_p_hi", _SIGMOID_P_HI),
+        "tier_thresholds": [list(t) for t in _profile["tier_thresholds"]],
         "score_offset": SCORE_OFFSET_DEFAULT,
+        "scoring_profile": profile,
     }
 
 
@@ -989,8 +1011,10 @@ def main() -> None:  # pragma: no cover - exercised only under `streamlit run`
         """Compact "origineel vs. actueel" table for one parameter group.
 
         ``rows`` is ``[(label, original_value, current_value), ...]`` —
-        "origineel" is always ``default_params()``, the fixed baseline the
-        UI session starts from; "actueel" is whatever ``st.session_state
+        "origineel" is always ``default_params(active_scoring_profile)``,
+        the real enrichment baseline for whichever country is currently
+        loaded (see ``scoring_profile_for_country_folder``); "actueel" is
+        whatever ``st.session_state
         ["rescore_params"]`` holds right now. That current value is
         identical whether it got there via a manual slider drag or a
         programmatic auto-calibrate/auto-optimize button (Sigmoid tab's
@@ -1027,12 +1051,20 @@ def main() -> None:  # pragma: no cover - exercised only under `streamlit run`
         "until you explicitly upload; current/ and existing runs are never touched."
     )
 
+    # Which commercial_fit_scoring profile actually scored the currently
+    # loaded country during real enrichment (empty/none loaded -> "default").
+    # Drives default_params() below so "origineel"/"Reset naar
+    # standaardparameters" reproduce that country's real enrichment values
+    # instead of always the "default" profile.
+    active_scoring_profile = scoring_profile_for_country_folder(
+        st.session_state.get("_current_country", ""))
+
     if "rescore_params" not in st.session_state:
-        st.session_state["rescore_params"] = default_params()
+        st.session_state["rescore_params"] = default_params(active_scoring_profile)
     params = st.session_state["rescore_params"]
     # Params saved by an older app version may miss newer keys — backfill so
     # the UI can rely on them without .get everywhere.
-    for _key, _val in default_params().items():
+    for _key, _val in default_params(active_scoring_profile).items():
         params.setdefault(_key, _val)
 
     # Slider/number-input values live in st.session_state under their widget
@@ -1171,8 +1203,13 @@ def main() -> None:  # pragma: no cover - exercised only under `streamlit run`
         ))
 
         st.divider()
+        st.caption(
+            f"Reset gebruikt scoring-profiel `{active_scoring_profile}` "
+            f"(op basis van het geladen land) — dezelfde waarden als bij de "
+            f"echte enrichment in lead_prioritizer_core.py."
+        )
         if st.button("↺ Reset naar standaardparameters"):
-            st.session_state["rescore_params"] = default_params()
+            st.session_state["rescore_params"] = default_params(active_scoring_profile)
             st.session_state["_pending_param_updates"] = {"reset_widgets": True}
             st.rerun()
 
@@ -1484,7 +1521,7 @@ def main() -> None:  # pragma: no cover - exercised only under `streamlit run`
         # reading params["intercept"]/["coefficients"] before the st.slider()
         # calls that assign them shows last run's value, one interaction
         # behind whatever the user just moved.
-        _defaults = default_params()
+        _defaults = default_params(active_scoring_profile)
         with st.expander("🔍 Origineel vs. actueel", expanded=False):
             render_param_diff_table(
                 [("intercept", _defaults["intercept"], float(params["intercept"]))]
@@ -1535,7 +1572,7 @@ def main() -> None:  # pragma: no cover - exercised only under `streamlit run`
         # widget in this tab body -- only by the auto-calibrate button below,
         # which applies its update at the top of the NEXT run -- so they're
         # already current at any point here.
-        _defaults = default_params()
+        _defaults = default_params(active_scoring_profile)
         with st.expander("🔍 Origineel vs. actueel", expanded=False):
             render_param_diff_table([
                 ("sigmoid_k", _defaults["sigmoid_k"], float(params["sigmoid_k"])),
@@ -1670,7 +1707,8 @@ def main() -> None:  # pragma: no cover - exercised only under `streamlit run`
         # params["tier_thresholds"] BEFORE those widgets update it this run)
         # -- same one-run-behind lag as the Coëfficiënten tab.
         _default_thresholds_by_label = {
-            label: score for score, label in default_params()["tier_thresholds"]}
+            label: score for score, label in
+            default_params(active_scoring_profile)["tier_thresholds"]}
         with st.expander("🔍 Origineel vs. actueel", expanded=False):
             render_param_diff_table([
                 ("🥇 Hot", _default_thresholds_by_label.get("🥇 Hot", 0.0), float(hot)),
