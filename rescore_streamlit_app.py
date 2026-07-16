@@ -1226,16 +1226,27 @@ def main() -> None:  # pragma: no cover - exercised only under `streamlit run`
     current = st.session_state.get("_current")
 
     # ---------------------------------------------------------------------
-    # Live re-score of the currently loaded single country — shared by the
+    # Live re-score of the currently loaded single country -- shared by the
     # "Impact", "Signaal-analyse" and "Toepassen & uploaden" tabs so it's
     # computed once per rerun, not per tab. With fast preview on, only a
     # percentile-stratified sample is re-scored per rerun; the full-country
     # re-score happens exclusively inside the upload buttons.
+    #
+    # Split into two parts so the widgets on "Coefficienten"/"Sigmoid &
+    # blend"/"Tier-drempels" below can mutate `params` BEFORE the actual
+    # re-score (part 2, after those tabs) runs -- otherwise a slider's effect
+    # would only show up one rerun late, since Streamlit renders every tab's
+    # body in SCRIPT order on every rerun regardless of which tab is
+    # visually active, and a widget instantiated further down the script
+    # only updates `params` once execution reaches it. Part 1 here only
+    # depends on the loaded `current` bundle / fast-preview settings, not on
+    # `params`, so it's safe to compute before any parameter widget runs.
     # ---------------------------------------------------------------------
     original_by_id: dict = {}
     rescored_by_id: dict = {}
     all_details_by_id: dict = {}
     preview_note = ""
+    preview_current: dict = {}
     if current:
         all_details_by_id = {
             cid: d for b in current["detail_files"].values() for cid, d in b.items()}
@@ -1251,18 +1262,8 @@ def main() -> None:  # pragma: no cover - exercised only under `streamlit run`
             )
         else:
             preview_current = current
-        _now_iso = pd.Timestamp.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ")
-        preview_run = build_rescored_run(
-            preview_current, params,
-            country_folder=st.session_state.get("_current_country", ""),
-            run_folder="preview",
-            now_iso=_now_iso,
-            apply_c5_upgrade=apply_c5_upgrade,
-        )
         original_by_id = {
             cid: d for b in preview_current["detail_files"].values() for cid, d in b.items()}
-        rescored_by_id = {
-            cid: d for b in preview_run["detail_files"].values() for cid, d in b.items()}
 
     # ---------------------------------------------------------------------
     # Parameter tabs
@@ -1273,6 +1274,279 @@ def main() -> None:  # pragma: no cover - exercised only under `streamlit run`
         "🎯 Tier-drempels", "🧮 Eén bedrijf", "🔬 Signaal-analyse",
         "🌍 Alle landen", "🚀 Toepassen & uploaden",
     ])
+
+
+    # ── Coefficients ───────────────────────────────────────────────────────
+    with tab_coef:
+        st.subheader("Logistic-regression coëfficiënten")
+        st.caption(
+            "Elke coëfficiënt weegt hoe zwaar dat signaal (0–3, genormaliseerd "
+            "naar 0–1) meetelt in de log-odds. Positief = verhoogt de kans op "
+            "ICP-fit; negatief = verlaagt de kans."
+        )
+        params["intercept"] = st.slider(
+            "Intercept", min_value=-3.0, max_value=1.0,
+            value=float(params["intercept"]), step=0.01, key="intercept_slider",
+            help="Basiswaarde van de log-odds vóór enig signaal wordt meegeteld.",
+        )
+        new_coeffs = {}
+        for field, default_val in LEAN_COEFFICIENTS.items():
+            current_val = params["coefficients"].get(field, default_val)
+            new_coeffs[field] = st.slider(
+                field, min_value=-1.0, max_value=1.5,
+                value=float(current_val), step=0.005, key=f"coef_{field}",
+            )
+            st.caption(COEFFICIENT_LABELS.get(field, ""))
+        params["coefficients"] = new_coeffs
+
+        # Rendered AFTER the sliders above (not before) so it reflects the
+        # value a just-dragged slider wrote into `params` THIS run --
+        # reading params["intercept"]/["coefficients"] before the st.slider()
+        # calls that assign them shows last run's value, one interaction
+        # behind whatever the user just moved.
+        _defaults = default_params(active_scoring_profile)
+        with st.expander("🔍 Origineel vs. actueel", expanded=False):
+            render_param_diff_table(
+                [("intercept", _defaults["intercept"], float(params["intercept"]))]
+                + [
+                    (field, _defaults["coefficients"][field],
+                     float(params["coefficients"].get(field, _defaults["coefficients"][field])))
+                    for field in LEAN_COEFFICIENTS
+                ]
+            )
+
+
+    # ── Sigmoid & blend ──────────────────────────────────────────────────────
+    with tab_sigmoid:
+        st.subheader("Sigmoid steilheid (K) & ICP/grootte-blend")
+        col_k, col_w = st.columns(2)
+        with col_k:
+            params["sigmoid_k"] = st.slider(
+                "Sigmoid K", min_value=1.0, max_value=25.0,
+                value=float(params["sigmoid_k"]), step=0.5, key="k_slider",
+                help="Hoger = scherpere spreiding tussen 1–10 rond de "
+                     "kansdrempel van 0.5; verandert de ranking-volgorde niet, "
+                     "wel de spreiding.",
+            )
+        with col_w:
+            params["model_weight"] = st.slider(
+                "ICP-gewicht (model_weight)", min_value=0.0, max_value=1.0,
+                value=float(params["model_weight"]), step=0.05, key="model_weight_slider",
+            )
+            params["size_weight"] = round(1.0 - params["model_weight"], 2)
+            st.metric(
+                "Grootte-gewicht (size_weight, uit Lucia/Lusha-data)",
+                params["size_weight"],
+            )
+
+        st.divider()
+        params["score_offset"] = st.number_input(
+            "Final score offset",
+            min_value=SCORE_OFFSET_MIN, max_value=SCORE_OFFSET_MAX,
+            value=float(params.get("score_offset", SCORE_OFFSET_DEFAULT)),
+            step=SCORE_OFFSET_STEP, key="score_offset_input",
+            help="Adds a fixed amount to every final score after the model "
+                 "calculation. This preserves ranking and score spacing, "
+                 "except where scores are capped at 1 or 10.",
+        )
+
+        # Rendered AFTER the sliders above (see the Coëfficiënten tab for why:
+        # reading params before the st.slider() assignments shows last run's
+        # value, one interaction behind). sigmoid_p_lo/p_hi are never set by a
+        # widget in this tab body -- only by the auto-calibrate button below,
+        # which applies its update at the top of the NEXT run -- so they're
+        # already current at any point here.
+        _defaults = default_params(active_scoring_profile)
+        with st.expander("🔍 Origineel vs. actueel", expanded=False):
+            render_param_diff_table([
+                ("sigmoid_k", _defaults["sigmoid_k"], float(params["sigmoid_k"])),
+                ("model_weight", _defaults["model_weight"], float(params["model_weight"])),
+                ("size_weight", _defaults["size_weight"], float(params["size_weight"])),
+                ("sigmoid_p_lo", _defaults["sigmoid_p_lo"], float(params["sigmoid_p_lo"])),
+                ("sigmoid_p_hi", _defaults["sigmoid_p_hi"], float(params["sigmoid_p_hi"])),
+                ("score_offset", _defaults["score_offset"], float(params["score_offset"])),
+            ])
+        st.caption(
+            "model_weight + size_weight telt altijd op tot 1 — het "
+            "grootte-gewicht past zich automatisch aan (zoals in de "
+            "referentie-spreadsheet's 'Scoring Parameters'-tab)."
+        )
+        if params["size_weight"] >= 0.7:
+            _size_values = ", ".join(f"{v:g}" for v in sorted(set(SIZE_BAND_LOOKUP.values())))
+            if params["model_weight"] == 0.0:
+                st.warning(
+                    "ICP-gewicht staat op 0: `final_commercial_fit_score` wordt nu "
+                    "EXACT gelijk aan `company_size_score` — de ICP-signalen tellen "
+                    "helemaal niet meer mee. Bedrijfsgrootte is geen doorlopende "
+                    "schaal maar een vaste band per employee-range, dus de score "
+                    f"kan maar **{len(set(SIZE_BAND_LOOKUP.values()))} vaste "
+                    f"waarden** aannemen: {_size_values}. Dat verklaart de "
+                    "'verbreding'/blokjes in de histogram hierboven in plaats van "
+                    "een vloeiende verdeling — elk blokje is één employee-range-band."
+                )
+            else:
+                st.info(
+                    "Bij een hoog grootte-gewicht domineert `company_size_score` "
+                    "de eindscore. Let op: grootte is geen doorlopende schaal maar "
+                    f"een vaste band per employee-range ({len(set(SIZE_BAND_LOOKUP.values()))} "
+                    f"mogelijke waarden: {_size_values}), dus de histogram gaat er "
+                    "steeds blokkiger/'breder' uitzien naarmate size_weight hoger "
+                    "wordt — dat is verwacht gedrag, geen bug."
+                )
+
+        curve_df = sigmoid_curve_dataframe(
+            params["sigmoid_k"],
+            p_lo=params["sigmoid_p_lo"], p_hi=params["sigmoid_p_hi"],
+        )
+        fig = px.line(
+            curve_df, x="probability", y=["sigmoid_raw_s", "icp_similarity_score"],
+            labels={"probability": "model_probability (p)", "value": "waarde", "variable": ""},
+            title=f"Sigmoid-curve bij K={params['sigmoid_k']}",
+        )
+        st.plotly_chart(fig, use_container_width=True)
+        st.caption(
+            "sigmoid_raw_s (links, 0–1) is de gestretchte kans; "
+            "icp_similarity_score (rechts, 1–10) is die kans herschaald over "
+            "de ankers p_lo/p_hi hieronder."
+        )
+
+        st.divider()
+        st.subheader("🎯 Kalibratie van het 1–10-bereik (sigmoid-ankers)")
+        st.caption(
+            "icp_similarity_score wordt herschaald tussen twee anker-kansen: "
+            "alles op/boven p_hi wordt 10, alles op/onder p_lo wordt 1. De "
+            "standaard-ankers komen van een oude referentiepopulatie — als "
+            "de kansen van jouw beste bedrijven daar onder blijven, haalt de "
+            "top nooit een 10. Kalibreren zet de ankers op de percentielen "
+            "van de geladen data zelf."
+        )
+        a1, a2, a3 = st.columns(3)
+        a1.metric("p_lo (→ score 1)", f"{params['sigmoid_p_lo']:.5f}")
+        a2.metric("p_hi (→ score 10)", f"{params['sigmoid_p_hi']:.5f}")
+        _is_default_anchors = (
+            params["sigmoid_p_lo"] == _SIGMOID_P_LO
+            and params["sigmoid_p_hi"] == _SIGMOID_P_HI)
+        a3.metric("Bron", "standaard" if _is_default_anchors else "gekalibreerd")
+
+        c1, c2 = st.columns(2)
+        with c1:
+            lo_pct = st.number_input(
+                "Laag percentiel", min_value=0.0, max_value=25.0,
+                value=CALIBRATION_LO_PCT, step=1.0, key="calib_lo_pct")
+        with c2:
+            hi_pct = st.number_input(
+                "Hoog percentiel", min_value=75.0, max_value=100.0,
+                value=CALIBRATION_HI_PCT, step=1.0, key="calib_hi_pct")
+        b1, b2 = st.columns(2)
+        with b1:
+            if st.button(
+                "🎯 Kalibreer ankers op geladen data",
+                disabled=not current, key="calibrate_btn",
+                help="Vereist een geladen land-folder (zijbalk).",
+            ):
+                anchors = auto_calibrate_sigmoid_anchors(
+                    all_details_by_id, params, lo_pct=lo_pct, hi_pct=hi_pct)
+                if anchors is None:
+                    st.warning(
+                        "Kalibratie niet mogelijk — te weinig bedrijven met "
+                        "scoring_inputs of geen spreiding in de kansen.")
+                else:
+                    st.session_state["_pending_param_updates"] = {
+                        "params": {"sigmoid_p_lo": anchors[0], "sigmoid_p_hi": anchors[1]},
+                    }
+                    st.rerun()
+        with b2:
+            if st.button("↺ Standaard-ankers herstellen", key="reset_anchors_btn"):
+                st.session_state["_pending_param_updates"] = {
+                    "params": {"sigmoid_p_lo": _SIGMOID_P_LO, "sigmoid_p_hi": _SIGMOID_P_HI},
+                }
+                st.rerun()
+        if not current:
+            st.info("Laad eerst een land-folder via de zijbalk om te kunnen kalibreren.")
+
+
+    # ---------------------------------------------------------------------
+    # Live re-score, part 2: needs every parameter widget above (Coefficienten
+    # + Sigmoid & blend) to have already run THIS rerun, so it reflects the
+    # value just dragged rather than last rerun's -- see part 1's comment
+    # above for why this is split instead of running right after `current`.
+    # ---------------------------------------------------------------------
+    if current:
+        _now_iso = pd.Timestamp.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ")
+        preview_run = build_rescored_run(
+            preview_current, params,
+            country_folder=st.session_state.get("_current_country", ""),
+            run_folder="preview",
+            now_iso=_now_iso,
+            apply_c5_upgrade=apply_c5_upgrade,
+        )
+        rescored_by_id = {
+            cid: d for b in preview_run["detail_files"].values() for cid, d in b.items()}
+
+    # ── Tier thresholds ──────────────────────────────────────────────────────
+    with tab_tiers:
+        st.subheader("Tier-drempels (final_commercial_fit_score)")
+        thresholds_by_label = {label: score for score, label in params["tier_thresholds"]}
+        hot = st.number_input(
+            "🥇 Hot vanaf", value=float(thresholds_by_label.get("🥇 Hot", 8.5)),
+            step=0.01, key="tier_hot")
+        warm = st.number_input(
+            "🥈 Warm vanaf", value=float(thresholds_by_label.get("🥈 Warm", 6.5)),
+            step=0.01, key="tier_warm")
+        cool = st.number_input(
+            "🥉 Cool vanaf", value=float(thresholds_by_label.get("🥉 Cool", 4.5)),
+            step=0.01, key="tier_cool")
+        error = validate_tier_thresholds(hot, warm, cool)
+        if error:
+            st.error(error)
+        else:
+            params["tier_thresholds"] = [
+                [hot, "🥇 Hot"], [warm, "🥈 Warm"], [cool, "🥉 Cool"], [0.0, "❄️ Pass"],
+            ]
+        st.caption("Onder Cool valt een bedrijf automatisch in ❄️ Pass.")
+
+        # Rendered AFTER the number_inputs above and reads hot/warm/cool
+        # directly (not thresholds_by_label, which is derived from
+        # params["tier_thresholds"] BEFORE those widgets update it this run)
+        # -- same one-run-behind lag as the Coëfficiënten tab.
+        _default_thresholds_by_label = {
+            label: score for score, label in
+            default_params(active_scoring_profile)["tier_thresholds"]}
+        with st.expander("🔍 Origineel vs. actueel", expanded=False):
+            render_param_diff_table([
+                ("🥇 Hot", _default_thresholds_by_label.get("🥇 Hot", 0.0), float(hot)),
+                ("🥈 Warm", _default_thresholds_by_label.get("🥈 Warm", 0.0), float(warm)),
+                ("🥉 Cool", _default_thresholds_by_label.get("🥉 Cool", 0.0), float(cool)),
+            ])
+
+        st.divider()
+        if st.button(
+            "📐 Stel drempels voor uit de nieuwe verdeling (10/20/30-regel)",
+            disabled=not current, key="suggest_tiers_btn",
+            help="Zet Hot/Warm/Cool op de percentielen van de HERscoorde "
+                 "preview: top 10% Hot, volgende 20% Warm, volgende 30% Cool "
+                 "— dezelfde methodiek als de oorspronkelijke kalibratie.",
+        ):
+            suggestion = suggest_tier_thresholds(rescored_by_id)
+            if suggestion is None:
+                st.warning(
+                    "Geen voorstel mogelijk — te weinig spreiding in de "
+                    "nieuwe scores.")
+            else:
+                st.session_state["_pending_param_updates"] = {
+                    "params": {"tier_thresholds": suggestion},
+                    "widgets": {
+                        "tier_hot": suggestion[0][0],
+                        "tier_warm": suggestion[1][0],
+                        "tier_cool": suggestion[2][0],
+                    },
+                }
+                st.rerun()
+        if not current:
+            st.info(
+                "Laad eerst een land-folder via de zijbalk om drempels uit "
+                "de data voor te stellen.")
+
 
     # ── Impact — the first thing you see: what do the current params do? ────
     with tab_impact:
@@ -1502,257 +1776,6 @@ def main() -> None:  # pragma: no cover - exercised only under `streamlit run`
                     + (f" Bron van de range — {'; '.join(_src_parts)}."
                        if _src_parts else "")
                 )
-
-    # ── Coefficients ───────────────────────────────────────────────────────
-    with tab_coef:
-        st.subheader("Logistic-regression coëfficiënten")
-        st.caption(
-            "Elke coëfficiënt weegt hoe zwaar dat signaal (0–3, genormaliseerd "
-            "naar 0–1) meetelt in de log-odds. Positief = verhoogt de kans op "
-            "ICP-fit; negatief = verlaagt de kans."
-        )
-        params["intercept"] = st.slider(
-            "Intercept", min_value=-3.0, max_value=1.0,
-            value=float(params["intercept"]), step=0.01, key="intercept_slider",
-            help="Basiswaarde van de log-odds vóór enig signaal wordt meegeteld.",
-        )
-        new_coeffs = {}
-        for field, default_val in LEAN_COEFFICIENTS.items():
-            current_val = params["coefficients"].get(field, default_val)
-            new_coeffs[field] = st.slider(
-                field, min_value=-1.0, max_value=1.5,
-                value=float(current_val), step=0.005, key=f"coef_{field}",
-            )
-            st.caption(COEFFICIENT_LABELS.get(field, ""))
-        params["coefficients"] = new_coeffs
-
-        # Rendered AFTER the sliders above (not before) so it reflects the
-        # value a just-dragged slider wrote into `params` THIS run --
-        # reading params["intercept"]/["coefficients"] before the st.slider()
-        # calls that assign them shows last run's value, one interaction
-        # behind whatever the user just moved.
-        _defaults = default_params(active_scoring_profile)
-        with st.expander("🔍 Origineel vs. actueel", expanded=False):
-            render_param_diff_table(
-                [("intercept", _defaults["intercept"], float(params["intercept"]))]
-                + [
-                    (field, _defaults["coefficients"][field],
-                     float(params["coefficients"].get(field, _defaults["coefficients"][field])))
-                    for field in LEAN_COEFFICIENTS
-                ]
-            )
-
-    # ── Sigmoid & blend ──────────────────────────────────────────────────────
-    with tab_sigmoid:
-        st.subheader("Sigmoid steilheid (K) & ICP/grootte-blend")
-        col_k, col_w = st.columns(2)
-        with col_k:
-            params["sigmoid_k"] = st.slider(
-                "Sigmoid K", min_value=1.0, max_value=25.0,
-                value=float(params["sigmoid_k"]), step=0.5, key="k_slider",
-                help="Hoger = scherpere spreiding tussen 1–10 rond de "
-                     "kansdrempel van 0.5; verandert de ranking-volgorde niet, "
-                     "wel de spreiding.",
-            )
-        with col_w:
-            params["model_weight"] = st.slider(
-                "ICP-gewicht (model_weight)", min_value=0.0, max_value=1.0,
-                value=float(params["model_weight"]), step=0.05, key="model_weight_slider",
-            )
-            params["size_weight"] = round(1.0 - params["model_weight"], 2)
-            st.metric(
-                "Grootte-gewicht (size_weight, uit Lucia/Lusha-data)",
-                params["size_weight"],
-            )
-
-        st.divider()
-        params["score_offset"] = st.number_input(
-            "Final score offset",
-            min_value=SCORE_OFFSET_MIN, max_value=SCORE_OFFSET_MAX,
-            value=float(params.get("score_offset", SCORE_OFFSET_DEFAULT)),
-            step=SCORE_OFFSET_STEP, key="score_offset_input",
-            help="Adds a fixed amount to every final score after the model "
-                 "calculation. This preserves ranking and score spacing, "
-                 "except where scores are capped at 1 or 10.",
-        )
-
-        # Rendered AFTER the sliders above (see the Coëfficiënten tab for why:
-        # reading params before the st.slider() assignments shows last run's
-        # value, one interaction behind). sigmoid_p_lo/p_hi are never set by a
-        # widget in this tab body -- only by the auto-calibrate button below,
-        # which applies its update at the top of the NEXT run -- so they're
-        # already current at any point here.
-        _defaults = default_params(active_scoring_profile)
-        with st.expander("🔍 Origineel vs. actueel", expanded=False):
-            render_param_diff_table([
-                ("sigmoid_k", _defaults["sigmoid_k"], float(params["sigmoid_k"])),
-                ("model_weight", _defaults["model_weight"], float(params["model_weight"])),
-                ("size_weight", _defaults["size_weight"], float(params["size_weight"])),
-                ("sigmoid_p_lo", _defaults["sigmoid_p_lo"], float(params["sigmoid_p_lo"])),
-                ("sigmoid_p_hi", _defaults["sigmoid_p_hi"], float(params["sigmoid_p_hi"])),
-                ("score_offset", _defaults["score_offset"], float(params["score_offset"])),
-            ])
-        st.caption(
-            "model_weight + size_weight telt altijd op tot 1 — het "
-            "grootte-gewicht past zich automatisch aan (zoals in de "
-            "referentie-spreadsheet's 'Scoring Parameters'-tab)."
-        )
-        if params["size_weight"] >= 0.7:
-            _size_values = ", ".join(f"{v:g}" for v in sorted(set(SIZE_BAND_LOOKUP.values())))
-            if params["model_weight"] == 0.0:
-                st.warning(
-                    "ICP-gewicht staat op 0: `final_commercial_fit_score` wordt nu "
-                    "EXACT gelijk aan `company_size_score` — de ICP-signalen tellen "
-                    "helemaal niet meer mee. Bedrijfsgrootte is geen doorlopende "
-                    "schaal maar een vaste band per employee-range, dus de score "
-                    f"kan maar **{len(set(SIZE_BAND_LOOKUP.values()))} vaste "
-                    f"waarden** aannemen: {_size_values}. Dat verklaart de "
-                    "'verbreding'/blokjes in de histogram hierboven in plaats van "
-                    "een vloeiende verdeling — elk blokje is één employee-range-band."
-                )
-            else:
-                st.info(
-                    "Bij een hoog grootte-gewicht domineert `company_size_score` "
-                    "de eindscore. Let op: grootte is geen doorlopende schaal maar "
-                    f"een vaste band per employee-range ({len(set(SIZE_BAND_LOOKUP.values()))} "
-                    f"mogelijke waarden: {_size_values}), dus de histogram gaat er "
-                    "steeds blokkiger/'breder' uitzien naarmate size_weight hoger "
-                    "wordt — dat is verwacht gedrag, geen bug."
-                )
-
-        curve_df = sigmoid_curve_dataframe(
-            params["sigmoid_k"],
-            p_lo=params["sigmoid_p_lo"], p_hi=params["sigmoid_p_hi"],
-        )
-        fig = px.line(
-            curve_df, x="probability", y=["sigmoid_raw_s", "icp_similarity_score"],
-            labels={"probability": "model_probability (p)", "value": "waarde", "variable": ""},
-            title=f"Sigmoid-curve bij K={params['sigmoid_k']}",
-        )
-        st.plotly_chart(fig, use_container_width=True)
-        st.caption(
-            "sigmoid_raw_s (links, 0–1) is de gestretchte kans; "
-            "icp_similarity_score (rechts, 1–10) is die kans herschaald over "
-            "de ankers p_lo/p_hi hieronder."
-        )
-
-        st.divider()
-        st.subheader("🎯 Kalibratie van het 1–10-bereik (sigmoid-ankers)")
-        st.caption(
-            "icp_similarity_score wordt herschaald tussen twee anker-kansen: "
-            "alles op/boven p_hi wordt 10, alles op/onder p_lo wordt 1. De "
-            "standaard-ankers komen van een oude referentiepopulatie — als "
-            "de kansen van jouw beste bedrijven daar onder blijven, haalt de "
-            "top nooit een 10. Kalibreren zet de ankers op de percentielen "
-            "van de geladen data zelf."
-        )
-        a1, a2, a3 = st.columns(3)
-        a1.metric("p_lo (→ score 1)", f"{params['sigmoid_p_lo']:.5f}")
-        a2.metric("p_hi (→ score 10)", f"{params['sigmoid_p_hi']:.5f}")
-        _is_default_anchors = (
-            params["sigmoid_p_lo"] == _SIGMOID_P_LO
-            and params["sigmoid_p_hi"] == _SIGMOID_P_HI)
-        a3.metric("Bron", "standaard" if _is_default_anchors else "gekalibreerd")
-
-        c1, c2 = st.columns(2)
-        with c1:
-            lo_pct = st.number_input(
-                "Laag percentiel", min_value=0.0, max_value=25.0,
-                value=CALIBRATION_LO_PCT, step=1.0, key="calib_lo_pct")
-        with c2:
-            hi_pct = st.number_input(
-                "Hoog percentiel", min_value=75.0, max_value=100.0,
-                value=CALIBRATION_HI_PCT, step=1.0, key="calib_hi_pct")
-        b1, b2 = st.columns(2)
-        with b1:
-            if st.button(
-                "🎯 Kalibreer ankers op geladen data",
-                disabled=not current, key="calibrate_btn",
-                help="Vereist een geladen land-folder (zijbalk).",
-            ):
-                anchors = auto_calibrate_sigmoid_anchors(
-                    all_details_by_id, params, lo_pct=lo_pct, hi_pct=hi_pct)
-                if anchors is None:
-                    st.warning(
-                        "Kalibratie niet mogelijk — te weinig bedrijven met "
-                        "scoring_inputs of geen spreiding in de kansen.")
-                else:
-                    st.session_state["_pending_param_updates"] = {
-                        "params": {"sigmoid_p_lo": anchors[0], "sigmoid_p_hi": anchors[1]},
-                    }
-                    st.rerun()
-        with b2:
-            if st.button("↺ Standaard-ankers herstellen", key="reset_anchors_btn"):
-                st.session_state["_pending_param_updates"] = {
-                    "params": {"sigmoid_p_lo": _SIGMOID_P_LO, "sigmoid_p_hi": _SIGMOID_P_HI},
-                }
-                st.rerun()
-        if not current:
-            st.info("Laad eerst een land-folder via de zijbalk om te kunnen kalibreren.")
-
-    # ── Tier thresholds ──────────────────────────────────────────────────────
-    with tab_tiers:
-        st.subheader("Tier-drempels (final_commercial_fit_score)")
-        thresholds_by_label = {label: score for score, label in params["tier_thresholds"]}
-        hot = st.number_input(
-            "🥇 Hot vanaf", value=float(thresholds_by_label.get("🥇 Hot", 8.5)),
-            step=0.01, key="tier_hot")
-        warm = st.number_input(
-            "🥈 Warm vanaf", value=float(thresholds_by_label.get("🥈 Warm", 6.5)),
-            step=0.01, key="tier_warm")
-        cool = st.number_input(
-            "🥉 Cool vanaf", value=float(thresholds_by_label.get("🥉 Cool", 4.5)),
-            step=0.01, key="tier_cool")
-        error = validate_tier_thresholds(hot, warm, cool)
-        if error:
-            st.error(error)
-        else:
-            params["tier_thresholds"] = [
-                [hot, "🥇 Hot"], [warm, "🥈 Warm"], [cool, "🥉 Cool"], [0.0, "❄️ Pass"],
-            ]
-        st.caption("Onder Cool valt een bedrijf automatisch in ❄️ Pass.")
-
-        # Rendered AFTER the number_inputs above and reads hot/warm/cool
-        # directly (not thresholds_by_label, which is derived from
-        # params["tier_thresholds"] BEFORE those widgets update it this run)
-        # -- same one-run-behind lag as the Coëfficiënten tab.
-        _default_thresholds_by_label = {
-            label: score for score, label in
-            default_params(active_scoring_profile)["tier_thresholds"]}
-        with st.expander("🔍 Origineel vs. actueel", expanded=False):
-            render_param_diff_table([
-                ("🥇 Hot", _default_thresholds_by_label.get("🥇 Hot", 0.0), float(hot)),
-                ("🥈 Warm", _default_thresholds_by_label.get("🥈 Warm", 0.0), float(warm)),
-                ("🥉 Cool", _default_thresholds_by_label.get("🥉 Cool", 0.0), float(cool)),
-            ])
-
-        st.divider()
-        if st.button(
-            "📐 Stel drempels voor uit de nieuwe verdeling (10/20/30-regel)",
-            disabled=not current, key="suggest_tiers_btn",
-            help="Zet Hot/Warm/Cool op de percentielen van de HERscoorde "
-                 "preview: top 10% Hot, volgende 20% Warm, volgende 30% Cool "
-                 "— dezelfde methodiek als de oorspronkelijke kalibratie.",
-        ):
-            suggestion = suggest_tier_thresholds(rescored_by_id)
-            if suggestion is None:
-                st.warning(
-                    "Geen voorstel mogelijk — te weinig spreiding in de "
-                    "nieuwe scores.")
-            else:
-                st.session_state["_pending_param_updates"] = {
-                    "params": {"tier_thresholds": suggestion},
-                    "widgets": {
-                        "tier_hot": suggestion[0][0],
-                        "tier_warm": suggestion[1][0],
-                        "tier_cool": suggestion[2][0],
-                    },
-                }
-                st.rerun()
-        if not current:
-            st.info(
-                "Laad eerst een land-folder via de zijbalk om drempels uit "
-                "de data voor te stellen.")
 
     # ── Single company calculator ────────────────────────────────────────────
     with tab_calc:
