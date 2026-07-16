@@ -964,25 +964,35 @@ def main() -> None:  # pragma: no cover - exercised only under `streamlit run`
         if dist_df.empty:
             st.info("Geen bedrijven met een score om te tonen.")
         else:
-            # One figure: score on the x-axis, huidig/nieuw as side-by-side
-            # facets, foreign/domestic HQ stacked within each facet's bars —
-            # replaces the old two-color grouped histogram (huidig vs.
-            # nieuw only) so the HQ split that drives the score (see
-            # HQ_CATEGORY_ORDER above) is visible directly on this chart
-            # instead of requiring a separate breakdown.
+            # One overlaid figure -- huidig and nieuw share the same x-axis
+            # and plot area (no facets) so the shift in the distribution's
+            # SHAPE is visible directly, instead of requiring a side-by-side
+            # comparison across two subplots. Color still encodes
+            # foreign/domestic HQ status (see HQ_CATEGORY_ORDER above);
+            # huidig/nieuw is instead distinguished by a hatch pattern
+            # (solid = huidig, hatched = nieuw) plus overlay transparency so
+            # both are readable where they overlap.
             dist_fig = px.histogram(
                 dist_df, x="commercial_fit_score", color="hq_category",
-                facet_col="when", barmode="stack", nbins=20,
+                pattern_shape="when", pattern_shape_sequence=["", "/"],
+                barmode="overlay", nbins=20, opacity=0.6,
                 category_orders={"when": WHEN_ORDER, "hq_category": HQ_CATEGORY_ORDER},
                 color_discrete_map=HQ_CATEGORY_COLORS,
-                labels={"commercial_fit_score": "commercial_fit_score", "hq_category": "HQ"},
+                labels={
+                    "commercial_fit_score": "commercial_fit_score",
+                    "hq_category": "HQ", "when": "",
+                },
             )
-            # Facet subplot titles default to "when=Huidig" / "when=Nieuw" —
-            # strip the "when=" prefix for a cleaner label.
-            dist_fig.for_each_annotation(
-                lambda a: a.update(text=a.text.split("=", 1)[-1]))
+            # Default legend title ("HQ, ") awkwardly concatenates the color
+            # and pattern_shape labels -- each trace name already reads
+            # "<HQ status>, <huidig/nieuw>", so a plain "HQ" title suffices.
+            dist_fig.update_layout(legend_title_text="HQ")
             st.plotly_chart(
                 dist_fig, use_container_width=True, key=f"{key_prefix}_dist_chart",
+            )
+            st.caption(
+                "Effen vlak = huidig, gearceerd (schuine streepjes) = nieuw "
+                "— kleur toont Foreign/Domestic HQ-status."
             )
 
         # Extra vertical breathing room between the two charts -- they used
