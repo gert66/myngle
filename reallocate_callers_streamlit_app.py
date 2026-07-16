@@ -252,11 +252,21 @@ def main() -> None:  # pragma: no cover - exercised only under `streamlit run`
     if use_cohort_window:
         size_col, range_col = st.columns([1, 3])
         cohort_size = size_col.number_input(
-            "Cohort size", min_value=1,
+            "Companies per caller (per cohort)", min_value=1,
             value=int(st.session_state.get("_rr_cohort_size", 100)),
             key="_rr_cohort_size",
+            help="How many companies EACH caller gets per cohort — the "
+                 "window released per cohort is this number times the "
+                 "caller pool size, then round-robin split so every caller "
+                 "ends up with exactly this many (barring a partial final "
+                 "cohort at the end of the ranking).",
         )
-        max_cohort = max(1, math.ceil(total_companies / cohort_size))
+        # A "cohort" here is per-caller: the released window per cohort is
+        # `cohort_size * len(new_callers)` companies, so round-robin
+        # splitting it across the pool gives every caller `cohort_size`
+        # companies — not `cohort_size` total shared across the pool.
+        window_unit = cohort_size * len(new_callers)
+        max_cohort = max(1, math.ceil(total_companies / window_unit))
         prev_start, prev_end = st.session_state.get(
             "_rr_cohort_range", (1, max_cohort))
         cohort_start, cohort_end = range_col.slider(
@@ -268,16 +278,17 @@ def main() -> None:  # pragma: no cover - exercised only under `streamlit run`
             key="_rr_cohort_range",
         )
         start_rank, end_rank = resolve_cohort_window(
-            cohort_size, cohort_start, cohort_end, total_companies)
+            window_unit, cohort_start, cohort_end, total_companies)
         n_in_window = max(0, end_rank - start_rank + 1)
+        n_per_caller = n_in_window // len(new_callers)
         st.caption(
             f"→ rank {start_rank}–{end_rank} ({n_in_window} of "
-            f"{total_companies} companies released; the rest stay "
-            "unassigned)."
+            f"{total_companies} companies released — ~{n_per_caller} per "
+            "caller; the rest stay unassigned)."
         )
         assignment = assign_callers_round_robin_by_cohort_window(
             original_list_items, new_callers,
-            cohort_size=cohort_size, cohort_start=cohort_start,
+            cohort_size=window_unit, cohort_start=cohort_start,
             cohort_end=cohort_end, rerank_by_score=rerank,
             unassigned_label=UNASSIGNED_LABEL,
         )
