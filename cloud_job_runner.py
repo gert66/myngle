@@ -250,6 +250,7 @@ class RunConfig:
     company_column: Optional[str] = None
     domain_column: Optional[str] = None
     input_country_column: Optional[str] = None
+    default_country: Optional[str] = None
     compose_caller_content: bool = False
     deep_dive: bool = False
     deep_dive_min_score: float = 8.0
@@ -294,6 +295,12 @@ def build_arg_parser() -> argparse.ArgumentParser:
                          help="Domain column (default: auto-detected).")
     parser.add_argument("--input-country-column", default=None,
                          help="Optional per-row input country column (default: auto-detected).")
+    parser.add_argument("--default-country", default=None,
+                         help="Fallback input_country when no per-row country column can be "
+                              "resolved from the source file (env DEFAULT_COUNTRY). Unlike "
+                              "lead_prioritizer_batch_cli.py's own --default-country, this has "
+                              "NO 'Italy' fallback: when unset and no country column resolves, "
+                              "the task fails instead of silently defaulting to Italy.")
     parser.add_argument("--compose-caller-content", action="store_true",
                          help="Opt-in Step 3 (default: off; env COMPOSE_CALLER_CONTENT).")
     parser.add_argument("--deep-dive", action="store_true",
@@ -373,6 +380,9 @@ def resolve_config(argv=None) -> RunConfig:
         domain_column=args.domain_column or os.environ.get("DOMAIN_COLUMN") or None,
         input_country_column=(
             args.input_country_column or os.environ.get("INPUT_COUNTRY_COLUMN") or None
+        ),
+        default_country=(
+            args.default_country or os.environ.get("DEFAULT_COUNTRY") or None
         ),
         compose_caller_content=args.compose_caller_content or _env_bool("COMPOSE_CALLER_CONTENT"),
         deep_dive=args.deep_dive or _env_bool("DEEP_DIVE"),
@@ -539,6 +549,27 @@ def main(argv=None) -> int:
         rows_in_part = len(df_part)
 
         company_col, domain_col, country_col = resolve_columns(cfg, df_part.columns)
+        if not country_col and not cfg.default_country:
+            # No per-row country column in the source file (e.g. a raw Lusha
+            # export, which nests country inside a "location" dict rather
+            # than a flat input_country/country column) AND no explicit
+            # fallback was configured. Refuse to proceed: silently falling
+            # through to lead_prioritizer_batch_cli.py's own "Italy" default
+            # here previously mis-enriched an entire non-Italy country batch
+            # (every row scored/adjudicated against the wrong home country)
+            # without any error, log line, or way to detect it until a human
+            # spotted the wrong result downstream. Fail fast instead -- this
+            # is before any AI/Firecrawl/Serper call is made, so it costs
+            # nothing -- and point at the fix: a sidecar 'default_country'
+            # (or 'lovable_export.country') key, or a proper country column.
+            raise ValueError(
+                "Could not resolve an input-country column from the source "
+                "file, and no --default-country/DEFAULT_COUNTRY fallback was "
+                "provided. Refusing to silently default to \"Italy\". Set a "
+                "sidecar 'default_country' (or 'lovable_export.country') key "
+                "for this incoming/ upload, or add an input_country/country "
+                "column to the source file."
+            )
 
         part_input_path = tmp_dir / f"input_part_{cfg.task_index:04d}.xlsx"
         df_part.to_excel(part_input_path, index=False)
@@ -568,6 +599,8 @@ def main(argv=None) -> int:
                     "--checkpoint-every-rows", str(cfg.checkpoint_every_rows)]
         if country_col:
             cmd += ["--input-country-column", country_col]
+        if cfg.default_country:
+            cmd += ["--default-country", cfg.default_country]
         if cfg.compose_caller_content:
             cmd += ["--compose-caller-content"]
         if cfg.deep_dive:

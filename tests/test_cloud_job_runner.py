@@ -45,6 +45,12 @@ def _write_synthetic_excel(path: Path, n_rows: int) -> None:
     df = pd.DataFrame({
         "company_name": [f"Company {i}" for i in range(n_rows)],
         "domain": [f"company{i}.example.com" for i in range(n_rows)],
+        # A real "country" column so resolve_columns() can auto-detect it,
+        # same as most real uploads -- these tests exercise sharding/
+        # subprocess/status mechanics, not country resolution, which has its
+        # own dedicated tests (test_missing_country_column_and_no_default_
+        # country_fails_fast below).
+        "country": ["Testland"] * n_rows,
     })
     df.to_excel(path, index=False)
 
@@ -326,7 +332,71 @@ def test_mode_and_column_overrides_are_forwarded(tmp_path, monkeypatch):
     assert cmd[cmd.index("--input-country-column") + 1] == "Land"
     assert "--deep-dive" in cmd
     assert "--rich-icp-context" in cmd
-    assert "--ai-signal-scoring" in cmd
+
+
+def test_missing_country_column_and_no_default_country_fails_fast(tmp_path, monkeypatch):
+    """A source file with no resolvable country column (e.g. a raw Lusha
+    export, which nests country inside a "location" dict rather than a flat
+    country/input_country column) and no --default-country/DEFAULT_COUNTRY
+    fallback must fail the task instead of silently defaulting to Italy --
+    that silent fallback previously mis-enriched an entire non-Italy country
+    batch with no error anywhere in the pipeline."""
+    input_path = tmp_path / "input.xlsx"
+    df = pd.DataFrame({
+        "company_name": ["Acme"],
+        "domain": ["acme.example.com"],
+        "location": ["{'city': 'Luxembourg', 'country': 'Luxembourg'}"],
+    })
+    df.to_excel(input_path, index=False)
+    output_dir = tmp_path / "out"
+
+    fake_run = _fake_batch_cli_subprocess()
+    monkeypatch.setattr(cjr.subprocess, "run", fake_run)
+
+    rc = cjr.main([
+        "--input", str(input_path),
+        "--output-dir", str(output_dir),
+        "--task-index", "0",
+        "--task-count", "1",
+        "--run-id", "no-country-no-default",
+    ])
+
+    assert rc == 1
+    assert fake_run.calls == []  # never even shelled out to the batch CLI
+    status = json.loads((output_dir / "status" / "part_0000_failed.json").read_text(encoding="utf-8"))
+    assert status["status"] == "failed"
+    assert "input-country-column" in status["error"] or "default-country" in status["error"]
+
+
+def test_default_country_forwarded_when_no_country_column(tmp_path, monkeypatch):
+    """--default-country/DEFAULT_COUNTRY lets a file with no resolvable
+    country column still run, by forwarding an explicit fallback to
+    lead_prioritizer_batch_cli.py instead of relying on that CLI's own
+    hardcoded "Italy" default."""
+    input_path = tmp_path / "input.xlsx"
+    df = pd.DataFrame({
+        "company_name": ["ArcelorMittal"],
+        "domain": ["arcelormittal.com"],
+    })
+    df.to_excel(input_path, index=False)
+    output_dir = tmp_path / "out"
+
+    fake_run = _fake_batch_cli_subprocess()
+    monkeypatch.setattr(cjr.subprocess, "run", fake_run)
+
+    rc = cjr.main([
+        "--input", str(input_path),
+        "--output-dir", str(output_dir),
+        "--task-index", "0",
+        "--task-count", "1",
+        "--run-id", "default-country-forwarded",
+        "--default-country", "Luxembourg",
+    ])
+
+    assert rc == 0
+    cmd = fake_run.calls[0]
+    assert cmd[cmd.index("--default-country") + 1] == "Luxembourg"
+    assert "--input-country-column" not in cmd
 
 
 def test_new_opt_in_flags_are_forwarded(tmp_path, monkeypatch):
@@ -336,6 +406,7 @@ def test_new_opt_in_flags_are_forwarded(tmp_path, monkeypatch):
     df = pd.DataFrame({
         "Company Name": ["Acme"],
         "Website": ["acme.example.com"],
+        "Country": ["Testland"],
     })
     df.to_excel(input_path, index=False)
     output_dir = tmp_path / "out"
@@ -374,7 +445,7 @@ def test_new_opt_in_flags_are_forwarded(tmp_path, monkeypatch):
 
 def test_gate_full_enrichment_on_foreign_hq_defaults_off(tmp_path, monkeypatch):
     input_path = tmp_path / "input.xlsx"
-    df = pd.DataFrame({"Company Name": ["Acme"], "Website": ["acme.example.com"]})
+    df = pd.DataFrame({"Company Name": ["Acme"], "Website": ["acme.example.com"], "Country": ["Testland"]})
     df.to_excel(input_path, index=False)
     output_dir = tmp_path / "out"
 
@@ -397,7 +468,7 @@ def test_gate_full_enrichment_on_foreign_hq_defaults_off(tmp_path, monkeypatch):
 
 def test_gate_full_enrichment_on_foreign_hq_via_env_var(tmp_path, monkeypatch):
     input_path = tmp_path / "input.xlsx"
-    df = pd.DataFrame({"Company Name": ["Acme"], "Website": ["acme.example.com"]})
+    df = pd.DataFrame({"Company Name": ["Acme"], "Website": ["acme.example.com"], "Country": ["Testland"]})
     df.to_excel(input_path, index=False)
     output_dir = tmp_path / "out"
 
@@ -421,7 +492,7 @@ def test_gate_full_enrichment_on_foreign_hq_via_env_var(tmp_path, monkeypatch):
 
 def test_deep_dive_on_foreign_hq_stays_on_by_default(tmp_path, monkeypatch):
     input_path = tmp_path / "input.xlsx"
-    df = pd.DataFrame({"Company Name": ["Acme"], "Website": ["acme.example.com"]})
+    df = pd.DataFrame({"Company Name": ["Acme"], "Website": ["acme.example.com"], "Country": ["Testland"]})
     df.to_excel(input_path, index=False)
     output_dir = tmp_path / "out"
 

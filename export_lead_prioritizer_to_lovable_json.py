@@ -3002,6 +3002,9 @@ def _rows_by_source_index(df: pd.DataFrame) -> dict:
     return grouped
 
 
+_COUNTRY_MISMATCH_WARNING_PREFIX = "LET OP: export-bucket-label"
+
+
 def _export_country_mismatch_warning(
     export_country: str, enriched: pd.DataFrame,
 ) -> "str | None":
@@ -3011,7 +3014,13 @@ def _export_country_mismatch_warning(
     enriched against (``input_country``, e.g. used for real query/gl-hl
     localization during the run), print a warning so nobody mistakes a
     "Test" bucket export for a production update of the real country's
-    bucket. Never a hard block -- comparison runs are the whole point."""
+    bucket. Never a hard block here -- comparison runs via the interactive
+    Streamlit "Test" bucket feature are the whole point. Unattended callers
+    that auto-promote an export into a country's live current/ bucket (e.g.
+    cloud_dispatcher.py's autopilot "go live" step) have no human present to
+    recognize "this is just a Test export" and MUST check
+    ``manifest_has_country_mismatch_warning`` before promoting -- see that
+    function's docstring."""
     if enriched.empty or "input_country" not in enriched.columns:
         return None
     source_countries = sorted({
@@ -3021,9 +3030,24 @@ def _export_country_mismatch_warning(
         return None
     label = ", ".join(source_countries)
     return (
-        f"LET OP: export-bucket-label {export_country!r} wijkt af van de "
+        f"{_COUNTRY_MISMATCH_WARNING_PREFIX} {export_country!r} wijkt af van de "
         f"brondata-landen ({label}) — dit is een vergelijkings-/testexport, "
         f"geen productie-update van de {label}-bucket."
+    )
+
+
+def manifest_has_country_mismatch_warning(manifest: dict) -> bool:
+    """True when an export manifest (as returned by
+    ``export_workbook_to_lovable_json`` / written to export_manifest.json)
+    carries the country-mismatch warning from ``_export_country_mismatch_
+    warning`` -- i.e. this export's rows were actually enriched against a
+    different country than the bucket label it's about to be published
+    under. Unattended production callers (cloud_dispatcher.py's autopilot
+    "go live" step) use this to skip auto-promoting a comparison/test export
+    into a country's live current/ bucket."""
+    return any(
+        str(w).startswith(_COUNTRY_MISMATCH_WARNING_PREFIX)
+        for w in (manifest or {}).get("warnings") or []
     )
 
 
