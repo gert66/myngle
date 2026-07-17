@@ -103,6 +103,7 @@ _SCALAR_ENV_KEYS = {
     "company_column": "COMPANY_COLUMN",
     "domain_column": "DOMAIN_COLUMN",
     "input_country_column": "INPUT_COUNTRY_COLUMN",
+    "default_country": "DEFAULT_COUNTRY",
     "total_row_limit": "TOTAL_ROW_LIMIT",
     "checkpoint_every_rows": "CHECKPOINT_EVERY_ROWS",
 }
@@ -243,6 +244,45 @@ def start_cloud_run_job_execution(
         return {"started": False, "error": f"{type(exc).__name__}: {exc}"}
 
 
+def resolve_default_country(name: str, config: dict) -> tuple[Optional[str], str]:
+    """Return ``(country, source)`` for the DEFAULT_COUNTRY env override.
+
+    Priority: an explicit sidecar ``default_country`` > the sidecar's own
+    ``lovable_export.country`` (already required for the export step, so
+    reusing it here means the enrichment country and the export bucket label
+    can never again silently disagree, which is exactly how one country's
+    entire batch previously got enriched/adjudicated against the wrong home
+    country with zero errors or warnings) > a guess from the uploaded
+    filename (the same ``suggest_country_from_filename`` heuristic the
+    interactive Streamlit uploader already uses to pre-fill its "Default
+    input country" dropdown, so "upload a file with 'Luxembourg' in the
+    name" behaves the same whether a human drives the Streamlit UI or the
+    unattended incoming/ dispatcher does).
+
+    ``source`` is one of "sidecar_default_country", "sidecar_lovable_export",
+    "filename_guess", or "undetermined" -- always returned (never raises) so
+    the caller can record/warn regardless of outcome.
+    """
+    from lead_prioritizer_batch_app import (
+        SUPPORTED_DEFAULT_INPUT_COUNTRIES,
+        suggest_country_from_filename,
+    )
+
+    sidecar_default = config.get("default_country")
+    if sidecar_default:
+        return str(sidecar_default), "sidecar_default_country"
+
+    lovable_country = (config.get("lovable_export") or {}).get("country")
+    if lovable_country:
+        return str(lovable_country), "sidecar_lovable_export"
+
+    filename_guess = suggest_country_from_filename(name, SUPPORTED_DEFAULT_INPUT_COUNTRIES)
+    if filename_guess:
+        return filename_guess, "filename_guess"
+
+    return None, "undetermined"
+
+
 def load_sidecar_config(bucket: str, name: str) -> dict:
     """Best-effort: {} if the sidecar ``<name>.config.json`` is missing or
     invalid — a run without one behaves exactly like before this feature
@@ -296,6 +336,25 @@ async def handle_event(request: Request):
     output_dir = join_path(runs_bucket_dir, "runs", run_id)
     extra_env = build_env_overrides_from_config(config)
 
+    # Auto-detect a fallback input country (sidecar > lovable_export.country >
+    # filename guess) so the unattended path never has to fall back to
+    # cloud_job_runner.py's hard "no country column and no default -> fail"
+    # guard just because nobody set a sidecar 'default_country'. Recorded in
+    # the manifest either way so a human reviewing the run can see where the
+    # country came from -- or that it couldn't be determined at all.
+    detected_country, country_source = resolve_default_country(name, config)
+    if "DEFAULT_COUNTRY" not in extra_env and detected_country:
+        extra_env["DEFAULT_COUNTRY"] = detected_country
+    if country_source == "undetermined":
+        print(
+            f"[cloud_dispatcher] WARNING: could not determine a default country for "
+            f"{name!r} (no sidecar 'default_country'/'lovable_export.country', filename "
+            "doesn't match a supported country). If the source file also has no "
+            "resolvable country column, this run's tasks will fail fast instead of "
+            "silently defaulting to Italy -- add a sidecar default_country to fix.",
+            file=sys.stderr,
+        )
+
     # Job execution is started BEFORE the manifest is written (not after, as
     # before) so the manifest can carry execution_name for the stop button --
     # the manifest is still always written, even when the execution call
@@ -311,6 +370,10 @@ async def handle_event(request: Request):
         "created_at": datetime.now(timezone.utc).isoformat(),
         "config": config,
         "execution_name": execution.get("execution") if execution.get("started") else None,
+        "country_detection": {
+            "detected_country": detected_country,
+            "source": country_source,
+        },
     }
     manifest_uri = join_path(output_dir, "manifest.json")
     try:
@@ -329,6 +392,7 @@ async def handle_event(request: Request):
             "manifest_uri": manifest_uri,
             "extra_env": extra_env,
             "execution": execution,
+            "country_detection": manifest["country_detection"],
         },
         status_code=200,
     )
@@ -459,7 +523,10 @@ def _run_lovable_export(final_output_uri: str, output_dir: str, lovable_cfg: dic
     )
 
     from cloud_merge_results import _download_to_local
-    from export_lead_prioritizer_to_lovable_json import main as export_main
+    from export_lead_prioritizer_to_lovable_json import (
+        main as export_main,
+        manifest_has_country_mismatch_warning,
+    )
     import lovable_gcs_upload as lovable_gcs
 
     with tempfile.TemporaryDirectory() as td:
@@ -506,6 +573,37 @@ def _run_lovable_export(final_output_uri: str, output_dir: str, lovable_cfg: dic
             uploaded.append(dest_uri)
 
         result = {"started": True, "ok": True, "files": uploaded, "dest_dir": dest_dir, "live_upload": None}
+
+        # A country-label/source-data mismatch (export_lead_prioritizer_to_
+        # lovable_json._export_country_mismatch_warning) is deliberately
+        # non-blocking in the export step itself -- the interactive
+        # Streamlit "Test" bucket comparison feature relies on exactly that.
+        # But there's no human here to recognize "oh, that's just a test
+        # export" before it goes live: this unattended path previously
+        # promoted a whole country's Lusha upload into current/ while every
+        # row had actually been enriched against a different country (see
+        # the Luxembourg-labeled-as-Italy incident). Read the manifest this
+        # export run just wrote and refuse to auto-promote when it carries
+        # that warning -- the per-run archive above still happened, so
+        # nothing is lost, it just isn't published as the live dataset.
+        export_manifest_path = local_export_dir / "export_manifest.json"
+        try:
+            export_manifest = json.loads(export_manifest_path.read_text(encoding="utf-8"))
+        except Exception:
+            export_manifest = {}
+        if manifest_has_country_mismatch_warning(export_manifest):
+            result["live_upload"] = {
+                "ok": False,
+                "blocked": True,
+                "error": (
+                    "Auto-promotion to current/ skipped: this export's rows were "
+                    "enriched against a different country than the export label "
+                    f"{country!r} (see export_manifest.json warnings). The per-run "
+                    "archive was still uploaded to final/lovable_export/ for manual "
+                    "review -- fix the source country and re-run before publishing."
+                ),
+            }
+            return result
 
         # ---- Go live: merge into <country>/current/ + archive snapshot ----
         try:
