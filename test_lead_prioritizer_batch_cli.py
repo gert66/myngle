@@ -68,7 +68,7 @@ class TestArgParsing:
         assert args.mode == "full"
         assert args.start_row == 0
         assert args.row_limit == 10
-        assert args.default_country == "Italy"
+        assert args.default_country == ""
         assert args.sheet is None
         assert args.include_raw_ai_json is False
         assert args.stop_on_error is False

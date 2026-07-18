@@ -89,8 +89,11 @@ def build_arg_parser() -> argparse.ArgumentParser:
                    help="Sheet name. Required only when the workbook has >1 sheet.")
     p.add_argument("--input-country-column", default=None,
                    help="Optional per-row input country column.")
-    p.add_argument("--default-country", default="Italy",
-                   help="Fallback input country when no column/value is present.")
+    p.add_argument("--default-country", default="",
+                   help="Fallback input country when no column/value is present. "
+                        "Left unset, a row with no resolvable country is scored "
+                        "as unknown rather than silently defaulting to a market "
+                        "(previously hardcoded to Italy).")
     p.add_argument("--mode", default="full", choices=list(SUPPORTED_RUN_MODES),
                    help="Run mode (default: full).")
     p.add_argument("--start-row", type=int, default=0, help="First row offset (default: 0).")
