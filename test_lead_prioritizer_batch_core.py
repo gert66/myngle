@@ -415,7 +415,7 @@ class TestRunBatch:
         with patch("lead_prioritizer_batch_core.prioritize_single_lead", side_effect=_fake):
             out = run_batch_dataframe(self._df, cfg, "SERP", "ANTH")
         assert seen.get("run_full_v2_pipeline") is True
-        assert seen.get("default_input_country") == "Italy"
+        assert seen.get("default_input_country") == ""
         # keys passed through but never surface in output
         assert out["enriched_leads"].shape[0] == 1
         blob = out["enriched_leads"].to_csv(index=False)
@@ -840,7 +840,8 @@ class TestEnrichmentCacheWiring:
         cfg = BatchRunConfig(company_name_column="company", domain_column="domain",
                              run_mode="full", row_limit=0,
                              use_enrichment_cache=True,
-                             enrichment_cache_bucket="test-bucket")
+                             enrichment_cache_bucket="test-bucket",
+                             default_input_country="Italy")
         with patch("lead_prioritizer_batch_core.prioritize_single_lead",
                    side_effect=lambda li, **k: _sample_result(company_name=li.company_name)), \
              patch("enrichment_cache.load_cache_index", side_effect=_fake_load), \

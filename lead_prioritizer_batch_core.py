@@ -100,7 +100,16 @@ class BatchRunConfig:
     company_name_column: str
     domain_column: str
     input_country_column: Optional[str] = None
-    default_input_country: str = "Italy"
+    # No hardcoded market here on purpose: this used to be "Italy" (a
+    # leftover from when Italy was the pipeline's only market), which meant
+    # any row missing a value in input_country_column -- or a caller that
+    # never set this field at all -- silently scored/adjudicated against
+    # Italy as the home country, for ANY country's batch. Every real caller
+    # (the CLI's --default-country, the interactive Streamlit app's required
+    # "Default input country" dropdown, cloud_job_runner.py's DEFAULT_COUNTRY
+    # plumbing) already passes this explicitly; "" here just means a caller
+    # that skips all of those gets an honest "unknown", not a wrong country.
+    default_input_country: str = ""
     run_mode: str = "full"
     start_row: int = 0
     row_limit: int = 10
