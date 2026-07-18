@@ -133,8 +133,9 @@ COUNTRY_CANDIDATES = ["input_country", "country", "Country"]
 # Central list of default-input-country choices. Add new countries here only —
 # no other code path hardcodes a country name. Kept alphabetically sorted.
 SUPPORTED_DEFAULT_INPUT_COUNTRIES = [
-    "Australia", "Brazil", "Germany", "Italy", "Japan", "Netherlands",
-    "New Zealand", "South Korea", "Spain", "Switzerland", "Test", "Uruguay",
+    "Australia", "Brazil", "Germany", "Italy", "Japan", "Luxembourg",
+    "Netherlands", "New Zealand", "South Korea", "Spain", "Switzerland",
+    "Test", "Uruguay",
 ]
 DEFAULT_COUNTRY_PLACEHOLDER = "Select country..."
 DEFAULT_COUNTRY_REQUIRED_MESSAGE = "Please select a default input country before running."
