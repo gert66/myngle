@@ -1327,6 +1327,21 @@ def main() -> None:  # pragma: no cover - exercised only under `streamlit run`
     }
     if total_row_limit:
         extra_env["TOTAL_ROW_LIMIT"] = str(int(total_row_limit))
+    if export_country:
+        # Feed the same "Export country" selection into the actual
+        # enrichment step as its DEFAULT_COUNTRY fallback -- previously this
+        # value only drove the Lovable export LABEL, never the real
+        # input_country used for HQ/localization during the run itself. A
+        # source file with no resolvable country column (e.g. a raw Lusha
+        # export, which nests country inside a "location" dict) then
+        # silently fell back to lead_prioritizer_batch_core.py's hardcoded
+        # default_input_country="Italy" -- the exact cause of the
+        # Luxembourg-labeled-as-Italy incident. Cloud_job_runner.py now
+        # fails the task instead of silently defaulting when neither a
+        # country column nor a default is available, but setting this here
+        # means a correctly-chosen "Export country" makes the run succeed
+        # correctly instead of merely failing safely.
+        extra_env["DEFAULT_COUNTRY"] = export_country
 
     # =========================================================================
     # Status panel: keyed by run_id, not by browser session. A run dispatched
