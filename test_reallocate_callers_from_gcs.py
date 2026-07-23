@@ -32,6 +32,7 @@ from reallocate_callers_from_gcs import (
     reassign_detail_record,
     reassign_details_bucket,
     reassign_list_items,
+    unexpected_reallocation_warning,
 )
 
 
@@ -277,6 +278,42 @@ class TestBuildReallocateManifest:
         assert manifest["caller_distribution_after"] == {"Zoe": 2}
         assert manifest["promoted_to_current"] is False
         assert manifest["rerank_by_score"] is False
+
+
+class TestUnexpectedReallocationWarning:
+    def _manifest(self, *, previous_pool, new_pool, n_moved, total=2):
+        return {
+            "previous_cold_callers": previous_pool,
+            "cold_callers": new_pool,
+            "companies_reallocated": n_moved,
+            "companies_total": total,
+        }
+
+    def test_no_warning_when_nothing_moved(self):
+        manifest = self._manifest(
+            previous_pool=["Ann", "Bob"], new_pool=["Ann", "Bob"], n_moved=0)
+        assert unexpected_reallocation_warning(manifest) is None
+
+    def test_no_warning_when_pool_changed(self):
+        # A different pool causing movers is the expected, intended outcome.
+        manifest = self._manifest(
+            previous_pool=["Ann", "Bob"], new_pool=["Ann", "Bob", "Zoe"], n_moved=1)
+        assert unexpected_reallocation_warning(manifest) is None
+
+    def test_warning_when_pool_unchanged_but_companies_moved(self):
+        manifest = self._manifest(
+            previous_pool=["Ann", "Bob"], new_pool=["Ann", "Bob"], n_moved=2)
+        warning = unexpected_reallocation_warning(manifest)
+        assert warning is not None
+        assert "2 of 2 companies" in warning
+        assert "unchanged" in warning
+
+    def test_warning_when_pool_reordered(self):
+        # Same names, different order is a real pool change (round-robin
+        # keys off position), so warn just like any other change in movers.
+        manifest = self._manifest(
+            previous_pool=["Ann", "Bob"], new_pool=["Bob", "Ann"], n_moved=2)
+        assert unexpected_reallocation_warning(manifest) is None
 
 
 class TestDefaultReallocateRunFolder:

@@ -61,6 +61,8 @@ from rescore_from_gcs import (
     rescore_details_bucket,
     resolve_detail_employee_range,
     tier_distribution,
+    tier_movers,
+    unexpected_rescore_warning,
     upload_rescored_run,
     write_rescored_run,
 )
@@ -1999,6 +2001,13 @@ def main() -> None:  # pragma: no cover - exercised only under `streamlit run`
                 st.info("Geen scoreverschillen om te tonen.")
             else:
                 st.dataframe(movers_df, use_container_width=True, hide_index=True)
+            n_tier_preview = len(tier_movers(original_by_id, rescored_by_id))
+            if n_tier_preview:
+                st.caption(
+                    f"⚠️ {n_tier_preview} van {len(rescored_by_id)} bedrijven in "
+                    "deze steekproef wisselen van tier — het exacte aantal over "
+                    "de volledige populatie verschijnt pas na 'Upload naar GCS'."
+                )
 
             st.divider()
             st.subheader("Uploaden naar GCS")
@@ -2030,14 +2039,25 @@ def main() -> None:  # pragma: no cover - exercised only under `streamlit run`
                             apply_c5_upgrade=apply_c5_upgrade,
                         )
                     manifest = full_run["manifest"]
-                    u1, u2 = st.columns(2)
+                    u1, u2, u3 = st.columns(3)
                     u1.metric("Bedrijven her-scoord", manifest["companies_rescored"])
                     u2.metric(
                         "Overgeslagen (geen scoring_inputs)",
                         manifest["companies_skipped"])
+                    u3.metric(
+                        "Tier gewijzigd", manifest.get("companies_tier_changed", 0))
                     if manifest["skipped_company_ids"]:
                         with st.expander("Overgeslagen bedrijven"):
                             st.write(", ".join(manifest["skipped_company_ids"]))
+                    unexpected = unexpected_rescore_warning(manifest)
+                    if unexpected:
+                        st.error(f"⚠️ Onverwacht: {unexpected}")
+                    elif manifest.get("companies_tier_changed"):
+                        st.warning(
+                            f"⚠️ {manifest['companies_tier_changed']} van "
+                            f"{manifest['companies_rescored']} bedrijven "
+                            "wisselen van tier door deze parameterwijziging."
+                        )
                     out_dir = write_rescored_run(
                         full_run, st.session_state["_work_dir"] + "/out")
                     with st.spinner("Uploaden…"):
@@ -2051,6 +2071,7 @@ def main() -> None:  # pragma: no cover - exercised only under `streamlit run`
                             f"gs://{bucket}/{country_folder}/runs/{run_folder}/"
                         )
                         st.session_state["_last_uploaded_run_folder"] = run_folder
+                        st.session_state["_last_upload_manifest"] = manifest
                     st.dataframe(pd.DataFrame(results), use_container_width=True, hide_index=True)
                 except Exception as exc:
                     st.error(f"Upload mislukt: {exc}")
@@ -2068,6 +2089,17 @@ def main() -> None:  # pragma: no cover - exercised only under `streamlit run`
                 value=st.session_state.get("_last_uploaded_run_folder", run_folder),
                 key="_promote_run_folder",
             )
+            last_manifest = st.session_state.get("_last_upload_manifest")
+            if last_manifest and promote_folder == last_manifest.get("run_folder"):
+                unexpected = unexpected_rescore_warning(last_manifest)
+                if unexpected:
+                    st.error(f"⚠️ Onverwacht: {unexpected}")
+                elif last_manifest.get("companies_tier_changed"):
+                    st.warning(
+                        f"⚠️ Deze run laat {last_manifest['companies_tier_changed']} "
+                        "bedrijven van tier wisselen — de live Company Hub "
+                        "toont dit direct na promoten."
+                    )
             promote_confirmed = st.checkbox(
                 f"Ik begrijp dat dit gs://{bucket}/{country_folder}/current/ "
                 f"overschrijft met de inhoud van runs/{promote_folder}/.",

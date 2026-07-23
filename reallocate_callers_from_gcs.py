@@ -79,6 +79,7 @@ __all__ = [
     "reassign_detail_record",
     "reassign_details_bucket",
     "reallocation_movers",
+    "unexpected_reallocation_warning",
     "build_reallocate_manifest",
     "build_reallocated_run",
     "build_reallocated_run_from_assignment",
@@ -361,6 +362,36 @@ def build_reallocate_manifest(
     }
 
 
+def unexpected_reallocation_warning(manifest: dict) -> "Optional[str]":
+    """Warning message when ``manifest`` shows companies changing caller even
+    though the caller pool (names and order) is byte-for-byte unchanged from
+    before the reallocation.
+
+    With the default ``rerank_by_score=False`` this should be impossible: a
+    stable rank keyed off ``company_id`` maps to the exact same caller when
+    the pool hasn't changed (``caller = pool[(rank - 1) % len(pool)]``), so
+    seeing movers here means something else shifted the ranking (e.g. a
+    stored ``assigned_cold_caller_rank`` was missing and got re-derived, or
+    ``rerank_by_score=True`` was used). Returns ``None`` when there's nothing
+    to warn about — no companies moved, or the pool did change and moves are
+    the expected result of that.
+    """
+    n_moved = manifest.get("companies_reallocated", 0)
+    if not n_moved:
+        return None
+    previous_pool = manifest.get("previous_cold_callers") or []
+    new_pool = manifest.get("cold_callers") or []
+    if previous_pool != new_pool:
+        return None
+    return (
+        f"{n_moved} of {manifest.get('companies_total', '?')} companies "
+        "changed caller even though the caller pool (names and order) is "
+        "unchanged. This normally shouldn't happen with the default "
+        "stable-rank behaviour — check for a missing/reset stored rank "
+        "before trusting this run."
+    )
+
+
 def default_reallocate_run_folder(now: "datetime | None" = None) -> str:
     """Default GCS run folder for a reallocation run:
     ``YYYY-MM-DD_reallocate``."""
@@ -610,6 +641,7 @@ def main() -> None:
     print(f"{'='*72}\n")
 
     exit_code = 0
+    n_unexpected = 0
     for country_folder in countries:
         try:
             manifest = reallocate_country(
@@ -629,8 +661,20 @@ def main() -> None:
             f"{manifest['companies_reallocated']} of {manifest['companies_total']} "
             f"companies moved caller -> "
             f"gs://{args.bucket}/{country_folder}/runs/{run_folder}/")
+        warning = unexpected_reallocation_warning(manifest)
+        if warning:
+            n_unexpected += 1
+            print(f"  ⚠️  WARNING  {country_folder}: {warning}", file=sys.stderr)
         if n_failed:
             exit_code = 1
+
+    if n_unexpected:
+        print(
+            f"\n⚠️  {n_unexpected} of {len(countries)} countries had "
+            "companies change caller despite an unchanged caller pool — "
+            "review before promoting these runs to current/.",
+            file=sys.stderr,
+        )
 
     sys.exit(exit_code)
 

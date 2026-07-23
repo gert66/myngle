@@ -339,6 +339,70 @@ def tier_distribution(details_by_id: dict) -> dict:
     return dist
 
 
+def tier_movers(original_details_by_id: dict, rescored_details_by_id: dict) -> list[dict]:
+    """Companies whose ``commercial_tier`` actually changed between the
+    original and re-scored detail records — the tier-level counterpart of
+    ``reallocate_callers_from_gcs.reallocation_movers``. A company skipped by
+    the re-score (no ``scoring_inputs``) never appears here since its tier is
+    carried over unchanged. Sorted by ``company_id`` for a stable order."""
+    movers = []
+    for cid, new_detail in rescored_details_by_id.items():
+        old_detail = original_details_by_id.get(cid)
+        if old_detail is None:
+            continue
+        old_tier = old_detail.get("commercial_tier")
+        new_tier = new_detail.get("commercial_tier")
+        if old_tier == new_tier:
+            continue
+        movers.append({
+            "company_id": cid,
+            "company_name": new_detail.get("company_name", ""),
+            "tier_before": old_tier,
+            "tier_after": new_tier,
+            "score_before": old_detail.get("commercial_fit_score"),
+            "score_after": new_detail.get("commercial_fit_score"),
+        })
+    movers.sort(key=lambda m: m["company_id"])
+    return movers
+
+
+def unexpected_rescore_warning(manifest: dict) -> "Optional[str]":
+    """Warning when re-scoring with the SAME params as the source run's own
+    last re-score nonetheless changed companies' tiers.
+
+    ``score_company()`` is a pure function of its inputs and ``params``, so
+    re-running it with identical params over the same persisted
+    ``scoring_inputs`` must reproduce the exact same
+    ``commercial_fit_score``/``commercial_tier``. Tier movement here means
+    either the underlying ``scoring_inputs`` changed between runs (a
+    legitimate but easy-to-miss reason) or scoring itself is behaving
+    non-deterministically — either way worth a second look before trusting
+    this run.
+
+    Returns ``None`` when there's nothing to warn about: no tier changes, or
+    the source run has no recorded ``params`` to compare against (e.g. it was
+    a fresh export, never itself re-scored), or the params actually differ
+    from the source run's (so tier movement is the expected result of that
+    intentional change).
+    """
+    n_changed = manifest.get("companies_tier_changed", 0)
+    if not n_changed:
+        return None
+    source_manifest = manifest.get("source_current_manifest") or {}
+    previous_params = source_manifest.get("params")
+    if previous_params is None:
+        return None
+    if previous_params != (manifest.get("params") or {}):
+        return None
+    return (
+        f"{n_changed} of {manifest.get('companies_rescored', '?')} companies "
+        "changed tier even though the scoring params are IDENTICAL to the "
+        "source run's own last re-score. This normally shouldn't happen — "
+        "check whether the underlying scoring_inputs changed before "
+        "trusting this run."
+    )
+
+
 def build_rescore_manifest(
     *,
     country_folder: str,
@@ -368,6 +432,8 @@ def build_rescore_manifest(
         "companies_rescored": len(rescored_details_by_id) - len(skipped_ids),
         "companies_skipped": len(skipped_ids),
         "skipped_company_ids": skipped_ids,
+        "companies_tier_changed": len(
+            tier_movers(original_details_by_id, rescored_details_by_id)),
         "tier_distribution_before": tier_distribution(original_details_by_id),
         "tier_distribution_after": tier_distribution(rescored_details_by_id),
         "promoted_to_current": False,
@@ -1031,6 +1097,7 @@ def main() -> None:
     print(f"{'='*72}\n")
 
     exit_code = 0
+    n_unexpected = 0
     for country_folder in countries:
         try:
             manifest = rescore_country(
@@ -1052,12 +1119,25 @@ def main() -> None:
         )
         print(
             f"  {status:<24} {country_folder}: "
-            f"{manifest['companies_rescored']} companies rescored{skipped_note} -> "
+            f"{manifest['companies_rescored']} companies rescored{skipped_note}, "
+            f"{manifest.get('companies_tier_changed', 0)} changed tier -> "
             f"gs://{args.bucket}/{country_folder}/runs/{run_folder}/")
         if manifest.get("skipped_company_ids"):
             print(f"    skipped: {', '.join(manifest['skipped_company_ids'])}")
+        warning = unexpected_rescore_warning(manifest)
+        if warning:
+            n_unexpected += 1
+            print(f"  ⚠️  WARNING  {country_folder}: {warning}", file=sys.stderr)
         if n_failed:
             exit_code = 1
+
+    if n_unexpected:
+        print(
+            f"\n⚠️  {n_unexpected} of {len(countries)} countries had "
+            "companies change tier despite identical scoring params — "
+            "review before promoting these runs to current/.",
+            file=sys.stderr,
+        )
 
     sys.exit(exit_code)
 

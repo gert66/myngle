@@ -324,9 +324,23 @@ def main() -> None:  # pragma: no cover - exercised only under `streamlit run`
     st.plotly_chart(fig, use_container_width=True)
 
     st.subheader("Companies changing caller")
+    pool_unchanged = new_callers == current_callers
     if movers_df.empty:
-        st.info("No company changes caller with this pool.")
+        st.success("No company changes caller with this pool.")
+    elif pool_unchanged:
+        st.error(
+            f"⚠️ Unexpected: {len(movers_df)} companies would change caller "
+            "even though the caller pool (names and order) is unchanged from "
+            "current/. This normally shouldn't happen — it usually means a "
+            "stored rank was missing/reset, or re-ranking is on. Double-check "
+            "before uploading."
+        )
+        st.dataframe(movers_df, use_container_width=True, hide_index=True)
     else:
+        st.warning(
+            f"⚠️ {len(movers_df)} of {len(original_list_items)} companies "
+            "will change caller because of this caller-pool change."
+        )
         st.dataframe(movers_df, use_container_width=True, hide_index=True)
 
     # ---------------------------------------------------------------------
@@ -344,11 +358,15 @@ def main() -> None:  # pragma: no cover - exercised only under `streamlit run`
     )
     run_folder = st.text_input(
         "Run folder", value=default_reallocate_run_folder(), key="_run_folder")
+    mover_clause = (
+        "no company changes caller" if movers_df.empty
+        else f"**{len(movers_df)} companies change caller**"
+    )
     confirmed = st.checkbox(
         f"I understand this writes to gs://{bucket}/{country_folder}/runs/"
         f"{run_folder}/ and immediately overwrites gs://{bucket}/"
-        f"{country_folder}/current/ with it (the live Company Hub will show "
-        "this immediately).",
+        f"{country_folder}/current/ with it ({mover_clause}; the live "
+        "Company Hub will show this immediately).",
         key="_upload_confirmed",
     )
     if st.button(

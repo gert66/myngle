@@ -41,6 +41,8 @@ from rescore_from_gcs import (
     resolve_gcs_tool,
     skipped_company_ids,
     tier_distribution,
+    tier_movers,
+    unexpected_rescore_warning,
     upload_file,
     upload_rescored_run,
     write_rescored_run,
@@ -510,6 +512,7 @@ class TestBuildRescoreManifest:
         assert manifest["companies_rescored"] == 1
         assert manifest["companies_skipped"] == 0
         assert manifest["skipped_company_ids"] == []
+        assert manifest["companies_tier_changed"] == 1
         assert manifest["tier_distribution_before"] == {"Cool": 1}
         assert manifest["tier_distribution_after"] == {"Hot": 1}
         assert manifest["promoted_to_current"] is False
@@ -529,6 +532,74 @@ class TestBuildRescoreManifest:
         assert manifest["companies_rescored"] == 1
         assert manifest["companies_skipped"] == 1
         assert manifest["skipped_company_ids"] == ["c2"]
+
+
+class TestTierMovers:
+    def test_only_changed_tiers_included(self):
+        original = {
+            "c1": {"commercial_tier": "Cool"},
+            "c2": {"commercial_tier": "Hot"},
+        }
+        rescored = {
+            "c1": {"company_name": "One", "commercial_tier": "Hot",
+                   "commercial_fit_score": 8.0},
+            "c2": {"company_name": "Two", "commercial_tier": "Hot",
+                   "commercial_fit_score": 9.0},
+        }
+        movers = tier_movers(original, rescored)
+        assert len(movers) == 1
+        assert movers[0]["company_id"] == "c1"
+        assert movers[0]["tier_before"] == "Cool"
+        assert movers[0]["tier_after"] == "Hot"
+
+    def test_company_missing_from_original_is_excluded(self):
+        original = {}
+        rescored = {"c1": {"commercial_tier": "Hot"}}
+        assert tier_movers(original, rescored) == []
+
+    def test_no_changes_yields_empty_list(self):
+        original = {"c1": {"commercial_tier": "Cool"}}
+        rescored = {"c1": {"commercial_tier": "Cool"}}
+        assert tier_movers(original, rescored) == []
+
+
+class TestUnexpectedRescoreWarning:
+    def _manifest(self, *, n_changed, source_params, new_params, n_rescored=5):
+        return {
+            "companies_tier_changed": n_changed,
+            "companies_rescored": n_rescored,
+            "params": new_params,
+            "source_current_manifest": (
+                {"params": source_params} if source_params is not None else {}
+            ),
+        }
+
+    def test_no_warning_when_nothing_changed_tier(self):
+        manifest = self._manifest(
+            n_changed=0, source_params={"intercept": -1.0}, new_params={"intercept": -1.0})
+        assert unexpected_rescore_warning(manifest) is None
+
+    def test_no_warning_when_source_has_no_recorded_params(self):
+        # Source run was a fresh export, never itself re-scored -- nothing to
+        # compare against, so tier movement here isn't necessarily unexpected.
+        manifest = self._manifest(
+            n_changed=3, source_params=None, new_params={"intercept": -1.0})
+        assert unexpected_rescore_warning(manifest) is None
+
+    def test_no_warning_when_params_actually_differ(self):
+        manifest = self._manifest(
+            n_changed=3, source_params={"intercept": -1.0},
+            new_params={"intercept": -2.0})
+        assert unexpected_rescore_warning(manifest) is None
+
+    def test_warning_when_identical_params_still_move_tiers(self):
+        manifest = self._manifest(
+            n_changed=3, source_params={"intercept": -1.0},
+            new_params={"intercept": -1.0})
+        warning = unexpected_rescore_warning(manifest)
+        assert warning is not None
+        assert "3 of 5 companies" in warning
+        assert "IDENTICAL" in warning
 
 
 class TestSkippedCompanyIds:
