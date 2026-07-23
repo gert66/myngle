@@ -9,12 +9,14 @@ from linkedin_backfill import (
     STATUS_REJECTED_NOT_COMPANY,
     STATUS_SKIPPED_BUDGET,
     LookupBudget,
+    _normalize_domain,
     apply_linkedin_url,
     backfill_details_bucket,
     build_backfill_manifest,
     build_backfilled_run,
     count_backfill_candidates,
     is_company_linkedin_url,
+    make_master_file_lookup,
     needs_backfill,
     pick_detail_domain,
 )
@@ -210,9 +212,11 @@ class TestBuildBackfilledRun:
             current, lookup, country_folder="italy", run_folder="r1",
             now_iso=NOW, budget=LookupBudget(None))
         assert run["list_items"] == current["list_items"]  # unchanged
-        assert run["manifest"]["companies_backfilled"] == 1
-        assert run["manifest"]["run_type"] == "linkedin_backfill"
-        assert run["manifest"]["source_current_manifest"] == {"generated_at": "orig"}
+        # Original manifest preserved verbatim (app header depends on it) …
+        assert run["manifest"]["generated_at"] == "orig"
+        # … with the backfill counts attached as an annotation.
+        assert run["manifest"]["linkedin_backfill"]["companies_backfilled"] == 1
+        assert run["manifest"]["linkedin_backfill"]["run_type"] == "linkedin_backfill"
 
 
 class TestCountCandidates:
@@ -228,6 +232,51 @@ class TestCountCandidates:
         }
         needs, already, no_domain = count_backfill_candidates(current)
         assert (needs, already, no_domain) == (1, 1, 1)
+
+
+class TestNormalizeDomain:
+    def test_strips_scheme_www_path(self):
+        assert _normalize_domain("https://www.Audi.it/en/models") == "audi.it"
+
+    def test_bare_domain(self):
+        assert _normalize_domain("Haribo.IT") == "haribo.it"
+
+    def test_query_string(self):
+        assert _normalize_domain("audi.it?ref=x") == "audi.it"
+
+    def test_non_string_and_empty(self):
+        assert _normalize_domain(None) == ""
+        assert _normalize_domain(float("nan")) == ""
+        assert _normalize_domain("   ") == ""
+
+
+class TestMasterFileLookup:
+    def _write_master(self, path):
+        import pandas as pd
+        pd.DataFrame({
+            "Normalized Domain": [
+                "haribo.it", "junk.it", "nolink.it", "WWW.Bausch.it", "",
+            ],
+            "Lusha LinkedIn URL(s)": [
+                "https://www.linkedin.com/company/haribo-italia-spa",  # good local
+                "https://www.linkedin.com/jobs/view/x-1",              # junk -> dropped
+                "",                                                    # empty -> dropped
+                "https://www.linkedin.com/company/bausch-lomb-italia",  # domain needs normalizing
+                "https://www.linkedin.com/company/orphan",             # no domain -> dropped
+            ],
+        }).to_excel(path, index=False, sheet_name="Master Combined")
+
+    def test_maps_only_valid_company_urls(self, tmp_path):
+        xlsx = tmp_path / "master.xlsx"
+        self._write_master(xlsx)
+        lookup = make_master_file_lookup(str(xlsx))
+        assert lookup("haribo.it") == "https://www.linkedin.com/company/haribo-italia-spa"
+        # domain normalization on both sides (sheet had WWW.Bausch.it, query here)
+        assert lookup("https://bausch.it/en") == "https://www.linkedin.com/company/bausch-lomb-italia"
+        # junk / empty / orphan rows are absent -> "" (backfill counts no_linkedin)
+        assert lookup("junk.it") == ""
+        assert lookup("nolink.it") == ""
+        assert lookup("unknown.it") == ""
 
 
 class TestBuildBackfillManifest:

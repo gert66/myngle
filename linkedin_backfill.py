@@ -266,7 +266,13 @@ def build_backfilled_run(
     """Pure-ish core: turn a loaded ``current`` bundle (from
     ``download_current_run``) into a new run ``{"list_items", "detail_files",
     "manifest"}``. ``list_items`` pass through unchanged — ``linkedin_url`` is
-    a detail-only field the frontend reads off the detail record."""
+    a detail-only field the frontend reads off the detail record.
+
+    The run's manifest PRESERVES the original ``current`` manifest verbatim
+    (the app reads app-facing fields off it — row count, dataset version — and
+    promoting overwrites ``export_manifest.json``, so replacing it with a
+    backfill-only manifest would break the app header). The backfill's own
+    counts are attached as a ``linkedin_backfill`` annotation instead."""
     counters: dict = {}
     new_detail_files = {
         filename: backfill_details_bucket(
@@ -274,13 +280,15 @@ def build_backfilled_run(
             counters=counters, checkpoint=checkpoint)
         for filename, bucket_dict in current["detail_files"].items()
     }
-    manifest = build_backfill_manifest(
+    summary = build_backfill_manifest(
         country_folder=country_folder,
-        source_current_manifest=current.get("manifest"),
+        source_current_manifest=None,  # not duplicated — we keep the whole thing below
         run_folder=run_folder,
         counters=counters,
         generated_at=now_iso,
     )
+    manifest = dict(current.get("manifest") or {})
+    manifest["linkedin_backfill"] = summary
     return {
         "list_items": current["list_items"],
         "detail_files": new_detail_files,
@@ -295,7 +303,14 @@ def build_backfilled_run(
 def make_lusha_lookup(sleep_seconds: float = 0.3) -> Callable[[str], str]:
     """A domain->URL lookup backed by the live Lusha company search, with a
     small pause between calls to stay well under rate limits. Imported lazily
-    so a dry run never imports the client or needs ``LUSHA_API_KEY``."""
+    so a dry run never imports the client or needs ``LUSHA_API_KEY``.
+
+    NOTE: prefer ``make_master_file_lookup`` when the Lusha-vs-Chamber master
+    workbook is available — it is free (no credits) AND higher quality: its
+    URLs are the local Italian entity pages (HARIBO Italia -> haribo-italia-spa)
+    where a live domain search often resolves to the global parent
+    (haribo-france). This live path is the fallback for domains the master
+    doesn't cover."""
     import lusha_client
 
     def _lookup(domain: str) -> str:
@@ -307,6 +322,59 @@ def make_lusha_lookup(sleep_seconds: float = 0.3) -> Callable[[str], str]:
         if sleep_seconds:
             time.sleep(sleep_seconds)
         return url
+
+    return _lookup
+
+
+def _normalize_domain(raw: object) -> str:
+    """``https://www.Example.com/path`` -> ``example.com``. Offline twin of
+    ``lusha_client._normalize_domain`` so the master-file flow needs neither
+    the API client nor ``requests``."""
+    if not isinstance(raw, str):
+        return ""
+    s = raw.strip()
+    if not s:
+        return ""
+    if "://" in s:
+        s = s.split("://", 1)[1]
+    s = s.split("/")[0].split("?")[0].strip().lower()
+    if s.startswith("www."):
+        s = s[4:]
+    return s
+
+
+def make_master_file_lookup(
+    xlsx_path: str,
+    *,
+    sheet: str = "Master Combined",
+    domain_col: str = "Normalized Domain",
+    url_col: str = "Lusha LinkedIn URL(s)",
+) -> Callable[[str], str]:
+    """A domain->URL lookup backed by the Lusha-vs-Chamber master workbook —
+    FREE (no Lusha calls) and higher quality than the live domain search.
+
+    Builds a ``normalized_domain -> company_url`` map, keeping only URLs that
+    pass ``is_company_linkedin_url`` (so scraped junk in the sheet is dropped
+    up front). Rows with no domain or no valid company URL are simply absent,
+    so the lookup returns "" for them and the backfill records ``no_linkedin``.
+    """
+    import pandas as pd
+
+    df = pd.read_excel(xlsx_path, sheet_name=sheet)
+    mapping: dict[str, str] = {}
+    for _, row in df.iterrows():
+        dom = _normalize_domain(row.get(domain_col))
+        if not dom:
+            continue
+        url = str(row.get(url_col) or "").strip()
+        if not is_company_linkedin_url(url):
+            continue
+        # First valid URL for a domain wins; don't let a later duplicate row
+        # overwrite an already-good mapping.
+        mapping.setdefault(dom, url)
+
+    def _lookup(domain: str) -> str:
+        return mapping.get(_normalize_domain(domain), "")
 
     return _lookup
 
@@ -379,9 +447,14 @@ def main() -> None:
                         help="Country folder (repeatable). Default: all country folders.")
     parser.add_argument("--limit", type=int, default=None,
                         help="Max Lusha lookups this run (credit cap). Omit for unlimited.")
+    parser.add_argument("--from-master", default=None, metavar="XLSX",
+                        help="Backfill from the Lusha-vs-Chamber master workbook "
+                             "instead of the live API — FREE (no credits) and higher "
+                             "quality (local entity pages). Recommended source.")
     parser.add_argument("--apply-lookups", action="store_true",
-                        help="Actually call Lusha. Without this it's a DRY RUN "
-                             "(reports how many companies WOULD be looked up, spends nothing).")
+                        help="Actually call Lusha (live API). Without this OR "
+                             "--from-master it's a DRY RUN (reports how many companies "
+                             "WOULD be looked up, spends nothing).")
     parser.add_argument("--sleep", type=float, default=0.3,
                         help="Seconds between Lusha calls (rate limiting; default 0.3).")
     parser.add_argument("--out-dir", default=None,
@@ -400,6 +473,8 @@ def main() -> None:
 
     if args.promote and not args.upload:
         parser.error("--promote requires --upload (nothing to promote otherwise).")
+    if args.from_master and args.apply_lookups:
+        parser.error("Use either --from-master (free) or --apply-lookups (live API), not both.")
 
     run_folder = args.run_folder or default_backfill_run_folder()
     now_iso = datetime.now(timezone.utc).isoformat()
@@ -409,14 +484,27 @@ def main() -> None:
         print("No country folders found.", file=sys.stderr)
         sys.exit(1)
 
-    lookup = make_lusha_lookup(args.sleep) if args.apply_lookups else None
+    # Lookup source: master workbook (free) > live API (credits) > none (dry run).
+    if args.from_master:
+        print(f"Loading LinkedIn URLs from master workbook: {args.from_master}")
+        lookup = make_master_file_lookup(args.from_master)
+        mode = "MASTER (free)"
+    elif args.apply_lookups:
+        lookup = make_lusha_lookup(args.sleep)
+        mode = "APPLY (live API)"
+    else:
+        lookup = None
+        mode = "DRY RUN"
+
+    # A checkpoint only makes sense for the credit-spending live path.
     checkpoint = _load_checkpoint(args.checkpoint) if args.apply_lookups else None
 
-    mode = "APPLY" if args.apply_lookups else "DRY RUN"
-    budget_note = "unlimited" if args.limit is None else str(args.limit)
+    # The master path is free, so its budget is unlimited regardless of --limit.
+    budget_limit = None if args.from_master else args.limit
+    budget_note = "unlimited" if budget_limit is None else str(budget_limit)
     print(f"\n{'='*72}\nLinkedIn backfill - {mode} - lookup budget: {budget_note}\n{'='*72}\n")
 
-    budget = LookupBudget(args.limit)
+    budget = LookupBudget(budget_limit)
     exit_code = 0
 
     for country_folder in countries:
@@ -428,7 +516,7 @@ def main() -> None:
             exit_code = 1
             continue
 
-        if not args.apply_lookups:
+        if lookup is None:
             needs, already, no_domain = count_backfill_candidates(current)
             print(
                 f"  {country_folder}: {needs} companies WOULD be looked up "
@@ -440,7 +528,7 @@ def main() -> None:
         run = build_backfilled_run(
             current, lookup, country_folder=country_folder, run_folder=run_folder,
             now_iso=now_iso, budget=budget, checkpoint=checkpoint)
-        _print_manifest_summary(country_folder, run["manifest"])
+        _print_manifest_summary(country_folder, run["manifest"]["linkedin_backfill"])
         _save_checkpoint(args.checkpoint, checkpoint)
 
         if args.out_dir:
@@ -459,9 +547,9 @@ def main() -> None:
                 promote_run_to_current(args.bucket, country_folder, run_folder)
                 print(f"    promoted to gs://{args.bucket}/{country_folder}/current/ (live)")
 
-    if not args.apply_lookups:
-        print("\nDry run only — no Lusha calls made, nothing written. "
-              "Re-run with --apply-lookups (and a --limit) to spend credits.")
+    if lookup is None:
+        print("\nDry run only — nothing written. Re-run with --from-master <xlsx> "
+              "(free) or --apply-lookups --limit N (live API) to backfill.")
 
     sys.exit(exit_code)
 
