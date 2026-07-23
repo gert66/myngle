@@ -233,6 +233,24 @@ def _normalise_contact(raw: dict) -> dict:
 # Public API
 # ---------------------------------------------------------------------------
 
+def _extract_company_linkedin(company_data: dict) -> str:
+    """Company LinkedIn URL from a Lusha company object. Lusha returns it
+    under ``socialLinks.linkedin`` (confirmed live shape, see
+    ``lusha_full_pipeline_app``); older/enrich responses sometimes carry a
+    flat ``linkedin``/``linkedinUrl`` field, so both are tried. Returns ""
+    when absent."""
+    social = company_data.get("socialLinks")
+    if isinstance(social, dict):
+        val = social.get("linkedin") or social.get("linkedIn") or social.get("linkedinUrl")
+        if val:
+            return str(val).strip()
+    for key in ("linkedin", "linkedin_url", "linkedinUrl", "linkedInUrl"):
+        val = company_data.get(key)
+        if val:
+            return str(val).strip()
+    return ""
+
+
 def find_company_by_domain(domain: str) -> dict:
     """
     Search Lusha for a company by domain.
@@ -257,12 +275,28 @@ def find_company_by_domain(domain: str) -> dict:
                 "domain":    domain,
                 "employees": company_data.get("employeeCount") or company_data.get("employees") or "",
                 "industry":  company_data.get("industry") or "",
+                "linkedin":  _extract_company_linkedin(company_data),
             }
         return {}
     except requests.HTTPError as exc:
         raise RuntimeError(f"Lusha company search failed: {exc.response.status_code}") from exc
     except requests.RequestException as exc:
         raise RuntimeError(f"Lusha request error: {exc}") from exc
+
+
+def find_company_linkedin_by_domain(domain: str) -> str:
+    """Return just the company's LinkedIn URL for ``domain`` (or "" if Lusha
+    has none). Thin wrapper over ``find_company_by_domain`` used by the
+    linkedin_url backfill, kept separate so the backfill's intent is
+    explicit and it can be stubbed in tests without touching the network.
+
+    NOTE: this does not validate that the URL is a ``/company/`` page — that
+    is the backfill's job (see ``linkedin_backfill.is_company_linkedin_url``),
+    so a caller can log what Lusha returned even when it's rejected."""
+    if not domain or not str(domain).strip():
+        return ""
+    company = find_company_by_domain(domain)
+    return str(company.get("linkedin") or "")
 
 
 def find_contacts(
