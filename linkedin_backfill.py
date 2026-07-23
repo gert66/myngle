@@ -351,6 +351,7 @@ def _save_checkpoint(path: "Optional[str]", checkpoint: "Optional[dict]") -> Non
     if not path or checkpoint is None:
         return
     try:
+        Path(path).parent.mkdir(parents=True, exist_ok=True)
         Path(path).write_text(
             json.dumps(checkpoint, ensure_ascii=False, indent=2), encoding="utf-8")
     except OSError as exc:
