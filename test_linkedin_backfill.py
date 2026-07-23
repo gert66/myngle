@@ -14,6 +14,7 @@ from linkedin_backfill import (
     backfill_details_bucket,
     build_backfill_manifest,
     build_backfilled_run,
+    _extract_linkedin_from_cell,
     count_backfill_candidates,
     is_company_linkedin_url,
     make_master_file_lookup,
@@ -248,6 +249,52 @@ class TestNormalizeDomain:
         assert _normalize_domain(None) == ""
         assert _normalize_domain(float("nan")) == ""
         assert _normalize_domain("   ") == ""
+
+
+class TestExtractLinkedInFromCell:
+    def test_plain_url_passthrough(self):
+        assert _extract_linkedin_from_cell(
+            "https://www.linkedin.com/company/anz") == "https://www.linkedin.com/company/anz"
+
+    def test_sociallinks_dict_repr_string(self):
+        # Raw prospecting exports store socialLinks as str(dict) — single quotes.
+        cell = "{'linkedin': 'https://www.linkedin.com/company/anz'}"
+        assert _extract_linkedin_from_cell(cell) == "https://www.linkedin.com/company/anz"
+
+    def test_real_dict(self):
+        assert _extract_linkedin_from_cell(
+            {"linkedin": "https://www.linkedin.com/company/bhp"}) == \
+            "https://www.linkedin.com/company/bhp"
+
+    def test_sociallinks_without_linkedin_key(self):
+        assert _extract_linkedin_from_cell("{'twitter': 'https://x.com/y'}") == ""
+
+    def test_malformed_dict_string(self):
+        assert _extract_linkedin_from_cell("{not valid python") == ""
+
+    def test_empty_and_non_string(self):
+        assert _extract_linkedin_from_cell("") == ""
+        assert _extract_linkedin_from_cell(None) == ""
+        assert _extract_linkedin_from_cell(float("nan")) == ""
+
+
+class TestMasterFileLookupSocialLinks:
+    def test_raw_sociallinks_column(self, tmp_path):
+        import pandas as pd
+        xlsx = tmp_path / "au.xlsx"
+        pd.DataFrame({
+            "domain": ["www.anz.com.au", "www.bhp.com", "nolink.au"],
+            "socialLinks": [
+                "{'linkedin': 'https://www.linkedin.com/company/anz'}",
+                "{'linkedin': 'https://www.linkedin.com/company/bhp'}",
+                "{'twitter': 'https://x.com/y'}",  # no linkedin -> dropped
+            ],
+        }).to_excel(xlsx, index=False, sheet_name="Companies")
+        lookup = make_master_file_lookup(
+            str(xlsx), sheet="Companies", domain_col="domain", url_col="socialLinks")
+        assert lookup("anz.com.au") == "https://www.linkedin.com/company/anz"
+        assert lookup("www.bhp.com") == "https://www.linkedin.com/company/bhp"
+        assert lookup("nolink.au") == ""
 
 
 class TestMasterFileLookup:

@@ -343,6 +343,37 @@ def _normalize_domain(raw: object) -> str:
     return s
 
 
+def _extract_linkedin_from_cell(value: object) -> str:
+    """Pull a LinkedIn URL out of one spreadsheet cell.
+
+    Handles the two shapes the country files use:
+      * a plain URL string — Italy's ``Lusha LinkedIn URL(s)`` and the
+        Netherlands' ``Company linkedin URL`` columns;
+      * a Lusha ``socialLinks`` cell, which the raw prospecting exports store
+        as a Python-dict *repr* string, e.g.
+        ``"{'linkedin': 'https://www.linkedin.com/company/anz'}"`` (single
+        quotes → not JSON, parsed with ``ast.literal_eval``). A real dict is
+        handled too, in case pandas ever hands one back.
+    Returns "" when nothing usable is present."""
+    if isinstance(value, dict):
+        return str(value.get("linkedin") or "").strip()
+    if not isinstance(value, str):
+        return ""
+    s = value.strip()
+    if not s:
+        return ""
+    if s.startswith("{"):
+        try:
+            import ast
+            parsed = ast.literal_eval(s)
+        except (ValueError, SyntaxError):
+            return ""
+        if isinstance(parsed, dict):
+            return str(parsed.get("linkedin") or "").strip()
+        return ""
+    return s
+
+
 def make_master_file_lookup(
     xlsx_path: str,
     *,
@@ -350,13 +381,22 @@ def make_master_file_lookup(
     domain_col: str = "Normalized Domain",
     url_col: str = "Lusha LinkedIn URL(s)",
 ) -> Callable[[str], str]:
-    """A domain->URL lookup backed by the Lusha-vs-Chamber master workbook —
-    FREE (no Lusha calls) and higher quality than the live domain search.
+    """A domain->URL lookup backed by a Lusha source workbook — FREE (no Lusha
+    calls) and higher quality than the live domain search.
+
+    Works across the country files by pointing ``sheet``/``domain_col``/
+    ``url_col`` at the right columns:
+      * Italy master: ``Master Combined`` / ``Normalized Domain`` /
+        ``Lusha LinkedIn URL(s)`` (the defaults);
+      * Netherlands: ``Geselecteerd`` / ``domain`` / ``Company linkedin URL``;
+      * AU/NZ/UY raw prospecting: ``Companies`` / ``domain`` / ``socialLinks``.
+    The URL cell is parsed by ``_extract_linkedin_from_cell`` so a raw
+    ``socialLinks`` dict-string works the same as a plain-URL column.
 
     Builds a ``normalized_domain -> company_url`` map, keeping only URLs that
-    pass ``is_company_linkedin_url`` (so scraped junk in the sheet is dropped
-    up front). Rows with no domain or no valid company URL are simply absent,
-    so the lookup returns "" for them and the backfill records ``no_linkedin``.
+    pass ``is_company_linkedin_url`` (so scraped junk is dropped up front).
+    Rows with no domain or no valid company URL are simply absent, so the
+    lookup returns "" for them and the backfill records ``no_linkedin``.
     """
     import pandas as pd
 
@@ -366,7 +406,7 @@ def make_master_file_lookup(
         dom = _normalize_domain(row.get(domain_col))
         if not dom:
             continue
-        url = str(row.get(url_col) or "").strip()
+        url = _extract_linkedin_from_cell(row.get(url_col))
         if not is_company_linkedin_url(url):
             continue
         # First valid URL for a domain wins; don't let a later duplicate row
@@ -448,9 +488,20 @@ def main() -> None:
     parser.add_argument("--limit", type=int, default=None,
                         help="Max Lusha lookups this run (credit cap). Omit for unlimited.")
     parser.add_argument("--from-master", default=None, metavar="XLSX",
-                        help="Backfill from the Lusha-vs-Chamber master workbook "
-                             "instead of the live API — FREE (no credits) and higher "
-                             "quality (local entity pages). Recommended source.")
+                        help="Backfill from a Lusha source workbook instead of the "
+                             "live API — FREE (no credits) and higher quality (local "
+                             "entity pages). Recommended source.")
+    parser.add_argument("--sheet", default="Master Combined",
+                        help="Worksheet in --from-master (default: 'Master Combined' "
+                             "for Italy; use 'Geselecteerd' for NL, 'Companies' for "
+                             "AU/NZ/UY raw prospecting).")
+    parser.add_argument("--domain-col", default="Normalized Domain",
+                        help="Domain column in --from-master (default: "
+                             "'Normalized Domain'; use 'domain' for the others).")
+    parser.add_argument("--url-col", default="Lusha LinkedIn URL(s)",
+                        help="LinkedIn column in --from-master (default for Italy; "
+                             "use 'Company linkedin URL' for NL, 'socialLinks' for "
+                             "AU/NZ/UY raw).")
     parser.add_argument("--apply-lookups", action="store_true",
                         help="Actually call Lusha (live API). Without this OR "
                              "--from-master it's a DRY RUN (reports how many companies "
@@ -487,7 +538,9 @@ def main() -> None:
     # Lookup source: master workbook (free) > live API (credits) > none (dry run).
     if args.from_master:
         print(f"Loading LinkedIn URLs from master workbook: {args.from_master}")
-        lookup = make_master_file_lookup(args.from_master)
+        lookup = make_master_file_lookup(
+            args.from_master, sheet=args.sheet,
+            domain_col=args.domain_col, url_col=args.url_col)
         mode = "MASTER (free)"
     elif args.apply_lookups:
         lookup = make_lusha_lookup(args.sleep)
