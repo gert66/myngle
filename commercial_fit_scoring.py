@@ -303,6 +303,7 @@ SCORE_OUTPUT_COLS: list[str] = [
     "size_weight",
     "weighted_model_component",
     "weighted_size_component",
+    "size_missing_icp_only_reweight",
     "score_offset_applied",
     # ── Composite profile scores (display-only) ───────────────────────────────
     "global_complexity_score",
@@ -412,11 +413,22 @@ def resolve_employee_range_value(row: "dict | pd.Series") -> "str | None":
     ``final_commercial_fit_score`` — exactly the bug that left
     ``employee_range``/``scoring_inputs.employee_range`` blank for v2-era
     exports (Spain, ...) while Italy register exports had it.
+
+    Field list MUST mirror ``_resolve_size_score``'s exactly (including
+    ``lusha_employees``) — this function exists so callers like
+    ``rescore_from_gcs.resolve_detail_employee_range`` can recover the same
+    size data from a persisted ``debug.lead_prioritizer_row`` blob that
+    ``_resolve_size_score`` would have used at original scoring time. A
+    missing ``lusha_employees`` entry here (found 2026-07-24: Italy register
+    rows persist Lusha size ONLY under that key in the debug row, never
+    under ``lusha_employee_range``) silently made the recovery fail and
+    ``company_size_score`` fall back to the neutral 5.5 default even when
+    real Lusha size data was sitting right there in the same record.
     """
     if isinstance(row, pd.Series):
         row = row.to_dict()
     for field in ("lusha_api_employee_range", "lusha_employee_range",
-                  "employee_range", "company_size"):
+                  "employee_range", "lusha_employees", "company_size"):
         raw = row.get(field)
         if _is_missing(raw):
             continue
@@ -643,9 +655,34 @@ def score_company(
             f"{_src_label}: {range_key} → company_size_score {round(size_score, 2)}/10."
         )
 
-    # ── 5. Blend — profile-controlled weights ────────────────────────────────
-    w_model = _model_w * icp_sim
-    w_size  = _size_w  * size_score
+    # ── 5. Blend — profile-controlled weights, with a per-row ICP-only
+    # fallback when size is genuinely unknown ────────────────────────────────
+    # Blending in SIZE_SCORE_MISSING (a fixed 5.5) whenever no employee-range
+    # data exists — as every profile did before this fallback existed — means
+    # any two companies with the same ICP signals land on the EXACT SAME
+    # final score regardless of their real size, because 25% of the blend is
+    # a shared constant rather than a per-company fact. On the Italy dataset
+    # (2026-07-24) this produced 518 unrelated companies (2.6% of the
+    # country) sharing one identical score, several of which — like ENGEL
+    # Italia — actually had real Lusha size data available elsewhere in the
+    # record that simply never reached the scorer (see
+    # resolve_employee_range_value's docstring). Rather than keep guessing a
+    # company's size with a neutral placeholder, a row with no resolvable
+    # size is scored 100% on ICP fit for THAT row only — the configured
+    # profile weights are untouched for every row where size IS known.
+    _size_reweighted_to_icp_only = size_missing and _size_w > 0
+    if _size_reweighted_to_icp_only:
+        _row_model_w, _row_size_w = 1.0, 0.0
+        notes.append(
+            "No employee range data found anywhere for this company — "
+            "scored 100% on ICP fit for this row instead of blending in "
+            "the neutral company_size_score default, so this company's "
+            "score reflects only its own signals, not a shared placeholder."
+        )
+    else:
+        _row_model_w, _row_size_w = _model_w, _size_w
+    w_model = _row_model_w * icp_sim
+    w_size  = _row_size_w  * size_score
     final_before_offset = _clamp(w_model + w_size, 1.0, 10.0)
     # Legacy 75/25 formula — kept for ranking-impact audit (default profile only).
     _legacy_final = _clamp(
@@ -749,12 +786,15 @@ def score_company(
         "sigmoid_s_max":       _s_max,
         "sigmoid_input_value": round(lean_model_prob, 7),
         "sigmoid_raw_s":       round(sigmoid_raw_s, 7),
-        # Blend audit
-        "model_weight":              _model_w,
-        "size_weight":               _size_w,
+        # Blend audit — the EFFECTIVE weights actually used for this row (see
+        # _size_reweighted_to_icp_only above); equal to the profile's
+        # configured model_weight/size_weight except when size was missing.
+        "model_weight":              _row_model_w,
+        "size_weight":               _row_size_w,
         "weighted_model_component":  round(w_model, 4),
         "weighted_size_component":   round(w_size, 4),
         "scoring_profile":           _profile_name,
+        "size_missing_icp_only_reweight": _size_reweighted_to_icp_only,
         # Composite
         "global_complexity_score":     global_complexity,
         "people_development_score":    people_development,
