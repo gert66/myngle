@@ -234,7 +234,8 @@ def fetch_gcs_text(destination: str) -> dict:
         }
     cmd = [*tool_cmd, destination]
     try:
-        proc = subprocess.run(cmd, capture_output=True, text=True, timeout=60)
+        proc = subprocess.run(
+            cmd, capture_output=True, text=True, encoding="utf-8", timeout=60)
     except Exception as exc:
         return {
             "success": False, "exists": None, "text": None,
