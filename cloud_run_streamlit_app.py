@@ -538,15 +538,29 @@ def extract_execution_name(run_capture_output: str) -> Optional[str]:
 
 def _download_existing_current_export(
     bucket: str, country_folder: str, project: str, local_dir: Path,
+    *, strict: bool = True,
 ) -> tuple[list[dict], dict[str, dict]]:
     """Download and parse the existing current/companies.list.json +
     current/company-details-*.json for one country.
 
-    Returns ``([], {})`` — never raises — when nothing is there yet (the
-    normal first-ever export for this country/bucket) or any download/parse
-    step fails: a merge must degrade to "nothing existing" rather than ever
-    block or corrupt this run's own export, same philosophy as
-    enrichment_cache.py's cache-load failure handling.
+    Returns ``([], {})`` when nothing is there yet (the normal first-ever
+    export for this country/bucket) -- the list-level download failing, or
+    the initial bucket-file listing failing, still degrade to "nothing
+    existing" rather than blocking this run's own export.
+
+    When ``strict`` (the default): raises ``RuntimeError`` if the
+    list-level download succeeds (so we know detail data exists) but one or
+    more individual ``company-details-*.json`` files fail to download or
+    parse. Silently dropping just those files used to leave their
+    companies' list rows intact while quietly losing the matching detail
+    records -- exactly what corrupted 239 Italy companies in the
+    2026-07-26 merge (see HANDOFF.md's 2026-07-31 entry). A partial read
+    failure during an actual merge must abort it, not degrade it, since
+    "missing some details" is not the same safe fallback as "nothing
+    published yet". Pass ``strict=False`` only for callers that discard the
+    details dict and use the list items alone (e.g. the "skip already
+    enriched" pre-filter) -- they have nothing at stake in a detail-bucket
+    read failure and shouldn't be blocked by one.
     """
     import lovable_gcs_upload as lovable_gcs
 
@@ -575,17 +589,27 @@ def _download_existing_current_export(
     bucket_uris = list_existing_gcs_files(listing) if rc_ls == 0 else []
 
     existing_details: dict[str, dict] = {}
+    failed_uris: list[str] = []
     for uri in bucket_uris:
         local_bucket_path = local_dir / Path(uri).name
         result = lovable_gcs.download_file(tool_cmd, uri, str(local_bucket_path))
         if not result["success"]:
+            failed_uris.append(uri)
             continue
         try:
             bucket_data = json.loads(local_bucket_path.read_text(encoding="utf-8"))
         except Exception:
+            failed_uris.append(uri)
             continue
         if isinstance(bucket_data, dict):
             existing_details.update(bucket_data)
+
+    if failed_uris and strict:
+        raise RuntimeError(
+            "Could not download/parse existing detail bucket file(s) during "
+            "current/ merge -- refusing to merge with partial existing data "
+            f"(would silently drop those companies' details): {failed_uris}"
+        )
 
     return existing_list_items, existing_details
 
@@ -624,6 +648,9 @@ def _merge_export_into_existing_current(
         existing_list_items, existing_details, new_list_items, new_details)
     merged_items, merged_buckets = lovable_gcs.rebucket_company_details(
         merged_items, merged_details, bucket_size)
+    # Refuse to write/upload a merge that would corrupt current/ -- see
+    # validate_merged_current's docstring for why this gate exists.
+    lovable_gcs.validate_merged_current(merged_items, merged_buckets)
 
     merged_dir = local_run_dir / "lovable_export_merged_current"
     merged_dir.mkdir(parents=True, exist_ok=True)
@@ -1850,6 +1877,7 @@ def main() -> None:  # pragma: no cover - exercised only under `streamlit run`
                     existing_list_items, _ = _download_existing_current_export(
                         gcs_bucket_norm_prefilter, gcs_prefix_norm_prefilter, project,
                         work_dir / "lovable_current_existing_prefilter",
+                        strict=False,
                     )
                     known_ids = known_enriched_company_ids(existing_list_items)
 

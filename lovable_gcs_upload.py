@@ -551,6 +551,55 @@ def rebucket_company_details(
     return updated_items, buckets
 
 
+class CurrentMergeValidationError(Exception):
+    """Raised by ``validate_merged_current`` when a merged current/ export
+    fails referential-integrity validation. Callers must not upload
+    anything to GCS if this is raised."""
+
+
+def validate_merged_current(list_items: list[dict], buckets: dict[str, dict]) -> None:
+    """Referential-integrity check for a merged current/ export: every list
+    item's ``detail_bucket`` must point to a bucket file that actually
+    contains that ``company_id``.
+
+    ``export_workbook_to_lovable_json`` (a brand-new single export) has
+    always had an equivalent check (``_validate_export``, which raises on
+    "Company {cid} missing from bucket {bucket_file}."). The merge path --
+    ``merge_company_records`` + ``rebucket_company_details``, used by both
+    the Streamlit "Mergen" flow and the Autopilot/Cloud Run dispatcher --
+    never had one: ``rebucket_company_details`` always assigns a
+    ``detail_bucket`` pointer to every list item regardless of whether a
+    matching detail record survived the merge, so a gap in
+    ``details_by_id`` (e.g. from a partial existing-data download failure)
+    silently produces a list row whose detail can never be found. This is
+    exactly what happened to 239 Italy companies (e.g. ``abb-com-41``,
+    ``gea-com-1844``) in the 2026-07-26 merge -- see HANDOFF.md's
+    2026-07-31 entry. Call this right after ``rebucket_company_details`` and
+    before writing/uploading anything; the caller must treat a raise here as
+    "do not publish this merge", not as a soft warning.
+    """
+    errors: list[str] = []
+    for item in list_items:
+        cid = item["company_id"]
+        bucket_file = item.get("detail_bucket")
+        if not bucket_file:
+            errors.append(f"List item {cid} has no detail_bucket.")
+            continue
+        bucket = buckets.get(bucket_file)
+        if bucket is None:
+            errors.append(f"List item {cid} references unknown bucket {bucket_file}.")
+        elif cid not in bucket:
+            errors.append(f"Company {cid} missing from bucket {bucket_file}.")
+    if errors:
+        shown = errors[:50]
+        more = f"\n... and {len(errors) - 50} more" if len(errors) > 50 else ""
+        raise CurrentMergeValidationError(
+            f"Merged current/ export failed referential-integrity validation "
+            f"({len(errors)} issue(s)) -- refusing to publish:\n"
+            + "\n".join(f"- {e}" for e in shown) + more
+        )
+
+
 def run_upload_plan(jobs: list[dict]) -> list[dict]:
     """Execute every job from ``build_upload_plan`` and return per-file results.
 

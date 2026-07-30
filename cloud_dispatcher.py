@@ -466,9 +466,17 @@ def _release_claim(claim_uri: str) -> None:
 def _download_existing_current_via_client(bucket: str, country_folder: str) -> tuple[list[dict], dict[str, dict]]:
     """GCS-client equivalent of cloud_run_streamlit_app._download_existing_current_export
     (that one shells out to gcloud/gsutil, which isn't available in this
-    lean Cloud Run service). Returns ``([], {})`` -- never raises -- when
-    nothing is there yet or any read/parse step fails, same "merge degrades
-    to nothing existing" philosophy."""
+    lean Cloud Run service).
+
+    Returns ``([], {})`` when nothing is there yet (the ``list_blobs`` call
+    itself fails, or turns up no matching blobs) -- a merge degrades to
+    "nothing existing" in that case rather than blocking. Raises
+    ``RuntimeError`` if one or more individual blobs are listed but fail to
+    read/parse: silently skipping just those blobs used to leave their
+    companies' list rows intact while quietly losing the matching detail
+    records -- exactly what corrupted 239 Italy companies in the
+    2026-07-26 merge (see HANDOFF.md's 2026-07-31 entry). A partial read
+    failure must abort the merge, not degrade it."""
     prefix = f"{country_folder}/current/"
     try:
         blobs = list(_gcs_client().bucket(bucket).list_blobs(prefix=prefix))
@@ -477,17 +485,27 @@ def _download_existing_current_via_client(bucket: str, country_folder: str) -> t
 
     list_items: list[dict] = []
     details: dict[str, dict] = {}
+    failed_names: list[str] = []
     for blob in blobs:
         name = blob.name.rsplit("/", 1)[-1]
         if name != "companies.list.json" and not name.startswith("company-details-"):
             continue
         data = _read_json(f"gs://{bucket}/{blob.name}")
         if data is None:
+            failed_names.append(name)
             continue
         if name == "companies.list.json" and isinstance(data, list):
             list_items = data
         elif name.startswith("company-details-") and isinstance(data, dict):
             details.update(data)
+
+    if failed_names:
+        raise RuntimeError(
+            "Could not read existing detail bucket file(s) during current/ "
+            "merge -- refusing to merge with partial existing data (would "
+            f"silently drop those companies' details): {failed_names}"
+        )
+
     return list_items, details
 
 
@@ -625,6 +643,12 @@ def _run_lovable_export(final_output_uri: str, output_dir: str, lovable_cfg: dic
                 existing_list_items, existing_details, new_list_items, new_details)
             merged_items, merged_buckets = lovable_gcs.rebucket_company_details(
                 merged_items, merged_details, bucket_size)
+            # Refuse to write/upload a merge that would corrupt current/ --
+            # see validate_merged_current's docstring for why this gate
+            # exists. This whole block is already inside a try/except that
+            # reports failure via result["live_upload"] without uploading
+            # anything, so raising here is exactly the safe outcome.
+            lovable_gcs.validate_merged_current(merged_items, merged_buckets)
 
             merged_dir = Path(td) / "lovable_export_merged_current"
             merged_dir.mkdir(parents=True, exist_ok=True)

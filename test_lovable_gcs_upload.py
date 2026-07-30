@@ -32,6 +32,8 @@ from lovable_gcs_upload import (
     resolve_gcs_upload_tool,
     select_lovable_export_files,
     validate_gcs_bucket,
+    validate_merged_current,
+    CurrentMergeValidationError,
     build_upload_command,
     build_upload_plan,
     upload_file,
@@ -419,6 +421,49 @@ class TestRebucketCompanyDetails:
         rebucket_company_details(items, details, bucket_size=1)
         assert items == items_copy
         assert details == details_copy
+
+
+class TestValidateMergedCurrent:
+    """Coverage for the 2026-07-31 fix: rebucket_company_details always
+    assigns a detail_bucket pointer even when no matching detail record
+    survived a merge (e.g. from a partial existing-data download failure),
+    which is exactly how 239 Italy companies got orphaned on 2026-07-26.
+    validate_merged_current is the gate that must catch that before
+    anything is published to current/."""
+
+    def test_passes_on_a_consistent_rebucketed_output(self):
+        items = [_item("a"), _item("b")]
+        details = {"a": {"v": "a"}, "b": {"v": "b"}}
+        updated, buckets = rebucket_company_details(items, details, bucket_size=500)
+        validate_merged_current(updated, buckets)  # must not raise
+
+    def test_raises_when_a_list_item_has_no_matching_detail(self):
+        # Simulates rebucket_company_details being handed a details_by_id
+        # that is missing an entry for a company still present in list_items
+        # -- the exact shape a partial download failure produces upstream.
+        items = [_item("a"), _item("orphan")]
+        details = {"a": {"v": "a"}}  # "orphan" has no detail record
+        updated, buckets = rebucket_company_details(items, details, bucket_size=500)
+        with pytest.raises(CurrentMergeValidationError, match="orphan"):
+            validate_merged_current(updated, buckets)
+
+    def test_raises_when_detail_bucket_pointer_is_missing(self):
+        updated = [{"company_id": "a", "detail_bucket": None}]
+        with pytest.raises(CurrentMergeValidationError, match="no detail_bucket"):
+            validate_merged_current(updated, {})
+
+    def test_raises_when_detail_bucket_pointer_targets_unknown_bucket(self):
+        updated = [{"company_id": "a", "detail_bucket": "company-details-099.json"}]
+        with pytest.raises(CurrentMergeValidationError, match="unknown bucket"):
+            validate_merged_current(updated, {})
+
+    def test_error_lists_every_offending_company_up_to_the_cap(self):
+        items = [_item(f"orphan{i}") for i in range(3)]
+        updated, buckets = rebucket_company_details(items, {}, bucket_size=500)
+        with pytest.raises(CurrentMergeValidationError) as exc_info:
+            validate_merged_current(updated, buckets)
+        for i in range(3):
+            assert f"orphan{i}" in str(exc_info.value)
 
 
 class TestNormalizeGcsPrefix:
