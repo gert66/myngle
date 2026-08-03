@@ -21,6 +21,7 @@ from rescore_from_gcs import (
     apply_c5_foreign_hq_upgrade,
     build_rescore_manifest,
     build_rescored_run,
+    CHUNKS_INDEX_FILENAME,
     default_rescore_run_folder,
     download_current_run,
     download_file,
@@ -31,6 +32,7 @@ from rescore_from_gcs import (
     list_current_files,
     list_run_files,
     promote_run_to_current,
+    regenerate_current_chunks,
     rehydrate_scoring_row,
     rescore_all_countries,
     rescore_country,
@@ -1221,3 +1223,144 @@ class TestPromoteRunToCurrent:
         current_list = json.loads(
             (remote_root / "brazil" / "current" / LIST_FILENAME).read_text(encoding="utf-8"))
         assert current_list[0]["assigned_cold_caller"] == "Ernie"
+
+    def test_leaves_chunks_alone_when_country_never_used_chunking(self, tmp_path):
+        """No companies.list.chunks-index.json in current/ -> promote must
+        not invent one. Chunked/progressive loading is opt-in per country;
+        this pipeline only ever keeps an EXISTING index fresh."""
+        remote_root = tmp_path / "remote"
+        _write_fixture_current_run(remote_root / "brazil" / "runs" / "2026-07-08_reallocate")
+
+        with patch("rescore_from_gcs.resolve_gcs_tool", return_value=["gcloud", "storage"]), \
+             patch("rescore_from_gcs.subprocess.run", side_effect=_fake_gcs_tool_for_local_dir(remote_root)):
+            result = promote_run_to_current("bucket-a", "brazil", "2026-07-08_reallocate")
+
+        assert result["chunks_regenerated"] is None
+        current_dir = remote_root / "brazil" / "current"
+        assert not (current_dir / CHUNKS_INDEX_FILENAME).exists()
+
+    def test_refreshes_stale_chunks_when_country_already_uses_chunking(self, tmp_path):
+        """This is the 2026-07-29 Italy bug, reproduced: current/ already has
+        a (stale) chunks-index + chunk file from a previous export. A
+        promotion must regenerate them from the freshly-promoted list,
+        sorted by commercial_fit_score_app desc -- never leave them stale."""
+        remote_root = tmp_path / "remote"
+        current_dir = remote_root / "brazil" / "current"
+        run_dir = remote_root / "brazil" / "runs" / "2026-07-08_reallocate"
+        _write_fixture_current_run(current_dir)
+        _write_fixture_current_run(run_dir)
+
+        # Stale chunking artifacts already present in current/, from days ago,
+        # with scores that don't match anything in the run being promoted.
+        current_dir.mkdir(parents=True, exist_ok=True)
+        stale_chunk = [{"company_id": "stale-co", "commercial_fit_score_app": 1.0}]
+        (current_dir / "companies.list.chunk-000.json").write_text(
+            json.dumps(stale_chunk), encoding="utf-8")
+        (current_dir / CHUNKS_INDEX_FILENAME).write_text(json.dumps({
+            "schema_version": 1, "chunk_files": ["companies.list.chunk-000.json"],
+            "chunk_size": 2500, "total_companies": 1,
+            "sorted_by": "commercial_fit_score_app", "sort_dir": "desc",
+            "generated_at": "2026-07-01T00:00:00Z",
+        }), encoding="utf-8")
+
+        # The run being promoted carries real commercial_fit_score_app values.
+        run_list_path = run_dir / LIST_FILENAME
+        run_list = json.loads(run_list_path.read_text(encoding="utf-8"))
+        assert len(run_list) == 2
+        run_list[0]["company_id"], run_list[1]["company_id"] = "low-co", "high-co"
+        run_list[0]["commercial_fit_score_app"] = 3.0
+        run_list[1]["commercial_fit_score_app"] = 9.5
+        run_list_path.write_text(json.dumps(run_list), encoding="utf-8")
+
+        with patch("rescore_from_gcs.resolve_gcs_tool", return_value=["gcloud", "storage"]), \
+             patch("rescore_from_gcs.subprocess.run", side_effect=_fake_gcs_tool_for_local_dir(remote_root)):
+            result = promote_run_to_current(
+                "bucket-a", "brazil", "2026-07-08_reallocate",
+                now=datetime(2026, 7, 29, 8, 0, tzinfo=timezone.utc),
+            )
+
+        chunks = result["chunks_regenerated"]
+        assert chunks is not None
+        assert all(r["success"] for r in chunks["results"])
+        assert chunks["total_companies"] == 2
+        assert chunks["generated_at"] == "2026-07-29T08:00:00Z"
+
+        new_index = json.loads((current_dir / CHUNKS_INDEX_FILENAME).read_text(encoding="utf-8"))
+        assert new_index["generated_at"] == "2026-07-29T08:00:00Z"
+        assert new_index["total_companies"] == 2
+        # Both companies fit under the default chunk_size (2500) -> 1 chunk.
+        assert len(new_index["chunk_files"]) == 1
+
+        chunk_0 = json.loads((current_dir / new_index["chunk_files"][0]).read_text(encoding="utf-8"))
+        # Highest commercial_fit_score_app must lead -- this is exactly the
+        # ordering the Company Hub's progressive loader renders first.
+        assert [c["company_id"] for c in chunk_0] == ["high-co", "low-co"]
+
+        # The stale record from days ago must be gone, not merely appended to.
+        assert "stale-co" not in [c["company_id"] for c in chunk_0]
+
+
+class TestRegenerateCurrentChunks:
+    def test_returns_none_when_no_chunks_index_exists(self, tmp_path):
+        remote_root = tmp_path / "remote"
+        (remote_root / "brazil" / "current").mkdir(parents=True)
+
+        with patch("rescore_from_gcs.resolve_gcs_tool", return_value=["gcloud", "storage"]), \
+             patch("rescore_from_gcs.subprocess.run", side_effect=_fake_gcs_tool_for_local_dir(remote_root)):
+            result = regenerate_current_chunks(
+                "bucket-a", "brazil", [{"company_id": "a", "commercial_fit_score_app": 5.0}],
+                work_dir=tmp_path / "staging",
+            )
+
+        assert result is None
+
+    def test_splits_into_chunks_of_the_requested_size(self, tmp_path):
+        remote_root = tmp_path / "remote"
+        current_dir = remote_root / "brazil" / "current"
+        current_dir.mkdir(parents=True)
+        (current_dir / CHUNKS_INDEX_FILENAME).write_text(json.dumps({
+            "schema_version": 1, "chunk_files": [], "chunk_size": 2,
+            "total_companies": 0, "sorted_by": "commercial_fit_score_app",
+            "sort_dir": "desc", "generated_at": "2026-01-01T00:00:00Z",
+        }), encoding="utf-8")
+
+        companies = [
+            {"company_id": f"co-{i}", "commercial_fit_score_app": float(i)}
+            for i in range(5)
+        ]
+
+        with patch("rescore_from_gcs.resolve_gcs_tool", return_value=["gcloud", "storage"]), \
+             patch("rescore_from_gcs.subprocess.run", side_effect=_fake_gcs_tool_for_local_dir(remote_root)):
+            result = regenerate_current_chunks(
+                "bucket-a", "brazil", companies,
+                work_dir=tmp_path / "staging", chunk_size=2,
+                now=datetime(2026, 7, 29, 8, 0, tzinfo=timezone.utc),
+            )
+
+        assert result["total_companies"] == 5
+        assert len(result["chunk_files"]) == 3  # 5 companies / chunk_size 2 -> 3 chunks
+        chunk_0 = json.loads((current_dir / "companies.list.chunk-000.json").read_text(encoding="utf-8"))
+        assert [c["company_id"] for c in chunk_0] == ["co-4", "co-3"]  # highest score first
+        chunk_2 = json.loads((current_dir / "companies.list.chunk-002.json").read_text(encoding="utf-8"))
+        assert [c["company_id"] for c in chunk_2] == ["co-0"]
+
+    def test_companies_missing_score_sort_last(self, tmp_path):
+        remote_root = tmp_path / "remote"
+        current_dir = remote_root / "brazil" / "current"
+        current_dir.mkdir(parents=True)
+        (current_dir / CHUNKS_INDEX_FILENAME).write_text("{}", encoding="utf-8")
+
+        companies = [
+            {"company_id": "no-score"},
+            {"company_id": "has-score", "commercial_fit_score_app": 1.0},
+        ]
+
+        with patch("rescore_from_gcs.resolve_gcs_tool", return_value=["gcloud", "storage"]), \
+             patch("rescore_from_gcs.subprocess.run", side_effect=_fake_gcs_tool_for_local_dir(remote_root)):
+            regenerate_current_chunks(
+                "bucket-a", "brazil", companies,
+                work_dir=tmp_path / "staging", chunk_size=10,
+            )
+
+        chunk_0 = json.loads((current_dir / "companies.list.chunk-000.json").read_text(encoding="utf-8"))
+        assert [c["company_id"] for c in chunk_0] == ["has-score", "no-score"]

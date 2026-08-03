@@ -850,6 +850,108 @@ def upload_rescored_run(
     ]
 
 
+CHUNKS_INDEX_FILENAME = "companies.list.chunks-index.json"
+_CHUNK_FILENAME_RE = re.compile(r"^companies\.list\.chunk-\d+\.json$")
+DEFAULT_CHUNK_SIZE = 2500
+
+
+def regenerate_current_chunks(
+    bucket: str,
+    country_folder: str,
+    companies: list[dict],
+    *,
+    work_dir: "str | Path",
+    now: "datetime | None" = None,
+    chunk_size: int = DEFAULT_CHUNK_SIZE,
+) -> "dict | None":
+    """Rebuild ``companies.list.chunk-NNN.json`` + ``companies.list.chunks-
+    index.json`` in ``<country_folder>/current/`` from the just-promoted
+    company list, sorted by ``commercial_fit_score_app`` descending, and
+    upload them.
+
+    Only acts if a chunks-index already exists for this country -- i.e. this
+    NEVER introduces chunked/progressive loading for a country that doesn't
+    already use it; it only keeps an existing one fresh. Returns ``None``
+    when there's nothing to do (no existing chunks-index, or no GCS tool
+    available), otherwise a result dict shaped like ``promote_run_to_current``'s.
+
+    Why this exists: on 2026-07-29 the Italy Company Hub kept showing
+    pre-rescore data for hours after a fully-verified promotion, because the
+    frontend's progressive loader (``fetchCompanyListProgressive`` in the
+    Lovable app's ``companies.demo.ts``) prefers these chunk files over
+    ``companies.list.json`` whenever a chunks-index is present, and nothing
+    in this pipeline ever regenerated them -- they were silently 3 days
+    stale. Calling this at the end of every promotion closes that gap for
+    good, for every country that uses chunking, not just Italy.
+    """
+    existing = list_current_files(bucket, country_folder)
+    if CHUNKS_INDEX_FILENAME not in existing:
+        return None  # this country doesn't use chunked loading -- leave it alone
+
+    tool = resolve_gcs_tool()
+    if tool is None and not gcs_python_backend.available():
+        return None
+
+    now = now or datetime.now(timezone.utc)
+    now_iso = now.strftime("%Y-%m-%dT%H:%M:%SZ")
+    current_dir = gcs_current_dir(bucket, country_folder)
+    staging = Path(work_dir)
+    staging.mkdir(parents=True, exist_ok=True)
+
+    ranked = sorted(
+        companies, key=lambda c: -(c.get("commercial_fit_score_app") or 0)
+    )
+    chunk_files = []
+    results = []
+    for i in range(0, len(ranked), chunk_size):
+        idx = i // chunk_size
+        filename = f"companies.list.chunk-{idx:03d}.json"
+        chunk = ranked[i : i + chunk_size]
+        local_path = staging / filename
+        local_path.write_text(
+            json.dumps(chunk, ensure_ascii=False, default=str), encoding="utf-8")
+        chunk_files.append(filename)
+        if tool is not None:
+            upload_result = upload_file(
+                tool, str(local_path), f"{current_dir}/{filename}",
+                cache_control=CURRENT_CACHE_CONTROL)
+        else:
+            upload_result = gcs_python_backend.upload_file(
+                bucket, str(local_path), f"{country_folder}/current/{filename}",
+                cache_control=CURRENT_CACHE_CONTROL)
+        results.append({**upload_result, "target": "current", "phase": "upload"})
+
+    index = {
+        "schema_version": 1,
+        "chunk_files": chunk_files,
+        "chunk_size": chunk_size,
+        "total_companies": len(ranked),
+        "sorted_by": "commercial_fit_score_app",
+        "sort_dir": "desc",
+        "generated_at": now_iso,
+    }
+    index_path = staging / CHUNKS_INDEX_FILENAME
+    index_path.write_text(
+        json.dumps(index, ensure_ascii=False, indent=2), encoding="utf-8")
+    if tool is not None:
+        upload_result = upload_file(
+            tool, str(index_path), f"{current_dir}/{CHUNKS_INDEX_FILENAME}",
+            cache_control=CURRENT_CACHE_CONTROL)
+    else:
+        upload_result = gcs_python_backend.upload_file(
+            bucket, str(index_path), f"{country_folder}/current/{CHUNKS_INDEX_FILENAME}",
+            cache_control=CURRENT_CACHE_CONTROL)
+    results.append({**upload_result, "target": "current", "phase": "upload"})
+
+    return {
+        "country_folder": country_folder,
+        "chunk_files": chunk_files,
+        "total_companies": len(ranked),
+        "generated_at": now_iso,
+        "results": results,
+    }
+
+
 def promote_run_to_current(
     bucket: str,
     country_folder: str,
@@ -931,12 +1033,25 @@ def promote_run_to_current(
                     bucket, str(local_path), f"{country_folder}/current/{filename}",
                     cache_control=CURRENT_CACHE_CONTROL)
             results.append({**upload_result, "target": "current", "phase": "upload"})
+
+        # Keep any existing chunked/progressive-loading files (see
+        # regenerate_current_chunks's docstring for why this is mandatory,
+        # not optional) in sync with the companies.list.json we just
+        # promoted -- never leave them stale again.
+        chunks_result = None
+        list_local_path = staging / LIST_FILENAME
+        if list_local_path.exists():
+            companies = json.loads(list_local_path.read_text(encoding="utf-8"))
+            chunks_result = regenerate_current_chunks(
+                bucket, country_folder, companies, work_dir=staging, now=now)
+
         return {
             "country_folder": country_folder,
             "run_folder": run_folder,
             "promoted_at": now_iso,
             "promoted_files": relevant,
             "results": results,
+            "chunks_regenerated": chunks_result,
         }
     finally:
         if cleanup:

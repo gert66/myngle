@@ -63,6 +63,23 @@ def main() -> None:
         f"gs://{args.bucket}/{args.country}/current/"
     )
 
+    chunks = result.get("chunks_regenerated")
+    if chunks is None:
+        print(
+            "No companies.list.chunks-index.json found for this country — "
+            "chunked/progressive loading not in use, nothing to keep in sync."
+        )
+    else:
+        chunk_failed = sum(1 for r in chunks["results"] if not r["success"])
+        status = "OK" if chunk_failed == 0 else f"{chunk_failed} FAILED"
+        print(
+            f"Chunk files regenerated ({status}): {len(chunks['chunk_files'])} "
+            f"chunk(s), {chunks['total_companies']} companies, "
+            f"generated_at={chunks['generated_at']} — kept in sync with "
+            f"companies.list.json so the frontend's progressive loader never "
+            f"serves stale data again."
+        )
+
 
 if __name__ == "__main__":
     main()
