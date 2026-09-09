@@ -82,9 +82,31 @@ def normalize_country(value) -> str:
     return re.sub(r"[^a-z0-9]+", "", _text(value).lower())
 
 
+def _find_header_row(path: Path, sheet_name: str, required: set[str], scan_rows: int = 10) -> int:
+    """Scans the first ``scan_rows`` rows of ``sheet_name`` with no header assumed
+    and returns the index of the first row whose cell values are a superset of
+    ``required`` — the real header row.
+
+    Some exports of this workbook carry a title/banner sentence (and a blank
+    row) above the actual header, which a bare ``header=0`` read would
+    otherwise silently misparse: the banner text becomes one mangled column
+    name, and the real header row is read as ordinary data.
+    """
+    preview = pd.read_excel(path, sheet_name=sheet_name, header=None, nrows=scan_rows)
+    for i in range(len(preview)):
+        row_values = {_text(v) for v in preview.iloc[i].tolist()}
+        if required.issubset(row_values):
+            return i
+    raise ValueError(
+        f"Could not find a header row containing all of {sorted(required)} "
+        f"in the first {scan_rows} rows of sheet '{sheet_name}'."
+    )
+
+
 def load_handover(path: Path) -> pd.DataFrame:
-    df = pd.read_excel(path, sheet_name=HANDOVER_SHEET)
     required = {"Company", "Country", "ASSIGNED CLOSER"}
+    header_row = _find_header_row(path, HANDOVER_SHEET, required)
+    df = pd.read_excel(path, sheet_name=HANDOVER_SHEET, header=header_row)
     missing = sorted(required - set(df.columns))
     if missing:
         raise ValueError(f"Missing required Handover List columns: {', '.join(missing)}")
