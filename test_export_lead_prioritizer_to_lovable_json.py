@@ -897,6 +897,77 @@ def test_manifest_contains_caller_distribution_and_counts(tmp_path):
     assert on_disk["caller_distribution"] == manifest["caller_distribution"]
 
 
+# ---------------------------------------------------------------------------
+# per_row_caller_column (Recuperated/former-client real caller preservation)
+# ---------------------------------------------------------------------------
+
+def test_per_row_caller_column_absent_keeps_round_robin_unchanged(tmp_path):
+    # Same three rows/two callers as test_manifest_contains_caller_distribution_
+    # and_counts, with an unused assigned_cold_caller column present on every
+    # row — proves the option being merely present in the workbook (but not
+    # requested via per_row_caller_column) never changes anything.
+    enriched = [
+        enriched_row(source_index=i, company_name=f"Co{i}", domain=f"co{i}.com",
+                     assigned_cold_caller="Someone Else")
+        for i in range(1, 4)
+    ]
+    manifest, out_dir = run_export(
+        tmp_path, enriched, cold_callers=["Jantje", "Pietje"])
+
+    assert manifest["caller_distribution"] == {"Jantje": 2, "Pietje": 1}
+    items = {i["company_name"]: i for i in load_list(out_dir)}
+    assert items["Co1"]["assigned_cold_caller"] == "Jantje"
+    assert items["Co2"]["assigned_cold_caller"] == "Pietje"
+    assert items["Co3"]["assigned_cold_caller"] == "Jantje"
+
+
+def test_per_row_caller_column_used_when_supplied(tmp_path):
+    enriched = [
+        enriched_row(source_index=1, company_name="Co1", domain="co1.com",
+                     commercial_fit_score_app=90, assigned_cold_caller="NICOLE"),
+        enriched_row(source_index=2, company_name="Co2", domain="co2.com",
+                     commercial_fit_score_app=80, assigned_cold_caller="GIULIO"),
+        enriched_row(source_index=3, company_name="Co3", domain="co3.com",
+                     commercial_fit_score_app=70, assigned_cold_caller="PIETRO"),
+    ]
+    manifest, out_dir = run_export(
+        tmp_path, enriched, cold_callers=["Jantje", "Pietje"],
+        per_row_caller_column="assigned_cold_caller")
+
+    items = {i["company_name"]: i for i in load_list(out_dir)}
+    assert items["Co1"]["assigned_cold_caller"] == "NICOLE"
+    assert items["Co2"]["assigned_cold_caller"] == "GIULIO"
+    assert items["Co3"]["assigned_cold_caller"] == "PIETRO"
+    assert manifest["caller_distribution"] == {
+        "Jantje": 0, "Pietje": 0, "NICOLE": 1, "GIULIO": 1, "PIETRO": 1,
+    }
+    # The real historical caller is not exclusive to the debug block, but it
+    # is also still preserved there like any other unmapped column.
+    detail = detail_for(out_dir, "Co1")
+    assert detail["debug"]["lead_prioritizer_row"]["assigned_cold_caller"] == "NICOLE"
+
+
+def test_per_row_caller_column_blank_falls_back_to_round_robin(tmp_path):
+    enriched = [
+        enriched_row(source_index=1, company_name="Co1", domain="co1.com",
+                     commercial_fit_score_app=90, assigned_cold_caller="NICOLE"),
+        enriched_row(source_index=2, company_name="Co2", domain="co2.com",
+                     commercial_fit_score_app=80, assigned_cold_caller=""),
+        enriched_row(source_index=3, company_name="Co3", domain="co3.com",
+                     commercial_fit_score_app=70),  # column missing entirely
+    ]
+    manifest, out_dir = run_export(
+        tmp_path, enriched, cold_callers=["Jantje", "Pietje"],
+        per_row_caller_column="assigned_cold_caller")
+
+    items = {i["company_name"]: i for i in load_list(out_dir)}
+    # Co1 has a real value -> used as-is. Co2/Co3 fall back to round-robin,
+    # ranked by score (Co2 rank 2 -> Pietje, Co3 rank 3 -> Jantje).
+    assert items["Co1"]["assigned_cold_caller"] == "NICOLE"
+    assert items["Co2"]["assigned_cold_caller"] == "Pietje"
+    assert items["Co3"]["assigned_cold_caller"] == "Jantje"
+
+
 def test_manifest_contains_foreign_hq_fields(tmp_path):
     enriched = [
         enriched_row(source_index=1, company_name="Foreign",

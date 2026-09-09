@@ -3146,6 +3146,7 @@ def export_workbook_to_lovable_json(
     foreign_hq_only: bool = True,
     bucket_size: int = 500,
     content_language: str = DEFAULT_CONTENT_LANGUAGE,
+    per_row_caller_column: "str | None" = None,
 ) -> dict:
     """Convert a Lead Prioritizer workbook into Lovable Company Hub JSON files.
 
@@ -3158,6 +3159,17 @@ def export_workbook_to_lovable_json(
     calls. "English" (or any unrecognized value) leaves behavior
     byte-for-byte identical to before this option existed. The JSON schema
     (field names) never changes either way.
+
+    ``per_row_caller_column`` (default ``None``, opt-in) is for a Recuperated/
+    former-client-style export where each row already carries a real,
+    historical caller assignment that must be shown, not re-assigned. When
+    unset, caller assignment is byte-for-byte the existing round-robin over
+    ``cold_callers`` by score rank — no behavior change for any existing
+    country export. When set, each row's value in that Enriched Leads column
+    is used as the visible ``assigned_cold_caller`` whenever it is non-blank;
+    a row where it's blank/missing still falls back to the same round-robin
+    formula. Never affects ranking, scoring, company_id generation,
+    foreign-HQ filtering, or detail bucketing.
 
     Returns the export manifest dict (also written to export_manifest.json).
     """
@@ -3225,7 +3237,14 @@ def export_workbook_to_lovable_json(
     industry_source_counts: dict[str, int] = {}
 
     for rank, (row, detected, reason) in enumerate(selected, start=1):
-        caller = cold_callers[(rank - 1) % len(cold_callers)]
+        per_row_caller = (
+            clean_str(row.get(per_row_caller_column)) if per_row_caller_column else None
+        )
+        if per_row_caller:
+            caller = per_row_caller
+        else:
+            caller = cold_callers[(rank - 1) % len(cold_callers)]
+        caller_distribution.setdefault(caller, 0)
         caller_distribution[caller] += 1
         company_id = make_company_id(row, used_ids)
         item = _build_list_item(row, company_id, export_country,
@@ -3431,6 +3450,15 @@ def build_arg_parser() -> argparse.ArgumentParser:
                         choices=list(SUPPORTED_CONTENT_LANGUAGES),
                         help="Demo option: localize caller-facing JSON text "
                              "values (default English).")
+    parser.add_argument("--per-row-caller-column", default=None,
+                        help="Opt-in (e.g. Recuperated/former-client exports): "
+                             "Enriched Leads column holding each row's real, "
+                             "historical caller assignment. When set, a "
+                             "non-blank value there is used as the visible "
+                             "assigned_cold_caller instead of the round-robin "
+                             "assignment; a blank value still falls back to "
+                             "round-robin. Omit for the existing behavior "
+                             "(default: unset, round-robin for every row).")
     return parser
 
 
@@ -3445,6 +3473,7 @@ def main(argv=None) -> int:
         foreign_hq_only=args.foreign_hq_only,
         bucket_size=args.bucket_size,
         content_language=args.content_language,
+        per_row_caller_column=args.per_row_caller_column,
     )
     print(f"Rows read:                 {manifest['total_rows_read']}")
     print(f"Rows exported:             {manifest['rows_exported']}")
