@@ -126,6 +126,20 @@ class TestResolveRowDomain:
         row = {"domain": "", "Company Domain": None}
         assert bc.resolve_row_domain(row, self._cfg()) is None
 
+    def test_falls_back_to_company_domain_when_primary_is_nan(self):
+        # The bug this guards against: a blank Excel cell for the primary
+        # domain column reads back as float('nan') via pandas, not "". The
+        # old `str(row.get(...) or "")` coerced that to the literal string
+        # "nan" (truthy, non-empty), so it was returned as if it were a real
+        # domain instead of falling through to the company-name-based query
+        # — every row in a real batch run silently searched "nan headquarters".
+        row = {"domain": float("nan"), "Company Domain": "https://www.Draeger.com/it"}
+        assert bc.resolve_row_domain(row, self._cfg()) == "draeger.com"
+
+    def test_returns_none_when_primary_is_nan_and_no_fallback(self):
+        row = {"domain": float("nan"), "Company Domain": None}
+        assert bc.resolve_row_domain(row, self._cfg()) is None
+
     def test_does_not_double_check_configured_column_as_its_own_fallback(self):
         cfg = BatchRunConfig(company_name_column="Company Name", domain_column="Company Domain")
         row = {"Company Domain": ""}

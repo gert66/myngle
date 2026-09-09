@@ -227,7 +227,8 @@ def resolve_row_domain(row: dict, config: "BatchRunConfig") -> "str | None":
     """Domain for one row: ``config.domain_column``, falling back per-row to
     ``_DOMAIN_FALLBACK_COLUMNS`` when that field is blank for this row (see
     ``_DOMAIN_FALLBACK_COLUMNS`` docstring)."""
-    primary = str(row.get(config.domain_column, "") or "").strip()
+    raw = row.get(config.domain_column, "")
+    primary = "" if pd.isna(raw) else str(raw or "").strip()
     if primary:
         return primary
     for col in _DOMAIN_FALLBACK_COLUMNS:
