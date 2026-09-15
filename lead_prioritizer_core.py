@@ -389,9 +389,17 @@ def prioritize_single_lead(
                 country=effective_country,
                 cache_index=cache_index, force_refresh=force_refresh,
             )
-            if fc["used"]:
-                hq = _interpret(fc["pages"])
-                fallback_used = True
+            # Re-adjudicate whenever escalation was triggered. If Firecrawl
+            # produced usable own-site pages, use them. If it did not, remove
+            # the risky Crawl4AI content and re-run against the same Serper
+            # evidence only. This mirrors the proven Firecrawl-arm behavior
+            # from the 50-case benchmark, where a Firecrawl miss can still
+            # yield a better Serper-only adjudication than keeping misleading
+            # Crawl4AI content.
+            hq = _interpret(fc["pages"] if fc["used"] else [])
+            fallback_used = True
+            if not fc["used"]:
+                fallback_reasons.append("firecrawl_no_usable_pages_serper_only")
 
     hq.hq_crawl_provider_primary = (
         "crawl4ai" if provider.startswith("crawl4ai") else "firecrawl"

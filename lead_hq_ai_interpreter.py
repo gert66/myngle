@@ -1030,8 +1030,20 @@ def interpret_hq_with_ai(
             sig_foreign_hq_score_for_next_scoring=0.0,
         )
 
-    # Countries differ
-    if clf == "foreign_parent" and confidence in ("High", "Medium"):
+    # Countries differ. A model can occasionally emit classification=domestic
+    # while simultaneously returning a parent HQ country different from the
+    # input country. That combination is internally inconsistent: preserve the
+    # raw ai_hq_classification for audit, but adjudicate the structure as a
+    # foreign parent and apply the exact same positive-score safety checks used
+    # for an explicit foreign_parent classification.
+    _clf_for_scoring = (
+        "foreign_parent"
+        if clf == "domestic" and confidence in ("High", "Medium")
+        else clf
+    )
+    _country_consistency_override = (_clf_for_scoring != clf)
+
+    if _clf_for_scoring == "foreign_parent" and confidence in ("High", "Medium"):
         # C4 positive-score safety: keep the foreign_parent classification, but
         # only keep score 3.0 when the evidence appears to belong to this
         # company/domain. Risky short/generic roots with blank/mismatched
@@ -1073,13 +1085,17 @@ def interpret_hq_with_ai(
             foreign_hq_simple=True,
             hq_structure_type="foreign_parent",
             needs_manual_review=False,
-            hq_reason=f"foreign_parent ({confidence}): {ai_reason}",
+            hq_reason=(
+                ("foreign_parent_country_consistency_override "
+                 if _country_consistency_override else "foreign_parent ")
+                + f"({confidence}): {ai_reason}"
+            ),
             sig_foreign_hq_score_for_next_scoring=3.0,
             hq_positive_score_suppressed_for_review="No",
             hq_review_reason="",
         )
 
-    if clf == "foreign_parent" and confidence == "Low":
+    if _clf_for_scoring == "foreign_parent" and confidence == "Low":
         return HQDetectionResult(
             **_base, **ai_fields,
             ai_call_success="Yes",
