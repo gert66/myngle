@@ -1,0 +1,6 @@
+[Unit]
+Description=Refresh read-only orchestrator export for Hermes pilot
+
+[Service]
+Type=oneshot
+ExecStart=/home/myngle/orchestrator/bin/export_for_hermes.sh

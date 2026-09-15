@@ -1,0 +1,15 @@
+{
+  "repos": {
+    "gert66/myngle": {
+      "allow_write_on_canonical_base": true,
+      "canonical_base_branch": "work",
+      "expected_origin": "https://github.com/gert66/myngle.git"
+    },
+    "gert66/myngle-company-hub": {
+      "allow_write_on_canonical_base": false,
+      "canonical_base_branch": "main",
+      "expected_origin": "https://github.com/gert66/myngle-company-hub.git"
+    }
+  },
+  "schema_version": 1
+}

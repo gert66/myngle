@@ -1,0 +1,25 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "orchestrator/schemas/state.schema.json",
+  "title": "Persistent job state",
+  "description": "Canonical per-job state persisted atomically after every transition by core/state.py. Validated by core/contracts.py:validate_state. Transition history lives in events.jsonl (ts/from/to/reason/step_id), not here.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "job_id", "phase", "step_id", "attempt", "created_at", "updated_at", "last_error"],
+  "properties": {
+    "schema_version": { "const": 1 },
+    "job_id": { "type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$" },
+    "phase": {
+      "type": "string",
+      "enum": ["QUEUED", "PLANNING", "WORKING", "EVIDENCE", "REVIEWING", "COMMITTING", "WAITING", "NEEDS_HUMAN", "DONE", "ERROR"]
+    },
+    "step_id": { "type": ["string", "null"], "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$" },
+    "attempt": { "type": "integer", "minimum": 0 },
+    "created_at": { "type": "string", "format": "date-time" },
+    "updated_at": { "type": "string", "format": "date-time" },
+    "last_error": { "type": ["string", "null"] },
+    "wait_until": { "type": ["string", "null"], "format": "date-time" },
+    "human_question": { "type": ["string", "null"] },
+    "runtime": { "type": ["object", "null"], "description": "Bookkeeping owned by core/machine.py (config, counters, current batch, inflight call id, retry_phase, history). Opaque to validate_state beyond being an object." }
+  }
+}

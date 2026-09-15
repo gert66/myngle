@@ -1,0 +1,12 @@
+[Unit]
+Description=Recover runnable mYngle Orchestrator jobs after user manager start
+
+[Service]
+Type=oneshot
+WorkingDirectory=/home/myngle/orchestrator
+ExecStart=/usr/bin/python3 -m core.recover
+Environment=PYTHONUNBUFFERED=1
+Environment=PATH=/home/myngle/bin:/home/myngle/.npm-global/bin:/usr/local/bin:/usr/bin:/bin
+
+[Install]
+WantedBy=default.target

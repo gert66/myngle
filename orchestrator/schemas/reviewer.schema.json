@@ -1,0 +1,45 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "orchestrator/schemas/reviewer.schema.json",
+  "title": "Reviewer verdict",
+  "description": "Output of the independent Claude Reviewer for one batch. Validated by core/contracts.py:validate_reviewer, which applies a consistency guard: a PASS verdict with scope_ok false, tests_ok false, or any BLOCKER finding is degraded to FAIL. The validator always sets verdict_degraded and degrade_reasons on the returned object; values supplied for those keys in the input are ignored. human_question is required for verdict NEEDS_HUMAN.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "step_id", "verdict", "scope_ok", "tests_ok", "summary", "findings"],
+  "properties": {
+    "schema_version": { "const": 1 },
+    "step_id": { "type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$" },
+    "verdict": {
+      "type": "string",
+      "enum": ["PASS", "FAIL", "NEEDS_HUMAN"]
+    },
+    "scope_ok": { "type": "boolean" },
+    "tests_ok": { "type": "boolean" },
+    "summary": { "type": "string", "minLength": 1 },
+    "findings": { "type": "array", "items": { "$ref": "#/$defs/finding" } },
+    "human_question": { "type": ["string", "null"] },
+    "verdict_degraded": { "type": "boolean" },
+    "degrade_reasons": { "type": "array", "items": { "type": "string" } }
+  },
+  "allOf": [
+    {
+      "if": { "properties": { "verdict": { "const": "NEEDS_HUMAN" } } },
+      "then": { "required": ["human_question"], "properties": { "human_question": { "type": "string", "minLength": 1 } } }
+    }
+  ],
+  "$defs": {
+    "finding": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["severity", "message"],
+      "properties": {
+        "severity": {
+          "type": "string",
+          "enum": ["BLOCKER", "MAJOR", "MINOR", "INFO"]
+        },
+        "message": { "type": "string", "minLength": 1 },
+        "file": { "type": ["string", "null"] }
+      }
+    }
+  }
+}

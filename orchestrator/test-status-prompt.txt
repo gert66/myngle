@@ -1,0 +1,1 @@
+Read-only smoke test. Do not modify anything. Reply exactly: status test complete

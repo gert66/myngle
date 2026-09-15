@@ -1,0 +1,25 @@
+# Runtime-only state and credentials
+secrets/
+jobs/
+state/
+locks/
+logs/
+backups/
+intake/
+input/
+
+# VM/account-specific mutable config
+config/claude_accounts.conf*
+config/claude_quota.json*
+config/quota_heartbeat_state.json
+config/ops_push_url.txt
+config/ops_change_stories.json
+config/hermes_advisory.enabled
+
+# Job-specific/generated prompts
+prompts/*.txt
+!prompts/smoke_readonly.txt
+
+# Python artifacts
+__pycache__/
+*.pyc

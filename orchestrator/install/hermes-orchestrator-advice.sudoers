@@ -1,0 +1,3 @@
+# Allow only the root-owned Hermes advisory wrapper to run as isolated user hermes.
+# The wrapper itself validates that its sole argument is an advisory request file.
+myngle ALL=(hermes) NOPASSWD: /usr/local/sbin/hermes-orchestrator-advice *

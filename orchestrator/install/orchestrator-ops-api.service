@@ -1,0 +1,17 @@
+[Unit]
+Description=Myngle Orchestrator Control read-only API
+After=network.target
+
+[Service]
+Type=simple
+User=myngle
+Group=myngle
+WorkingDirectory=/home/myngle/orchestrator
+ExecStart=/usr/bin/python3 -m core.ops_api --host 127.0.0.1 --port 8765
+Restart=on-failure
+RestartSec=3
+Environment=PYTHONUNBUFFERED=1
+Environment=OPS_API_TOKEN_FILE=/home/myngle/orchestrator/secrets/ops_api_token
+
+[Install]
+WantedBy=multi-user.target

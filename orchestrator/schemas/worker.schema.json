@@ -1,0 +1,22 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "orchestrator/schemas/worker.schema.json",
+  "title": "Worker result",
+  "description": "Output of a Claude Worker after executing one bounded batch. Validated by core/contracts.py:validate_worker.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "step_id", "status", "summary"],
+  "properties": {
+    "schema_version": { "const": 1 },
+    "step_id": { "type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$" },
+    "status": {
+      "type": "string",
+      "enum": ["COMPLETED", "PARTIAL", "BLOCKED", "FAILED"]
+    },
+    "summary": { "type": "string", "minLength": 1 },
+    "files_changed": { "type": "array", "items": { "type": "string" } },
+    "tests_run": { "type": "array", "items": { "type": "string" } },
+    "tests_passed": { "type": ["boolean", "null"] },
+    "blockers": { "type": "array", "items": { "type": "string" } }
+  }
+}

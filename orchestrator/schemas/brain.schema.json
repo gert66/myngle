@@ -1,0 +1,52 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "orchestrator/schemas/brain.schema.json",
+  "title": "Brain decision",
+  "description": "Output of the orchestrator Brain: the next bounded step for a job. Validated by core/contracts.py:validate_brain. next_batch is required for NEXT/REPAIR and must be null otherwise; human_question is required for NEEDS_HUMAN and must be null otherwise; wait_seconds (60..3600) is required for WAIT and must be null otherwise.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "decision", "reason"],
+  "properties": {
+    "schema_version": { "const": 1 },
+    "decision": {
+      "type": "string",
+      "enum": ["NEXT", "REPAIR", "REVIEW_AGAIN", "WAIT", "NEEDS_HUMAN", "DONE", "ERROR"]
+    },
+    "reason": { "type": "string", "minLength": 1 },
+    "next_batch": {
+      "oneOf": [ { "type": "null" }, { "$ref": "#/$defs/batch" } ]
+    },
+    "human_question": { "type": ["string", "null"] },
+    "wait_seconds": { "type": ["integer", "null"], "minimum": 60, "maximum": 3600 }
+  },
+  "allOf": [
+    {
+      "if": { "properties": { "decision": { "enum": ["NEXT", "REPAIR"] } } },
+      "then": { "required": ["next_batch"], "properties": { "next_batch": { "type": "object" } } },
+      "else": { "properties": { "next_batch": { "type": "null" } } }
+    },
+    {
+      "if": { "properties": { "decision": { "const": "NEEDS_HUMAN" } } },
+      "then": { "required": ["human_question"], "properties": { "human_question": { "type": "string", "minLength": 1 } } },
+      "else": { "properties": { "human_question": { "type": "null" } } }
+    },
+    {
+      "if": { "properties": { "decision": { "const": "WAIT" } } },
+      "then": { "required": ["wait_seconds"], "properties": { "wait_seconds": { "type": "integer" } } },
+      "else": { "properties": { "wait_seconds": { "type": "null" } } }
+    }
+  ],
+  "$defs": {
+    "batch": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["step_id", "goal", "instructions"],
+      "properties": {
+        "step_id": { "type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$" },
+        "goal": { "type": "string", "minLength": 1 },
+        "instructions": { "type": "string", "minLength": 1 },
+        "acceptance_criteria": { "type": "array", "items": { "type": "string" } }
+      }
+    }
+  }
+}

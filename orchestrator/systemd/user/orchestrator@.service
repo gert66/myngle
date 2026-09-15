@@ -1,0 +1,14 @@
+[Unit]
+Description=mYngle Orchestrator job %i
+
+[Service]
+Type=simple
+WorkingDirectory=/home/myngle/orchestrator
+ExecStart=/usr/bin/python3 -m core.supervisor --job-id %i
+Restart=on-failure
+RestartSec=60
+Environment=PYTHONUNBUFFERED=1
+Environment=PATH=/home/myngle/bin:/home/myngle/.npm-global/bin:/usr/local/bin:/usr/bin:/bin
+
+[Install]
+WantedBy=default.target

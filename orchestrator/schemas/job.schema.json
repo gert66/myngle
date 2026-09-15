@@ -1,0 +1,24 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "orchestrator/schemas/job.schema.json",
+  "title": "Job definition",
+  "description": "A queued orchestrator job: what to do, in which repo/branch, and with which limits. Validated by core/contracts.py:validate_job. mode is lowercase to match bin/run_claude_job.sh.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "job_id", "repo", "branch", "mode", "goal", "created_at"],
+  "properties": {
+    "schema_version": { "const": 1 },
+    "job_id": { "type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$" },
+    "repo": { "type": "string", "minLength": 1 },
+    "branch": { "type": "string", "minLength": 1 },
+    "mode": {
+      "type": "string",
+      "enum": ["read", "write"]
+    },
+    "goal": { "type": "string", "minLength": 1 },
+    "created_at": { "type": "string", "format": "date-time" },
+    "input_files": { "type": "array", "items": { "type": "string" } },
+    "max_steps": { "type": "integer", "minimum": 1 },
+    "max_repairs_per_step": { "type": "integer", "minimum": 0 }
+  }
+}

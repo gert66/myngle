@@ -1,0 +1,1 @@
+Read-only smoke test. Do not modify files, Git state, configuration, or network state. Report only the current Git branch and whether the working tree has tracked modifications. Keep it to two lines.
