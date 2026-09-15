@@ -38,7 +38,7 @@ from core.machine import (
     DEFAULT_MAX_TRANSITIONS, ORCH_ROOT, DryRunRunner, JobLock, LockHeld, Machine, MachineError,
     create_job,
 )
-from core.state import StateError, read_events, utc_now
+from core.state import StateError, load_state, read_events, utc_now
 from core.scheduler import write_job_policy
 
 DEFAULT_JOBS_DIR = ORCH_ROOT / "jobs"

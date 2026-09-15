@@ -4,11 +4,12 @@ import sys
 import tempfile
 import unittest
 from unittest import mock
+from types import SimpleNamespace
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from core.cli import build_parser, main
+from core.cli import _make_machine, build_parser, main
 
 
 class CliHardeningTests(unittest.TestCase):
@@ -89,6 +90,23 @@ class CliHardeningTests(unittest.TestCase):
                           out=io.StringIO(), err=io.StringIO())
             self.assertEqual(rc, 0)
             start.assert_not_called()
+
+    def test_make_machine_without_injected_runner_loads_persisted_state(self):
+        with tempfile.TemporaryDirectory() as td:
+            repo = Path(td) / "repo"; repo.mkdir()
+            jobs = Path(td) / "jobs"
+            rc = main(["--jobs-dir", str(jobs), "submit", "--job-id", "j-run",
+                       "--repo", "gert66/myngle", "--repo-path", str(repo), "--branch", "work",
+                       "--mode", "read", "--goal", "g", "--no-start"],
+                      out=io.StringIO(), err=io.StringIO())
+            self.assertEqual(rc, 0)
+            args = SimpleNamespace(job_id="j-run", jobs_dir=str(jobs), dry_run=False,
+                                   claude_bin=None, timeout=30, codex_bin="codex")
+            with mock.patch("core.cli.build_runner", return_value="runner") as build, \
+                 mock.patch("core.cli.Machine", return_value="machine") as machine:
+                self.assertEqual(_make_machine(args, None, io.StringIO()), "machine")
+            build.assert_called_once()
+            machine.assert_called_once()
 
     def test_set_config_command_parses_tests_timeout_and_caps(self):
         args = build_parser().parse_args([
