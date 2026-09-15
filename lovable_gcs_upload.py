@@ -38,6 +38,7 @@ _COUNTRY_FOLDER_SLUGS = {
     "spain": "spain",
     "luxembourg": "luxembourg",
     "test": "test",
+    "austria": "austria",
 }
 
 
