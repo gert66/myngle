@@ -302,6 +302,9 @@ _RESULT_FLAT_FIELDS = [
     "hq_query_risk_flag", "hq_evidence_domain_match",
     "hq_evidence_domain_mismatch_warning",
     "hq_positive_score_suppressed_for_review", "hq_review_reason",
+    # HQ crawler/fallback audit
+    "hq_crawl_provider_primary", "hq_firecrawl_fallback_used",
+    "hq_firecrawl_fallback_reason",
     "ai_hq_model", "ai_hq_classification", "ai_hq_confidence",
     "ai_parent_company", "ai_parent_hq_country", "ai_parent_hq_city",
     "ai_call_attempted", "ai_call_success", "ai_hq_error",

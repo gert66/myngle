@@ -10,13 +10,16 @@ Implements AI-first HQ detection for a single lead:
 from __future__ import annotations
 
 import json
+import os
 from typing import Optional
+from urllib.parse import urlparse
 
 from lead_output_schema import LeadInput, LeadPrioritizationResult, HQDetectionResult
 from hq_simple_detector import build_simple_hq_query, is_hosted_careers_platform_domain
 from lead_country_config import gl_hl_for_hq_country, std_country
 from lead_hq_ai_interpreter import call_serper_for_hq, interpret_hq_with_ai
 from lead_hq_firecrawl_source import collect_own_domain_hq_pages
+from lead_hq_crawl4ai_source import collect_own_domain_hq_pages_crawl4ai
 from lead_hq_location_summary import build_hq_location_summary
 from lead_non_hq_enrichment import collect_non_hq_enrichment_evidence
 from lead_non_hq_signal_extractor import (
@@ -43,6 +46,35 @@ from lead_legacy_enrichment import run_legacy_enrichment
 from lead_public_source_signal_enrichment import collect_public_source_signal_evidence
 
 _DEFAULT_AI_MODEL = "claude-haiku-4-5-20251001"
+
+
+def _hq_firecrawl_fallback_reasons(
+    hq: HQDetectionResult, *, input_country: str, crawl4ai_used: bool
+) -> list[str]:
+    """Return benchmark-derived reasons to re-run HQ with Firecrawl.
+
+    Keep this deliberately narrow: the Swiss 50-company A/B benchmark showed
+    these rules caught all three harmful Crawl4AI disagreements while only
+    escalating five companies. ``unclear``/Low results are not automatically
+    sent to Firecrawl because Firecrawl was usually equally uncertain there.
+    """
+    reasons: list[str] = []
+    clf = (hq.ai_hq_classification or hq.hq_structure_type or "").strip().lower()
+    confidence = (hq.ai_hq_confidence or hq.hq_confidence or "").strip()
+    input_norm = std_country(input_country or "")
+    result_norm = std_country(hq.ai_parent_hq_country or hq.hq_detected_country or "")
+
+    if clf == "domestic" and input_norm and result_norm and result_norm != input_norm:
+        reasons.append("domestic_parent_country_mismatch")
+
+    evidence_path = urlparse(hq.hq_evidence_url or "").path.lower()
+    if clf == "domestic" and "/contact" in evidence_path:
+        reasons.append("domestic_contact_page_evidence")
+
+    if clf == "foreign_parent" and not crawl4ai_used and confidence != "High":
+        reasons.append("foreign_parent_without_own_site_non_high_confidence")
+
+    return reasons
 
 #: commercial_fit_scoring profile is per-country: "italy_register_icp_only"
 #: was calibrated specifically for the Italian company-register source (size
@@ -84,6 +116,8 @@ def prioritize_single_lead(
     serper_api_key: str = "",
     anthropic_api_key: str = "",
     firecrawl_api_key: str = "",
+    hq_crawl_provider: str = "",
+    crawl4ai_runner: str = "",
     ai_model: str = _DEFAULT_AI_MODEL,
     ai_provider: str = "anthropic",
     openai_api_key: str = "",
@@ -290,24 +324,31 @@ def prioritize_single_lead(
         force_refresh=force_refresh,
     )
 
-    # ── PRIMARY HQ source: crawl the company's own domain via Firecrawl ────────
-    # The single Serper query above is non-deterministic run-to-run, which used
-    # to flip the HQ classification of the exact same company (see
-    # HQ_FIRECRAWL_STABILITY_NOTES.md). The company's own website content is
-    # stable, so we feed it to the classifier as the first, most-trusted source
-    # with the Serper snippets as secondary corroboration. A missing Firecrawl
-    # key, a hosted-platform "domain" (not the company's own site), or any hard
-    # Firecrawl failure falls back cleanly to exactly today's Serper-only
-    # behavior — never an error, mirroring the Deep Dive precedent.
+    # ── PRIMARY HQ source ──────────────────────────────────────────────────
+    # Existing behavior remains the default (Firecrawl). The hybrid mode uses
+    # Crawl4AI first and only escalates selected risky outcomes to Firecrawl.
+    provider = (hq_crawl_provider or os.getenv("HQ_CRAWL_PROVIDER") or "firecrawl").strip().lower()
+    if provider not in {"firecrawl", "crawl4ai", "crawl4ai_with_firecrawl_fallback"}:
+        raise ValueError(f"unsupported hq_crawl_provider: {hq_crawl_provider}")
+
     crawled_pages: list = []
-    if firecrawl_api_key and input_row.domain and not domain_is_hosted_platform:
-        fc = collect_own_domain_hq_pages(
-            input_row.domain, firecrawl_api_key,
-            country=effective_country,
-            cache_index=cache_index, force_refresh=force_refresh,
-        )
-        if fc["used"]:
-            crawled_pages = fc["pages"]
+    crawl4ai_used = False
+    if input_row.domain and not domain_is_hosted_platform:
+        if provider in {"crawl4ai", "crawl4ai_with_firecrawl_fallback"}:
+            c4 = collect_own_domain_hq_pages_crawl4ai(
+                input_row.domain, runner=crawl4ai_runner,
+            )
+            crawl4ai_used = bool(c4["used"])
+            if crawl4ai_used:
+                crawled_pages = c4["pages"]
+        elif firecrawl_api_key:
+            fc = collect_own_domain_hq_pages(
+                input_row.domain, firecrawl_api_key,
+                country=effective_country,
+                cache_index=cache_index, force_refresh=force_refresh,
+            )
+            if fc["used"]:
+                crawled_pages = fc["pages"]
 
     # Use the effective (defaulted) country for interpretation without mutating
     # the caller's input row.
@@ -317,20 +358,46 @@ def prioritize_single_lead(
         input_country=effective_country,
     )
 
-    hq: HQDetectionResult = interpret_hq_with_ai(
-        lead_input=interp_input,
-        domain_root=domain_root,
-        query=query,
-        serper_payload=serper_payload,
-        anthropic_api_key=anthropic_api_key,
-        model=ai_model,
-        ai_provider=ai_provider,
-        openai_api_key=openai_api_key,
-        deepseek_api_key=deepseek_api_key,
-        crawled_pages=crawled_pages,
-        lusha_description=input_row.lusha_description,
-        lusha_specialties=input_row.lusha_specialties,
+    def _interpret(pages: list) -> HQDetectionResult:
+        return interpret_hq_with_ai(
+            lead_input=interp_input,
+            domain_root=domain_root,
+            query=query,
+            serper_payload=serper_payload,
+            anthropic_api_key=anthropic_api_key,
+            model=ai_model,
+            ai_provider=ai_provider,
+            openai_api_key=openai_api_key,
+            deepseek_api_key=deepseek_api_key,
+            crawled_pages=pages,
+            lusha_description=input_row.lusha_description,
+            lusha_specialties=input_row.lusha_specialties,
+        )
+
+    hq: HQDetectionResult = _interpret(crawled_pages)
+    fallback_reasons: list[str] = []
+    fallback_used = False
+
+    if provider == "crawl4ai_with_firecrawl_fallback":
+        fallback_reasons = _hq_firecrawl_fallback_reasons(
+            hq, input_country=effective_country, crawl4ai_used=crawl4ai_used,
+        )
+        if (fallback_reasons and firecrawl_api_key and input_row.domain
+                and not domain_is_hosted_platform):
+            fc = collect_own_domain_hq_pages(
+                input_row.domain, firecrawl_api_key,
+                country=effective_country,
+                cache_index=cache_index, force_refresh=force_refresh,
+            )
+            if fc["used"]:
+                hq = _interpret(fc["pages"])
+                fallback_used = True
+
+    hq.hq_crawl_provider_primary = (
+        "crawl4ai" if provider.startswith("crawl4ai") else "firecrawl"
     )
+    hq.hq_firecrawl_fallback_used = "Yes" if fallback_used else "No"
+    hq.hq_firecrawl_fallback_reason = ";".join(fallback_reasons) or None
 
     # ── Step 2: non-HQ evidence collection (evidence only, no scores) ─────────
     # Runs strictly after HQ detection and only when explicitly enabled.
@@ -531,6 +598,10 @@ def prioritize_single_lead(
         hq_evidence_domain_mismatch_warning=hq.hq_evidence_domain_mismatch_warning,
         hq_positive_score_suppressed_for_review=hq.hq_positive_score_suppressed_for_review,
         hq_review_reason=hq.hq_review_reason,
+        # HQ crawler/fallback audit
+        hq_crawl_provider_primary=hq.hq_crawl_provider_primary,
+        hq_firecrawl_fallback_used=hq.hq_firecrawl_fallback_used,
+        hq_firecrawl_fallback_reason=hq.hq_firecrawl_fallback_reason,
         # AI audit
         ai_hq_model=hq.ai_hq_model,
         ai_hq_classification=hq.ai_hq_classification,

@@ -86,6 +86,10 @@ class HQDetectionResult:
     hq_evidence_domain_mismatch_warning: Optional[str] = None   # "Yes" | "No"
     hq_positive_score_suppressed_for_review: Optional[str] = None  # "Yes" | "No"
     hq_review_reason: Optional[str] = None
+    # HQ crawler/fallback audit
+    hq_crawl_provider_primary: Optional[str] = None
+    hq_firecrawl_fallback_used: Optional[str] = None  # "Yes" | "No"
+    hq_firecrawl_fallback_reason: Optional[str] = None
 
 
 @dataclass
@@ -186,6 +190,10 @@ class LeadPrioritizationResult:
     hq_evidence_domain_mismatch_warning: Optional[str] = None
     hq_positive_score_suppressed_for_review: Optional[str] = None
     hq_review_reason: Optional[str] = None
+    # HQ crawler/fallback audit
+    hq_crawl_provider_primary: Optional[str] = None
+    hq_firecrawl_fallback_used: Optional[str] = None  # "Yes" | "No"
+    hq_firecrawl_fallback_reason: Optional[str] = None
     # AI audit fields
     ai_hq_model: Optional[str] = None
     ai_hq_classification: Optional[str] = None

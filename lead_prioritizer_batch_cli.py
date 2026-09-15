@@ -100,6 +100,18 @@ def build_arg_parser() -> argparse.ArgumentParser:
                    help="Output .xlsx path. Default: timestamped file next to input.")
     p.add_argument("--secrets-file", default=None,
                    help="Optional TOML fallback for API keys.")
+    p.add_argument(
+        "--hq-crawl-provider",
+        choices=["firecrawl", "crawl4ai", "crawl4ai_with_firecrawl_fallback"],
+        default=os.getenv("HQ_CRAWL_PROVIDER", "firecrawl"),
+        help=("HQ own-site crawler strategy. Default: firecrawl. "
+              "Use crawl4ai_with_firecrawl_fallback for Crawl4AI first with "
+              "benchmark-derived Firecrawl escalation rules."),
+    )
+    p.add_argument(
+        "--crawl4ai-runner", default=os.getenv("CRAWL4AI_RUNNER", ""),
+        help="Path to Crawl4AI runner script; required for Crawl4AI modes.",
+    )
     p.add_argument("--include-raw-ai-json", action="store_true",
                    help="Include ai_hq_raw_json in the Enriched Leads sheet.")
     p.add_argument("--stop-on-error", action="store_true",
@@ -290,6 +302,15 @@ def config_from_args(args: argparse.Namespace) -> BatchRunConfig:
 def main(argv: Optional[list[str]] = None) -> int:
     args = build_arg_parser().parse_args(argv)
 
+    if args.hq_crawl_provider != "firecrawl":
+        if not args.crawl4ai_runner or not Path(args.crawl4ai_runner).is_file():
+            print("ERROR: --crawl4ai-runner must point to an existing file for Crawl4AI modes.",
+                  file=sys.stderr)
+            return 2
+    os.environ["HQ_CRAWL_PROVIDER"] = args.hq_crawl_provider
+    if args.crawl4ai_runner:
+        os.environ["CRAWL4AI_RUNNER"] = args.crawl4ai_runner
+
     # ── API keys (never printed as values) ────────────────────────────────────
     keys = load_api_keys(secrets_file=args.secrets_file)
     serper = keys.get(SERPER_KEY_NAME, "")
@@ -346,6 +367,7 @@ def main(argv: Optional[list[str]] = None) -> int:
     print(f"Sheet         : {sheet}")
     print(f"Row count     : {len(df)}")
     print(f"Run mode      : {args.mode}")
+    print(f"HQ crawler    : {args.hq_crawl_provider}")
     print(f"Foreign-HQ gate: {gate_status}")
     print(f"Selected rows : {selected_count}")
     print(f"Output path   : {output_path}")
