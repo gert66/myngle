@@ -6,7 +6,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from unittest import mock
 
-from core.ops_status import build_snapshot, collect_handoffs, project_run
+from core.ops_status import build_snapshot, collect_approvals, collect_handoffs, project_run
 
 
 def iso(dt):
@@ -99,6 +99,27 @@ class OpsStatusTests(unittest.TestCase):
             self.assertEqual(rows[0]["status"], "HANDOFF")
             self.assertEqual(rows[0]["age_seconds"], 30)
 
+    def test_collect_approvals_projects_only_safe_fields(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            write_json(root / "FB-1.json", {
+                "proposal": {
+                    "proposal_id": "FB-1", "reporter": "Carla", "company": "Acme",
+                    "reported": "Cannot save outcome", "diagnosis": "Mapping mismatch",
+                    "prepared_fix": "Align mapping", "resolution_note": "Fixed mapping",
+                    "reporter_reply": "Thanks for spotting this.", "risk": "GREEN", "version": 2,
+                    "changed_files": ["secret/internal/path.py"],
+                },
+                "fingerprint": "hidden-hash", "status": "pending",
+                "created_at": "2026-09-16T08:00:00Z", "updated_at": "2026-09-16T08:05:00Z",
+            })
+            rows = collect_approvals(root)
+            self.assertEqual(len(rows), 1)
+            self.assertEqual(rows[0]["proposal_id"], "FB-1")
+            self.assertEqual(rows[0]["status"], "pending")
+            self.assertNotIn("fingerprint", rows[0])
+            self.assertNotIn("changed_files", rows[0])
+
     @mock.patch("core.ops_status.collect_vm_trends", return_value={})
     @mock.patch("core.ops_status.collect_vm_health", return_value={})
     @mock.patch("core.ops_status.collect_usage_trends", return_value={})
@@ -123,7 +144,7 @@ class OpsStatusTests(unittest.TestCase):
                 "source": "chatgpt", "status": "RECEIVED", "received_at": iso(now - timedelta(seconds=9)),
                 "job_id": None,
             })
-            snap = build_snapshot(jobs_dir=jobs, quota_file=root / "quota.json", intake_dir=intake, now=now)
+            snap = build_snapshot(jobs_dir=jobs, quota_file=root / "quota.json", intake_dir=intake, approvals_dir=root / "approvals", now=now)
             self.assertEqual(snap["summary"]["running"], 1)
             self.assertEqual(snap["summary"]["handoff"], 1)
             self.assertEqual(snap["summary"]["stale"], 0)

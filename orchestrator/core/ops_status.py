@@ -14,6 +14,7 @@ JOBS_DIR = ORCH_ROOT / "jobs"
 QUOTA_FILE = ORCH_ROOT / "config" / "claude_quota.json"
 STORY_FILE = ORCH_ROOT / "config" / "ops_change_stories.json"
 INTAKE_DIR = ORCH_ROOT / "intake"
+APPROVALS_DIR = ORCH_ROOT / "approvals"
 HEARTBEAT_STALE_SECONDS = 75
 ACTIVE_PHASES = {"QUEUED", "PLANNING", "WORKING", "EVIDENCE", "REVIEWING", "REPAIRING"}
 ATTENTION_PHASES = {"NEEDS_HUMAN", "ERROR", "FAILED", "RATE_LIMITED", "BLOCKED"}
@@ -95,6 +96,36 @@ def _heartbeat(job_dir: Path, now, phase_active):
         "process_alive": alive,
         "stale": stale,
     }
+
+
+def collect_approvals(approvals_dir=APPROVALS_DIR):
+    approvals_dir = Path(approvals_dir)
+    if not approvals_dir.is_dir():
+        return []
+    rows = []
+    for path in approvals_dir.glob("*.json"):
+        item = _load_json(path, {}) or {}
+        proposal = item.get("proposal") or {}
+        status = item.get("status") or "unknown"
+        if status not in {"pending", "discussion_requested", "approved", "rejected"}:
+            continue
+        rows.append({
+            "proposal_id": proposal.get("proposal_id") or path.stem,
+            "status": status,
+            "reporter": _safe_text(proposal.get("reporter"), 120),
+            "company": _safe_text(proposal.get("company"), 180),
+            "reported": _safe_text(proposal.get("reported"), 700),
+            "diagnosis": _safe_text(proposal.get("diagnosis"), 700),
+            "prepared_fix": _safe_text(proposal.get("prepared_fix"), 700),
+            "resolution_note": _safe_text(proposal.get("resolution_note"), 700),
+            "reporter_reply": _safe_text(proposal.get("reporter_reply"), 700),
+            "risk": proposal.get("risk"),
+            "version": proposal.get("version"),
+            "created_at": item.get("created_at"),
+            "updated_at": item.get("updated_at"),
+            "note": _safe_text(item.get("note"), 700),
+        })
+    return sorted(rows, key=lambda x: x.get("updated_at") or x.get("created_at") or "", reverse=True)
 
 
 def collect_handoffs(intake_dir=INTAKE_DIR, jobs_dir=JOBS_DIR, now=None):
@@ -234,7 +265,7 @@ def collect_capacity(quota_file=QUOTA_FILE):
     }
 
 
-def build_snapshot(jobs_dir=JOBS_DIR, quota_file=QUOTA_FILE, now=None, intake_dir=INTAKE_DIR):
+def build_snapshot(jobs_dir=JOBS_DIR, quota_file=QUOTA_FILE, now=None, intake_dir=INTAKE_DIR, approvals_dir=APPROVALS_DIR):
     now = now or datetime.now(timezone.utc)
     runs = collect_runs(jobs_dir=jobs_dir, now=now)
     live = [r for r in runs if r.get("phase_active")]
@@ -244,6 +275,7 @@ def build_snapshot(jobs_dir=JOBS_DIR, quota_file=QUOTA_FILE, now=None, intake_di
     done.sort(key=lambda x: x.get("updated_at") or "", reverse=True)
     recent = done[:5]
     handoffs = collect_handoffs(intake_dir=intake_dir, jobs_dir=jobs_dir, now=now)
+    approvals = collect_approvals(approvals_dir=approvals_dir)
     running = sum(1 for r in live if r.get("active"))
     stale = sum(1 for r in live if r.get("stale"))
     return {
@@ -254,9 +286,11 @@ def build_snapshot(jobs_dir=JOBS_DIR, quota_file=QUOTA_FILE, now=None, intake_di
             "stale": stale,
             "attention": len(attention),
             "completed": len(done),
+            "approvals_pending": sum(1 for a in approvals if a.get("status") in {"pending", "discussion_requested"}),
             "total": len(runs),
         },
         "handoffs": handoffs,
+        "approvals": approvals,
         "live": live,
         "attention": attention,
         "recent": recent,
