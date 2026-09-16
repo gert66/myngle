@@ -6,7 +6,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from unittest import mock
 
-from core.ops_status import build_snapshot, collect_approvals, collect_handoffs, project_run
+from core.ops_status import build_snapshot, collect_approvals, collect_control_health, collect_handoffs, project_run
 
 
 def iso(dt):
@@ -119,6 +119,24 @@ class OpsStatusTests(unittest.TestCase):
             self.assertEqual(rows[0]["status"], "pending")
             self.assertEqual(rows[0]["fingerprint"], "hidden-hash")
             self.assertNotIn("changed_files", rows[0])
+
+    def test_control_health_reports_fresh_approval_poller(self):
+        now = datetime(2026, 9, 16, 8, 0, tzinfo=timezone.utc)
+        with tempfile.TemporaryDirectory() as td:
+            hb = Path(td) / "poller.heartbeat"
+            hb.touch()
+            stamp = (now - timedelta(seconds=25)).timestamp()
+            os.utime(hb, (stamp, stamp))
+            health = collect_control_health(now=now, approval_heartbeat=hb)
+            poller = health["approval_command_poller"]
+            self.assertTrue(poller["healthy"])
+            self.assertEqual(poller["heartbeat_age_seconds"], 25)
+
+    def test_control_health_marks_missing_approval_poller_unhealthy(self):
+        now = datetime(2026, 9, 16, 8, 0, tzinfo=timezone.utc)
+        with tempfile.TemporaryDirectory() as td:
+            health = collect_control_health(now=now, approval_heartbeat=Path(td) / "missing")
+            self.assertFalse(health["approval_command_poller"]["healthy"])
 
     @mock.patch("core.ops_status.collect_vm_trends", return_value={})
     @mock.patch("core.ops_status.collect_vm_health", return_value={})

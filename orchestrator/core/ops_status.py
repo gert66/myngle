@@ -15,7 +15,9 @@ QUOTA_FILE = ORCH_ROOT / "config" / "claude_quota.json"
 STORY_FILE = ORCH_ROOT / "config" / "ops_change_stories.json"
 INTAKE_DIR = ORCH_ROOT / "intake"
 APPROVALS_DIR = ORCH_ROOT / "approvals"
+APPROVAL_POLLER_HEARTBEAT = ORCH_ROOT / "state" / "approval-command-poller.heartbeat"
 HEARTBEAT_STALE_SECONDS = 75
+APPROVAL_POLLER_STALE_SECONDS = 150
 ACTIVE_PHASES = {"QUEUED", "PLANNING", "WORKING", "EVIDENCE", "REVIEWING", "REPAIRING"}
 ATTENTION_PHASES = {"NEEDS_HUMAN", "ERROR", "FAILED", "RATE_LIMITED", "BLOCKED"}
 
@@ -97,6 +99,29 @@ def _heartbeat(job_dir: Path, now, phase_active):
         "stale": stale,
     }
 
+
+
+def collect_control_health(now=None, approval_heartbeat=APPROVAL_POLLER_HEARTBEAT):
+    now = now or datetime.now(timezone.utc)
+    path = Path(approval_heartbeat)
+    try:
+        ts = datetime.fromtimestamp(path.stat().st_mtime, tz=timezone.utc)
+        age = max(0, round((now - ts).total_seconds()))
+        return {
+            "approval_command_poller": {
+                "heartbeat_at": ts.isoformat(timespec="seconds").replace("+00:00", "Z"),
+                "heartbeat_age_seconds": age,
+                "healthy": age <= APPROVAL_POLLER_STALE_SECONDS,
+            }
+        }
+    except OSError:
+        return {
+            "approval_command_poller": {
+                "heartbeat_at": None,
+                "heartbeat_age_seconds": None,
+                "healthy": False,
+            }
+        }
 
 def collect_approvals(approvals_dir=APPROVALS_DIR):
     approvals_dir = Path(approvals_dir)
@@ -302,6 +327,7 @@ def build_snapshot(jobs_dir=JOBS_DIR, quota_file=QUOTA_FILE, now=None, intake_di
         "usage_trends": collect_usage_trends(jobs_dir, now=now),
         "vm_health": collect_vm_health(now=now),
         "vm_trends": collect_vm_trends(now=now),
+        "control_health": collect_control_health(now=now),
     }
 
 
