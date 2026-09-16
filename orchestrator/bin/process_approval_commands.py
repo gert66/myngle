@@ -29,6 +29,7 @@ def _call(url, token, *, method="GET", payload=None, timeout=15):
     req = request.Request(url, data=body, method=method, headers={
         "Accept": "application/json",
         "Content-Type": "application/json",
+        "User-Agent": "Sales-Cockpit-Control-Center/1.0",
         "x-orchestrator-token": token,
     })
     with request.urlopen(req, timeout=timeout) as resp:
