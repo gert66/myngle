@@ -199,3 +199,17 @@ class OpsStatusTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+def test_collect_feedback_cases_projects_safe_owner_fields(tmp_path):
+    from core.ops_status import collect_feedback_cases
+    (tmp_path / "abc12345.json").write_text(json.dumps({
+        "feedback_id": "abc12345", "status": "researching", "kind": "feature_request",
+        "reporter_email": "caller@example.com", "company": "Acme", "country": "DE",
+        "comment": "Could we add this?", "job_id": "feedback-abc12345", "job_phase": "WORKER",
+        "question": None, "investigation_summary": None, "updated_at": "2026-09-16T12:00:00Z"
+    }), encoding="utf-8")
+    rows = collect_feedback_cases(tmp_path)
+    assert rows[0]["feedback_id"] == "abc12345"
+    assert rows[0]["status"] == "researching"
+    assert "attachment_path" not in rows[0]

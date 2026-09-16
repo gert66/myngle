@@ -15,6 +15,7 @@ QUOTA_FILE = ORCH_ROOT / "config" / "claude_quota.json"
 STORY_FILE = ORCH_ROOT / "config" / "ops_change_stories.json"
 INTAKE_DIR = ORCH_ROOT / "intake"
 APPROVALS_DIR = ORCH_ROOT / "approvals"
+FEEDBACK_CASES_DIR = ORCH_ROOT / "feedback_cases"
 GEMINI_LEDGER_FILE = ORCH_ROOT / "logs" / "gemini_usage.jsonl"
 APPROVAL_POLLER_HEARTBEAT = ORCH_ROOT / "state" / "approval-command-poller.heartbeat"
 HEARTBEAT_STALE_SECONDS = 75
@@ -186,6 +187,33 @@ def collect_approvals(approvals_dir=APPROVALS_DIR):
     return sorted(rows, key=lambda x: x.get("updated_at") or x.get("created_at") or "", reverse=True)
 
 
+def collect_feedback_cases(cases_dir=FEEDBACK_CASES_DIR):
+    cases_dir = Path(cases_dir)
+    if not cases_dir.is_dir():
+        return []
+    rows = []
+    for path in cases_dir.glob("*.json"):
+        item = _load_json(path, {}) or {}
+        rows.append({
+            "feedback_id": item.get("feedback_id") or path.stem,
+            "status": item.get("status") or "unknown",
+            "kind": item.get("kind"),
+            "risk": item.get("risk"),
+            "reporter_email": _safe_text(item.get("reporter_email"), 160),
+            "company": _safe_text(item.get("company"), 180),
+            "country": _safe_text(item.get("country"), 80),
+            "comment": _safe_text(item.get("comment"), 700),
+            "job_id": item.get("job_id"),
+            "job_phase": item.get("job_phase"),
+            "proposal_id": item.get("proposal_id"),
+            "question": _safe_text(item.get("question"), 900),
+            "investigation_summary": _safe_text(item.get("investigation_summary"), 1200),
+            "received_at": item.get("received_at"),
+            "updated_at": item.get("updated_at"),
+        })
+    return sorted(rows, key=lambda x: x.get("updated_at") or x.get("received_at") or "", reverse=True)
+
+
 def collect_handoffs(intake_dir=INTAKE_DIR, jobs_dir=JOBS_DIR, now=None):
     now = now or datetime.now(timezone.utc)
     intake_dir = Path(intake_dir)
@@ -334,6 +362,7 @@ def build_snapshot(jobs_dir=JOBS_DIR, quota_file=QUOTA_FILE, now=None, intake_di
     recent = done[:5]
     handoffs = collect_handoffs(intake_dir=intake_dir, jobs_dir=jobs_dir, now=now)
     approvals = collect_approvals(approvals_dir=approvals_dir)
+    feedback_cases = collect_feedback_cases()
     running = sum(1 for r in live if r.get("active"))
     stale = sum(1 for r in live if r.get("stale"))
     return {
@@ -345,10 +374,12 @@ def build_snapshot(jobs_dir=JOBS_DIR, quota_file=QUOTA_FILE, now=None, intake_di
             "attention": len(attention),
             "completed": len(done),
             "approvals_pending": sum(1 for a in approvals if a.get("status") in {"pending", "discussion_requested"}),
+            "feedback_open": sum(1 for f in feedback_cases if f.get("status") not in {"informational", "resolved"}),
             "total": len(runs),
         },
         "handoffs": handoffs,
         "approvals": approvals,
+        "feedback_cases": feedback_cases,
         "live": live,
         "attention": attention,
         "recent": recent,
