@@ -1,0 +1,487 @@
+"""Pure intake/normalization layer for self-service Sales Cockpit lead lists.
+
+This module does no enrichment, no HubSpot writes, and no Cockpit publication.
+It turns an arbitrary XLSX/CSV contact/company list into two deterministic
+worksets: normalized source rows and unique companies ready for protection
+checks and enrichment.
+"""
+from __future__ import annotations
+
+from dataclasses import dataclass
+from pathlib import Path
+import hashlib
+import re
+import unicodedata
+from typing import Any
+
+import pandas as pd
+
+SUPPORTED_SUFFIXES = {".xlsx", ".csv"}
+MAX_HEADER_SCAN_ROWS = 15
+
+
+def _norm_header(value: Any) -> str:
+    text = unicodedata.normalize("NFKD", str(value or ""))
+    text = text.encode("ascii", "ignore").decode().lower().strip()
+    return re.sub(r"[^a-z0-9]+", " ", text).strip()
+
+ALIASES: dict[str, tuple[str, ...]] = {
+    "company_name": (
+        "company name", "company", "account name", "account", "organization",
+        "organisation", "business name", "employer", "company_name",
+    ),
+    "domain": (
+        "domain", "company domain", "website", "website url", "company website",
+        "company url", "homepage", "web site", "url",
+    ),
+    "country": ("country", "company country", "country name", "hq country"),
+    "city": ("city", "company city", "location city", "town"),
+    "vat": ("vat", "vat number", "vat id", "tax id", "company vat"),
+    "contact_name": ("contact name", "full name", "person name", "contact", "name"),
+    "first_name": ("first name", "firstname", "given name"),
+    "last_name": ("last name", "lastname", "surname", "family name"),
+    "work_email": ("work email", "direct email", "business email", "email address", "contact email"),
+    "additional_email_1": ("additional email 1", "alternate email 1"),
+    "additional_email_2": ("additional email 2", "alternate email 2"),
+    "direct_phone": ("direct phone", "direct phone number", "phone", "phone number"),
+    "mobile": ("mobile", "mobile phone", "cell", "cell phone", "mobile 1"),
+    "mobile_2": ("mobile 2", "second mobile", "alternate mobile"),
+    "phone_1": ("phone 1",),
+    "phone_1_type": ("phone 1 type",),
+    "phone_2": ("phone 2",),
+    "phone_2_type": ("phone 2 type",),
+    "job_title": ("job title", "title", "position", "role"),
+    "contact_linkedin_url": (
+        "linkedin profile", "linkedin profile url", "contact linkedin",
+        "contact linkedin url", "linkedin url", "linkedin",
+    ),
+    "company_linkedin_url": ("company linkedin url", "company linkedin"),
+    "employee_range": ("company number of employees", "employee range", "employees"),
+    "company_revenue": ("company revenue", "revenue"),
+    "main_industry": ("company main industry", "main industry", "industry"),
+    "sub_industry": ("company sub industry", "sub industry", "sub-industry"),
+    "source_user": ("user", "owner", "uploaded by"),
+    "source_date": ("date", "created at", "export date"),
+}
+
+_ALIAS_LOOKUP = {
+    _norm_header(alias): canonical
+    for canonical, aliases in ALIASES.items()
+    for alias in aliases
+}
+
+@dataclass(frozen=True)
+class LoadedTable:
+    dataframe: pd.DataFrame
+    source_sheet: str
+    header_row: int
+    file_sha256: str
+
+
+@dataclass(frozen=True)
+class IntakeResult:
+    mapping: dict[str, str]
+    normalized_rows: pd.DataFrame
+    companies: pd.DataFrame
+    report: dict[str, Any]
+    source_sheet: str
+    header_row: int
+    file_sha256: str
+
+
+def _clean(value: Any) -> str:
+    if value is None:
+        return ""
+    try:
+        if pd.isna(value):
+            return ""
+    except (TypeError, ValueError):
+        pass
+    return str(value).strip()
+
+
+def normalize_domain(value: Any) -> str:
+    text = _clean(value).lower()
+    text = re.sub(r"^[a-z][a-z0-9+.\-]*://", "", text)
+    text = text.split("/")[0].split("?")[0].split("#")[0].split(":")[0]
+    text = text.removeprefix("www.").strip(".")
+    if not text or " " in text or "." not in text:
+        return ""
+    return text
+
+_LEGAL_SUFFIX_RE = re.compile(
+    r"\b(bv|nv|gmbh|ag|sa|sas|sarl|spa|srl|ltd|limited|llc|inc|corp|corporation|"
+    r"plc|pty|pte|kg|kgaa|oy|ab|as|holding|holdings|group|company|co)\b\.?,?",
+    re.IGNORECASE,
+)
+
+
+def normalize_company_name(value: Any) -> str:
+    text = unicodedata.normalize("NFKD", _clean(value)).encode("ascii", "ignore").decode()
+    text = text.lower().replace("&", " and ")
+    text = _LEGAL_SUFFIX_RE.sub(" ", text)
+    return re.sub(r"[^a-z0-9]+", " ", text).strip()
+
+
+def normalize_vat(value: Any) -> str:
+    return re.sub(r"[^A-Z0-9]", "", _clean(value).upper())
+
+
+def normalize_country(value: Any) -> str:
+    text = unicodedata.normalize("NFKD", _clean(value)).encode("ascii", "ignore").decode()
+    return re.sub(r"[^a-z0-9]+", "", text.lower())
+
+
+_GENERIC_EMAIL_DOMAINS = {
+    "gmail.com", "hotmail.com", "outlook.com", "yahoo.com", "icloud.com",
+    "live.com", "protonmail.com", "proton.me", "mail.com", "gmx.com", "gmx.ch",
+}
+
+
+_EMAIL_RE = re.compile(r"^[^\s@]+@[^\s@]+\.[^\s@]+$")
+
+
+def normalize_work_email(value: Any) -> str:
+    """Keep only a field that is itself an email address, not free-text call notes."""
+    email = _clean(value).lower()
+    return email if _EMAIL_RE.fullmatch(email) else ""
+
+
+def work_email_domain_hint(value: Any) -> str:
+    """Return a non-generic email domain as a resolver hint, never as proof."""
+    email = normalize_work_email(value)
+    if not email:
+        return ""
+    domain = normalize_domain(email.rsplit("@", 1)[1])
+    return "" if domain in _GENERIC_EMAIL_DOMAINS else domain
+
+
+def _first_valid_email(row: pd.Series, mapping: dict[str, str]) -> str:
+    for key in ("work_email", "additional_email_1", "additional_email_2"):
+        email = normalize_work_email(_column_value(row, mapping, key))
+        if email:
+            return email
+    return ""
+
+
+def _phones(row: pd.Series, mapping: dict[str, str]) -> tuple[str, str, str]:
+    """Return direct_phone, mobile, mobile_2 from explicit or Lusha Phone 1/2 fields."""
+    direct = _column_value(row, mapping, "direct_phone")
+    mobile = _column_value(row, mapping, "mobile")
+    mobile_2 = _column_value(row, mapping, "mobile_2")
+    extras: list[tuple[str, str]] = []
+    for n in (1, 2):
+        value = _column_value(row, mapping, f"phone_{n}")
+        kind = _column_value(row, mapping, f"phone_{n}_type").lower()
+        if value:
+            extras.append((value, kind))
+    for value, kind in extras:
+        is_mobile = "mobile" in kind or "cell" in kind
+        if is_mobile:
+            if not mobile:
+                mobile = value
+            elif not mobile_2 and value != mobile:
+                mobile_2 = value
+        elif not direct:
+            direct = value
+    return direct, mobile, mobile_2
+
+
+def _header_score(values: list[Any]) -> tuple[int, int]:
+    seen: set[str] = set()
+    exact = 0
+    for value in values:
+        canonical = _ALIAS_LOOKUP.get(_norm_header(value))
+        if canonical and canonical not in seen:
+            seen.add(canonical)
+            exact += 1
+    company_bonus = 3 if "company_name" in seen else 0
+    return exact + company_bonus, exact
+
+
+def _sha256(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+def _best_header_row(preview: pd.DataFrame) -> tuple[int, tuple[int, int]]:
+    best_row = 0
+    best_score = (-1, -1)
+    for row_idx in range(min(len(preview), MAX_HEADER_SCAN_ROWS)):
+        score = _header_score(preview.iloc[row_idx].tolist())
+        if score > best_score:
+            best_row, best_score = row_idx, score
+    return best_row, best_score
+
+
+def _read_csv(path: Path) -> tuple[pd.DataFrame, str, int]:
+    last_error: Exception | None = None
+    for encoding in ("utf-8-sig", "utf-8", "cp1252", "latin1"):
+        try:
+            preview = pd.read_csv(
+                path, sep=None, engine="python", header=None, nrows=MAX_HEADER_SCAN_ROWS,
+                encoding=encoding, dtype=str,
+            )
+            header_row, _ = _best_header_row(preview)
+            df = pd.read_csv(
+                path, sep=None, engine="python", header=header_row,
+                encoding=encoding, dtype=str,
+            )
+            return df, "CSV", header_row
+        except Exception as exc:  # pragma: no cover - exercised by encoding fallbacks
+            last_error = exc
+    raise ValueError(f"Could not read CSV: {last_error}")
+
+
+def _read_xlsx(path: Path) -> tuple[pd.DataFrame, str, int]:
+    book = pd.ExcelFile(path)
+    best: tuple[tuple[int, int, int], str, int] | None = None
+    for sheet in book.sheet_names:
+        preview = pd.read_excel(path, sheet_name=sheet, header=None, nrows=MAX_HEADER_SCAN_ROWS, dtype=str)
+        header_row, score = _best_header_row(preview)
+        populated = int(preview.notna().sum().sum())
+        candidate = ((score[0], score[1], populated), sheet, header_row)
+        if best is None or candidate[0] > best[0]:
+            best = candidate
+    if best is None:
+        raise ValueError("Workbook contains no readable sheets.")
+    _, sheet, header_row = best
+    return pd.read_excel(path, sheet_name=sheet, header=header_row, dtype=str), sheet, header_row
+
+def load_table(path: str | Path) -> LoadedTable:
+    source = Path(path)
+    if not source.is_file():
+        raise FileNotFoundError(source)
+    suffix = source.suffix.lower()
+    if suffix not in SUPPORTED_SUFFIXES:
+        raise ValueError(f"Unsupported lead-list format {suffix!r}; expected XLSX or CSV.")
+    if suffix == ".csv":
+        df, sheet, header_row = _read_csv(source)
+    else:
+        df, sheet, header_row = _read_xlsx(source)
+    df = df.dropna(axis=0, how="all").dropna(axis=1, how="all").reset_index(drop=True)
+    df.columns = [str(c).strip() for c in df.columns]
+    return LoadedTable(df, sheet, header_row, _sha256(source))
+
+
+_COLUMN_PRIORITIES: dict[str, tuple[str, ...]] = {
+    "company_name": ("company name", "account name", "business name", "company", "account"),
+    "domain": ("company domain", "company website", "website url", "website", "domain"),
+    "country": ("company country", "hq country", "country"),
+    "city": ("company city", "location city", "city", "town"),
+    # Luana-style sheets have a real Work email plus a separate call-status column
+    # literally named Email.  Never let that status column win this mapping.
+    "work_email": ("work email", "direct email", "business email", "email address", "contact email"),
+    "contact_linkedin_url": ("linkedin profile", "linkedin profile url", "contact linkedin url", "linkedin url", "linkedin"),
+    "company_linkedin_url": ("company linkedin url", "company linkedin"),
+}
+
+
+def detect_mapping(df: pd.DataFrame) -> dict[str, str]:
+    """Resolve canonical fields with company-specific headers taking precedence.
+
+    Lusha exports contain both contact ``Country``/``City`` and company
+    ``Company Country``/``Company City``.  Company identity must use the latter.
+    """
+    by_normalized = {_norm_header(column): column for column in df.columns}
+    mapping: dict[str, str] = {}
+    for canonical, aliases in ALIASES.items():
+        priorities = _COLUMN_PRIORITIES.get(canonical, aliases)
+        for alias in priorities:
+            column = by_normalized.get(_norm_header(alias))
+            if column is not None:
+                mapping[canonical] = column
+                break
+    return mapping
+
+
+def _column_value(row: pd.Series, mapping: dict[str, str], key: str) -> str:
+    column = mapping.get(key)
+    return _clean(row.get(column)) if column else ""
+
+
+def _contact_name(row: pd.Series, mapping: dict[str, str]) -> str:
+    direct = _column_value(row, mapping, "contact_name")
+    if direct:
+        return direct
+    return " ".join(
+        part for part in (
+            _column_value(row, mapping, "first_name"),
+            _column_value(row, mapping, "last_name"),
+        ) if part
+    ).strip()
+
+def _company_key(company_name: str, domain: str, vat: str, country: str) -> tuple[str, str]:
+    norm_domain = normalize_domain(domain)
+    if norm_domain:
+        return f"domain:{norm_domain}", "domain"
+    norm_vat = normalize_vat(vat)
+    if norm_vat:
+        return f"vat:{norm_vat}", "vat"
+    norm_name = normalize_company_name(company_name)
+    norm_country = normalize_country(country)
+    if norm_name:
+        return f"name:{norm_name}|country:{norm_country}", "name_country"
+    return "", "unresolved"
+
+
+def normalize_rows(
+    df: pd.DataFrame,
+    mapping: dict[str, str],
+    *,
+    default_country: str = "",
+) -> pd.DataFrame:
+    rows: list[dict[str, Any]] = []
+    for idx, source_row in df.iterrows():
+        company_name = _column_value(source_row, mapping, "company_name")
+        domain = normalize_domain(_column_value(source_row, mapping, "domain"))
+        country = _column_value(source_row, mapping, "country") or default_country
+        vat = normalize_vat(_column_value(source_row, mapping, "vat"))
+        key, basis = _company_key(company_name, domain, vat, country)
+        work_email = _first_valid_email(source_row, mapping)
+        direct_phone, mobile, mobile_2 = _phones(source_row, mapping)
+        status = "valid" if key and (company_name or domain or vat) else "review_required"
+        reason = "" if status == "valid" else "missing company identity"
+        rows.append({
+            "source_row_number": int(idx) + 1,
+            "company_name": company_name,
+            "normalized_company_name": normalize_company_name(company_name),
+            "domain": domain,
+            "country": country,
+            "city": _column_value(source_row, mapping, "city"),
+            "vat": vat,
+            "company_key": key,
+            "company_identity_basis": basis,
+            "contact_name": _contact_name(source_row, mapping),
+            "work_email": work_email,
+            "email_domain_hint": work_email_domain_hint(work_email),
+            "direct_phone": direct_phone,
+            "mobile": mobile,
+            "mobile_2": mobile_2,
+            "job_title": _column_value(source_row, mapping, "job_title"),
+            "contact_linkedin_url": _column_value(source_row, mapping, "contact_linkedin_url"),
+            "company_linkedin_url": _column_value(source_row, mapping, "company_linkedin_url"),
+            "employee_range": _column_value(source_row, mapping, "employee_range"),
+            "company_revenue": _column_value(source_row, mapping, "company_revenue"),
+            "main_industry": _column_value(source_row, mapping, "main_industry"),
+            "sub_industry": _column_value(source_row, mapping, "sub_industry"),
+            "source_user": _column_value(source_row, mapping, "source_user"),
+            "source_date": _column_value(source_row, mapping, "source_date"),
+            "intake_status": status,
+            "intake_reason": reason,
+        })
+    return pd.DataFrame(rows)
+
+def _filled_count(row: pd.Series, fields: tuple[str, ...]) -> int:
+    return sum(1 for field in fields if _clean(row.get(field)))
+
+
+def build_company_workset(rows: pd.DataFrame) -> pd.DataFrame:
+    if rows.empty:
+        return pd.DataFrame()
+    valid = rows[(rows["intake_status"] == "valid") & (rows["company_key"] != "")].copy()
+    if valid.empty:
+        return pd.DataFrame()
+
+    company_fields = (
+        "company_name", "domain", "country", "city", "vat", "company_linkedin_url",
+        "employee_range", "company_revenue", "main_industry", "sub_industry",
+    )
+    valid["_completeness"] = valid.apply(lambda r: _filled_count(r, company_fields), axis=1)
+    valid["_order"] = range(len(valid))
+
+    companies: list[dict[str, Any]] = []
+    for company_key, group in valid.groupby("company_key", sort=False):
+        winner = group.sort_values(
+            ["_completeness", "_order"], ascending=[False, True], kind="stable"
+        ).iloc[0]
+        contacts = group["contact_name"].fillna("").astype(str).str.strip()
+        emails = group["work_email"].fillna("").astype(str).str.strip()
+        email_domain_hints = sorted({
+            str(v).strip().lower() for v in group["email_domain_hint"].tolist() if str(v).strip()
+        })
+        source_rows = [int(v) for v in group["source_row_number"].tolist()]
+        companies.append({
+            "company_key": company_key,
+            "company_identity_basis": winner["company_identity_basis"],
+            "company_name": winner["company_name"],
+            "domain": winner["domain"],
+            "country": winner["country"],
+            "city": winner["city"],
+            "vat": winner["vat"],
+            "company_linkedin_url": winner.get("company_linkedin_url", ""),
+            "employee_range": winner.get("employee_range", ""),
+            "company_revenue": winner.get("company_revenue", ""),
+            "main_industry": winner.get("main_industry", ""),
+            "sub_industry": winner.get("sub_industry", ""),
+            "contact_count": int(sum(bool(v) for v in contacts)),
+            "contact_email_count": int(sum(bool(v) for v in emails)),
+            "source_row_count": int(len(group)),
+            "source_row_numbers": ",".join(str(v) for v in source_rows),
+            "email_domain_hint": email_domain_hints[0] if len(email_domain_hints) == 1 else "",
+            "email_domain_hint_conflict": len(email_domain_hints) > 1,
+            "needs_domain_resolution": not bool(winner["domain"]),
+            "protection_status": "pending",
+            "protection_reason": "",
+            "enrichment_status": "not_started",
+        })
+    return pd.DataFrame(companies)
+
+def analyze_lead_list(
+    path: str | Path,
+    *,
+    default_country: str = "",
+) -> IntakeResult:
+    loaded = load_table(path)
+    mapping = detect_mapping(loaded.dataframe)
+    normalized = normalize_rows(loaded.dataframe, mapping, default_country=default_country)
+    companies = build_company_workset(normalized)
+
+    row_count = int(len(normalized))
+    valid_rows = int((normalized["intake_status"] == "valid").sum()) if row_count else 0
+    review_rows = row_count - valid_rows
+    unique_companies = int(len(companies))
+    duplicate_company_rows = max(0, valid_rows - unique_companies)
+    domain_missing = (
+        int(companies["needs_domain_resolution"].sum()) if unique_companies else 0
+    )
+    email_hint_count = (
+        int((companies["email_domain_hint"].fillna("") != "").sum()) if unique_companies else 0
+    )
+    email_hint_conflicts = (
+        int(companies["email_domain_hint_conflict"].sum()) if unique_companies else 0
+    )
+    warnings: list[str] = []
+    identity_columns = {"company_name", "domain", "vat"} & set(mapping)
+    if not identity_columns:
+        warnings.append("No company-name, domain, or VAT column was detected; automatic processing must stop.")
+    if "domain" not in mapping:
+        warnings.append("No domain/website column was detected; domain resolution will be required.")
+
+    report = {
+        "source_rows": row_count,
+        "valid_rows": valid_rows,
+        "review_rows": review_rows,
+        "unique_companies": unique_companies,
+        "duplicate_company_rows": duplicate_company_rows,
+        "companies_needing_domain_resolution": domain_missing,
+        # Short UI alias used by Control Center cards. Keep the explicit key too.
+        "companies_needing_domain": domain_missing,
+        "companies_with_email_domain_hint": email_hint_count,
+        "email_domain_hint_conflicts": email_hint_conflicts,
+        "contact_rows": int((normalized["contact_name"].fillna("") != "").sum()) if row_count else 0,
+        "detected_columns": sorted(mapping.keys()),
+        "warnings": warnings,
+        "ready_for_protection_checks": bool(unique_companies and identity_columns),
+    }
+    return IntakeResult(
+        mapping=mapping,
+        normalized_rows=normalized,
+        companies=companies,
+        report=report,
+        source_sheet=loaded.source_sheet,
+        header_row=loaded.header_row,
+        file_sha256=loaded.file_sha256,
+    )
