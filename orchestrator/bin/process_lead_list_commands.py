@@ -92,6 +92,8 @@ def process_command(command):
     download_url = str(command.get("file_url") or "")
     filename = str(command.get("original_filename") or "lead-list.xlsx")
     country = str(command.get("country") or "").strip()
+    assigned_caller = str(command.get("cold_caller") or "").strip()
+    list_name = str(command.get("name") or Path(filename).stem).strip()
     if not list_id or not download_url:
         raise ValueError("command is missing list_id/file_url")
 
@@ -102,23 +104,29 @@ def process_command(command):
     with tempfile.TemporaryDirectory(prefix="lead-list-intake-") as td:
         local_path = Path(td) / ("input" + suffix)
         _download(download_url, local_path)
-        result = analyze_lead_list(local_path, default_country=country)
+        result = analyze_lead_list(
+            local_path,
+            default_country=country,
+            assigned_caller=assigned_caller,
+            list_name=list_name,
+        )
 
     report = dict(result.report)
     report.update({
         "source_sheet": result.source_sheet,
         "header_row": result.header_row,
         "file_sha256": result.file_sha256,
+        # UI compatibility aliases.
+        "companies_needing_domain": report.get("companies_needing_domain_resolution", 0),
+        "duplicate_company_rows": report.get("company_rows_collapsed", 0),
     })
-    list_status = (
-        "review_required"
-        if report["review_rows"] or not report["ready_for_protection_checks"]
-        else "checking"
-    )
+    decision = report.get("decision")
+    list_status = "checking" if decision == "READY" else "review_required"
     note = (
-        f"Intake: {report['source_rows']} rows -> {report['unique_companies']} companies; "
-        f"{report['companies_needing_domain_resolution']} need domain resolution; "
-        f"{report['review_rows']} row(s) need review."
+        f"Intake {report.get('quality_status', 'UNKNOWN')}: {report['source_rows']} rows -> "
+        f"{report['unique_companies']} companies; {report.get('blocked_rows', 0)} blocked; "
+        f"{report['companies_needing_domain_resolution']} need domain resolution. "
+        f"Decision: {decision}."
     )
     return {
         "list_id": list_id,

@@ -37,10 +37,14 @@ ALIASES: dict[str, tuple[str, ...]] = {
     "country": ("country", "company country", "country name", "hq country"),
     "city": ("city", "company city", "location city", "town"),
     "vat": ("vat", "vat number", "vat id", "tax id", "company vat"),
-    "contact_name": ("contact name", "full name", "person name", "contact", "name"),
+    "contact_name": (
+        "contact name", "full name", "person name", "contact", "name",
+    ),
     "first_name": ("first name", "firstname", "given name"),
     "last_name": ("last name", "lastname", "surname", "family name"),
-    "work_email": ("work email", "direct email", "business email", "email address", "contact email"),
+    "work_email": (
+        "work email", "direct email", "business email", "email address", "contact email",
+    ),
     "additional_email_1": ("additional email 1", "alternate email 1"),
     "additional_email_2": ("additional email 2", "alternate email 2"),
     "direct_phone": ("direct phone", "direct phone number", "phone", "phone number"),
@@ -55,13 +59,21 @@ ALIASES: dict[str, tuple[str, ...]] = {
         "linkedin profile", "linkedin profile url", "contact linkedin",
         "contact linkedin url", "linkedin url", "linkedin",
     ),
-    "company_linkedin_url": ("company linkedin url", "company linkedin"),
-    "employee_range": ("company number of employees", "employee range", "employees"),
+    "company_linkedin_url": ("company linkedin url", "company linkedin", "company linkedin profile"),
+    "company_website": ("company website", "website url", "website"),
+    "employee_range": ("company number of employees", "employee range", "employees", "company size"),
+    "industry": ("company main industry", "industry", "main industry"),
     "company_revenue": ("company revenue", "revenue"),
-    "main_industry": ("company main industry", "main industry", "industry"),
     "sub_industry": ("company sub industry", "sub industry", "sub-industry"),
-    "source_user": ("user", "owner", "uploaded by"),
-    "source_date": ("date", "created at", "export date"),
+    "company_description": ("company description", "description"),
+    "source_assignee_hint": ("user", "caller", "owner", "assigned caller", "assigned to"),
+    "called_1": ("called", "called 1", "call 1"),
+    "reached_1": ("reached", "reached 1"),
+    "interest_status": ("i/ni", "i ni", "interest status", "interest"),
+    "call_notes": ("notes", "call notes", "notes 1"),
+    "email_sent": ("email sent",),
+    "called_2": ("called 2", "call 2"),
+    "reached_2": ("reached 2",),
 }
 
 _ALIAS_LOOKUP = {
@@ -165,7 +177,7 @@ def _first_valid_email(row: pd.Series, mapping: dict[str, str]) -> str:
 
 
 def _phones(row: pd.Series, mapping: dict[str, str]) -> tuple[str, str, str]:
-    """Return direct_phone, mobile, mobile_2 from explicit or Lusha Phone 1/2 fields."""
+    """Return direct, mobile and second mobile from explicit or Lusha Phone 1/2 fields."""
     direct = _column_value(row, mapping, "direct_phone")
     mobile = _column_value(row, mapping, "mobile")
     mobile_2 = _column_value(row, mapping, "mobile_2")
@@ -175,15 +187,23 @@ def _phones(row: pd.Series, mapping: dict[str, str]) -> tuple[str, str, str]:
         kind = _column_value(row, mapping, f"phone_{n}_type").lower()
         if value:
             extras.append((value, kind))
-    for value, kind in extras:
+    for idx, (value, kind) in enumerate(extras, start=1):
         is_mobile = "mobile" in kind or "cell" in kind
         if is_mobile:
             if not mobile:
                 mobile = value
             elif not mobile_2 and value != mobile:
                 mobile_2 = value
-        elif not direct:
+        elif kind:
+            if not direct:
+                direct = value
+        elif idx == 1 and not direct:
+            # Historical Lusha exports use Phone 1 as direct and Phone 2 as mobile.
             direct = value
+        elif not mobile:
+            mobile = value
+        elif not mobile_2 and value != mobile:
+            mobile_2 = value
     return direct, mobile, mobile_2
 
 
@@ -271,11 +291,8 @@ _COLUMN_PRIORITIES: dict[str, tuple[str, ...]] = {
     "domain": ("company domain", "company website", "website url", "website", "domain"),
     "country": ("company country", "hq country", "country"),
     "city": ("company city", "location city", "city", "town"),
-    # Luana-style sheets have a real Work email plus a separate call-status column
-    # literally named Email.  Never let that status column win this mapping.
     "work_email": ("work email", "direct email", "business email", "email address", "contact email"),
-    "contact_linkedin_url": ("linkedin profile", "linkedin profile url", "contact linkedin url", "linkedin url", "linkedin"),
-    "company_linkedin_url": ("company linkedin url", "company linkedin"),
+    "company_website": ("company website", "website url", "website"),
 }
 
 
@@ -294,6 +311,16 @@ def detect_mapping(df: pd.DataFrame) -> dict[str, str]:
             if column is not None:
                 mapping[canonical] = column
                 break
+
+    # A bare "Email" column is ambiguous. If a more specific work-email
+    # column exists, keep that as the address and treat a separate yes/no
+    # Email column as the historical "email sent" flag.
+    bare_email = by_normalized.get("email")
+    if bare_email and mapping.get("work_email") != bare_email:
+        values = df[bare_email].dropna().astype(str).str.strip().str.lower()
+        values = values[values != ""]
+        if len(values) and float(values.isin({"yes", "no", "y", "n", "true", "false"}).mean()) >= 0.8:
+            mapping["email_sent"] = bare_email
     return mapping
 
 
@@ -327,6 +354,96 @@ def _company_key(company_name: str, domain: str, vat: str, country: str) -> tupl
     return "", "unresolved"
 
 
+
+_PHONE_DIGITS_RE = re.compile(r"\d")
+_CONFIDENCE_RE = re.compile(r"^(?:a\+?|b\+?|c\+?|high|medium|low|verified|unverified|unknown|\d{1,3}%?)$", re.I)
+_YES_NO = {"yes", "no", "y", "n", "true", "false"}
+
+
+def _plausible_phone(value: Any) -> bool:
+    text = _clean(value)
+    return len(_PHONE_DIGITS_RE.findall(text)) >= 7
+
+
+def _legacy_notes_from_source_row(row: pd.Series, mapping: dict[str, str]) -> str:
+    """Preserve free text found in email-shaped source columns as legacy notes.
+
+    This is deliberately lossless for messy Lusha exports. It does not attempt
+    to interpret the note as a call outcome; it merely prevents the text from
+    being discarded while keeping it out of normalized email fields.
+    """
+    email_sent_col = mapping.get("email_sent")
+    notes: list[str] = []
+    for column in row.index:
+        header = _norm_header(column)
+        if "email" not in header:
+            continue
+        value = _clean(row.get(column))
+        if not value:
+            continue
+        if email_sent_col == column and value.lower() in _YES_NO:
+            continue
+        if _EMAIL_RE.fullmatch(value.lower()):
+            continue
+        if "confidence" in header and _CONFIDENCE_RE.fullmatch(value):
+            continue
+        notes.append(f"{column}: {value}")
+    return " | ".join(notes)
+
+
+def semantic_column_issues(df: pd.DataFrame, mapping: dict[str, str]) -> list[dict[str, Any]]:
+    """Find columns whose contents do not match their declared semantics."""
+    issues: list[dict[str, Any]] = []
+    email_sent_col = mapping.get("email_sent")
+    for column in df.columns:
+        header = _norm_header(column)
+        if "email" not in header:
+            continue
+        values = df[column].dropna().astype(str).str.strip()
+        values = values[values != ""]
+        if values.empty:
+            continue
+        if email_sent_col == column and float(values.str.lower().isin(_YES_NO).mean()) >= 0.8:
+            continue
+        if "confidence" in header:
+            good = values.map(lambda v: bool(_CONFIDENCE_RE.fullmatch(v)) or bool(_EMAIL_RE.fullmatch(v.lower())))
+        else:
+            good = values.map(lambda v: bool(_EMAIL_RE.fullmatch(v.lower())))
+        bad = values[~good]
+        if bad.empty:
+            continue
+        ratio = float(len(bad) / len(values))
+        # A stray malformed address is repairable. Repeated free text in an
+        # email-shaped field indicates a structurally contaminated source.
+        severity = "review" if len(bad) >= 3 or ratio >= 0.10 else "warning"
+        issues.append({
+            "code": "email_field_contamination",
+            "severity": severity,
+            "column": str(column),
+            "affected_values": int(len(bad)),
+            "nonempty_values": int(len(values)),
+            "affected_ratio": round(ratio, 4),
+            "examples": [str(v)[:160] for v in bad.head(5).tolist()],
+            "message": f"{column} contains non-email/free-text values.",
+        })
+
+    domain_col = mapping.get("domain")
+    if domain_col:
+        values = df[domain_col].dropna().astype(str).str.strip()
+        values = values[values != ""]
+        bad = values[values.map(lambda v: not bool(normalize_domain(v)))]
+        if len(bad):
+            issues.append({
+                "code": "domain_field_contamination",
+                "severity": "review" if len(bad) >= 3 else "warning",
+                "column": domain_col,
+                "affected_values": int(len(bad)),
+                "nonempty_values": int(len(values)),
+                "examples": [str(v)[:160] for v in bad.head(5).tolist()],
+                "message": f"{domain_col} contains values that are not usable domains/URLs.",
+            })
+    return issues
+
 def normalize_rows(
     df: pd.DataFrame,
     mapping: dict[str, str],
@@ -341,9 +458,30 @@ def normalize_rows(
         vat = normalize_vat(_column_value(source_row, mapping, "vat"))
         key, basis = _company_key(company_name, domain, vat, country)
         work_email = _first_valid_email(source_row, mapping)
+        contact_name = _contact_name(source_row, mapping)
         direct_phone, mobile, mobile_2 = _phones(source_row, mapping)
-        status = "valid" if key and (company_name or domain or vat) else "review_required"
-        reason = "" if status == "valid" else "missing company identity"
+        linkedin = _column_value(source_row, mapping, "contact_linkedin_url")
+        has_contact_identifier = bool(
+            contact_name or work_email or linkedin or
+            _plausible_phone(direct_phone) or _plausible_phone(mobile) or _plausible_phone(mobile_2)
+        )
+        reasons: list[str] = []
+        if not key:
+            reasons.append("missing company identifier")
+        if not country:
+            reasons.append("missing country / sales market")
+        if not has_contact_identifier:
+            reasons.append("missing contact identifier")
+        if not company_name and (domain or vat):
+            reasons.append("company name requires resolution")
+        blocking = {"missing company identifier", "missing country / sales market", "missing contact identifier"}
+        if any(reason in blocking for reason in reasons):
+            status = "blocked"
+        elif reasons:
+            status = "review_required"
+        else:
+            status = "valid"
+        reason = "; ".join(reasons)
         rows.append({
             "source_row_number": int(idx) + 1,
             "company_name": company_name,
@@ -354,21 +492,31 @@ def normalize_rows(
             "vat": vat,
             "company_key": key,
             "company_identity_basis": basis,
-            "contact_name": _contact_name(source_row, mapping),
+            "contact_name": contact_name,
             "work_email": work_email,
             "email_domain_hint": work_email_domain_hint(work_email),
             "direct_phone": direct_phone,
             "mobile": mobile,
             "mobile_2": mobile_2,
             "job_title": _column_value(source_row, mapping, "job_title"),
-            "contact_linkedin_url": _column_value(source_row, mapping, "contact_linkedin_url"),
+            "contact_linkedin_url": linkedin,
+            "company_website": _column_value(source_row, mapping, "company_website"),
             "company_linkedin_url": _column_value(source_row, mapping, "company_linkedin_url"),
             "employee_range": _column_value(source_row, mapping, "employee_range"),
+            "industry": _column_value(source_row, mapping, "industry"),
+            "company_description": _column_value(source_row, mapping, "company_description"),
             "company_revenue": _column_value(source_row, mapping, "company_revenue"),
-            "main_industry": _column_value(source_row, mapping, "main_industry"),
             "sub_industry": _column_value(source_row, mapping, "sub_industry"),
-            "source_user": _column_value(source_row, mapping, "source_user"),
-            "source_date": _column_value(source_row, mapping, "source_date"),
+            "source_assignee_hint": _column_value(source_row, mapping, "source_assignee_hint"),
+            "called_1": _column_value(source_row, mapping, "called_1"),
+            "reached_1": _column_value(source_row, mapping, "reached_1"),
+            "interest_status": _column_value(source_row, mapping, "interest_status"),
+            "call_notes": _column_value(source_row, mapping, "call_notes"),
+            "email_sent": _column_value(source_row, mapping, "email_sent"),
+            "called_2": _column_value(source_row, mapping, "called_2"),
+            "reached_2": _column_value(source_row, mapping, "reached_2"),
+            "legacy_call_notes": _legacy_notes_from_source_row(source_row, mapping),
+            "has_contact_identifier": has_contact_identifier,
             "intake_status": status,
             "intake_reason": reason,
         })
@@ -381,14 +529,11 @@ def _filled_count(row: pd.Series, fields: tuple[str, ...]) -> int:
 def build_company_workset(rows: pd.DataFrame) -> pd.DataFrame:
     if rows.empty:
         return pd.DataFrame()
-    valid = rows[(rows["intake_status"] == "valid") & (rows["company_key"] != "")].copy()
+    valid = rows[(rows["intake_status"] != "blocked") & (rows["company_key"] != "")].copy()
     if valid.empty:
         return pd.DataFrame()
 
-    company_fields = (
-        "company_name", "domain", "country", "city", "vat", "company_linkedin_url",
-        "employee_range", "company_revenue", "main_industry", "sub_industry",
-    )
+    company_fields = ("company_name", "domain", "country", "city", "vat")
     valid["_completeness"] = valid.apply(lambda r: _filled_count(r, company_fields), axis=1)
     valid["_order"] = range(len(valid))
 
@@ -411,12 +556,7 @@ def build_company_workset(rows: pd.DataFrame) -> pd.DataFrame:
             "country": winner["country"],
             "city": winner["city"],
             "vat": winner["vat"],
-            "company_linkedin_url": winner.get("company_linkedin_url", ""),
-            "employee_range": winner.get("employee_range", ""),
-            "company_revenue": winner.get("company_revenue", ""),
-            "main_industry": winner.get("main_industry", ""),
-            "sub_industry": winner.get("sub_industry", ""),
-            "contact_count": int(sum(bool(v) for v in contacts)),
+            "contact_count": int(group["has_contact_identifier"].fillna(False).astype(bool).sum()),
             "contact_email_count": int(sum(bool(v) for v in emails)),
             "source_row_count": int(len(group)),
             "source_row_numbers": ",".join(str(v) for v in source_rows),
@@ -426,55 +566,155 @@ def build_company_workset(rows: pd.DataFrame) -> pd.DataFrame:
             "protection_status": "pending",
             "protection_reason": "",
             "enrichment_status": "not_started",
+            "company_website": winner.get("company_website", ""),
+            "company_linkedin_url": winner.get("company_linkedin_url", ""),
+            "employee_range": winner.get("employee_range", ""),
+            "industry": winner.get("industry", ""),
+            "company_description": winner.get("company_description", ""),
+            "company_revenue": winner.get("company_revenue", ""),
+            "sub_industry": winner.get("sub_industry", ""),
         })
     return pd.DataFrame(companies)
+
+def _exact_contact_duplicate_count(rows: pd.DataFrame) -> int:
+    if rows.empty:
+        return 0
+    keys: list[str] = []
+    for _, row in rows.iterrows():
+        company = _clean(row.get("company_key"))
+        if not company:
+            continue
+        email = normalize_work_email(row.get("work_email"))
+        linkedin = _clean(row.get("contact_linkedin_url")).lower().rstrip("/")
+        phone = re.sub(r"\D", "", _clean(row.get("mobile")) or _clean(row.get("direct_phone")))
+        name = normalize_company_name(row.get("contact_name"))
+        identity = email or linkedin or phone or name
+        if identity:
+            keys.append(f"{company}|{identity}")
+    return max(0, len(keys) - len(set(keys)))
+
 
 def analyze_lead_list(
     path: str | Path,
     *,
     default_country: str = "",
+    assigned_caller: str = "",
+    list_name: str = "",
 ) -> IntakeResult:
+    """Analyze a lead list without enrichment or publication.
+
+    `assigned_caller` is an upload decision and is authoritative. Any caller/user
+    column in the source is preserved only as an audit hint and never controls
+    ownership.
+    """
     loaded = load_table(path)
     mapping = detect_mapping(loaded.dataframe)
     normalized = normalize_rows(loaded.dataframe, mapping, default_country=default_country)
     companies = build_company_workset(normalized)
+    semantic_issues = semantic_column_issues(loaded.dataframe, mapping)
 
     row_count = int(len(normalized))
     valid_rows = int((normalized["intake_status"] == "valid").sum()) if row_count else 0
-    review_rows = row_count - valid_rows
+    review_rows = int((normalized["intake_status"] == "review_required").sum()) if row_count else 0
+    blocked_rows = int((normalized["intake_status"] == "blocked").sum()) if row_count else 0
     unique_companies = int(len(companies))
-    duplicate_company_rows = max(0, valid_rows - unique_companies)
-    domain_missing = (
-        int(companies["needs_domain_resolution"].sum()) if unique_companies else 0
-    )
-    email_hint_count = (
-        int((companies["email_domain_hint"].fillna("") != "").sum()) if unique_companies else 0
-    )
-    email_hint_conflicts = (
-        int(companies["email_domain_hint_conflict"].sum()) if unique_companies else 0
-    )
+    domain_missing = int(companies["needs_domain_resolution"].sum()) if unique_companies else 0
+    email_hint_count = int((companies["email_domain_hint"].fillna("") != "").sum()) if unique_companies else 0
+    email_hint_conflicts = int(companies["email_domain_hint_conflict"].sum()) if unique_companies else 0
+    exact_contact_duplicates = _exact_contact_duplicate_count(normalized)
+    legacy_note_rows = int((normalized["legacy_call_notes"].fillna("") != "").sum()) if row_count else 0
+
+    hard_stops: list[str] = []
+    review_reasons: list[str] = []
+    auto_repairs: list[str] = []
     warnings: list[str] = []
-    identity_columns = {"company_name", "domain", "vat"} & set(mapping)
-    if not identity_columns:
-        warnings.append("No company-name, domain, or VAT column was detected; automatic processing must stop.")
+
+    if row_count == 0:
+        hard_stops.append("The file contains no lead rows.")
+    if not _clean(assigned_caller):
+        hard_stops.append("Caller must be selected during upload; source caller fields are not trusted.")
+    if "company_name" not in mapping:
+        hard_stops.append("No company-name column was detected.")
+    if "country" not in mapping and not _clean(default_country):
+        hard_stops.append("No country/market column or upload-level default market was supplied.")
+
+    blocked_ratio = (blocked_rows / row_count) if row_count else 1.0
+    if blocked_rows:
+        msg = f"{blocked_rows} row(s) fail a minimum identity/market requirement."
+        if blocked_rows >= 10 or blocked_ratio > 0.05:
+            hard_stops.append(msg)
+        else:
+            review_reasons.append(msg + " These rows can be quarantined or corrected.")
+    if review_rows:
+        auto_repairs.append(f"{review_rows} row(s) need company-name or identity repair before publication.")
+
+    review_semantic = [i for i in semantic_issues if i["severity"] == "review"]
+    warning_semantic = [i for i in semantic_issues if i["severity"] == "warning"]
+    if review_semantic:
+        columns = ", ".join(str(i["column"]) for i in review_semantic)
+        review_reasons.append(f"Semantic contamination detected in source column(s): {columns}.")
+    if warning_semantic:
+        warnings.append(f"Minor malformed values found in {len(warning_semantic)} source field(s).")
+
     if "domain" not in mapping:
-        warnings.append("No domain/website column was detected; domain resolution will be required.")
+        auto_repairs.append("No domain column detected; domains will be inferred from work email or resolved during enrichment.")
+    elif domain_missing:
+        auto_repairs.append(f"{domain_missing} company/companies still need domain resolution.")
+    if exact_contact_duplicates:
+        auto_repairs.append(f"{exact_contact_duplicates} exact duplicate contact row(s) can be deduplicated automatically.")
+
+    source_assignees = sorted({
+        _clean(v) for v in normalized.get("source_assignee_hint", pd.Series(dtype=str)).tolist() if _clean(v)
+    })
+    caller = _clean(assigned_caller)
+    mismatched_source_assignees = [v for v in source_assignees if caller and v.casefold() != caller.casefold()]
+    if mismatched_source_assignees:
+        warnings.append(
+            "Source assignee field differs from upload assignment and will be ignored: "
+            + ", ".join(mismatched_source_assignees[:5])
+        )
+
+    if hard_stops:
+        quality_status = "RED"
+        decision = "REJECTED"
+    elif review_reasons:
+        quality_status = "AMBER"
+        decision = "REVIEW_REQUIRED"
+    elif review_rows or warning_semantic or exact_contact_duplicates:
+        quality_status = "AMBER"
+        decision = "AUTO_REPAIR"
+    else:
+        quality_status = "GREEN"
+        decision = "READY"
 
     report = {
+        "quality_status": quality_status,
+        "decision": decision,
+        "list_name": _clean(list_name) or Path(path).stem,
+        "assigned_caller": caller,
         "source_rows": row_count,
         "valid_rows": valid_rows,
         "review_rows": review_rows,
+        "blocked_rows": blocked_rows,
         "unique_companies": unique_companies,
-        "duplicate_company_rows": duplicate_company_rows,
+        "company_rows_collapsed": max(0, (valid_rows + review_rows) - unique_companies),
+        "exact_duplicate_contacts": exact_contact_duplicates,
         "companies_needing_domain_resolution": domain_missing,
-        # Short UI alias used by Control Center cards. Keep the explicit key too.
-        "companies_needing_domain": domain_missing,
         "companies_with_email_domain_hint": email_hint_count,
         "email_domain_hint_conflicts": email_hint_conflicts,
-        "contact_rows": int((normalized["contact_name"].fillna("") != "").sum()) if row_count else 0,
+        "contact_rows": int(normalized["has_contact_identifier"].fillna(False).astype(bool).sum()) if row_count else 0,
+        "legacy_note_rows_preserved": legacy_note_rows,
         "detected_columns": sorted(mapping.keys()),
+        "semantic_issues": semantic_issues,
+        "hard_stops": hard_stops,
+        "review_reasons": review_reasons,
+        "auto_repairs": auto_repairs,
         "warnings": warnings,
-        "ready_for_protection_checks": bool(unique_companies and identity_columns),
+        "source_assignee_values": source_assignees,
+        "source_assignee_ignored": bool(source_assignees),
+        "ready_for_protection_checks": quality_status == "GREEN" and bool(unique_companies),
+        "ready_for_enrichment": quality_status == "GREEN" and bool(unique_companies),
+        "publish_eligible": quality_status == "GREEN" and bool(unique_companies),
     }
     return IntakeResult(
         mapping=mapping,

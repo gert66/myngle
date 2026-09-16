@@ -38,8 +38,12 @@ class LeadListCommandTests(unittest.TestCase):
             "file_url": "https://signed.example/list.csv",
             "original_filename": "luana.csv",
             "country": "Switzerland",
+            "cold_caller": "Luana",
+            "name": "Luana Switzerland",
         })
         self.assertEqual(outcome["status"], "checking")
+        self.assertEqual(outcome["intake_report"]["quality_status"], "GREEN")
+        self.assertEqual(outcome["intake_report"]["decision"], "READY")
         self.assertEqual(outcome["intake_report"]["source_rows"], 2)
         self.assertEqual(outcome["intake_report"]["unique_companies"], 1)
         self.assertEqual(outcome["intake_report"]["companies_with_email_domain_hint"], 1)
