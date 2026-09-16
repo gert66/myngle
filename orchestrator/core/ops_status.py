@@ -2,14 +2,19 @@
 from __future__ import annotations
 
 import json
+import os
 import re
 from datetime import datetime, timezone
 from pathlib import Path
+
+from core.ops_metrics import collect_usage_analytics, collect_usage_meta, collect_usage_trends, collect_vm_health, collect_vm_trends
 
 ORCH_ROOT = Path(__file__).resolve().parents[1]
 JOBS_DIR = ORCH_ROOT / "jobs"
 QUOTA_FILE = ORCH_ROOT / "config" / "claude_quota.json"
 STORY_FILE = ORCH_ROOT / "config" / "ops_change_stories.json"
+INTAKE_DIR = ORCH_ROOT / "intake"
+HEARTBEAT_STALE_SECONDS = 75
 ACTIVE_PHASES = {"QUEUED", "PLANNING", "WORKING", "EVIDENCE", "REVIEWING", "REPAIRING"}
 ATTENTION_PHASES = {"NEEDS_HUMAN", "ERROR", "FAILED", "RATE_LIMITED", "BLOCKED"}
 
@@ -65,6 +70,59 @@ def _duration_seconds(created_at, updated_at, now):
     return max(0, round((end - start).total_seconds()))
 
 
+def _pid_alive(pid):
+    try:
+        pid = int(pid)
+        if pid <= 0:
+            return False
+        os.kill(pid, 0)
+        return True
+    except (OSError, TypeError, ValueError):
+        return False
+
+
+def _heartbeat(job_dir: Path, now, phase_active):
+    data = _load_json(job_dir / "heartbeat.json", {}) or {}
+    ts = _parse_ts(data.get("ts"))
+    age = max(0, round((now - ts).total_seconds())) if ts else None
+    pid = data.get("pid")
+    alive = _pid_alive(pid) if pid is not None else None
+    stale = bool(phase_active and (ts is None or age > HEARTBEAT_STALE_SECONDS or alive is False))
+    return {
+        "heartbeat_at": data.get("ts"),
+        "heartbeat_age_seconds": age,
+        "heartbeat_pid": pid,
+        "process_alive": alive,
+        "stale": stale,
+    }
+
+
+def collect_handoffs(intake_dir=INTAKE_DIR, jobs_dir=JOBS_DIR, now=None):
+    now = now or datetime.now(timezone.utc)
+    intake_dir = Path(intake_dir)
+    jobs_dir = Path(jobs_dir)
+    if not intake_dir.is_dir():
+        return []
+    rows = []
+    for path in intake_dir.glob("*.json"):
+        item = _load_json(path, {}) or {}
+        if item.get("status") != "RECEIVED":
+            continue
+        received = _parse_ts(item.get("received_at"))
+        age = max(0, round((now - received).total_seconds())) if received else None
+        rows.append({
+            "receipt_id": item.get("receipt_id") or path.stem,
+            "title": _safe_text(item.get("title"), 180),
+            "request": _safe_text(item.get("request"), 700),
+            "source": item.get("source"),
+            "status": "HANDOFF",
+            "received_at": item.get("received_at"),
+            "age_seconds": age,
+            "job_id": item.get("job_id"),
+        })
+    return sorted(rows, key=lambda x: x.get("received_at") or "", reverse=True)
+
+
 def project_run(job_dir: Path, now=None, stories=None):
     now = now or datetime.now(timezone.utc)
     job = _load_json(job_dir / "job.json", {}) or {}
@@ -82,9 +140,18 @@ def project_run(job_dir: Path, now=None, stories=None):
     last_event = events[-1] if events else {}
     story = (stories or {}).get(job.get("job_id") or job_dir.name) or {}
 
+    phase_active = phase in ACTIVE_PHASES
+    hb = _heartbeat(job_dir, now, phase_active)
     attention_reason = None
     if phase in ATTENTION_PHASES:
         attention_reason = state.get("human_question") or state.get("last_error") or last_event.get("reason")
+    elif hb["stale"]:
+        if hb["heartbeat_age_seconds"] is None:
+            attention_reason = "Active phase has no supervisor heartbeat."
+        elif hb["process_alive"] is False:
+            attention_reason = f"Supervisor heartbeat process is no longer alive; last heartbeat {hb['heartbeat_age_seconds']}s ago."
+        else:
+            attention_reason = f"Supervisor heartbeat is stale; last heartbeat {hb['heartbeat_age_seconds']}s ago."
 
     return {
         "run_id": job.get("job_id") or job_dir.name,
@@ -100,7 +167,13 @@ def project_run(job_dir: Path, now=None, stories=None):
         "created_at": job.get("created_at") or state.get("created_at"),
         "updated_at": updated_at,
         "duration_seconds": _duration_seconds(job.get("created_at") or state.get("created_at"), updated_at, now),
-        "active": phase in ACTIVE_PHASES,
+        "phase_active": phase_active,
+        "active": bool(phase_active and not hb["stale"]),
+        "heartbeat_at": hb["heartbeat_at"],
+        "heartbeat_age_seconds": hb["heartbeat_age_seconds"],
+        "heartbeat_pid": hb["heartbeat_pid"],
+        "process_alive": hb["process_alive"],
+        "stale": hb["stale"],
         "needs_attention": bool(attention_reason) and not bool(story.get("attention_suppressed")),
         "attention_reason": _safe_text(attention_reason, 700),
         "last_transition": {"from": last_event.get("from"), "to": last_event.get("to"), "reason": _safe_text(last_event.get("reason"), 500), "ts": last_event.get("ts")},
@@ -161,20 +234,39 @@ def collect_capacity(quota_file=QUOTA_FILE):
     }
 
 
-def build_snapshot(jobs_dir=JOBS_DIR, quota_file=QUOTA_FILE, now=None):
+def build_snapshot(jobs_dir=JOBS_DIR, quota_file=QUOTA_FILE, now=None, intake_dir=INTAKE_DIR):
     now = now or datetime.now(timezone.utc)
     runs = collect_runs(jobs_dir=jobs_dir, now=now)
-    live = [r for r in runs if r["active"]]
+    live = [r for r in runs if r.get("phase_active")]
     attention = [r for r in runs if r["needs_attention"]]
-    history = [r for r in runs if not r["active"]]
+    history = [r for r in runs if not r.get("phase_active")]
     done = [r for r in runs if r["phase"] == "DONE"]
+    done.sort(key=lambda x: x.get("updated_at") or "", reverse=True)
+    recent = done[:5]
+    handoffs = collect_handoffs(intake_dir=intake_dir, jobs_dir=jobs_dir, now=now)
+    running = sum(1 for r in live if r.get("active"))
+    stale = sum(1 for r in live if r.get("stale"))
     return {
         "generated_at": now.isoformat(timespec="seconds").replace("+00:00", "Z"),
-        "summary": {"running": len(live), "attention": len(attention), "completed": len(done), "total": len(runs)},
+        "summary": {
+            "running": running,
+            "handoff": len(handoffs),
+            "stale": stale,
+            "attention": len(attention),
+            "completed": len(done),
+            "total": len(runs),
+        },
+        "handoffs": handoffs,
         "live": live,
         "attention": attention,
+        "recent": recent,
         "history": history,
         "capacity": collect_capacity(quota_file=quota_file),
+        "usage_analytics": collect_usage_analytics(jobs_dir, quota_file, now=now),
+        "usage_meta": collect_usage_meta(jobs_dir),
+        "usage_trends": collect_usage_trends(jobs_dir, now=now),
+        "vm_health": collect_vm_health(now=now),
+        "vm_trends": collect_vm_trends(now=now),
     }
 
 

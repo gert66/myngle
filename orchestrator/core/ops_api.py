@@ -74,6 +74,10 @@ class OpsHandler(BaseHTTPRequestHandler):
             return self._send(200, {"generated_at": snapshot["generated_at"], **snapshot["summary"]})
         if path == "/api/ops/runs":
             return self._send(200, {"generated_at": snapshot["generated_at"], "runs": snapshot["live"]})
+        if path == "/api/ops/handoffs":
+            return self._send(200, {"generated_at": snapshot["generated_at"], "handoffs": snapshot["handoffs"]})
+        if path == "/api/ops/recent":
+            return self._send(200, {"generated_at": snapshot["generated_at"], "runs": snapshot["recent"]})
         if path == "/api/ops/attention":
             return self._send(200, {"generated_at": snapshot["generated_at"], "runs": snapshot["attention"]})
         if path == "/api/ops/history":
@@ -82,7 +86,8 @@ class OpsHandler(BaseHTTPRequestHandler):
             return self._send(200, {"generated_at": snapshot["generated_at"], **snapshot["capacity"]})
         if path.startswith("/api/ops/runs/"):
             run_id = path.split("/api/ops/runs/", 1)[1]
-            run = next((r for r in snapshot["history"] if r["run_id"] == run_id), None)
+            candidates = snapshot["live"] + snapshot["history"]
+            run = next((r for r in candidates if r["run_id"] == run_id), None)
             return self._send(200 if run else 404, run or {"error": "run not found"})
         return self._send(404, {"error": "not found"})
 

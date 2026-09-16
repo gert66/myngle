@@ -27,3 +27,13 @@ before planning or long analysis. Use `python3 -m core.intake receive ...`.
 Only after a real job has been created should the receipt be updated to SUBMITTED with its job_id.
 `orchestrator-intake-watch.timer` checks every 5 minutes and alerts once when a RECEIVED receipt
 is still not submitted after 10 minutes. This prevents interrupted ChatGPT turns from failing silently.
+
+Delegation status contract:
+- ChatGPT must create a durable intake receipt before saying that delegated work is underway.
+- RECEIVED means HANDOFF: accepted, but no worker job is running yet.
+- SUBMITTED is allowed only after a real orchestrator job_id exists.
+- Orchestrator Control is the authoritative view for delegated VM work; ChatGPT sidebar activity is not a VM-job signal.
+- A run counts as RUNNING only while it is in an active phase and its supervisor heartbeat is fresh.
+- Supervisors write heartbeat.json every 15 seconds. Orchestrator Control marks an active phase stale after 75 seconds without a healthy heartbeat.
+- DONE, ERROR and NEEDS_HUMAN are notified once through the configured Slack hook.
+- The snapshot exposes handoffs, live runs, attention, the five most recent completions, and history separately.

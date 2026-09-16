@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import argparse
+import os
 import sys
+import threading
 import time
 from datetime import datetime, timezone
 from pathlib import Path
@@ -20,6 +22,8 @@ ORCH_ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_JOBS_DIR = ORCH_ROOT / "jobs"
 TERMINAL_PHASES = frozenset({"DONE", "ERROR", "NEEDS_HUMAN"})
 MARKER_FILE = "notification_state.json"
+HEARTBEAT_FILE = "heartbeat.json"
+HEARTBEAT_INTERVAL_SECONDS = 15
 
 
 def _parse_ts(value):
@@ -36,6 +40,58 @@ def seconds_until(value, now=None):
     if target.tzinfo is None:
         target = target.replace(tzinfo=timezone.utc)
     return max(0.0, (target - now).total_seconds())
+
+
+def _heartbeat_payload(job_dir):
+    try:
+        state = load_state(Path(job_dir) / "state.json")
+        phase = state.get("phase")
+        job_id = state.get("job_id") or Path(job_dir).name
+    except Exception:
+        phase = None
+        job_id = Path(job_dir).name
+    return {
+        "job_id": job_id,
+        "phase": phase,
+        "pid": os.getpid(),
+        "ts": datetime.now(timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z"),
+    }
+
+
+def write_heartbeat(job_dir):
+    save_json(Path(job_dir) / HEARTBEAT_FILE, _heartbeat_payload(job_dir))
+
+
+class Heartbeat:
+    def __init__(self, job_dir, interval=HEARTBEAT_INTERVAL_SECONDS):
+        self.job_dir = Path(job_dir)
+        self.interval = max(1, float(interval))
+        self._stop = threading.Event()
+        self._thread = None
+
+    def start(self):
+        try:
+            write_heartbeat(self.job_dir)
+        except Exception:
+            pass
+        self._thread = threading.Thread(target=self._run, name=f"orchestrator-heartbeat-{self.job_dir.name}", daemon=True)
+        self._thread.start()
+
+    def _run(self):
+        while not self._stop.wait(self.interval):
+            try:
+                write_heartbeat(self.job_dir)
+            except Exception:
+                pass
+
+    def stop(self):
+        try:
+            write_heartbeat(self.job_dir)
+        except Exception:
+            pass
+        self._stop.set()
+        if self._thread is not None:
+            self._thread.join(timeout=1.0)
 
 
 def _usage_suffix(status):
@@ -85,43 +141,49 @@ def notify_once(job_dir, status, notifier=notify):
     return True
 
 
-def supervise(job_dir, runner=None, sleep=time.sleep, max_cycles=None, log=print, scheduler=None):
+def supervise(job_dir, runner=None, sleep=time.sleep, max_cycles=None, log=print, scheduler=None,
+              heartbeat_interval=HEARTBEAT_INTERVAL_SECONDS):
     job_dir = Path(job_dir)
     scheduler = scheduler or Scheduler(jobs_dir=job_dir.parent)
     cycles = 0
-    while True:
-        machine = Machine(job_dir, runner=runner)
-        status = machine.status()
-        phase = status["phase"]
-        if phase in TERMINAL_PHASES:
-            try:
-                notify_once(job_dir, status)
-            except NotifyError as exc:
-                log(f"notification warning: {exc}")
-            return phase
-        if max_cycles is not None and cycles >= max_cycles:
-            return phase
-        cycles += 1
-        if phase == "WAITING":
-            delay = seconds_until(status.get("wait_until"))
-            if delay > 0:
-                log(f"waiting {int(delay)}s for {status.get('retry_phase')}")
-                sleep(delay)
-            # Capacity is reacquired before resuming work. Long quota/backoff
-            # waits therefore do not occupy a scheduler slot.
-            if not scheduler.wait_for_slot(job_dir, sleep=sleep, log=log):
-                return Machine(job_dir, runner=runner).status()["phase"]
-            try:
-                Machine(job_dir, runner=runner).resume(force=True)
-            finally:
-                scheduler.release(status["job_id"], reason="run segment ended")
-        else:
-            if not scheduler.wait_for_slot(job_dir, sleep=sleep, log=log):
-                return Machine(job_dir, runner=runner).status()["phase"]
-            try:
-                Machine(job_dir, runner=runner).run()
-            finally:
-                scheduler.release(status["job_id"], reason="run segment ended")
+    heartbeat = Heartbeat(job_dir, interval=heartbeat_interval)
+    heartbeat.start()
+    try:
+        while True:
+            machine = Machine(job_dir, runner=runner)
+            status = machine.status()
+            phase = status["phase"]
+            if phase in TERMINAL_PHASES:
+                try:
+                    notify_once(job_dir, status)
+                except NotifyError as exc:
+                    log(f"notification warning: {exc}")
+                return phase
+            if max_cycles is not None and cycles >= max_cycles:
+                return phase
+            cycles += 1
+            if phase == "WAITING":
+                delay = seconds_until(status.get("wait_until"))
+                if delay > 0:
+                    log(f"waiting {int(delay)}s for {status.get('retry_phase')}")
+                    sleep(delay)
+                # Capacity is reacquired before resuming work. Long quota/backoff
+                # waits therefore do not occupy a scheduler slot.
+                if not scheduler.wait_for_slot(job_dir, sleep=sleep, log=log):
+                    return Machine(job_dir, runner=runner).status()["phase"]
+                try:
+                    Machine(job_dir, runner=runner).resume(force=True)
+                finally:
+                    scheduler.release(status["job_id"], reason="run segment ended")
+            else:
+                if not scheduler.wait_for_slot(job_dir, sleep=sleep, log=log):
+                    return Machine(job_dir, runner=runner).status()["phase"]
+                try:
+                    Machine(job_dir, runner=runner).run()
+                finally:
+                    scheduler.release(status["job_id"], reason="run segment ended")
+    finally:
+        heartbeat.stop()
 
 
 def build_parser():
