@@ -111,6 +111,7 @@ def collect_approvals(approvals_dir=APPROVALS_DIR):
             continue
         rows.append({
             "proposal_id": proposal.get("proposal_id") or path.stem,
+            "fingerprint": item.get("fingerprint"),
             "status": status,
             "reporter": _safe_text(proposal.get("reporter"), 120),
             "company": _safe_text(proposal.get("company"), 180),

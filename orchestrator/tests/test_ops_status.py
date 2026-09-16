@@ -117,7 +117,7 @@ class OpsStatusTests(unittest.TestCase):
             self.assertEqual(len(rows), 1)
             self.assertEqual(rows[0]["proposal_id"], "FB-1")
             self.assertEqual(rows[0]["status"], "pending")
-            self.assertNotIn("fingerprint", rows[0])
+            self.assertEqual(rows[0]["fingerprint"], "hidden-hash")
             self.assertNotIn("changed_files", rows[0])
 
     @mock.patch("core.ops_status.collect_vm_trends", return_value={})

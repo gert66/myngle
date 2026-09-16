@@ -83,6 +83,11 @@ def update_status(proposal_id: str, fingerprint: str, status: str, actor: str, n
     record = load_record(proposal_id)
     if record.get("fingerprint") != fingerprint:
         raise ValueError("proposal changed; approval is stale")
+    current = str(record.get("status") or "pending")
+    if current in {"approved", "rejected"} and status != current:
+        raise ValueError(f"proposal already finalized as {current}")
+    if status not in {"pending", "discussion_requested", "approved", "rejected"}:
+        raise ValueError("invalid approval status")
     record["status"] = status
     record["updated_at"] = utc_now()
     record["actor"] = actor
