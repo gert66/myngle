@@ -15,6 +15,7 @@ QUOTA_FILE = ORCH_ROOT / "config" / "claude_quota.json"
 STORY_FILE = ORCH_ROOT / "config" / "ops_change_stories.json"
 INTAKE_DIR = ORCH_ROOT / "intake"
 APPROVALS_DIR = ORCH_ROOT / "approvals"
+GEMINI_LEDGER_FILE = ORCH_ROOT / "logs" / "gemini_usage.jsonl"
 APPROVAL_POLLER_HEARTBEAT = ORCH_ROOT / "state" / "approval-command-poller.heartbeat"
 HEARTBEAT_STALE_SECONDS = 75
 APPROVAL_POLLER_STALE_SECONDS = 150
@@ -100,6 +101,33 @@ def _heartbeat(job_dir: Path, now, phase_active):
     }
 
 
+
+
+def collect_gemini_usage(path=GEMINI_LEDGER_FILE, limit=12):
+    rows = _events(Path(path))
+    rows.sort(key=lambda x: x.get("ts") or "", reverse=True)
+    totals = {
+        "records": len(rows),
+        "completed": sum(1 for r in rows if r.get("outcome") == "completed"),
+        "escalated": sum(1 for r in rows if str(r.get("outcome") or "").startswith("escalated_to_")),
+        "failed": sum(1 for r in rows if r.get("outcome") == "gemini_failed"),
+        "flex_attempts": sum(1 for r in rows if "flex" in (r.get("tiers_attempted") or []) or r.get("service_tier") == "flex"),
+        "standard_attempts": sum(1 for r in rows if "standard" in (r.get("tiers_attempted") or []) or r.get("service_tier") == "standard"),
+        "fallbacks": sum(len(r.get("fallback_events") or []) for r in rows),
+        "input_tokens": sum(int(r.get("input_tokens") or 0) for r in rows),
+        "output_tokens": sum(int(r.get("output_tokens") or 0) for r in rows),
+        "thinking_tokens": sum(int(r.get("thinking_tokens") or 0) for r in rows),
+        "total_tokens": sum(int(r.get("total_tokens") or 0) for r in rows),
+    }
+    recent = [{
+        "ts": r.get("ts"), "job_id": r.get("job_id"), "step_id": r.get("step_id"),
+        "role": r.get("role"), "outcome": r.get("outcome"), "validated": r.get("validated"),
+        "model": r.get("model"), "service_tier": r.get("service_tier"),
+        "tiers_attempted": r.get("tiers_attempted") or [], "fallback_events": r.get("fallback_events") or [],
+        "input_tokens": r.get("input_tokens", 0), "output_tokens": r.get("output_tokens", 0),
+        "thinking_tokens": r.get("thinking_tokens", 0), "total_tokens": r.get("total_tokens", 0),
+    } for r in rows[:max(0, int(limit))]]
+    return {"totals": totals, "recent": recent}
 
 def collect_control_health(now=None, approval_heartbeat=APPROVAL_POLLER_HEARTBEAT):
     now = now or datetime.now(timezone.utc)
@@ -328,6 +356,7 @@ def build_snapshot(jobs_dir=JOBS_DIR, quota_file=QUOTA_FILE, now=None, intake_di
         "vm_health": collect_vm_health(now=now),
         "vm_trends": collect_vm_trends(now=now),
         "control_health": collect_control_health(now=now),
+        "gemini_usage": collect_gemini_usage(),
     }
 
 

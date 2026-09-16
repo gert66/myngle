@@ -79,6 +79,7 @@ STEPS_DIR = "steps"
 EVIDENCE_DIR = "evidence"
 LOGS_DIR = "logs"
 CALLS_FILE = "calls.jsonl"
+GEMINI_LEDGER_FILE = ORCH_ROOT / "logs" / "gemini_usage.jsonl"
 SYSTEM_PROMPTS_DIR = "system_prompts"
 HERMES_ADVISORY_FLAG = ORCH_ROOT / "config" / "hermes_advisory.enabled"
 
@@ -1060,6 +1061,7 @@ class Machine:
             "classification": cls.category, "validated": cls.category == classify_mod.SUCCESS and not problem,
             "problem": problem, **telemetry,
         })
+        self._append_gemini_ledger(call_id, role, cls, result, problem, telemetry)
         totals = self.rt.setdefault("totals", _empty_totals())
         role_totals = totals["by_role"].setdefault(role, _empty_totals() | {"by_role": {}})
         for target in (totals, role_totals):
@@ -1071,6 +1073,35 @@ class Machine:
                 target[key] = int(target.get(key, 0) or 0) + int(telemetry[key] or 0)
         self.rt["last_call_telemetry"] = dict(telemetry)
         self._persist()
+
+    def _append_gemini_ledger(self, call_id, role, cls, result, problem, telemetry):
+        attempts = [a for a in (telemetry.get("provider_attempts") or []) if a.get("provider") == "gemini"]
+        upstream = telemetry.get("upstream_gemini_usage") or {}
+        direct = telemetry.get("provider") == "gemini"
+        if not direct and not attempts and not upstream:
+            return
+        usage = telemetry if direct else upstream
+        model = telemetry.get("model") if direct else (attempts[-1].get("model") if attempts else None)
+        tier = telemetry.get("service_tier") if direct else (attempts[-1].get("service_tier") if attempts else None)
+        validated = cls.category == classify_mod.SUCCESS and not problem
+        outcome = "completed" if direct and validated else ("gemini_failed" if direct else f"escalated_to_{telemetry.get('provider') or 'other'}")
+        record = {
+            "schema_version": 1, "ts": self.clock(), "job_id": self.job["job_id"],
+            "step_id": self.state.get("step_id"), "call_id": call_id, "role": role,
+            "phase": self.state.get("phase"), "classification": cls.category, "validated": validated,
+            "outcome": outcome, "final_provider": telemetry.get("provider"),
+            "provider_route": telemetry.get("provider_route"), "model": model, "service_tier": tier,
+            "tiers_attempted": [a.get("service_tier") for a in attempts if a.get("service_tier")],
+            "fallback_events": telemetry.get("fallback_events") or [], "retries": telemetry.get("retries", 0),
+            "input_tokens": int(usage.get("input_tokens", 0) or 0),
+            "output_tokens": int(usage.get("output_tokens", 0) or 0),
+            "thinking_tokens": int(usage.get("thinking_tokens", 0) or 0),
+            "total_tokens": int(usage.get("total_tokens", 0) or 0),
+            "call_duration_seconds": telemetry.get("duration_seconds", 0),
+            "problem": problem,
+        }
+        GEMINI_LEDGER_FILE.parent.mkdir(parents=True, exist_ok=True)
+        _append_jsonl(GEMINI_LEDGER_FILE, record)
 
     def _handle_call_failure(self, role, cls, problem, phase, result=None):
         category = classify_mod.INVALID_OUTPUT if problem else cls.category

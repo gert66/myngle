@@ -6,7 +6,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from unittest import mock
 
-from core.ops_status import build_snapshot, collect_approvals, collect_control_health, collect_handoffs, project_run
+from core.ops_status import build_snapshot, collect_approvals, collect_control_health, collect_gemini_usage, collect_handoffs, project_run
 
 
 def iso(dt):
@@ -98,6 +98,30 @@ class OpsStatusTests(unittest.TestCase):
             self.assertEqual([r["receipt_id"] for r in rows], ["a"])
             self.assertEqual(rows[0]["status"], "HANDOFF")
             self.assertEqual(rows[0]["age_seconds"], 30)
+
+
+    def test_collect_gemini_usage_summarizes_ledger(self):
+        with tempfile.TemporaryDirectory() as td:
+            path = Path(td) / "gemini_usage.jsonl"
+            rows = [
+                {"ts": "2026-09-16T08:00:00Z", "job_id": "j1", "step_id": "s1", "role": "worker",
+                 "outcome": "completed", "validated": True, "service_tier": "standard",
+                 "tiers_attempted": ["flex", "standard"], "fallback_events": [{"from": "flex", "to": "standard"}],
+                 "input_tokens": 100, "thinking_tokens": 40, "output_tokens": 10, "total_tokens": 150},
+                {"ts": "2026-09-16T07:00:00Z", "job_id": "j2", "step_id": "s2", "role": "worker",
+                 "outcome": "escalated_to_claude", "validated": True, "service_tier": "flex",
+                 "tiers_attempted": ["flex"], "fallback_events": [],
+                 "input_tokens": 20, "thinking_tokens": 5, "output_tokens": 2, "total_tokens": 27},
+            ]
+            path.write_text("".join(json.dumps(r) + "\n" for r in rows), encoding="utf-8")
+            data = collect_gemini_usage(path, limit=1)
+            self.assertEqual(data["totals"]["records"], 2)
+            self.assertEqual(data["totals"]["completed"], 1)
+            self.assertEqual(data["totals"]["escalated"], 1)
+            self.assertEqual(data["totals"]["fallbacks"], 1)
+            self.assertEqual(data["totals"]["total_tokens"], 177)
+            self.assertEqual(len(data["recent"]), 1)
+            self.assertEqual(data["recent"][0]["job_id"], "j1")
 
     def test_collect_approvals_projects_only_safe_fields(self):
         with tempfile.TemporaryDirectory() as td:
