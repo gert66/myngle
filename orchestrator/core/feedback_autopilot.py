@@ -11,7 +11,7 @@ from pathlib import Path
 from typing import Any
 from urllib import request
 
-from core.slack_approval import ApprovalProposal, build_blocks, save_proposal
+from core.slack_approval import ApprovalProposal, build_blocks, load_record, save_proposal
 
 ORCH_ROOT = Path(__file__).resolve().parents[1]
 CASES_DIR = Path(os.getenv("FEEDBACK_CASES_DIR", "/home/myngle/orchestrator/feedback_cases"))
@@ -21,6 +21,8 @@ COMPANY_REPO_PATH = Path(os.getenv("FEEDBACK_REPO_PATH", "/home/myngle/autopilot
 COMPANY_BRANCH = "work"
 LOVABLE_PROJECT = "a4691ca7-4294-496a-af73-cdba24a5ac0f"
 DEFAULT_API_URL = "https://myngle.whofirst.nl/api/feedback/autopilot"
+TOKEN_FILE = ORCH_ROOT / "secrets" / "feedback_autopilot_token"
+URL_FILE = ORCH_ROOT / "config" / "feedback_autopilot_url.txt"
 
 
 def utc_now() -> str:
@@ -196,6 +198,15 @@ def build_proposal(case: dict[str, Any], state: dict[str, Any], *, expected_main
 
 
 def reconcile_case(case: dict[str, Any]) -> dict[str, Any]:
+    if case.get("proposal_id"):
+        try:
+            if sync_verified_resolution(case):
+                return case
+        except Exception as exc:
+            case["status"] = "resolution_sync_error"
+            case["resolution_sync_error"] = str(exc)[:1200]
+            save_case(case)
+            return case
     job_id = case.get("job_id")
     if not job_id: return case
     state = _job_state(str(job_id))
@@ -228,6 +239,47 @@ def reconcile_case(case: dict[str, Any]) -> dict[str, Any]:
     save_case(case)
     return case
 
+
+
+def sync_verified_resolution(case: dict[str, Any], *, opener=request.urlopen) -> bool:
+    proposal_id = case.get("proposal_id")
+    if not proposal_id:
+        return False
+    try:
+        record = load_record(str(proposal_id))
+    except FileNotFoundError:
+        return False
+    deployment = record.get("deployment_result") or {}
+    if deployment.get("status") != "verified":
+        return False
+    proposal = record.get("proposal") or {}
+    note = str(proposal.get("resolution_note") or "").strip()
+    if not note:
+        raise RuntimeError("verified proposal has no resolution note")
+    token = TOKEN_FILE.read_text(encoding="utf-8").strip()
+    url = URL_FILE.read_text(encoding="utf-8").strip() if URL_FILE.exists() else DEFAULT_API_URL
+    payload = json.dumps({
+        "id": case["feedback_id"],
+        "resolution_note": note,
+        "expected_updated_at": case.get("source_updated_at"),
+    }).encode("utf-8")
+    req = request.Request(url, data=payload, method="POST", headers={
+        "Accept": "application/json",
+        "Content-Type": "application/json",
+        "User-Agent": "Sales-Cockpit-Feedback-Autopilot/1.0",
+        "x-feedback-autopilot-token": token,
+    })
+    with opener(req, timeout=20) as resp:
+        result = json.loads(resp.read().decode("utf-8"))
+    if result.get("status") != "resolved":
+        raise RuntimeError("feedback resolution endpoint did not confirm resolved")
+    row = result.get("row") or {}
+    case["status"] = "resolved"
+    case["resolution_note"] = note
+    case["resolved_at"] = row.get("resolved_at") or utc_now()
+    case.pop("resolution_sync_error", None)
+    save_case(case)
+    return True
 
 def list_cases() -> list[dict[str, Any]]:
     if not CASES_DIR.exists(): return []
