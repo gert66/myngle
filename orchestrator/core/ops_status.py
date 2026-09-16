@@ -162,10 +162,14 @@ def collect_approvals(approvals_dir=APPROVALS_DIR):
         status = item.get("status") or "unknown"
         if status not in {"pending", "discussion_requested", "approved", "rejected"}:
             continue
+        deployment = item.get("deployment_result") or {}
         rows.append({
             "proposal_id": proposal.get("proposal_id") or path.stem,
             "fingerprint": item.get("fingerprint"),
             "status": status,
+            "deployment_status": deployment.get("status"),
+            "deployment_commit_sha": deployment.get("deployment_commit_sha"),
+            "deployment_error": _safe_text(deployment.get("error"), 700),
             "reporter": _safe_text(proposal.get("reporter"), 120),
             "company": _safe_text(proposal.get("company"), 180),
             "reported": _safe_text(proposal.get("reported"), 700),

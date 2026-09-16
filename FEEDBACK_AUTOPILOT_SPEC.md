@@ -266,6 +266,8 @@ If unrelated known flaky tests fail, record them explicitly. Do not silently ign
 
 Autonomous deployment is allowed only for GREEN items and only using the existing approved Sales Cockpit deployment mechanism.
 
+For owner-approved Phase 2 proposals, the Approve action explicitly authorizes promotion of the exact fingerprint-bound commit to production. Promotion must cherry-pick only that one approved non-merge commit onto the recorded current `main`, re-run the recorded tests, publish the linked Lovable project, and run the recorded production verification. A broad `work -> main` merge is forbidden. If `main` has advanced since proposal creation, the approval is stale and a fresh proposal is required.
+
 Before deployment, record:
 
 - pre-deploy production revision;

@@ -135,6 +135,7 @@ class OpsStatusTests(unittest.TestCase):
                     "changed_files": ["secret/internal/path.py"],
                 },
                 "fingerprint": "hidden-hash", "status": "pending",
+                "deployment_result": {"status": "verified", "deployment_commit_sha": "abc123", "error": None},
                 "created_at": "2026-09-16T08:00:00Z", "updated_at": "2026-09-16T08:05:00Z",
             })
             rows = collect_approvals(root)
@@ -142,6 +143,8 @@ class OpsStatusTests(unittest.TestCase):
             self.assertEqual(rows[0]["proposal_id"], "FB-1")
             self.assertEqual(rows[0]["status"], "pending")
             self.assertEqual(rows[0]["fingerprint"], "hidden-hash")
+            self.assertEqual(rows[0]["deployment_status"], "verified")
+            self.assertEqual(rows[0]["deployment_commit_sha"], "abc123")
             self.assertNotIn("changed_files", rows[0])
 
     def test_control_health_reports_fresh_approval_poller(self):

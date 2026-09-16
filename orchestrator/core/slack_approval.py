@@ -43,6 +43,7 @@ class ApprovalProposal:
     changed_files: list[str]
     risk: str = "GREEN"
     version: int = 1
+    deployment: dict[str, Any] | None = None
 
     def payload(self) -> dict[str, Any]:
         return asdict(self)
@@ -93,6 +94,21 @@ def update_status(proposal_id: str, fingerprint: str, status: str, actor: str, n
     record["actor"] = actor
     if note:
         record["note"] = note
+    target = _path(proposal_id)
+    target.write_text(json.dumps(record, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+    return record
+
+
+
+def record_deployment(proposal_id: str, fingerprint: str, **fields: Any) -> dict[str, Any]:
+    record = load_record(proposal_id)
+    if record.get("fingerprint") != fingerprint:
+        raise ValueError("proposal changed; deployment result is stale")
+    deployment = dict(record.get("deployment_result") or {})
+    deployment.update(fields)
+    deployment["updated_at"] = utc_now()
+    record["deployment_result"] = deployment
+    record["updated_at"] = utc_now()
     target = _path(proposal_id)
     target.write_text(json.dumps(record, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
     return record

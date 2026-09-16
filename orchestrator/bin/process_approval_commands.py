@@ -10,7 +10,8 @@ from urllib import error, request
 ORCH_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ORCH_ROOT))
 
-from core.slack_approval import update_status  # noqa: E402
+from core.slack_approval import record_deployment, update_status  # noqa: E402
+from core.approval_deploy import DeploymentError, deploy_approved  # noqa: E402
 
 TOKEN_FILE = ORCH_ROOT / "secrets" / "orchestrator_ingest_token"
 PUSH_URL_FILE = ORCH_ROOT / "config" / "ops_push_url.txt"
@@ -75,11 +76,32 @@ def process_once(*, url=None, token=None):
         try:
             record = apply_command(command)
             note = f"proposal status -> {record.get('status')}"
+            if str(command.get("action") or "") == "approve":
+                deployment = deploy_approved(record)
+                if deployment.get("status") != "not_configured":
+                    record_deployment(
+                        str(command["proposal_id"]),
+                        str(command["fingerprint"]),
+                        **deployment,
+                    )
+                    note += f"; deployment -> {deployment.get('status')}"
             ack(cid, "executed", note, url=url, token=token)
             results.append((cid, "executed"))
         except (ValueError, FileNotFoundError) as exc:
             ack(cid, "stale", str(exc), url=url, token=token)
             results.append((cid, "stale"))
+        except DeploymentError as exc:
+            try:
+                record_deployment(
+                    str(command.get("proposal_id") or ""),
+                    str(command.get("fingerprint") or ""),
+                    status="failed",
+                    error=str(exc),
+                )
+            except Exception:
+                pass
+            ack(cid, "error", str(exc), url=url, token=token)
+            results.append((cid, "error"))
         except Exception as exc:  # keep one bad command from blocking the queue
             try:
                 ack(cid, "error", str(exc), url=url, token=token)

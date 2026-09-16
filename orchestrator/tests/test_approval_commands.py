@@ -18,6 +18,7 @@ class ApprovalCommandTests(unittest.TestCase):
         self.old = slack_approval.APPROVAL_DIR
         slack_approval.APPROVAL_DIR = Path(self.tmp.name)
         mod.update_status = slack_approval.update_status
+        mod.record_deployment = slack_approval.record_deployment
         proposal = slack_approval.ApprovalProposal(
             proposal_id="FB-1", reporter="Carla", company="Acme", reported="Problem",
             diagnosis="Cause", prepared_fix="Fix", checks=["tests"], resolution_note="Done",
@@ -44,6 +45,26 @@ class ApprovalCommandTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             mod.apply_command({"proposal_id":"FB-1", "fingerprint":self.fingerprint,
                                "action":"reject", "created_by":"owner"})
+
+
+    @mock.patch.object(mod, "deploy_approved", return_value={"status": "verified", "deployment_commit_sha": "c" * 40})
+    @mock.patch.object(mod, "ack")
+    @mock.patch.object(mod, "fetch_commands")
+    def test_approve_runs_configured_deployment(self, fetch, ack, deploy):
+        proposal = slack_approval.ApprovalProposal(
+            proposal_id="FB-DEPLOY", reporter="Carla", company="Acme", reported="Problem",
+            diagnosis="Cause", prepared_fix="Fix", checks=["tests"], resolution_note="Done",
+            reporter_reply="Thanks", changed_files=["x.py"], version=1,
+            deployment={"repo": "gert66/myngle-company-hub"},
+        )
+        slack_approval.save_proposal(proposal)
+        fetch.return_value = [{"command_id":"c2", "proposal_id":"FB-DEPLOY", "fingerprint":proposal.fingerprint,
+                               "action":"approve", "created_by":"owner"}]
+        result = mod.process_once(url="https://example.test", token="t")
+        self.assertEqual(result, [("c2", "executed")])
+        deploy.assert_called_once()
+        saved = slack_approval.load_record("FB-DEPLOY")
+        self.assertEqual(saved["deployment_result"]["status"], "verified")
 
     @mock.patch.object(mod, "ack")
     @mock.patch.object(mod, "fetch_commands")
