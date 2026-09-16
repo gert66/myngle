@@ -77,6 +77,12 @@ def process_once(*, url=None, token=None):
             record = apply_command(command)
             note = f"proposal status -> {record.get('status')}"
             if str(command.get("action") or "") == "approve":
+                if (record.get("proposal") or {}).get("deployment"):
+                    record_deployment(
+                        str(command["proposal_id"]),
+                        str(command["fingerprint"]),
+                        status="deploying",
+                    )
                 deployment = deploy_approved(record)
                 if deployment.get("status") != "not_configured":
                     record_deployment(
