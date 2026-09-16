@@ -102,11 +102,11 @@ def build_arg_parser() -> argparse.ArgumentParser:
                    help="Optional TOML fallback for API keys.")
     p.add_argument(
         "--hq-crawl-provider",
-        choices=["firecrawl", "crawl4ai", "crawl4ai_with_firecrawl_fallback"],
+        choices=["firecrawl", "crawl4ai", "crawl4ai_with_firecrawl_fallback", "zyte", "zyte_with_firecrawl_fallback"],
         default=os.getenv("HQ_CRAWL_PROVIDER", "firecrawl"),
         help=("HQ own-site crawler strategy. Default: firecrawl. "
-              "Use crawl4ai_with_firecrawl_fallback for Crawl4AI first with "
-              "benchmark-derived Firecrawl escalation rules."),
+              "Use zyte_with_firecrawl_fallback for Zyte smart own-site discovery "
+              "with Firecrawl second opinion, or Crawl4AI modes for the older path."),
     )
     p.add_argument(
         "--crawl4ai-runner", default=os.getenv("CRAWL4AI_RUNNER", ""),
@@ -302,11 +302,14 @@ def config_from_args(args: argparse.Namespace) -> BatchRunConfig:
 def main(argv: Optional[list[str]] = None) -> int:
     args = build_arg_parser().parse_args(argv)
 
-    if args.hq_crawl_provider != "firecrawl":
+    if args.hq_crawl_provider.startswith("crawl4ai"):
         if not args.crawl4ai_runner or not Path(args.crawl4ai_runner).is_file():
             print("ERROR: --crawl4ai-runner must point to an existing file for Crawl4AI modes.",
                   file=sys.stderr)
             return 2
+    if args.hq_crawl_provider.startswith("zyte") and not os.getenv("ZYTE_API_KEY"):
+        print("ERROR: ZYTE_API_KEY must be set in the environment for Zyte HQ modes.", file=sys.stderr)
+        return 2
     os.environ["HQ_CRAWL_PROVIDER"] = args.hq_crawl_provider
     if args.crawl4ai_runner:
         os.environ["CRAWL4AI_RUNNER"] = args.crawl4ai_runner

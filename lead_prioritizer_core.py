@@ -20,6 +20,7 @@ from lead_country_config import gl_hl_for_hq_country, std_country
 from lead_hq_ai_interpreter import call_serper_for_hq, interpret_hq_with_ai
 from lead_hq_firecrawl_source import collect_own_domain_hq_pages
 from lead_hq_crawl4ai_source import collect_own_domain_hq_pages_crawl4ai
+from lead_hq_zyte_source import collect_own_domain_hq_pages_zyte
 from lead_hq_location_summary import build_hq_location_summary
 from lead_non_hq_enrichment import collect_non_hq_enrichment_evidence
 from lead_non_hq_signal_extractor import (
@@ -59,7 +60,10 @@ def _hq_firecrawl_fallback_reasons(
     sent to Firecrawl because Firecrawl was usually equally uncertain there.
     """
     reasons: list[str] = []
-    clf = (hq.ai_hq_classification or hq.hq_structure_type or "").strip().lower()
+    # Use the deterministic/post-processed structure first. The raw AI label can
+    # be internally inconsistent (e.g. raw domestic + parent country Austria);
+    # the interpreter already corrects that before this fallback decision.
+    clf = (hq.hq_structure_type or hq.ai_hq_classification or "").strip().lower()
     confidence = (hq.ai_hq_confidence or hq.hq_confidence or "").strip()
     input_norm = std_country(input_country or "")
     result_norm = std_country(hq.ai_parent_hq_country or hq.hq_detected_country or "")
@@ -75,6 +79,24 @@ def _hq_firecrawl_fallback_reasons(
         reasons.append("foreign_parent_without_own_site_non_high_confidence")
 
     return reasons
+
+
+def _evidence_corroborated_by_crawled_pages(hq: HQDetectionResult, pages: list) -> bool:
+    """True when the selected evidence host was actually crawled from the entity graph.
+
+    This matters for foreign-parent claims: a different-domain parent is credible
+    when the company homepage itself led us to that group domain, but a random
+    same-name Serper result should not be enough to confirm ownership.
+    """
+    ev_host = (urlparse(hq.hq_evidence_url or "").hostname or "").lower().removeprefix("www.")
+    if not ev_host:
+        return False
+    for page in pages or []:
+        host = (urlparse(page.get("url") or "").hostname or "").lower().removeprefix("www.")
+        if host and (host == ev_host or host.endswith("." + ev_host) or ev_host.endswith("." + host)):
+            return True
+    return False
+
 
 #: commercial_fit_scoring profile is per-country: "italy_register_icp_only"
 #: was calibrated specifically for the Italian company-register source (size
@@ -116,6 +138,7 @@ def prioritize_single_lead(
     serper_api_key: str = "",
     anthropic_api_key: str = "",
     firecrawl_api_key: str = "",
+    zyte_api_key: str = "",
     hq_crawl_provider: str = "",
     crawl4ai_runner: str = "",
     ai_model: str = _DEFAULT_AI_MODEL,
@@ -328,26 +351,33 @@ def prioritize_single_lead(
     # Existing behavior remains the default (Firecrawl). The hybrid mode uses
     # Crawl4AI first and only escalates selected risky outcomes to Firecrawl.
     provider = (hq_crawl_provider or os.getenv("HQ_CRAWL_PROVIDER") or "firecrawl").strip().lower()
-    if provider not in {"firecrawl", "crawl4ai", "crawl4ai_with_firecrawl_fallback"}:
+    if provider not in {"firecrawl", "crawl4ai", "crawl4ai_with_firecrawl_fallback", "zyte", "zyte_with_firecrawl_fallback"}:
         raise ValueError(f"unsupported hq_crawl_provider: {hq_crawl_provider}")
 
     crawled_pages: list = []
-    crawl4ai_used = False
+    primary_crawl_used = False
+    zyte_key = (zyte_api_key or os.getenv("ZYTE_API_KEY") or "").strip()
     if input_row.domain and not domain_is_hosted_platform:
         if provider in {"crawl4ai", "crawl4ai_with_firecrawl_fallback"}:
             c4 = collect_own_domain_hq_pages_crawl4ai(
                 input_row.domain, runner=crawl4ai_runner,
             )
-            crawl4ai_used = bool(c4["used"])
-            if crawl4ai_used:
+            primary_crawl_used = bool(c4["used"])
+            if primary_crawl_used:
                 crawled_pages = c4["pages"]
+        elif provider in {"zyte", "zyte_with_firecrawl_fallback"}:
+            zy = collect_own_domain_hq_pages_zyte(input_row.domain, zyte_key)
+            primary_crawl_used = bool(zy["used"])
+            if primary_crawl_used:
+                crawled_pages = zy["pages"]
         elif firecrawl_api_key:
             fc = collect_own_domain_hq_pages(
                 input_row.domain, firecrawl_api_key,
                 country=effective_country,
                 cache_index=cache_index, force_refresh=force_refresh,
             )
-            if fc["used"]:
+            primary_crawl_used = bool(fc["used"])
+            if primary_crawl_used:
                 crawled_pages = fc["pages"]
 
     # Use the effective (defaulted) country for interpretation without mutating
@@ -378,10 +408,15 @@ def prioritize_single_lead(
     fallback_reasons: list[str] = []
     fallback_used = False
 
-    if provider == "crawl4ai_with_firecrawl_fallback":
+    if provider in {"crawl4ai_with_firecrawl_fallback", "zyte_with_firecrawl_fallback"}:
         fallback_reasons = _hq_firecrawl_fallback_reasons(
-            hq, input_country=effective_country, crawl4ai_used=crawl4ai_used,
+            hq, input_country=effective_country, crawl4ai_used=primary_crawl_used,
         )
+        if (provider.startswith("zyte")
+                and (hq.hq_structure_type or "").strip().lower() == "foreign_parent"
+                and hq.hq_evidence_domain_mismatch_warning == "Yes"
+                and not _evidence_corroborated_by_crawled_pages(hq, crawled_pages)):
+            fallback_reasons.append("foreign_parent_external_evidence_not_corroborated_by_zyte")
         if (fallback_reasons and firecrawl_api_key and input_row.domain
                 and not domain_is_hosted_platform):
             fc = collect_own_domain_hq_pages(
@@ -396,13 +431,30 @@ def prioritize_single_lead(
             # from the 50-case benchmark, where a Firecrawl miss can still
             # yield a better Serper-only adjudication than keeping misleading
             # Crawl4AI content.
-            hq = _interpret(fc["pages"] if fc["used"] else [])
+            fallback_pages = fc["pages"] if fc["used"] else []
+            hq = _interpret(fallback_pages)
             fallback_used = True
             if not fc["used"]:
                 fallback_reasons.append("firecrawl_no_usable_pages_serper_only")
 
+    # Final entity-safety gate for Zyte. A foreign-parent claim supported only
+    # by an unrelated external search result remains review-only even after the
+    # second opinion. Direct group domains discovered from the company homepage
+    # remain eligible for a positive score.
+    if (provider.startswith("zyte")
+            and (hq.hq_structure_type or "").strip().lower() == "foreign_parent"
+            and hq.hq_evidence_domain_mismatch_warning == "Yes"):
+        corroborating_pages = fallback_pages if fallback_used and 'fallback_pages' in locals() else crawled_pages
+        if not _evidence_corroborated_by_crawled_pages(hq, corroborating_pages):
+            hq.needs_manual_review = True
+            hq.sig_foreign_hq_score_for_next_scoring = 0.0
+            hq.hq_positive_score_suppressed_for_review = "Yes"
+            hq.hq_review_reason = "foreign parent evidence is external and not corroborated by crawled entity-linked pages"
+            hq.hq_reason = "foreign_parent_entity_link_unverified: " + (hq.hq_reason or "")
+
     hq.hq_crawl_provider_primary = (
-        "crawl4ai" if provider.startswith("crawl4ai") else "firecrawl"
+        "crawl4ai" if provider.startswith("crawl4ai") else
+        "zyte" if provider.startswith("zyte") else "firecrawl"
     )
     hq.hq_firecrawl_fallback_used = "Yes" if fallback_used else "No"
     hq.hq_firecrawl_fallback_reason = ";".join(fallback_reasons) or None
