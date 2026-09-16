@@ -8,6 +8,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from core.ops_metrics import collect_usage_analytics, collect_usage_meta, collect_usage_trends, collect_vm_health, collect_vm_trends
+from core.cost_overview import collect_cost_overview
 
 ORCH_ROOT = Path(__file__).resolve().parents[1]
 JOBS_DIR = ORCH_ROOT / "jobs"
@@ -392,6 +393,7 @@ def build_snapshot(jobs_dir=JOBS_DIR, quota_file=QUOTA_FILE, now=None, intake_di
         "vm_trends": collect_vm_trends(now=now),
         "control_health": collect_control_health(now=now),
         "gemini_usage": collect_gemini_usage(),
+        "cost_overview": collect_cost_overview(jobs_dir, GEMINI_LEDGER_FILE),
     }
 
 
