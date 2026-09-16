@@ -84,6 +84,8 @@ class OpsHandler(BaseHTTPRequestHandler):
             return self._send(200, {"generated_at": snapshot["generated_at"], "runs": snapshot["history"]})
         if path == "/api/ops/capacity":
             return self._send(200, {"generated_at": snapshot["generated_at"], **snapshot["capacity"]})
+        if path == "/api/ops/gemini":
+            return self._send(200, {"generated_at": snapshot["generated_at"], **snapshot["gemini_usage"]})
         if path.startswith("/api/ops/runs/"):
             run_id = path.split("/api/ops/runs/", 1)[1]
             candidates = snapshot["live"] + snapshot["history"]
