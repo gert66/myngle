@@ -158,7 +158,7 @@ Choose mode=reply when the owner is discussing wording, asking for an explanatio
 Choose mode=investigate when the owner asks you to check, test, retry, trace, fix, implement, or continue technical work, or answers yes to a pending technical action.
 For investigate, make investigation_instruction a concrete safe job instruction and keep assistant_reply short; it is only an acknowledgement.
 Choose job_mode=read for checking, analysing, tracing, validating, gathering evidence, or whenever the owner says not to change anything. Choose job_mode=write only when the owner explicitly asks to fix, implement, change or modify the product/code. For reply use job_mode=none and investigation_instruction must be empty.
-If a reporter reply is ready, proposed_reply should be concise and in the language of the reporter's original feedback. Otherwise use an empty string.
+The owner conversation is Dutch. proposed_reply is addressed to the reporter and MUST stay in the same language as the reporter's original feedback, regardless of the owner's Dutch instruction. Never translate an English reporter reply into Dutch just because the owner speaks Dutch. If no reporter reply is ready, use an empty string.
 
 CASE CONTEXT:
 {_case_context(case)}
@@ -200,7 +200,7 @@ Write a short natural Dutch answer to the owner, like a good ChatGPT response. L
 Translate technical evidence into ordinary language. Never dump branch names, file paths, commit hashes, stack traces, raw tool output, or orchestrator jargon unless the owner explicitly asked for technical detail.
 Be precise about what is only investigated/prepared/tested versus actually deployed or changed in production.
 If one decision is still required, ask exactly one plain-language question.
-If a reporter reply is ready, proposed_reply should be concise and in the language of the reporter's original feedback. If it is not ready, return an empty string.
+The owner conversation is Dutch. proposed_reply is addressed to the reporter and MUST stay in the same language as the reporter's original feedback, regardless of the owner's Dutch instruction. Never translate an English reporter reply into Dutch just because the owner speaks Dutch. If it is not ready, return an empty string.
 Never send or close the feedback yourself.
 
 CASE CONTEXT AFTER WORK:
