@@ -2,14 +2,20 @@
 from __future__ import annotations
 
 import json
+import sys
 from pathlib import Path
 from urllib import request
+
+ORCH_ROOT = Path(__file__).resolve().parents[1]
+REPO_ROOT = ORCH_ROOT.parent
+if not (REPO_ROOT / "lead_list_config_registry.py").is_file():
+    REPO_ROOT = ORCH_ROOT / "lib"
+sys.path.insert(0, str(REPO_ROOT))
 
 from lead_list_config_registry import (
     COUNTRY_LABELS, DEFAULT_COLD_CALLERS, DISABLED_COUNTRY_LABELS, country_folder_slug,
 )
 
-ORCH_ROOT = Path('/home/myngle/orchestrator')
 TOKEN_FILE = ORCH_ROOT / 'secrets' / 'orchestrator_ingest_token'
 PUSH_URL_FILE = ORCH_ROOT / 'config' / 'ops_push_url.txt'
 
