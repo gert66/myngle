@@ -39,6 +39,31 @@ def normalize_phone(value: Any) -> str:
     return digits[-10:] if len(digits) >= 10 else digits
 
 
+def domains_related(left: Any, right: Any) -> bool:
+    """True for exact domains or a strict parent/subdomain relationship."""
+    a = normalize_domain(left)
+    b = normalize_domain(right)
+    if not a or not b:
+        return False
+    return a == b or a.endswith("." + b) or b.endswith("." + a)
+
+
+def _email_domains_from_mapping(value: Any) -> set[str]:
+    found: set[str] = set()
+    if isinstance(value, Mapping):
+        for child in value.values():
+            found |= _email_domains_from_mapping(child)
+    elif isinstance(value, list):
+        for child in value:
+            found |= _email_domains_from_mapping(child)
+    elif isinstance(value, str):
+        for match in re.findall(r"[A-Za-z0-9._%+-]+@([A-Za-z0-9.-]+\.[A-Za-z]{2,})", value):
+            domain = normalize_domain(match)
+            if domain:
+                found.add(domain)
+    return found
+
+
 def _phones_from_mapping(value: Any) -> set[str]:
     found: set[str] = set()
     if isinstance(value, Mapping):
@@ -55,6 +80,20 @@ def _phones_from_mapping(value: Any) -> set[str]:
     return found
 
 
+def _incoming_email_domain_map(normalized_rows: Iterable[Mapping[str, Any]] | None) -> dict[str, set[str]]:
+    result: dict[str, set[str]] = {}
+    for row in normalized_rows or []:
+        key = str(row.get("company_key") or "")
+        if not key:
+            continue
+        domains = result.setdefault(key, set())
+        hint = normalize_domain(row.get("email_domain_hint"))
+        if hint:
+            domains.add(hint)
+        domains |= _email_domains_from_mapping(row.get("work_email"))
+    return result
+
+
 def _incoming_phone_map(normalized_rows: Iterable[Mapping[str, Any]] | None) -> dict[str, set[str]]:
     result: dict[str, set[str]] = {}
     for row in normalized_rows or []:
@@ -69,10 +108,19 @@ def _incoming_phone_map(normalized_rows: Iterable[Mapping[str, Any]] | None) -> 
     return result
 
 
+def _explicit_existing_domains(item: Mapping[str, Any], detail: Mapping[str, Any]) -> set[str]:
+    values = [item.get("domain"), item.get("website_url")]
+    debug_row = ((detail.get("debug") or {}).get("lead_prioritizer_row") or {}) if isinstance(detail, Mapping) else {}
+    values.extend([debug_row.get("Company Domain"), debug_row.get("Company Website")])
+    return {d for d in (normalize_domain(v) for v in values) if d}
+
+
 def _existing_indexes(existing_items: list[dict], existing_details: Mapping[str, dict] | None = None) -> dict[str, Any]:
     by_domain: dict[str, list[dict]] = {}
     by_name: dict[str, list[dict]] = {}
     phones: dict[str, set[str]] = {}
+    email_domains: dict[str, set[str]] = {}
+    explicit_domains: dict[str, set[str]] = {}
     details = existing_details or {}
     for item in existing_items:
         cid = str(item.get("company_id") or "")
@@ -82,8 +130,14 @@ def _existing_indexes(existing_items: list[dict], existing_details: Mapping[str,
             by_domain.setdefault(domain, []).append(item)
         if name:
             by_name.setdefault(name, []).append(item)
-        phones[cid] = _phones_from_mapping(details.get(cid, {}))
-    return {"by_domain": by_domain, "by_name": by_name, "phones": phones}
+        detail = details.get(cid, {})
+        phones[cid] = _phones_from_mapping(detail)
+        email_domains[cid] = _email_domains_from_mapping(detail)
+        explicit_domains[cid] = _explicit_existing_domains(item, detail)
+    return {
+        "by_domain": by_domain, "by_name": by_name, "phones": phones,
+        "email_domains": email_domains, "explicit_domains": explicit_domains,
+    }
 
 
 def prematch_companies(
@@ -96,6 +150,7 @@ def prematch_companies(
     """Conservative pre-match. Name-only matches are review, never automatic."""
     idx = _existing_indexes(existing_items, existing_details)
     incoming_phones = _incoming_phone_map(normalized_rows)
+    incoming_email_domains = _incoming_email_domain_map(normalized_rows)
     entries: list[dict[str, Any]] = []
     counts = {"matched_existing": 0, "new": 0, "ambiguous": 0}
 
@@ -137,9 +192,50 @@ def prematch_companies(
             elif len(phone_matches) > 1:
                 decision, match_basis, confidence = "ambiguous", "exact_name_and_phone", "review"
                 candidates = [str(x.get("company_id") or "") for x in phone_matches]
-            elif name_candidates:
-                decision, match_basis, confidence = "ambiguous", "exact_name_only", "review"
-                candidates = [str(x.get("company_id") or "") for x in name_candidates]
+            else:
+                source_domains = {d for d in (domain, hint) if d}
+                source_domains |= incoming_email_domains.get(source_key, set())
+                hierarchy_matches = [
+                    item for item in name_candidates
+                    if any(
+                        domains_related(source_domain, existing_domain)
+                        for source_domain in source_domains
+                        for existing_domain in idx["explicit_domains"].get(
+                            str(item.get("company_id") or ""), set()
+                        )
+                    )
+                ]
+                if len(hierarchy_matches) == 1:
+                    decision, match_basis, confidence = (
+                        "matched_existing", "exact_name_and_strong_domain", "high"
+                    )
+                    matched_id = str(hierarchy_matches[0].get("company_id") or "")
+                elif len(hierarchy_matches) > 1:
+                    decision, match_basis, confidence = (
+                        "ambiguous", "exact_name_and_strong_domain", "review"
+                    )
+                    candidates = [str(x.get("company_id") or "") for x in hierarchy_matches]
+                else:
+                    strong_email_domain = domain or hint
+                    email_matches = [
+                        item for item in name_candidates
+                        if strong_email_domain and strong_email_domain in idx["email_domains"].get(
+                            str(item.get("company_id") or ""), set()
+                        )
+                    ]
+                    if len(email_matches) == 1:
+                        decision, match_basis, confidence = (
+                            "matched_existing", "exact_name_and_contact_email_domain", "high"
+                        )
+                        matched_id = str(email_matches[0].get("company_id") or "")
+                    elif len(email_matches) > 1:
+                        decision, match_basis, confidence = (
+                            "ambiguous", "exact_name_and_contact_email_domain", "review"
+                        )
+                        candidates = [str(x.get("company_id") or "") for x in email_matches]
+                    elif name_candidates:
+                        decision, match_basis, confidence = "ambiguous", "exact_name_only", "review"
+                        candidates = [str(x.get("company_id") or "") for x in name_candidates]
 
         counts[decision] += 1
         entries.append({
