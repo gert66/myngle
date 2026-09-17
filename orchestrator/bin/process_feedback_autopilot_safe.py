@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Safe feedback poller with duplicate linking and research-only Lusha coverage checks."""
+"""Safe feedback poller with duplicate linking and research-only external integration checks."""
 from __future__ import annotations
 
 import argparse
@@ -37,6 +37,8 @@ def issue_key(text: str) -> str | None:
         return "log_call_failed"
     if "lusha" in t and any(x in t for x in ("phone", "number", "contact", "disconnect", "less efficient", "less phone")):
         return "lusha_contact_coverage"
+    if "aircall" in t and any(x in t for x in ("press", "selection", "keypad", "department", "option")):
+        return "aircall_dtmf"
     return None
 
 
@@ -106,8 +108,8 @@ def main() -> int:
         case, is_new = ingest_row(row)
         created += int(is_new)
 
-        if key == "lusha_contact_coverage" and not case.get("job_id"):
-            case["kind"] = "data_quality"
+        if key in {"lusha_contact_coverage", "aircall_dtmf"} and not case.get("job_id"):
+            case["kind"] = "data_quality" if key == "lusha_contact_coverage" else "integration_issue"
             case["risk"] = "AMBER"
             case["issue_key"] = key
             if case.get("status") not in {"resolved", "informational"}:
