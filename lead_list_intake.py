@@ -347,9 +347,19 @@ def load_table(
     elif suffix == ".csv":
         df, sheet, header_row = _read_csv(source)
     elif source_sheet is not None or header_row is not None:
-        sheet = source_sheet or pd.ExcelFile(source).sheet_names[0]
         chosen_header = int(header_row or 0)
-        df = pd.read_excel(source, sheet_name=sheet, header=chosen_header, dtype=str)
+        try:
+            sheet = source_sheet or pd.ExcelFile(source).sheet_names[0]
+            df = pd.read_excel(source, sheet_name=sheet, header=chosen_header, dtype=str)
+        except Exception as original:
+            message = str(original).lower()
+            if not any(term in message for term in ("stylesheet", "styles.xml", "invalid xml")):
+                raise
+            with tempfile.TemporaryDirectory(prefix="lead-list-xlsx-clean-") as td:
+                clean = Path(td) / "style-sanitized.xlsx"
+                _sanitize_xlsx_styles(source, clean)
+                sheet = source_sheet or pd.ExcelFile(clean).sheet_names[0]
+                df = pd.read_excel(clean, sheet_name=sheet, header=chosen_header, dtype=str)
         header_row = chosen_header
     else:
         df, sheet, header_row = _read_xlsx(source)
