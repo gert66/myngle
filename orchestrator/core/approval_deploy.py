@@ -30,13 +30,24 @@ def _shell(command: str, *, cwd: Path, timeout=900):
 
 
 def _prepare_dependencies(worktree: Path) -> None:
-    """Install locked app dependencies in the isolated deployment worktree."""
+    """Install app dependencies in the isolated deployment worktree."""
     if (worktree / "package-lock.json").exists():
         _run(
             ["npm", "ci", "--no-audit", "--no-fund"],
             cwd=worktree,
             timeout=900,
         )
+        return
+    if (worktree / "bun.lock").exists():
+        bun = shutil.which("bun")
+        if bun:
+            _run([bun, "install", "--frozen-lockfile"], cwd=worktree, timeout=900)
+        else:
+            _run(
+                ["npm", "install", "--no-audit", "--no-fund", "--package-lock=false"],
+                cwd=worktree,
+                timeout=900,
+            )
 
 
 def validate_spec(record: dict) -> dict:

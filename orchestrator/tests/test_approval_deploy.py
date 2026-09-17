@@ -59,6 +59,19 @@ class ApprovalDeployTests(unittest.TestCase):
                 timeout=900,
             )
 
+    def test_prepare_dependencies_falls_back_to_npm_for_bun_lock(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            worktree = Path(tmp)
+            (worktree / "bun.lock").write_text("", encoding="utf-8")
+            with mock.patch.object(approval_deploy.shutil, "which", return_value=None), \
+                 mock.patch.object(approval_deploy, "_run") as run:
+                approval_deploy._prepare_dependencies(worktree)
+            run.assert_called_once_with(
+                ["npm", "install", "--no-audit", "--no-fund", "--package-lock=false"],
+                cwd=worktree,
+                timeout=900,
+            )
+
 
 if __name__ == "__main__":
     unittest.main()
