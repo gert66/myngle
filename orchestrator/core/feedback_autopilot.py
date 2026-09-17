@@ -85,8 +85,11 @@ def ingest_row(row: dict[str, Any]) -> tuple[dict[str, Any], bool]:
         "source_updated_at": row.get("updated_at"),
         "received_at": row.get("created_at") or utc_now(),
         "reporter_email": row.get("created_by_email"),
+        "reporter_name": row.get("created_by_name") or row.get("reporter_name"),
         "company": row.get("company_name"),
         "country": row.get("country"),
+        "source": row.get("source") or "Sales Cockpit feedback",
+        "source_url": row.get("source_url"),
         "comment": row.get("comment") or "",
         "attachment_path": row.get("attachment_path"),
         "kind": kind,
@@ -207,6 +210,8 @@ def build_proposal(case: dict[str, Any], state: dict[str, Any], *, expected_main
 
 
 def reconcile_case(case: dict[str, Any]) -> dict[str, Any]:
+    if case.get("status") == "resolved":
+        return case
     if case.get("proposal_id"):
         try:
             if sync_verified_resolution(case):
@@ -227,14 +232,21 @@ def reconcile_case(case: dict[str, Any]) -> dict[str, Any]:
     elif phase == "NEEDS_HUMAN":
         case["status"] = "needs_review"
         case["question"] = state.get("human_question")
+        case["recommendation"] = "I need this one decision before I can continue safely."
     elif phase == "ERROR":
         case["status"] = "error"
         case["error"] = state.get("last_error")
+        case["question"] = "The automated investigation failed. Should I retry this case?"
+        case["recommendation"] = "I recommend retrying once before changing the product manually."
     elif phase == "DONE" and case.get("job_mode") == "read":
         closed = _latest_closed(state)
+        detail = " ".join(str(closed.get("detail") or "").split())[:1800]
         case["status"] = "needs_review"
-        case["investigation_summary"] = " ".join(str(closed.get("detail") or "").split())[:1800]
-        case["question"] = "Review the investigation and decide whether to proceed with the proposed product/data action."
+        case["investigation_summary"] = detail
+        case["actions_taken"] = detail
+        case.setdefault("ai_interpretation", f"I treated this as a {case.get('kind') or 'feedback'} case and investigated it without changing production.")
+        case["recommendation"] = "I completed the investigation. I need your answer to the question below before taking a protected product or data action."
+        case["question"] = "Do you want me to proceed with the product/data action described above?"
     elif phase == "DONE" and not case.get("proposal_id"):
         try:
             proposal = build_proposal(case, state, expected_main_sha=_expected_main_sha())
@@ -242,6 +254,10 @@ def reconcile_case(case: dict[str, Any]) -> dict[str, Any]:
             case["proposal_id"] = proposal.proposal_id
             case["proposal_fingerprint"] = proposal.fingerprint
             case["status"] = "awaiting_approval"
+            case["ai_interpretation"] = proposal.diagnosis
+            case["actions_taken"] = proposal.prepared_fix
+            case["recommendation"] = "I recommend approving the prepared fix, verifying production, then sending the reply below and closing this feedback."
+            case["proposed_reply"] = proposal.reporter_reply or proposal.resolution_note
         except ValueError as exc:
             case["status"] = "needs_review"
             case["question"] = str(exc)
