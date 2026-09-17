@@ -22,7 +22,7 @@ class TestConstants:
 
     def test_source_kinds_and_retrieval_methods(self):
         assert DEEP_DIVE_SOURCE_KINDS == ("own_domain", "parent_domain", "external")
-        assert DEEP_DIVE_RETRIEVAL_METHODS == ("firecrawl", "serper_localized", "plain_fetch")
+        assert DEEP_DIVE_RETRIEVAL_METHODS == ("zyte", "firecrawl", "serper_localized", "plain_fetch")
 
 
 class TestDeepDiveClaim:

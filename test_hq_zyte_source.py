@@ -36,7 +36,7 @@ class TestZyteSmartDiscovery(unittest.TestCase):
 
 
 class TestZyteCoreSafety(unittest.TestCase):
-    def test_unlinked_external_foreign_parent_escalates_to_firecrawl(self):
+    def test_unlinked_external_foreign_parent_is_suppressed_without_firecrawl(self):
         risky = HQDetectionResult(
             ai_hq_classification="foreign_parent", ai_hq_confidence="High",
             ai_parent_hq_country="Japan", hq_detected_country="Japan",
@@ -54,19 +54,22 @@ class TestZyteCoreSafety(unittest.TestCase):
             patch("lead_prioritizer_core.collect_own_domain_hq_pages_zyte", return_value={
                 "used": True, "pages": [{"url": "https://example.ch", "text": "local club"}],
             }),
-            patch("lead_prioritizer_core.collect_own_domain_hq_pages", return_value={"used": True, "pages": []}),
-            patch("lead_prioritizer_core.interpret_hq_with_ai", side_effect=[risky, safe]) as ai,
+            patch("lead_prioritizer_core.collect_own_domain_hq_pages") as fc,
+            patch("lead_prioritizer_core.interpret_hq_with_ai", return_value=risky) as ai,
         ):
             result = prioritize_single_lead(
                 LeadInput(company_name="Example", domain="example.ch", input_country="Switzerland"),
                 serper_api_key="s", anthropic_api_key="a", firecrawl_api_key="f",
                 zyte_api_key="z", hq_crawl_provider="zyte_with_firecrawl_fallback",
             )
-        self.assertEqual(2, ai.call_count)
+        self.assertEqual(1, ai.call_count)
+        fc.assert_not_called()
         self.assertEqual("zyte", result.hq_crawl_provider_primary)
-        self.assertEqual("Yes", result.hq_firecrawl_fallback_used)
-        self.assertIn("foreign_parent_external_evidence_not_corroborated_by_zyte", result.hq_firecrawl_fallback_reason)
+        self.assertEqual("No", result.hq_firecrawl_fallback_used)
+        self.assertIsNone(result.hq_firecrawl_fallback_reason)
         self.assertTrue(result.needs_manual_review)
+        self.assertEqual(0.0, result.sig_foreign_hq_score_for_next_scoring)
+        self.assertEqual("Yes", result.hq_positive_score_suppressed_for_review)
 
     def test_linked_group_evidence_does_not_escalate(self):
         good = HQDetectionResult(

@@ -23,6 +23,7 @@ from datetime import datetime
 from typing import Callable, Optional
 
 import io
+import os
 import re
 import threading
 import time
@@ -921,6 +922,7 @@ def run_batch_dataframe(
                         serper_api_key=serper_api_key,
                         anthropic_api_key=anthropic_api_key,
                         firecrawl_api_key=firecrawl_api_key,
+                        zyte_api_key=os.getenv("ZYTE_API_KEY", ""),
                         max_pages=config.deep_dive_max_pages,
                         verify_quotes=config.verify_quotes,
                         auto_correct_quotes=config.auto_correct_quotes,
@@ -1626,6 +1628,7 @@ def _run_gated_full_enrichment(
                     serper_api_key=serper_api_key,
                     anthropic_api_key=anthropic_api_key,
                     firecrawl_api_key=firecrawl_api_key,
+                    zyte_api_key=os.getenv("ZYTE_API_KEY", ""),
                     max_pages=config.deep_dive_max_pages,
                     verify_quotes=config.verify_quotes,
                     auto_correct_quotes=config.auto_correct_quotes,

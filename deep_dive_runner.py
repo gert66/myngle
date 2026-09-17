@@ -54,6 +54,7 @@ import api_retry
 from deep_dive_schema import DeepDiveClaim, DeepDiveResult, DEEP_DIVE_CATEGORIES
 from hq_simple_detector import is_hosted_careers_platform_domain
 from lead_hq_ai_interpreter import _host_from, _hosts_match
+from lead_hq_zyte_source import collect_own_domain_hq_pages_zyte, fetch_page_via_zyte
 from lead_non_hq_enrichment import extract_evidence_from_serper_payload
 from quote_verifier import verify_claims, verify_quote_on_page
 
@@ -158,6 +159,54 @@ def _firecrawl_scrape_page(
     if resp.status_code in _FC_KEY_FAILURE_CODES:
         return {"ok": False, "text": "", "status": f"http_{resp.status_code}", "hard_failure": True}
     return {"ok": False, "text": "", "status": f"http_{resp.status_code}", "hard_failure": False}
+
+
+def _collect_pages_via_zyte(
+    domain: Optional[str],
+    parent_domain: Optional[str],
+    zyte_api_key: str,
+    max_pages: int,
+) -> dict:
+    """Collect Deep Dive pages via Zyte, own domain first, then parent domain.
+
+    Reuses the smart HQ link discovery and normalizes its source kinds to the
+    Deep Dive schema. Firecrawl is not touched here.
+    """
+    targets: list[tuple[str, str]] = []
+    seen_roots: set[str] = set()
+    for root, kind in ((domain, "own_domain"), (parent_domain, "parent_domain")):
+        root = (root or "").strip()
+        if not root or root in seen_roots:
+            continue
+        seen_roots.add(root)
+        targets.append((root, kind))
+    if not targets or not zyte_api_key:
+        return {"pages": [], "pages_crawled": [], "used": False}
+
+    pages: list[dict] = []
+    pages_crawled: list[dict] = []
+    for root, kind in targets:
+        if len(pages) >= max_pages:
+            break
+        remaining = max_pages - len(pages)
+        z = collect_own_domain_hq_pages_zyte(
+            root, zyte_api_key, max_pages=min(3, remaining),
+        )
+        pages_crawled.extend(z.get("pages_crawled") or [])
+        for page in z.get("pages") or []:
+            if len(pages) >= max_pages:
+                break
+            source_kind = kind
+            if kind == "own_domain" and page.get("source_kind") == "linked_group_domain":
+                source_kind = "parent_domain"
+            pages.append({
+                "url": page.get("url"),
+                "title": None,
+                "text": (page.get("text") or "")[:_FC_MAX_CHARS],
+                "source_kind": source_kind,
+                "retrieval_method": "zyte",
+            })
+    return {"pages": pages, "pages_crawled": pages_crawled, "used": bool(pages)}
 
 
 def _collect_pages_via_firecrawl(
@@ -764,7 +813,9 @@ def _self_heal_claims(
 # Entry point
 # ---------------------------------------------------------------------------
 
-def _fetch_page_for_verification(url: str, firecrawl_api_key: str) -> Optional[str]:
+def _fetch_page_for_verification(
+    url: str, firecrawl_api_key: str, zyte_api_key: str = ""
+) -> Optional[str]:
     """Fetch one specific URL's full text for quote verification.
 
     Same fallback order as collection (Firecrawl if a key is set, else a
@@ -772,9 +823,14 @@ def _fetch_page_for_verification(url: str, firecrawl_api_key: str) -> Optional[s
     candidate paths. Returns ``None`` on any failure so the caller can
     record ``"fetch_failed"`` — never raises.
     """
+    if zyte_api_key:
+        z = fetch_page_via_zyte(url, zyte_api_key, timeout=30)
+        if z.get("ok"):
+            return (z.get("text") or "")[:_FC_MAX_CHARS]
     if firecrawl_api_key:
         result = _firecrawl_scrape_page(url, firecrawl_api_key)
-        return result["text"] if result["ok"] else None
+        if result["ok"]:
+            return result["text"]
     return _plain_fetch(url) or None
 
 
@@ -789,6 +845,7 @@ def run_deep_dive(
     serper_api_key: str = "",
     anthropic_api_key: str = "",
     firecrawl_api_key: str = "",
+    zyte_api_key: str = "",
     max_pages: int = 6,
     ai_model: str = DEFAULT_DEEP_DIVE_MODEL,
     verify_quotes: bool = True,
@@ -831,20 +888,39 @@ def run_deep_dive(
         localized_queries_used: list[str] = []
         firecrawl_used = False
 
-        if firecrawl_api_key:
+        zyte_used = False
+        if zyte_api_key:
+            z = _collect_pages_via_zyte(domain, parent_domain, zyte_api_key, max_pages)
+            pages_crawled = z["pages_crawled"]
+            if z["used"]:
+                pages = z["pages"]
+                zyte_used = True
+
+        # Firecrawl is a true fallback: only when Zyte delivered no usable page.
+        if not zyte_used and firecrawl_api_key:
             fc = _collect_pages_via_firecrawl(domain, parent_domain, firecrawl_api_key, max_pages)
-            pages_crawled = fc["pages_crawled"]
+            pages_crawled.extend(fc["pages_crawled"])
             if fc["used"]:
                 pages = fc["pages"]
                 firecrawl_used = True
 
-        if not firecrawl_used:
+        # Supplement a successful Zyte collection with localized Serper/plain
+        # material when there is room; if both crawlers failed this becomes the
+        # normal fallback path. This never consumes Firecrawl credits.
+        if not firecrawl_used and len(pages) < max_pages:
             fb = _collect_pages_via_fallback(
                 company_name=company_name, domain=domain, parent_domain=parent_domain,
                 parent_company=parent_company, country=country,
-                serper_api_key=serper_api_key, max_pages=max_pages,
+                serper_api_key=serper_api_key, max_pages=max_pages - len(pages),
             )
-            pages = fb["pages"]
+            existing_urls = {p.get("url") for p in pages}
+            for page in fb["pages"]:
+                if len(pages) >= max_pages:
+                    break
+                if page.get("url") in existing_urls:
+                    continue
+                pages.append(page)
+                existing_urls.add(page.get("url"))
             localized_queries_used = fb["localized_queries_used"]
 
         # Hosted-platform guard, applied to whichever collection mode ran.
@@ -874,11 +950,11 @@ def run_deep_dive(
             # trigger a fresh, targeted fetch instead (see verify_claims).
             page_cache = {
                 p["url"]: p["text"] for p in pages
-                if p.get("retrieval_method") in ("firecrawl", "plain_fetch")
+                if p.get("retrieval_method") in ("zyte", "firecrawl", "plain_fetch")
             }
 
             def _fetch_fn(url: str) -> Optional[str]:
-                return _fetch_page_for_verification(url, firecrawl_api_key)
+                return _fetch_page_for_verification(url, firecrawl_api_key, zyte_api_key)
 
             verify_claims(claims, page_cache, _fetch_fn, max_verify_fetches=max_verify_fetches)
 

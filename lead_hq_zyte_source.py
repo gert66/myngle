@@ -124,6 +124,19 @@ def _fetch(url: str, api_key: str, timeout: int = 60) -> dict:
     return {"ok": False, "status": last_error or "error", "url": url, "text": "", "links": []}
 
 
+def fetch_page_via_zyte(url: str, zyte_api_key: str, *, timeout: int = 60) -> dict:
+    """Public single-page Zyte fetch for other enrichment layers.
+
+    Returns the same ``ok/status/url/text/links`` shape as the internal HQ
+    fetcher and never exposes the API key in its result.
+    """
+    url = (url or "").strip()
+    key = (zyte_api_key or "").strip()
+    if not url or not key:
+        return {"ok": False, "status": "missing_url_or_key", "url": url, "text": "", "links": []}
+    return _fetch(url, key, timeout=timeout)
+
+
 def _score_link(base_url: str, href: str, anchor: str) -> tuple[int, str] | None:
     if not href or href.startswith(("mailto:", "tel:", "javascript:", "#")):
         return None

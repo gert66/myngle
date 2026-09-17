@@ -28,7 +28,7 @@ DEEP_DIVE_CATEGORIES: tuple[str, ...] = (
 DEEP_DIVE_SOURCE_KINDS: tuple[str, ...] = ("own_domain", "parent_domain", "external")
 
 DEEP_DIVE_RETRIEVAL_METHODS: tuple[str, ...] = (
-    "firecrawl", "serper_localized", "plain_fetch",
+    "zyte", "firecrawl", "serper_localized", "plain_fetch",
 )
 
 # Documented trigger_reason values (informational — not enforced).

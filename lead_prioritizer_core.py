@@ -412,11 +412,16 @@ def prioritize_single_lead(
         fallback_reasons = _hq_firecrawl_fallback_reasons(
             hq, input_country=effective_country, crawl4ai_used=primary_crawl_used,
         )
-        if (provider.startswith("zyte")
-                and (hq.hq_structure_type or "").strip().lower() == "foreign_parent"
-                and hq.hq_evidence_domain_mismatch_warning == "Yes"
-                and not _evidence_corroborated_by_crawled_pages(hq, crawled_pages)):
-            fallback_reasons.append("foreign_parent_external_evidence_not_corroborated_by_zyte")
+        if provider.startswith("zyte"):
+            # Zyte is the production primary. Firecrawl is reserved for hard
+            # retrieval/consistency failures, not routine second opinions.
+            # External foreign-parent evidence remains protected by the final
+            # entity-safety gate below: it is review-only and score-suppressed
+            # unless the Zyte entity graph corroborates it.
+            fallback_reasons = [r for r in fallback_reasons if r in {
+                "domestic_parent_country_mismatch",
+                "foreign_parent_without_own_site_non_high_confidence",
+            }]
         if (fallback_reasons and firecrawl_api_key and input_row.domain
                 and not domain_is_hosted_platform):
             fc = collect_own_domain_hq_pages(
