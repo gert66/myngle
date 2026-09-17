@@ -288,11 +288,9 @@ def handle_pending(message: dict, *, url=None, token=None) -> str:
     proposed = str(decision.get("proposed_reply") or "").strip()
     if proposed:
         case["proposed_reply"] = proposed
-    case["conversation_summary"] = str(decision.get("assistant_reply") or "").strip()
-    case["conversation_summary_at"] = utc_now()
+    reply = str(decision.get("assistant_reply") or "").strip() or "Ik heb je bericht verwerkt."
     if decision.get("mode") == "reply":
         save_case(case)
-        reply = case["conversation_summary"] or "Ik heb je bericht verwerkt."
         update_message(mid, "done", assistant_body=reply, result_note="conversation reply", url=url, token=token)
         return "done"
     instruction = str(decision.get("investigation_instruction") or message.get("body") or "").strip()
@@ -335,8 +333,6 @@ def handle_processing(message: dict, *, url=None, token=None) -> str:
         case["proposed_reply"] = proposed
     elif phase in {"ERROR", "NEEDS_HUMAN", "ABORTED"}:
         case["proposed_reply"] = None
-    case["conversation_summary"] = assistant
-    case["conversation_summary_at"] = utc_now()
     case["conversation_message_id"] = None
     case["conversation_job_id"] = None
     save_case(case)
