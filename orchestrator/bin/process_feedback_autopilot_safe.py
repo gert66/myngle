@@ -136,6 +136,19 @@ def main() -> int:
         case, is_new = ingest_row(row)
         created += int(is_new)
 
+        # The upstream endpoint only returns open feedback. If an item that we
+        # previously marked resolved appears again, it was reopened upstream.
+        # Mirror that source-of-truth state without silently re-running a job.
+        if case.get("status") == "resolved":
+            case["status"] = "needs_review"
+            case["source_open"] = True
+            case["resolution_note"] = None
+            case["resolved_at"] = None
+            case["closed_at"] = None
+            case["question"] = "This feedback was reopened. Review the prior investigation and decide the next action."
+            case["recommendation"] = "The case is open again in Sales Cockpit; continue from the prior investigation rather than treating it as closed."
+            save_case(case)
+
         if key in {"lusha_contact_coverage", "aircall_dtmf"} and not case.get("job_id"):
             case["kind"] = "data_quality" if key == "lusha_contact_coverage" else "integration_issue"
             case["risk"] = "AMBER"
