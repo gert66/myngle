@@ -83,3 +83,54 @@ def test_sync_verified_resolution_waits_for_verified(monkeypatch):
     case = {"feedback_id":"abcdef-123456", "proposal_id":"FB-abcdef-123456"}
     monkeypatch.setattr(f, "load_record", lambda _pid: {"deployment_result":{"status":"deploying"},"proposal":{}})
     assert f.sync_verified_resolution(case, opener=lambda *a, **k: None) is False
+
+
+def test_submit_case_relinks_existing_job_without_resubmitting(monkeypatch, tmp_path):
+    cases = tmp_path / "cases"
+    jobs = tmp_path / "jobs"
+    fid = "11807a50-ea2b-4abc-9def-123456789abc"
+    job_id = f"feedback-{fid[:12]}"
+    (jobs / job_id).mkdir(parents=True)
+    monkeypatch.setattr(f, "CASES_DIR", cases)
+    monkeypatch.setattr(f, "JOBS_DIR", jobs)
+    case = {
+        "feedback_id": fid,
+        "reporter_email": "carla@example.com",
+        "company": "Acme",
+        "country": "NL",
+        "comment": "I cannot log a call",
+        "status": "queued",
+        "job_id": None,
+    }
+
+    def should_not_run(*args, **kwargs):
+        raise AssertionError("existing deterministic job must be relinked, not resubmitted")
+
+    result = f.submit_case(case, run=should_not_run)
+    assert result["job_id"] == job_id
+    assert result["status"] == "investigating"
+    assert result["job_mode"] == "write"
+    assert f.load_case(fid)["job_id"] == job_id
+
+
+def test_submit_research_case_relinks_existing_job(monkeypatch, tmp_path):
+    cases = tmp_path / "cases"
+    jobs = tmp_path / "jobs"
+    fid = "abcdef12-3456-4abc-9def-123456789abc"
+    job_id = f"feedback-{fid[:12]}"
+    (jobs / job_id).mkdir(parents=True)
+    monkeypatch.setattr(f, "CASES_DIR", cases)
+    monkeypatch.setattr(f, "JOBS_DIR", jobs)
+    case = {
+        "feedback_id": fid,
+        "reporter_email": "nicole@example.com",
+        "company": "Acme",
+        "country": "US",
+        "comment": "Could we add a new outcome?",
+        "status": "queued_research",
+        "job_id": None,
+    }
+    result = f.submit_case(case, run=lambda *a, **k: (_ for _ in ()).throw(AssertionError("must not submit")))
+    assert result["job_id"] == job_id
+    assert result["status"] == "researching"
+    assert result["job_mode"] == "read"

@@ -118,6 +118,15 @@ def submit_case(case: dict[str, Any], *, run=subprocess.run) -> dict[str, Any]:
     research_only = case.get("status") == "queued_research"
     fid = str(case["feedback_id"])
     job_id = f"feedback-{fid[:12].lower()}"
+    existing_job = JOBS_DIR / job_id
+    if existing_job.exists():
+        case["job_id"] = job_id
+        case["status"] = "researching" if research_only else "investigating"
+        case["job_mode"] = "read" if research_only else "write"
+        case.setdefault("job_submitted_at", utc_now())
+        save_case(case)
+        return case
+
     args = [
         "/usr/bin/python3", "-m", "core.cli", "submit",
         "--job-id", job_id,
