@@ -41,13 +41,15 @@ class LeadListCommandTests(unittest.TestCase):
             "cold_caller": "Luana",
             "name": "Luana Switzerland",
         })
-        self.assertEqual(outcome["status"], "checking")
+        self.assertEqual(outcome["status"], "ready")
         self.assertEqual(outcome["intake_report"]["quality_status"], "GREEN")
         self.assertEqual(outcome["intake_report"]["decision"], "READY")
         self.assertEqual(outcome["intake_report"]["source_rows"], 2)
         self.assertEqual(outcome["intake_report"]["unique_companies"], 1)
         self.assertEqual(outcome["intake_report"]["companies_with_email_domain_hint"], 1)
         self.assertEqual(outcome["intake_report"]["companies_needing_domain"], 1)
+        self.assertEqual(outcome["intake_report"]["pipeline"]["mode"], "dry_run")
+        self.assertEqual(outcome["intake_report"]["pipeline"]["writes_performed"], 0)
 
     @mock.patch.object(mod, "ack")
     @mock.patch.object(mod, "process_command")

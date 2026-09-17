@@ -3,8 +3,9 @@
 
 The Control Center keeps the original upload in private storage. Its public,
 token-protected worker route returns a short-lived signed download URL plus
-list metadata. This worker performs intake normalization only: no enrichment,
-HubSpot writes, GCS publication, or Cockpit publication happen here.
+list metadata. This worker performs deterministic intake plus a downstream dry run. It persists
+private derived worksets and reports the protection/enrichment/publication plan.
+No enrichment supplier calls, HubSpot writes, or Sales Cockpit writes happen.
 """
 from __future__ import annotations
 
@@ -27,9 +28,11 @@ REPO_ROOT = Path(os.environ.get("MYNGLE_REPO_ROOT", str(_default_repo)))
 sys.path.insert(0, str(REPO_ROOT))
 
 from lead_list_intake import analyze_lead_list  # noqa: E402
+from lead_list_pipeline import build_dry_run_report, persist_intake_artifacts  # noqa: E402
 
 TOKEN_FILE = ORCH_ROOT / "secrets" / "orchestrator_ingest_token"
 PUSH_URL_FILE = ORCH_ROOT / "config" / "ops_push_url.txt"
+ARTIFACTS_DIR = ORCH_ROOT / "lead_lists"
 
 
 def commands_url(path=PUSH_URL_FILE):
@@ -94,6 +97,7 @@ def process_command(command):
     country = str(command.get("country") or "").strip()
     assigned_caller = str(command.get("cold_caller") or "").strip()
     list_name = str(command.get("name") or Path(filename).stem).strip()
+    import_plan = command.get("import_plan") if isinstance(command.get("import_plan"), dict) else {}
     if not list_id or not download_url:
         raise ValueError("command is missing list_id/file_url")
 
@@ -109,8 +113,11 @@ def process_command(command):
             default_country=country,
             assigned_caller=assigned_caller,
             list_name=list_name,
+            import_plan=import_plan,
         )
 
+    pipeline = build_dry_run_report(result, import_plan)
+    persist_intake_artifacts(list_id, result, pipeline, ARTIFACTS_DIR)
     report = dict(result.report)
     report.update({
         "source_sheet": result.source_sheet,
@@ -119,14 +126,16 @@ def process_command(command):
         # UI compatibility aliases.
         "companies_needing_domain": report.get("companies_needing_domain_resolution", 0),
         "duplicate_company_rows": report.get("company_rows_collapsed", 0),
+        "pipeline": pipeline,
+        "artifacts_persisted": True,
     })
     decision = report.get("decision")
-    list_status = "checking" if decision == "READY" else "review_required"
+    list_status = "ready" if pipeline.get("status") == "complete" else "review_required"
     note = (
-        f"Intake {report.get('quality_status', 'UNKNOWN')}: {report['source_rows']} rows -> "
-        f"{report['unique_companies']} companies; {report.get('blocked_rows', 0)} blocked; "
-        f"{report['companies_needing_domain_resolution']} need domain resolution. "
-        f"Decision: {decision}."
+        f"Dry run {'complete' if list_status == 'ready' else 'blocked'}: "
+        f"{report['source_rows']} rows -> {report['unique_companies']} companies; "
+        f"quality {report.get('quality_status', 'UNKNOWN')} / {decision}. "
+        "No enrichment supplier calls or external writes were performed."
     )
     return {
         "list_id": list_id,

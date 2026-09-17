@@ -12,7 +12,7 @@ from pathlib import Path
 import hashlib
 import re
 import unicodedata
-from typing import Any
+from typing import Any, Mapping
 
 import pandas as pd
 
@@ -270,20 +270,42 @@ def _read_xlsx(path: Path) -> tuple[pd.DataFrame, str, int]:
     _, sheet, header_row = best
     return pd.read_excel(path, sheet_name=sheet, header=header_row, dtype=str), sheet, header_row
 
-def load_table(path: str | Path) -> LoadedTable:
+def load_table(
+    path: str | Path, *, source_sheet: str | None = None, header_row: int | None = None,
+    delimiter: str | None = None,
+) -> LoadedTable:
     source = Path(path)
     if not source.is_file():
         raise FileNotFoundError(source)
     suffix = source.suffix.lower()
     if suffix not in SUPPORTED_SUFFIXES:
         raise ValueError(f"Unsupported lead-list format {suffix!r}; expected XLSX or CSV.")
-    if suffix == ".csv":
+    if suffix == ".csv" and header_row is not None:
+        last_error: Exception | None = None
+        for encoding in ("utf-8-sig", "utf-8", "cp1252", "latin1"):
+            try:
+                df = pd.read_csv(
+                    source, sep=delimiter or None, engine="python", header=int(header_row),
+                    encoding=encoding, dtype=str,
+                )
+                sheet = "CSV"
+                break
+            except Exception as exc:
+                last_error = exc
+        else:
+            raise ValueError(f"Could not read CSV: {last_error}")
+    elif suffix == ".csv":
         df, sheet, header_row = _read_csv(source)
+    elif source_sheet is not None or header_row is not None:
+        sheet = source_sheet or pd.ExcelFile(source).sheet_names[0]
+        chosen_header = int(header_row or 0)
+        df = pd.read_excel(source, sheet_name=sheet, header=chosen_header, dtype=str)
+        header_row = chosen_header
     else:
         df, sheet, header_row = _read_xlsx(source)
     df = df.dropna(axis=0, how="all").dropna(axis=1, how="all").reset_index(drop=True)
     df.columns = [str(c).strip() for c in df.columns]
-    return LoadedTable(df, sheet, header_row, _sha256(source))
+    return LoadedTable(df, sheet, int(header_row or 0), _sha256(source))
 
 
 _COLUMN_PRIORITIES: dict[str, tuple[str, ...]] = {
@@ -321,6 +343,64 @@ def detect_mapping(df: pd.DataFrame) -> dict[str, str]:
         values = values[values != ""]
         if len(values) and float(values.isin({"yes", "no", "y", "n", "true", "false"}).mean()) >= 0.8:
             mapping["email_sent"] = bare_email
+    return mapping
+
+
+UI_TO_CANONICAL = {
+    "company": "company_name",
+    "domain": "domain",
+    "country": "country",
+    "city": "city",
+    "contact_name": "contact_name",
+    "job_title": "job_title",
+    "cold_caller": "source_assignee_hint",
+}
+
+
+def mapping_from_import_plan(df: pd.DataFrame, plan: Mapping[str, Any]) -> dict[str, str]:
+    """Translate the browser-confirmed column mapping into intake canonical fields.
+
+    The upload UI may deliberately override our automatic guess, and may map
+    several source columns to Email or Phone. Preserve those choices instead
+    of silently re-detecting the file on the VM.
+    """
+    rows = plan.get("mapping") if isinstance(plan, Mapping) else None
+    if not isinstance(rows, list):
+        return {}
+    mapping: dict[str, str] = {}
+    email_targets = iter(("work_email", "additional_email_1", "additional_email_2"))
+    phone_targets = iter(("direct_phone", "mobile", "mobile_2", "phone_1", "phone_2"))
+    cols = list(df.columns)
+    normalized = [_norm_header(c) for c in cols]
+    for item in rows:
+        if not isinstance(item, Mapping):
+            continue
+        field = str(item.get("field") or "").strip()
+        if field in {"", "ignore", "source"}:
+            continue
+        column = None
+        try:
+            idx = int(item.get("index"))
+        except (TypeError, ValueError):
+            idx = -1
+        wanted = _norm_header(item.get("header"))
+        if 0 <= idx < len(cols) and (not wanted or normalized[idx] == wanted):
+            column = cols[idx]
+        elif wanted:
+            for i, norm in enumerate(normalized):
+                if norm == wanted:
+                    column = cols[i]
+                    break
+        if column is None:
+            continue
+        if field == "email":
+            target = next(email_targets, None)
+        elif field == "phone":
+            target = next(phone_targets, None)
+        else:
+            target = UI_TO_CANONICAL.get(field)
+        if target and target not in mapping:
+            mapping[target] = column
     return mapping
 
 
@@ -600,6 +680,7 @@ def analyze_lead_list(
     default_country: str = "",
     assigned_caller: str = "",
     list_name: str = "",
+    import_plan: Mapping[str, Any] | None = None,
 ) -> IntakeResult:
     """Analyze a lead list without enrichment or publication.
 
@@ -607,8 +688,19 @@ def analyze_lead_list(
     column in the source is preserved only as an audit hint and never controls
     ownership.
     """
-    loaded = load_table(path)
-    mapping = detect_mapping(loaded.dataframe)
+    plan = import_plan if isinstance(import_plan, Mapping) else {}
+    selected_sheet = str(plan.get("sheet") or "").strip() or None
+    selected_header = plan.get("header_row")
+    try:
+        selected_header = int(selected_header) if selected_header is not None else None
+    except (TypeError, ValueError):
+        selected_header = None
+    selected_delimiter = str(plan.get("delimiter") or "").strip() or None
+    loaded = load_table(
+        path, source_sheet=selected_sheet, header_row=selected_header, delimiter=selected_delimiter,
+    )
+    confirmed_mapping = mapping_from_import_plan(loaded.dataframe, plan)
+    mapping = confirmed_mapping or detect_mapping(loaded.dataframe)
     normalized = normalize_rows(loaded.dataframe, mapping, default_country=default_country)
     companies = build_company_workset(normalized)
     semantic_issues = semantic_column_issues(loaded.dataframe, mapping)
@@ -705,6 +797,7 @@ def analyze_lead_list(
         "contact_rows": int(normalized["has_contact_identifier"].fillna(False).astype(bool).sum()) if row_count else 0,
         "legacy_note_rows_preserved": legacy_note_rows,
         "detected_columns": sorted(mapping.keys()),
+        "mapping_source": "confirmed_by_user" if confirmed_mapping else "auto_detected",
         "semantic_issues": semantic_issues,
         "hard_stops": hard_stops,
         "review_reasons": review_reasons,
