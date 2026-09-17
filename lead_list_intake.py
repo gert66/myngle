@@ -125,7 +125,7 @@ def normalize_domain(value: Any) -> str:
 
 _LEGAL_SUFFIX_RE = re.compile(
     r"\b(bv|nv|gmbh|ag|sa|sas|sarl|spa|srl|ltd|limited|llc|inc|corp|corporation|"
-    r"plc|pty|pte|kg|kgaa|oy|ab|as|holding|holdings|group|company|co)\b\.?,?",
+    r"plc|pty|pte|kg|kgaa|oy|ab|as|company|co)\b\.?,?",
     re.IGNORECASE,
 )
 

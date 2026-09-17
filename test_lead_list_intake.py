@@ -159,3 +159,12 @@ def test_lusha_fallback_email_and_typed_phones(tmp_path: Path):
     assert row["direct_phone"] == "+39 02 1234567"
     assert row["mobile"] == "+39 333 1234567"
     assert "no answer" in row["legacy_call_notes"].lower()
+
+
+def test_group_and_holding_names_are_not_collapsed_into_legal_suffixes():
+    from lead_list_intake import normalize_company_name
+
+    assert normalize_company_name("Hanwha Group") == "hanwha group"
+    assert normalize_company_name("Hanwha Corporation") == "hanwha"
+    assert normalize_company_name("Acme Holdings") == "acme holdings"
+    assert normalize_company_name("Acme GmbH") == "acme"
