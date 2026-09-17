@@ -458,7 +458,7 @@ def publish_prospect_membership(
     """Write Prospect List membership only after the same protected live gate."""
     _require_live_gate(preflight, confirm_batch_id)
     endpoint = (url or os.environ.get("PROSPECT_LIST_MEMBERSHIP_URL") or
-                "https://control.whofirst.nl/api/public/prospect-list-membership").strip()
+                "https://myngle.whofirst.nl/api/public/prospect-list-membership").strip()
     secret = (token or os.environ.get("FEEDBACK_AUTOPILOT_TOKEN") or "").strip()
     if not secret:
         token_file = Path("/home/myngle/orchestrator/secrets/feedback_autopilot_token")
