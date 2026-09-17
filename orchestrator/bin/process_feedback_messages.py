@@ -40,9 +40,10 @@ DECISION_SCHEMA = {
         "mode": {"type": "string", "enum": ["reply", "investigate"]},
         "assistant_reply": {"type": "string"},
         "investigation_instruction": {"type": "string"},
+        "job_mode": {"type": "string", "enum": ["none", "read", "write"]},
         "proposed_reply": {"type": "string"},
     },
-    "required": ["mode", "assistant_reply", "investigation_instruction", "proposed_reply"],
+    "required": ["mode", "assistant_reply", "investigation_instruction", "job_mode", "proposed_reply"],
     "additionalProperties": False,
 }
 
@@ -156,7 +157,7 @@ A final reply to the reporter is only sent later by an explicit Send & close but
 Choose mode=reply when the owner is discussing wording, asking for an explanation, refining a proposed reply, or when you can answer from the existing evidence.
 Choose mode=investigate when the owner asks you to check, test, retry, trace, fix, implement, or continue technical work, or answers yes to a pending technical action.
 For investigate, make investigation_instruction a concrete safe job instruction and keep assistant_reply short; it is only an acknowledgement.
-For reply, investigation_instruction must be an empty string.
+Choose job_mode=read for checking, analysing, tracing, validating, gathering evidence, or whenever the owner says not to change anything. Choose job_mode=write only when the owner explicitly asks to fix, implement, change or modify the product/code. For reply use job_mode=none and investigation_instruction must be empty.
 If a reporter reply is ready, proposed_reply should be concise and in the language of the reporter's original feedback. Otherwise use an empty string.
 
 CASE CONTEXT:
@@ -214,7 +215,9 @@ THREAD:
     return _invoke_structured(prompt, RESULT_SCHEMA)
 
 
-def _submit_follow_up(case: dict, instruction: str, *, run=subprocess.run) -> str:
+def _submit_follow_up(case: dict, instruction: str, *, job_mode: str = "write", run=subprocess.run) -> str:
+    if job_mode not in {"read", "write"}:
+        raise ValueError("job_mode must be read or write")
     iteration = int(case.get("iteration") or 0) + 1
     fid = str(case["feedback_id"])
     jid = f"feedback-{fid[:8].lower()}-c{iteration}"
@@ -237,10 +240,9 @@ Work autonomously as far as evidence supports. On branch work only, reproduce or
         "--repo", COMPANY_REPO,
         "--repo-path", str(COMPANY_REPO_PATH),
         "--branch", COMPANY_BRANCH,
-        "--mode", "write",
+        "--mode", job_mode,
         "--goal", goal,
-        "--test", "npm test",
-        "--test", "npm run build",
+        *([] if job_mode == "read" else ["--test", "npm test", "--test", "npm run build"]),
         "--worker-provider", "auto",
         "--worker-complexity", "normal",
         "--resource-class", "dev",
@@ -253,7 +255,7 @@ Work autonomously as far as evidence supports. On branch work only, reproduce or
         raise RuntimeError((proc.stderr or proc.stdout)[-1600:])
     case["iteration"] = iteration
     case["job_id"] = jid
-    case["job_mode"] = "write"
+    case["job_mode"] = job_mode
     case["job_submitted_at"] = utc_now()
     case["status"] = "investigating"
     case["question"] = None
@@ -294,7 +296,10 @@ def handle_pending(message: dict, *, url=None, token=None) -> str:
         update_message(mid, "done", assistant_body=reply, result_note="conversation reply", url=url, token=token)
         return "done"
     instruction = str(decision.get("investigation_instruction") or message.get("body") or "").strip()
-    jid = _submit_follow_up(case, instruction)
+    requested_mode = str(decision.get("job_mode") or "write")
+    if requested_mode not in {"read", "write"}:
+        requested_mode = "write"
+    jid = _submit_follow_up(case, instruction, job_mode=requested_mode)
     case = load_case(fid)
     case["conversation_message_id"] = mid
     case["conversation_job_id"] = jid
