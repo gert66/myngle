@@ -67,6 +67,32 @@ def save_suppressions(data: dict) -> None:
     tmp.replace(SUPPRESSIONS_FILE)
 
 
+def sync_closed_from_open_feed(rows: list[dict]) -> int:
+    """Mirror the Sales Cockpit open-feedback feed into local case state.
+
+    The upstream endpoint intentionally returns only currently open feedback.
+    Any previously ingested non-informational case that is absent from a
+    successful fetch has therefore been closed/resolved in Sales Cockpit and
+    must no longer remain in the Control Center open queue.
+    """
+    open_ids = {str(row.get("id") or "") for row in rows}
+    changed = 0
+    for case in list_cases():
+        fid = str(case.get("feedback_id") or "")
+        if not fid or fid in open_ids:
+            continue
+        if case.get("status") in {"resolved", "informational"}:
+            continue
+        case["status"] = "resolved"
+        case["source_open"] = False
+        case["resolution_source"] = "sales_cockpit_open_feed"
+        case["question"] = None
+        case["recommendation"] = "This feedback is already resolved in Sales Cockpit."
+        save_case(case)
+        changed += 1
+    return changed
+
+
 def post_resolution(feedback_id: str, expected_updated_at: str | None, note: str, url: str, token: str) -> dict:
     payload = json.dumps({
         "id": feedback_id,
@@ -93,6 +119,7 @@ def main() -> int:
     url = URL_FILE.read_text(encoding="utf-8").strip() if URL_FILE.exists() else DEFAULT_API_URL
     rows = json.loads(Path(args.fixture).read_text(encoding="utf-8")) if args.fixture else fetch_rows(url, token)
     rows = sorted(rows, key=lambda r: str(r.get("created_at") or ""))
+    source_closed = 0 if args.fixture else sync_closed_from_open_feed(rows)
 
     canonical: dict[str, str] = {}
     for row in rows:
@@ -180,6 +207,7 @@ def main() -> int:
         "fetched": len(rows),
         "created": created,
         "linked_duplicates": linked,
+        "source_closed": source_closed,
         "cases": len(list_cases()),
         "submit_enabled": not args.no_submit,
     }, sort_keys=True))
