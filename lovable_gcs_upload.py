@@ -467,9 +467,19 @@ def merge_company_records(
         old_skipped = bool(old_item.get("enrichment_skipped"))
         new_wins = (not new_skipped) or old_skipped
         if new_wins:
-            merged_list_items.append(new_item)
+            # Preserve write-once batch provenance across repeated imports.
+            merged_item = dict(new_item)
+            old_batches = [str(x) for x in (old_item.get("import_batches") or []) if x]
+            new_batches = [str(x) for x in (new_item.get("import_batches") or []) if x]
+            merged_item["import_batches"] = list(dict.fromkeys(old_batches + new_batches))
+            merged_list_items.append(merged_item)
             if cid in new_details:
-                merged_details[cid] = new_details[cid]
+                merged_detail = dict(new_details[cid])
+                old_detail = existing_details.get(cid, {})
+                old_detail_batches = [str(x) for x in (old_detail.get("import_batches") or []) if x]
+                new_detail_batches = [str(x) for x in (merged_detail.get("import_batches") or []) if x]
+                merged_detail["import_batches"] = list(dict.fromkeys(old_detail_batches + new_detail_batches))
+                merged_details[cid] = merged_detail
         else:
             merged_list_items.append(old_item)
 

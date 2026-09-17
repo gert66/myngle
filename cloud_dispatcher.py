@@ -62,6 +62,7 @@ import tempfile
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
+from urllib import request as urllib_request
 
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
@@ -76,6 +77,31 @@ from cloud_job_runner import (
 )
 
 app = FastAPI(title="mYngle Lead Prioritizer — Cloud Run dispatcher", version="0.1.0")
+
+
+def _post_control_center_safety(payload: dict) -> None:
+    """Best-effort audit mirror. GCS safety artifacts remain authoritative."""
+    list_id = str(payload.get("list_id") or "")
+    token = os.environ.get("ORCHESTRATOR_INGEST_TOKEN", "").strip()
+    if not list_id or not token:
+        return
+    url = os.environ.get(
+        "CONTROL_CENTER_SAFETY_URL",
+        "https://control.whofirst.nl/api/public/lead-list-import-safety",
+    ).strip()
+    body = json.dumps(payload).encode("utf-8")
+    req = urllib_request.Request(url, data=body, method="POST", headers={
+        "Content-Type": "application/json",
+        "x-orchestrator-token": token,
+        "User-Agent": "mYngle-Cloud-Dispatcher/1.0",
+    })
+    try:
+        with urllib_request.urlopen(req, timeout=10):
+            pass
+    except Exception:
+        # Audit mirroring must never weaken the GCS safety gate itself.
+        return
+
 
 INCOMING_PREFIX = "incoming/"
 EXCEL_SUFFIXES = (".xlsx", ".xls")
@@ -523,8 +549,81 @@ def _run_lovable_export(final_output_uri: str, output_dir: str, lovable_cfg: dic
 
             existing_list_items, existing_details = _download_existing_current_via_client(
                 gcs_bucket, country_folder)
+
+            # Safety gate: reconcile the fresh export against the CURRENT country
+            # dataset before company_ids are merged. Exact domain (or exact
+            # name+phone) can link automatically; name-only candidates block
+            # the live write for review.
+            from lead_list_safety import (
+                annotate_import_provenance, build_change_ledger,
+                prematch_export_records, reconcile_export_ids,
+                write_before_snapshot,
+            )
+            raw_batch_id = str(lovable_cfg.get("import_batch") or output_dir.rstrip("/").split("/")[-1])
+            batch_id = re.sub(r"[^a-zA-Z0-9._-]+", "-", raw_batch_id).strip("-") or "import"
+            prematch = prematch_export_records(
+                new_list_items, existing_list_items,
+                new_details=new_details, existing_details=existing_details,
+            )
+            safety_dir = Path(td) / "safety"
+            safety_dir.mkdir(parents=True, exist_ok=True)
+            (safety_dir / "prematch.json").write_text(
+                json.dumps({"batch_id": batch_id, **prematch}, ensure_ascii=False, indent=2, default=str),
+                encoding="utf-8",
+            )
+            safety_prefix = f"gs://{gcs_bucket}/{country_folder}/imports/{batch_id}"
+            upload_output_file(safety_dir / "prematch.json", f"{safety_prefix}/prematch.json")
+            if int((prematch.get("summary") or {}).get("ambiguous") or 0) > 0:
+                _post_control_center_safety({
+                    "batch_id": batch_id,
+                    "list_id": str(lovable_cfg.get("source_list_id") or ""),
+                    "country_key": country_folder,
+                    "status": "safety_review_required",
+                    "prematch_summary": prematch.get("summary"),
+                    "safety_prefix": safety_prefix,
+                    "rollback_available": False,
+                    "entries": [
+                        {
+                            "company_id": str(e.get("source_company_key") or ""),
+                            "company_name": e.get("company_name"),
+                            "action": e.get("action"),
+                            "match_basis": e.get("match_basis"),
+                            "confidence": 1.0 if e.get("confidence") == "high" else 0.5,
+                        } for e in prematch.get("entries", []) if e.get("source_company_key")
+                    ],
+                })
+                result["live_upload"] = {
+                    "ok": False,
+                    "status": "safety_review_required",
+                    "batch_id": batch_id,
+                    "prematch": prematch.get("summary"),
+                    "safety_prefix": safety_prefix,
+                    "error": "Ambiguous company matches require review before publication.",
+                }
+                return result
+
+            reconciled_items, reconciled_details = reconcile_export_ids(
+                new_list_items, new_details, prematch)
+            reconciled_items, reconciled_details = annotate_import_provenance(
+                reconciled_items, reconciled_details, batch_id=batch_id,
+                source_list_id=str(lovable_cfg.get("source_list_id") or "") or None,
+            )
+            ledger = build_change_ledger(
+                existing_list_items, reconciled_items, prematch, batch_id=batch_id)
+            (safety_dir / "ledger.json").write_text(
+                json.dumps(ledger, ensure_ascii=False, indent=2, default=str), encoding="utf-8")
+            upload_output_file(safety_dir / "ledger.json", f"{safety_prefix}/ledger.json")
+
+            # An immutable pre-write snapshot is mandatory. If this upload
+            # fails, the exception aborts BEFORE current/ is touched.
+            before_dir = write_before_snapshot(
+                safety_dir / "before", existing_list_items, existing_details,
+                batch_id=batch_id, country_key=country_folder)
+            for before_file in sorted(before_dir.glob("*.json")):
+                upload_output_file(before_file, f"{safety_prefix}/before/{before_file.name}")
+
             merged_items, merged_details = lovable_gcs.merge_company_records(
-                existing_list_items, existing_details, new_list_items, new_details)
+                existing_list_items, existing_details, reconciled_items, reconciled_details)
             merged_items, merged_buckets = lovable_gcs.rebucket_company_details(
                 merged_items, merged_details, bucket_size)
 
@@ -546,10 +645,36 @@ def _run_lovable_export(final_output_uri: str, output_dir: str, lovable_cfg: dic
                     local_file,
                     lovable_gcs.gcs_archive_path(gcs_bucket, country_folder, run_folder, local_file.name))
 
+            _post_control_center_safety({
+                "batch_id": batch_id,
+                "list_id": str(lovable_cfg.get("source_list_id") or ""),
+                "country_key": country_folder,
+                "status": "published_with_rollback_protection",
+                "prematch_summary": prematch.get("summary"),
+                "ledger_summary": ledger.get("summary"),
+                "safety_prefix": safety_prefix,
+                "rollback_snapshot": f"{safety_prefix}/before/",
+                "rollback_available": True,
+                "entries": [
+                    {
+                        "company_id": str(e.get("company_id") or ""),
+                        "company_name": e.get("company_name"),
+                        "action": e.get("action"),
+                        "match_basis": e.get("match_basis"),
+                        "confidence": 1.0 if e.get("confidence") == "high" else 0.5,
+                    } for e in ledger.get("entries", []) if e.get("company_id")
+                ],
+            })
             result["live_upload"] = {
                 "ok": True,
+                "status": "published_with_rollback_protection",
+                "batch_id": batch_id,
                 "current_dir": lovable_gcs.gcs_current_path(gcs_bucket, country_folder, ""),
                 "archive_dir": lovable_gcs.gcs_archive_path(gcs_bucket, country_folder, run_folder, ""),
+                "safety_prefix": safety_prefix,
+                "prematch": prematch.get("summary"),
+                "ledger": ledger.get("summary"),
+                "rollback_snapshot": f"{safety_prefix}/before/",
                 "companies_total_after": len(merged_items),
             }
         except Exception as exc:

@@ -170,8 +170,16 @@ def build_dry_run_report(
         "country_worksets": country_worksets,
         "stages": stages,
         "blockers": blockers,
+        "live_guardrails": {
+            "prematch_current_country": "required",
+            "ambiguous_matches_allowed": 0,
+            "before_snapshot": "required_before_first_write",
+            "batch_ledger": "required",
+            "selective_rollback": "required",
+            "hubspot_bulk_sync": "blocked_for_initial_live_import",
+        },
         "next_action": (
-            "Review this dry run, then explicitly enable the real pipeline."
+            "Review this dry run, then run the protected live preflight before enrichment or publication."
             if intake_ok else "Resolve the intake blockers before any downstream processing."
         ),
     }
