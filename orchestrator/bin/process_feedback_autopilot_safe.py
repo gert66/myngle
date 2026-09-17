@@ -6,8 +6,9 @@ import argparse
 import json
 import os
 import sys
+from datetime import datetime, timezone
 from pathlib import Path
-from urllib import request
+from urllib import error, request
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
@@ -147,12 +148,26 @@ def main() -> int:
                 duplicate_case = load_case(duplicate_id)
             except FileNotFoundError:
                 continue
+            # A duplicate may already have been resolved by a previous/manual run.
+            # In that case the suppression entry is stale bookkeeping and must not
+            # trigger another conditional write to production.
+            if duplicate_case.get("status") == "resolved" and str(duplicate_case.get("resolution_note") or "").strip():
+                suppressions.pop(duplicate_id, None)
+                continue
             if canonical_case.get("status") != "resolved":
                 continue
             note = str(canonical_case.get("resolution_note") or "").strip()
             if not note:
                 continue
-            result = post_resolution(duplicate_id, meta.get("source_updated_at"), note, url, token)
+            try:
+                result = post_resolution(duplicate_id, meta.get("source_updated_at"), note, url, token)
+            except error.HTTPError as exc:
+                # A stale expected_updated_at is a per-record concurrency conflict,
+                # not a reason to stop intake for every other feedback item.
+                if exc.code == 409:
+                    meta["last_conflict_at"] = datetime.now(timezone.utc).isoformat()
+                    continue
+                raise
             if result.get("status") == "resolved":
                 duplicate_case["status"] = "resolved"
                 duplicate_case["resolution_note"] = note
