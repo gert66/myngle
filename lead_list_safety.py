@@ -411,6 +411,48 @@ def selective_rollback(
     }
 
 
+def apply_reviewed_match_overrides(
+    prematch: Mapping[str, Any], overrides: Iterable[Mapping[str, Any]] | None,
+) -> dict[str, Any]:
+    """Resolve reviewed ambiguous matches without weakening automatic rules.
+
+    Every override must point to a company_id already listed as a candidate on
+    the ambiguous entry and must carry at least one evidence reference.
+    """
+    result = deepcopy(dict(prematch))
+    entries = [dict(e) for e in result.get("entries", [])]
+    by_key = {str(e.get("source_company_key") or ""): e for e in entries}
+    reviewed = 0
+    for raw in overrides or []:
+        key = str(raw.get("source_company_key") or "").strip()
+        target = str(raw.get("existing_company_id") or "").strip()
+        evidence = [str(x).strip() for x in (raw.get("evidence") or []) if str(x).strip()]
+        if not key or not target or not evidence:
+            raise ValueError("reviewed match override requires source_company_key, existing_company_id and evidence")
+        entry = by_key.get(key)
+        if not entry or entry.get("action") != "ambiguous":
+            raise ValueError(f"reviewed match override is not a current ambiguous entry: {key}")
+        candidates = {str(x) for x in entry.get("candidate_company_ids") or []}
+        if target not in candidates:
+            raise ValueError(f"reviewed match target is not a prematch candidate: {key} -> {target}")
+        entry["action"] = "matched_existing"
+        entry["existing_company_id"] = target
+        entry["match_basis"] = "reviewed_identity_match"
+        entry["confidence"] = "high"
+        entry["review_evidence"] = evidence
+        entry["reviewer"] = str(raw.get("reviewer") or "protected-live-review")
+        entry["review_note"] = str(raw.get("note") or "").strip() or None
+        reviewed += 1
+    counts = {"matched_existing": 0, "new": 0, "ambiguous": 0}
+    for entry in entries:
+        action = str(entry.get("action") or "")
+        if action in counts:
+            counts[action] += 1
+    result["entries"] = entries
+    result["summary"] = {**counts, "total": len(entries), "reviewed_matches": reviewed}
+    return result
+
+
 def build_enrichment_plan(prematch: Mapping[str, Any]) -> dict[str, Any]:
     """Route companies before Zyte: new=full, matched=gap-fill, ambiguous=hold."""
     full: list[str] = []

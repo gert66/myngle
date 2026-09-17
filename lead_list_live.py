@@ -14,6 +14,7 @@ from urllib import request as urllib_request
 from typing import Any
 
 from lead_list_safety import (
+    apply_reviewed_match_overrides,
     build_enrichment_plan,
     prematch_companies,
     write_before_snapshot,
@@ -89,6 +90,13 @@ def build_live_preflight(
         normalized_rows=rows,
         existing_details=existing_details,
     )
+    automatic_prematch = prematch
+    overrides_path = base / "reviewed_matches.json"
+    if overrides_path.is_file():
+        overrides = json.loads(overrides_path.read_text(encoding="utf-8"))
+        if not isinstance(overrides, list):
+            raise ValueError("reviewed_matches.json must contain a JSON list")
+        prematch = apply_reviewed_match_overrides(prematch, overrides)
     enrichment = build_enrichment_plan(prematch)
     summary = prematch["summary"]
     safety_dir = preflight_dir / "safety" / batch_id
@@ -112,6 +120,7 @@ def build_live_preflight(
         "existing_matched": int(summary.get("matched_existing") or 0),
         "new": int(summary.get("new") or 0),
         "ambiguous": int(summary.get("ambiguous") or 0),
+        "reviewed_matches": int(summary.get("reviewed_matches") or 0),
         "enrichment_full": int(enrichment["summary"].get("full_enrichment") or 0),
         "enrichment_gap_fill": int(enrichment["summary"].get("gap_fill_existing") or 0),
         "expected_gcs_creates": int(summary.get("new") or 0),
@@ -123,6 +132,9 @@ def build_live_preflight(
         "zyte_provider": "zyte",
     }
     preflight_dir.mkdir(parents=True, exist_ok=True)
+    (preflight_dir / "prematch.auto.json").write_text(
+        json.dumps({"batch_id": batch_id, **automatic_prematch}, ensure_ascii=False, indent=2), encoding="utf-8"
+    )
     (preflight_dir / "prematch.json").write_text(
         json.dumps({"batch_id": batch_id, **prematch}, ensure_ascii=False, indent=2), encoding="utf-8"
     )
