@@ -11,6 +11,7 @@ SUPPORTED_REPO = "gert66/myngle-company-hub"
 SUPPORTED_SOURCE_BRANCH = "work"
 SUPPORTED_LOVABLE_PROJECT = "a4691ca7-4294-496a-af73-cdba24a5ac0f"
 DEFAULT_REPO_PATH = Path("/home/myngle/myngle-company-hub")
+DEPENDENCY_CACHE_REPO = Path("/home/myngle/autopilot-company-hub-sync")
 _SHA = re.compile(r"^[0-9a-f]{40}$")
 
 
@@ -29,8 +30,8 @@ def _shell(command: str, *, cwd: Path, timeout=900):
     return _run(["bash", "-lc", command], cwd=cwd, timeout=timeout)
 
 
-def _prepare_dependencies(worktree: Path) -> None:
-    """Install app dependencies in the isolated deployment worktree."""
+def _prepare_dependencies(worktree: Path, *, cache_repo: Path = DEPENDENCY_CACHE_REPO) -> None:
+    """Prepare dependencies without weakening lockfile reproducibility."""
     if (worktree / "package-lock.json").exists():
         _run(
             ["npm", "ci", "--no-audit", "--no-fund"],
@@ -38,16 +39,23 @@ def _prepare_dependencies(worktree: Path) -> None:
             timeout=900,
         )
         return
-    if (worktree / "bun.lock").exists():
-        bun = shutil.which("bun")
-        if bun:
-            _run([bun, "install", "--frozen-lockfile"], cwd=worktree, timeout=900)
-        else:
-            _run(
-                ["npm", "install", "--no-audit", "--no-fund", "--package-lock=false"],
-                cwd=worktree,
-                timeout=900,
+    if not (worktree / "bun.lock").exists():
+        return
+    bun = shutil.which("bun")
+    if bun:
+        _run([bun, "install", "--frozen-lockfile"], cwd=worktree, timeout=900)
+        return
+    for name in ("package.json", "bun.lock"):
+        source = worktree / name
+        cached = cache_repo / name
+        if not cached.exists() or source.read_bytes() != cached.read_bytes():
+            raise DeploymentError(
+                f"Bun is unavailable and dependency cache does not match {name}"
             )
+    cached_modules = cache_repo / "node_modules"
+    if not cached_modules.is_dir():
+        raise DeploymentError("Bun is unavailable and matching node_modules cache is missing")
+    (worktree / "node_modules").symlink_to(cached_modules, target_is_directory=True)
 
 
 def validate_spec(record: dict) -> dict:

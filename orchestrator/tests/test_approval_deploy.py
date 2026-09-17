@@ -59,18 +59,18 @@ class ApprovalDeployTests(unittest.TestCase):
                 timeout=900,
             )
 
-    def test_prepare_dependencies_falls_back_to_npm_for_bun_lock(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            worktree = Path(tmp)
-            (worktree / "bun.lock").write_text("", encoding="utf-8")
-            with mock.patch.object(approval_deploy.shutil, "which", return_value=None), \
-                 mock.patch.object(approval_deploy, "_run") as run:
-                approval_deploy._prepare_dependencies(worktree)
-            run.assert_called_once_with(
-                ["npm", "install", "--no-audit", "--no-fund", "--package-lock=false"],
-                cwd=worktree,
-                timeout=900,
-            )
+    def test_prepare_dependencies_reuses_matching_bun_cache_without_bun(self):
+        with tempfile.TemporaryDirectory() as work_tmp, tempfile.TemporaryDirectory() as cache_tmp:
+            worktree = Path(work_tmp)
+            cache = Path(cache_tmp)
+            for name, content in (("package.json", "{}"), ("bun.lock", "lock")):
+                (worktree / name).write_text(content, encoding="utf-8")
+                (cache / name).write_text(content, encoding="utf-8")
+            (cache / "node_modules").mkdir()
+            with mock.patch.object(approval_deploy.shutil, "which", return_value=None):
+                approval_deploy._prepare_dependencies(worktree, cache_repo=cache)
+            self.assertTrue((worktree / "node_modules").is_symlink())
+            self.assertEqual((worktree / "node_modules").resolve(), (cache / "node_modules").resolve())
 
 
 if __name__ == "__main__":
