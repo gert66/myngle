@@ -10,6 +10,7 @@ import os
 import shutil
 import subprocess
 from pathlib import Path
+from urllib import request as urllib_request
 from typing import Any
 
 from lead_list_safety import (
@@ -257,8 +258,20 @@ def protected_publish_export(
             preflight=preflight, confirm_batch_id=confirm_batch_id,
         )
 
+    imported_ids = [str(item.get("company_id") or "") for item in reconciled_items if item.get("company_id")]
+    try:
+        membership = publish_prospect_membership(
+            imported_ids, preflight=preflight, confirm_batch_id=confirm_batch_id,
+        )
+        membership_status = "complete"
+        publish_status = "merged"
+    except Exception as exc:
+        membership = {"status": "error", "message": str(exc)}
+        membership_status = "failed_after_merge"
+        publish_status = "merged_membership_failed"
+
     result = {
-        "status": "merged",
+        "status": publish_status,
         "batch_id": batch_id,
         "created": ledger["summary"]["created"],
         "updated_existing": ledger["summary"]["updated_existing"],
@@ -266,7 +279,8 @@ def protected_publish_export(
         "snapshot": f"{safety_prefix}/before/",
         "ledger": f"{safety_prefix}/ledger.json",
         "hubspot_sync": False,
-        "prospect_membership": "pending_after_merge",
+        "prospect_membership": membership_status,
+        "prospect_membership_result": membership,
     }
     result_path = base / "live" / f"{batch_id}.publish-result.json"
     result_path.write_text(json.dumps(result, ensure_ascii=False, indent=2), encoding="utf-8")
@@ -422,15 +436,52 @@ def build_membership_payload(
     merged_company_ids: list[str], *, preflight: dict, list_name: str = "Carla Korea"
 ) -> dict[str, Any]:
     """Idempotent membership payload for the Company Hub write route."""
+    ids = list(dict.fromkeys(str(x) for x in merged_company_ids if x))
     return {
-        "batch_id": preflight["batch_id"],
+        "import_batch": preflight["batch_id"],
         "country_key": preflight["country"],
         "list_key": "carla-korea",
         "list_label": list_name,
-        "assigned_caller": preflight["caller"],
-        "company_ids": list(dict.fromkeys(str(x) for x in merged_company_ids if x)),
+        "members": [
+            {"company_id": cid, "assigned_caller": preflight["caller"]}
+            for cid in ids
+        ],
         "source_system": "control-center-lead-list",
+        "added_by": "sales-cockpit-lead-list-worker",
     }
+
+
+def publish_prospect_membership(
+    merged_company_ids: list[str], *, preflight: dict, confirm_batch_id: str,
+    list_name: str = "Carla Korea", url: str | None = None, token: str | None = None,
+) -> dict[str, Any]:
+    """Write Prospect List membership only after the same protected live gate."""
+    _require_live_gate(preflight, confirm_batch_id)
+    endpoint = (url or os.environ.get("PROSPECT_LIST_MEMBERSHIP_URL") or
+                "https://control.whofirst.nl/api/public/prospect-list-membership").strip()
+    secret = (token or os.environ.get("FEEDBACK_AUTOPILOT_TOKEN") or "").strip()
+    if not secret:
+        token_file = Path("/home/myngle/orchestrator/secrets/feedback_autopilot_token")
+        if token_file.is_file():
+            secret = token_file.read_text(encoding="utf-8").strip()
+    if not secret:
+        raise RuntimeError("Prospect List write blocked: feedback autopilot token unavailable")
+    payload = build_membership_payload(merged_company_ids, preflight=preflight, list_name=list_name)
+    body = json.dumps(payload).encode("utf-8")
+    req = urllib_request.Request(endpoint, data=body, method="POST", headers={
+        "Content-Type": "application/json",
+        "Accept": "application/json",
+        "x-feedback-autopilot-token": secret,
+        "User-Agent": "Sales-Cockpit-Lead-List-Worker/1.0",
+    })
+    try:
+        with urllib_request.urlopen(req, timeout=30) as resp:
+            result = json.loads(resp.read().decode("utf-8"))
+    except Exception as exc:
+        raise RuntimeError(f"Prospect List membership write failed: {exc}") from exc
+    if result.get("status") != "ok":
+        raise RuntimeError(f"Prospect List membership rejected: {result}")
+    return result
 
 
 def prepare_batch_rollback(list_dir: str | Path, preflight: dict) -> dict[str, Any]:
