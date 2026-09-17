@@ -1,5 +1,9 @@
+import tempfile
 import unittest
+from pathlib import Path
+from unittest import mock
 
+from core import approval_deploy
 from core.approval_deploy import DeploymentError, validate_spec
 
 
@@ -42,6 +46,18 @@ class ApprovalDeployTests(unittest.TestCase):
         row["proposal"]["deployment"]["verification_commands"] = []
         with self.assertRaises(DeploymentError):
             validate_spec(row)
+
+    def test_prepare_dependencies_runs_npm_ci_for_package_lock(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            worktree = Path(tmp)
+            (worktree / "package-lock.json").write_text("{}", encoding="utf-8")
+            with mock.patch.object(approval_deploy, "_run") as run:
+                approval_deploy._prepare_dependencies(worktree)
+            run.assert_called_once_with(
+                ["npm", "ci", "--no-audit", "--no-fund"],
+                cwd=worktree,
+                timeout=900,
+            )
 
 
 if __name__ == "__main__":

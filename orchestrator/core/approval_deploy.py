@@ -29,6 +29,16 @@ def _shell(command: str, *, cwd: Path, timeout=900):
     return _run(["bash", "-lc", command], cwd=cwd, timeout=timeout)
 
 
+def _prepare_dependencies(worktree: Path) -> None:
+    """Install locked app dependencies in the isolated deployment worktree."""
+    if (worktree / "package-lock.json").exists():
+        _run(
+            ["npm", "ci", "--no-audit", "--no-fund"],
+            cwd=worktree,
+            timeout=900,
+        )
+
+
 def validate_spec(record: dict) -> dict:
     if record.get("status") != "approved":
         raise DeploymentError("proposal is not approved")
@@ -109,6 +119,7 @@ def deploy_approved(record: dict, *, repo_path: Path = DEFAULT_REPO_PATH) -> dic
     try:
         _run(["git", "worktree", "add", "--detach", str(worktree), current_main], cwd=repo)
         _run(["git", "cherry-pick", spec["commit_sha"]], cwd=worktree)
+        _prepare_dependencies(worktree)
         for command in spec["test_commands"]:
             _shell(str(command), cwd=worktree)
         promoted_sha = _run(["git", "rev-parse", "HEAD"], cwd=worktree).stdout.strip()
