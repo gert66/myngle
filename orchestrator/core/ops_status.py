@@ -226,6 +226,8 @@ def collect_feedback_cases(cases_dir=FEEDBACK_CASES_DIR):
             "actions_taken": _safe_text(item.get("actions_taken"), 1800),
             "recommendation": _safe_text(item.get("recommendation"), 1400),
             "proposed_reply": _safe_text(item.get("proposed_reply"), 2400),
+            "conversation_summary": _safe_text(item.get("conversation_summary"), 1800),
+            "conversation_summary_at": item.get("conversation_summary_at"),
             "closed_at": item.get("closed_at") or item.get("resolved_at"),
             "received_at": item.get("received_at"),
             "updated_at": item.get("updated_at"),
