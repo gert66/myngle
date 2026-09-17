@@ -12,6 +12,7 @@ SUPPORTED_SOURCE_BRANCH = "work"
 SUPPORTED_LOVABLE_PROJECT = "a4691ca7-4294-496a-af73-cdba24a5ac0f"
 DEFAULT_REPO_PATH = Path("/home/myngle/myngle-company-hub")
 DEPENDENCY_CACHE_REPO = Path("/home/myngle/autopilot-company-hub-sync")
+DEPLOY_TMP_ROOT = Path("/home/myngle/deploy-tmp")
 _SHA = re.compile(r"^[0-9a-f]{40}$")
 
 
@@ -132,7 +133,8 @@ def deploy_approved(record: dict, *, repo_path: Path = DEFAULT_REPO_PATH) -> dic
     approved_files = set((record.get("proposal") or {}).get("changed_files") or [])
     if not changed or not changed.issubset(approved_files):
         raise DeploymentError(f"approved commit changes files outside the proposal: {sorted(changed - approved_files)}")
-    tmp = Path(tempfile.mkdtemp(prefix="sales-cockpit-deploy-"))
+    DEPLOY_TMP_ROOT.mkdir(parents=True, exist_ok=True)
+    tmp = Path(tempfile.mkdtemp(prefix="sales-cockpit-deploy-", dir=str(DEPLOY_TMP_ROOT)))
     worktree = tmp / "repo"
     promoted_sha = None
     try:
