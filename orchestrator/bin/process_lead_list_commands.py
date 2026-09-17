@@ -98,6 +98,9 @@ def process_command(command):
     assigned_caller = str(command.get("cold_caller") or "").strip()
     list_name = str(command.get("name") or Path(filename).stem).strip()
     import_plan = command.get("import_plan") if isinstance(command.get("import_plan"), dict) else {}
+    fallback_country = str(import_plan.get("country_fallback") or "").strip()
+    if not fallback_country and country not in {"", "Unknown", "Multi-country"}:
+        fallback_country = country
     if not list_id or not download_url:
         raise ValueError("command is missing list_id/file_url")
 
@@ -110,7 +113,7 @@ def process_command(command):
         _download(download_url, local_path)
         result = analyze_lead_list(
             local_path,
-            default_country=country,
+            default_country=fallback_country,
             assigned_caller=assigned_caller,
             list_name=list_name,
             import_plan=import_plan,

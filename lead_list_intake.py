@@ -11,7 +11,9 @@ from dataclasses import dataclass
 from pathlib import Path
 import hashlib
 import re
+import tempfile
 import unicodedata
+import zipfile
 from typing import Any, Mapping
 
 import pandas as pd
@@ -255,7 +257,39 @@ def _read_csv(path: Path) -> tuple[pd.DataFrame, str, int]:
     raise ValueError(f"Could not read CSV: {last_error}")
 
 
-def _read_xlsx(path: Path) -> tuple[pd.DataFrame, str, int]:
+_MINIMAL_STYLES_XML = b'''<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<styleSheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">
+  <numFmts count="0"/>
+  <fonts count="1"><font><sz val="11"/><name val="Calibri"/></font></fonts>
+  <fills count="2"><fill><patternFill patternType="none"/></fill><fill><patternFill patternType="gray125"/></fill></fills>
+  <borders count="1"><border><left/><right/><top/><bottom/><diagonal/></border></borders>
+  <cellStyleXfs count="1"><xf numFmtId="0" fontId="0" fillId="0" borderId="0"/></cellStyleXfs>
+  <cellXfs count="1"><xf numFmtId="0" fontId="0" fillId="0" borderId="0" xfId="0"/></cellXfs>
+  <cellStyles count="1"><cellStyle name="Normal" xfId="0" builtinId="0"/></cellStyles>
+</styleSheet>
+'''
+
+
+def _sanitize_xlsx_styles(source: Path, target: Path) -> None:
+    """Copy workbook data while neutralising a malformed Excel stylesheet.
+
+    Some Lusha/legacy exports contain perfectly readable cells but invalid
+    styles.xml. Browser XLSX readers ignore it; openpyxl rejects the whole
+    workbook. This fallback changes only a temporary copy: all cell style
+    references become style 0 and a minimal valid stylesheet is substituted.
+    """
+    cell_style = re.compile(rb'(<c\b[^>]*?)\s+s="[0-9]+"')
+    with zipfile.ZipFile(source, "r") as src, zipfile.ZipFile(target, "w") as dst:
+        for info in src.infolist():
+            data = src.read(info.filename)
+            if info.filename == "xl/styles.xml":
+                data = _MINIMAL_STYLES_XML
+            elif info.filename.startswith("xl/worksheets/") and info.filename.endswith(".xml"):
+                data = cell_style.sub(rb'\1 s="0"', data)
+            dst.writestr(info, data)
+
+
+def _read_xlsx_core(path: Path) -> tuple[pd.DataFrame, str, int]:
     book = pd.ExcelFile(path)
     best: tuple[tuple[int, int, int], str, int] | None = None
     for sheet in book.sheet_names:
@@ -269,6 +303,22 @@ def _read_xlsx(path: Path) -> tuple[pd.DataFrame, str, int]:
         raise ValueError("Workbook contains no readable sheets.")
     _, sheet, header_row = best
     return pd.read_excel(path, sheet_name=sheet, header=header_row, dtype=str), sheet, header_row
+
+
+def _read_xlsx(path: Path) -> tuple[pd.DataFrame, str, int]:
+    try:
+        return _read_xlsx_core(path)
+    except Exception as original:
+        message = str(original).lower()
+        if not any(term in message for term in ("stylesheet", "styles.xml", "invalid xml")):
+            raise
+        with tempfile.TemporaryDirectory(prefix="lead-list-xlsx-clean-") as td:
+            clean = Path(td) / "style-sanitized.xlsx"
+            try:
+                _sanitize_xlsx_styles(path, clean)
+                return _read_xlsx_core(clean)
+            except Exception:
+                raise original
 
 def load_table(
     path: str | Path, *, source_sheet: str | None = None, header_row: int | None = None,

@@ -20,42 +20,9 @@ from datetime import datetime
 from pathlib import Path
 from typing import Optional
 
+from lead_list_config_registry import country_folder_slug
+
 DEFAULT_GCS_BUCKET = "myngle-company-data-104527058436"
-
-# Curated slugs for the countries the Lead Prioritizer batch app already
-# supports (see SUPPORTED_DEFAULT_INPUT_COUNTRIES in lead_prioritizer_batch_app.py).
-_COUNTRY_FOLDER_SLUGS = {
-    "brazil": "brazil",
-    "italy": "italy",
-    "australia": "australia",
-    "uruguay": "uruguay",
-    "new zealand": "newzealand",
-    "netherlands": "netherlands",
-    "japan": "japan",
-    "south korea": "south-korea",
-    "switzerland": "switzerland",
-    "germany": "germany",
-    "spain": "spain",
-    "luxembourg": "luxembourg",
-    "test": "test",
-    "austria": "austria",
-}
-
-
-def country_folder_slug(country: str) -> str:
-    """Map an export country name to its GCS country-folder slug.
-
-    Known countries (Brazil, Italy, Australia, Uruguay, New Zealand) use the
-    curated mapping above to match the existing bucket layout; anything else
-    falls back to a lower-cased, hyphen-separated slug so the function never
-    raises for an unrecognised country.
-    """
-    norm = re.sub(r"\s+", " ", str(country or "").strip().lower())
-    if norm in _COUNTRY_FOLDER_SLUGS:
-        return _COUNTRY_FOLDER_SLUGS[norm]
-    slug = re.sub(r"[^a-z0-9]+", "-", norm).strip("-")
-    return slug or "unknown"
-
 
 def default_gcs_run_folder(run_mode: str, now: Optional[datetime] = None) -> str:
     """Default GCS run folder: ``YYYY-MM-DD_<run_mode_slug>``."""

@@ -34,18 +34,11 @@ from lovable_gcs_upload import (
     upload_file,
 )
 
-# Countries shown in the Lovable manifest, in display order. Kept in sync with
-# SUPPORTED_DEFAULT_INPUT_COUNTRIES in lead_prioritizer_batch_app.py (checked
-# by test_generate_lovable_countries_index.py) without importing that module,
-# which pulls in the full enrichment stack and is slow to import.
-MANIFEST_COUNTRY_LABELS = [
-    "Australia", "Austria", "Brazil", "Germany", "Italy", "Japan",
-    "Luxembourg", "Netherlands", "New Zealand", "South Korea", "Spain",
-    "Switzerland", "Test", "Uruguay",
-]
-
-# Countries present in the manifest but not yet ready for Lovable to show.
-DISABLED_COUNTRY_LABELS = {"Austria", "Japan", "Luxembourg", "South Korea", "Test"}
+# Central registry used by Lead Lists and the GCS manifest.
+from lead_list_config_registry import (
+    COUNTRY_LABELS as MANIFEST_COUNTRY_LABELS,
+    DISABLED_COUNTRY_LABELS,
+)
 
 
 def _manifest_id(label: str) -> str:

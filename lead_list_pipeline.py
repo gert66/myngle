@@ -13,6 +13,7 @@ from pathlib import Path
 from typing import Any, Mapping
 
 from lead_list_intake import IntakeResult
+from lead_list_config_registry import country_folder_slug
 
 
 def _options(import_plan: Mapping[str, Any] | None) -> dict[str, bool]:
@@ -28,6 +29,39 @@ def _options(import_plan: Mapping[str, Any] | None) -> dict[str, bool]:
     }
 
 
+def _country_worksets(result: IntakeResult) -> list[dict[str, Any]]:
+    """Partition normalized rows by their effective country for later GCS publication."""
+    rows = result.normalized_rows
+    companies = result.companies
+    if rows is None or rows.empty or "country" not in rows.columns:
+        return []
+
+    worksets: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for raw in rows["country"].fillna("").astype(str).tolist():
+        label = raw.strip()
+        if not label:
+            continue
+        slug = country_folder_slug(label)
+        if slug in seen:
+            continue
+        seen.add(slug)
+        row_mask = rows["country"].fillna("").astype(str).str.strip().map(country_folder_slug) == slug
+        source_rows = int(row_mask.sum())
+        company_count = 0
+        if companies is not None and not companies.empty and "country" in companies.columns:
+            company_mask = companies["country"].fillna("").astype(str).str.strip().map(country_folder_slug) == slug
+            company_count = int(company_mask.sum())
+        worksets.append({
+            "label": label,
+            "slug": slug,
+            "source_rows": source_rows,
+            "companies": company_count,
+            "target_prefix": f"{slug}/current",
+        })
+    return worksets
+
+
 def build_dry_run_report(
     result: IntakeResult,
     import_plan: Mapping[str, Any] | None = None,
@@ -41,6 +75,7 @@ def build_dry_run_report(
     email_hints = int(report.get("companies_with_email_domain_hint") or 0)
     decision = str(report.get("decision") or "UNKNOWN")
     intake_ok = decision == "READY"
+    country_worksets = _country_worksets(result)
 
     stages: list[dict[str, Any]] = [{
         "key": "intake",
@@ -52,6 +87,22 @@ def build_dry_run_report(
             f"Quality {report.get('quality_status', 'UNKNOWN')} / {decision}."
         ),
     }]
+
+    stages.append({
+        "key": "country_partition",
+        "label": "Country worksets",
+        "status": "simulated" if intake_ok else "blocked",
+        "count": len(country_worksets) if intake_ok else 0,
+        "summary": (
+            "; ".join(
+                f"{w['label']}: {w['source_rows']} rows -> {w['target_prefix']}"
+                for w in country_worksets
+            )
+            + ". Target only; no GCS write in dry run."
+            if intake_ok and country_worksets
+            else ("No country workset could be formed." if intake_ok else "Held until intake is approved.")
+        ),
+    })
 
     stages.append({
         "key": "protection",
@@ -116,6 +167,7 @@ def build_dry_run_report(
         "external_write_calls": 0,
         "supplier_calls": 0,
         "options": options,
+        "country_worksets": country_worksets,
         "stages": stages,
         "blockers": blockers,
         "next_action": (
@@ -152,4 +204,29 @@ def persist_intake_artifacts(
             os.chmod(path, 0o600)
         except OSError:
             pass
+
+    countries_root = target / "countries"
+    for workset in pipeline_report.get("country_worksets", []):
+        slug = str(workset.get("slug") or "").strip()
+        if not slug:
+            continue
+        country_dir = countries_root / slug
+        country_dir.mkdir(parents=True, exist_ok=True)
+        try:
+            os.chmod(country_dir, 0o700)
+        except OSError:
+            pass
+        row_mask = result.normalized_rows["country"].fillna("").astype(str).str.strip().map(country_folder_slug) == slug
+        company_mask = result.companies["country"].fillna("").astype(str).str.strip().map(country_folder_slug) == slug if not result.companies.empty else []
+        country_files = {
+            "normalized_rows.jsonl": result.normalized_rows[row_mask].to_json(orient="records", lines=True),
+            "companies.jsonl": result.companies[company_mask].to_json(orient="records", lines=True) if not result.companies.empty else "",
+        }
+        for name, content in country_files.items():
+            path = country_dir / name
+            path.write_text(content + ("\n" if content and not content.endswith("\n") else ""), encoding="utf-8")
+            try:
+                os.chmod(path, 0o600)
+            except OSError:
+                pass
     return target

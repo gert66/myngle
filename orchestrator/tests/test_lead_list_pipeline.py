@@ -59,3 +59,24 @@ class LeadListPipelineTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+def test_multi_country_worksets_are_partitioned(tmp_path):
+    path = tmp_path / "multi.csv"
+    pd.DataFrame([
+        {"Company name": "Acme", "Country": "South Korea", "Contact name": "Jane"},
+        {"Company name": "Beta", "Country": "Japan", "Contact name": "John"},
+        {"Company name": "Gamma", "Country": "", "Contact name": "Gina"},
+    ]).to_csv(path, index=False)
+    result = analyze_lead_list(
+        path, default_country="South Korea", assigned_caller="Carla")
+    pipeline = build_dry_run_report(result, {"options": {"publish": True}})
+    worksets = {w["slug"]: w for w in pipeline["country_worksets"]}
+    assert worksets["south-korea"]["source_rows"] == 2
+    assert worksets["japan"]["source_rows"] == 1
+    assert worksets["south-korea"]["target_prefix"] == "south-korea/current"
+    assert pipeline["external_write_calls"] == 0
+
+    out = persist_intake_artifacts("multi", result, pipeline, tmp_path / "artifacts")
+    assert (out / "countries" / "south-korea" / "normalized_rows.jsonl").is_file()
+    assert (out / "countries" / "japan" / "normalized_rows.jsonl").is_file()
