@@ -213,3 +213,28 @@ def test_collect_feedback_cases_projects_safe_owner_fields(tmp_path):
     assert rows[0]["feedback_id"] == "abc12345"
     assert rows[0]["status"] == "researching"
     assert "attachment_path" not in rows[0]
+
+
+def test_control_health_reports_all_automation_pollers():
+    now = datetime(2026, 9, 17, 11, 0, tzinfo=timezone.utc)
+    with tempfile.TemporaryDirectory() as td:
+        root = Path(td)
+        paths = [root / name for name in ("approval", "feedback", "lead", "chat")]
+        for idx, path in enumerate(paths):
+            path.touch()
+            stamp = (now - timedelta(seconds=20 + idx)).timestamp()
+            os.utime(path, (stamp, stamp))
+        health = collect_control_health(
+            now=now,
+            approval_heartbeat=paths[0],
+            feedback_heartbeat=paths[1],
+            lead_list_heartbeat=paths[2],
+            chat_heartbeat=paths[3],
+        )
+        assert set(health) == {
+            "approval_command_poller",
+            "feedback_autopilot",
+            "lead_list_command_poller",
+            "chat_command_poller",
+        }
+        assert all(item["healthy"] for item in health.values())

@@ -19,6 +19,9 @@ APPROVALS_DIR = ORCH_ROOT / "approvals"
 FEEDBACK_CASES_DIR = ORCH_ROOT / "feedback_cases"
 GEMINI_LEDGER_FILE = ORCH_ROOT / "logs" / "gemini_usage.jsonl"
 APPROVAL_POLLER_HEARTBEAT = ORCH_ROOT / "state" / "approval-command-poller.heartbeat"
+FEEDBACK_POLLER_HEARTBEAT = ORCH_ROOT / "state" / "feedback-autopilot.heartbeat"
+LEAD_LIST_POLLER_HEARTBEAT = ORCH_ROOT / "state" / "lead-list-command-poller.heartbeat"
+CHAT_POLLER_HEARTBEAT = ORCH_ROOT / "state" / "chat-command-poller.heartbeat"
 HEARTBEAT_STALE_SECONDS = 75
 APPROVAL_POLLER_STALE_SECONDS = 150
 ACTIVE_PHASES = {"QUEUED", "PLANNING", "WORKING", "EVIDENCE", "REVIEWING", "REPAIRING"}
@@ -131,27 +134,34 @@ def collect_gemini_usage(path=GEMINI_LEDGER_FILE, limit=12):
     } for r in rows[:max(0, int(limit))]]
     return {"totals": totals, "recent": recent}
 
-def collect_control_health(now=None, approval_heartbeat=APPROVAL_POLLER_HEARTBEAT):
-    now = now or datetime.now(timezone.utc)
-    path = Path(approval_heartbeat)
+def _poller_health(path, now):
+    path = Path(path)
     try:
         ts = datetime.fromtimestamp(path.stat().st_mtime, tz=timezone.utc)
         age = max(0, round((now - ts).total_seconds()))
         return {
-            "approval_command_poller": {
-                "heartbeat_at": ts.isoformat(timespec="seconds").replace("+00:00", "Z"),
-                "heartbeat_age_seconds": age,
-                "healthy": age <= APPROVAL_POLLER_STALE_SECONDS,
-            }
+            "heartbeat_at": ts.isoformat(timespec="seconds").replace("+00:00", "Z"),
+            "heartbeat_age_seconds": age,
+            "healthy": age <= APPROVAL_POLLER_STALE_SECONDS,
         }
     except OSError:
-        return {
-            "approval_command_poller": {
-                "heartbeat_at": None,
-                "heartbeat_age_seconds": None,
-                "healthy": False,
-            }
-        }
+        return {"heartbeat_at": None, "heartbeat_age_seconds": None, "healthy": False}
+
+
+def collect_control_health(
+    now=None,
+    approval_heartbeat=APPROVAL_POLLER_HEARTBEAT,
+    feedback_heartbeat=FEEDBACK_POLLER_HEARTBEAT,
+    lead_list_heartbeat=LEAD_LIST_POLLER_HEARTBEAT,
+    chat_heartbeat=CHAT_POLLER_HEARTBEAT,
+):
+    now = now or datetime.now(timezone.utc)
+    return {
+        "approval_command_poller": _poller_health(approval_heartbeat, now),
+        "feedback_autopilot": _poller_health(feedback_heartbeat, now),
+        "lead_list_command_poller": _poller_health(lead_list_heartbeat, now),
+        "chat_command_poller": _poller_health(chat_heartbeat, now),
+    }
 
 def collect_approvals(approvals_dir=APPROVALS_DIR):
     approvals_dir = Path(approvals_dir)
