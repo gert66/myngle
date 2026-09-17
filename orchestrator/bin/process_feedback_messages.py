@@ -414,6 +414,23 @@ def process_once(*, url=None, token=None):
     return results
 
 
+
+
+def _publish_snapshot() -> None:
+    snapshot = Path("/home/myngle/Myngle/Orchestrator Logs/ops_snapshot.json")
+    tmp = snapshot.with_suffix(".json.tmp")
+    proc = subprocess.run(
+        ["/usr/bin/python3", "-m", "core.ops_status", "--compact"],
+        cwd=ORCH_ROOT, text=True, capture_output=True,
+    )
+    if proc.returncode:
+        raise RuntimeError((proc.stderr or proc.stdout)[-1000:])
+    tmp.write_text(proc.stdout, encoding="utf-8")
+    tmp.replace(snapshot)
+    push = subprocess.run([str(ORCH_ROOT / "bin" / "push_ops_snapshot.sh")], cwd=ORCH_ROOT, text=True, capture_output=True)
+    if push.returncode:
+        raise RuntimeError((push.stderr or push.stdout)[-1000:])
+
 def main() -> int:
     try:
         results = process_once()
@@ -422,6 +439,11 @@ def main() -> int:
         return 1
     for mid, status in results:
         print(f"{mid} {status}")
+    if any(status in {"done", "processing", "error", "summary"} for _, status in results):
+        try:
+            _publish_snapshot()
+        except Exception as exc:
+            print(f"feedback snapshot push failed: {_compact(exc, 600)}", file=sys.stderr)
     return 0
 
 
