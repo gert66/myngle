@@ -365,6 +365,36 @@ def prepare_zyte_worksets(list_dir: str | Path, preflight: dict) -> dict[str, st
     return outputs
 
 
+def _hermes_env_secret(name: str) -> str:
+    """Read one existing Hermes secret without exposing it in logs."""
+    path = Path("/home/myngle/.config/hermes/secrets.env")
+    if not path.is_file():
+        return ""
+    for raw in path.read_text(encoding="utf-8").splitlines():
+        line = raw.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        key, value = line.split("=", 1)
+        if key.strip() == name:
+            return value.strip().strip("\"' ")
+    return ""
+
+
+def _enriched_workbook_complete(output: Path, input_path: str) -> bool:
+    """Reuse only a same-batch workbook with every selected row successful."""
+    if not output.is_file():
+        return False
+    try:
+        import pandas as pd
+        expected = len(pd.read_excel(input_path))
+        rows = pd.read_excel(output, sheet_name="Enriched Leads")
+        if len(rows) != expected or "run_success" not in rows.columns:
+            return False
+        return bool(rows["run_success"].fillna(False).astype(bool).all())
+    except Exception:
+        return False
+
+
 def run_zyte_enrichment(
     list_dir: str | Path, preflight: dict, *, allow_supplier_calls: bool = False,
     python_bin: str = "/home/myngle/myngle/.venv/bin/python",
@@ -381,6 +411,10 @@ def run_zyte_enrichment(
     secrets = Path("/home/myngle/Myngle/secrets.toml")
     for mode_key, input_path in worksets.items():
         output = Path(input_path).with_suffix(".enriched.xlsx")
+        if _enriched_workbook_complete(output, input_path):
+            outputs[mode_key] = str(output)
+            continue
+        checkpoint = Path(input_path).with_suffix(".checkpoint.json")
         cmd = [
             python_bin, str(repo / "lead_prioritizer_batch_cli.py"),
             "--input", input_path,
@@ -389,10 +423,18 @@ def run_zyte_enrichment(
             "--mode", "full" if mode_key == "full" else "hq_only",
             "--row-limit", "0", "--output", str(output),
             "--hq-crawl-provider", "zyte", "--yes",
+            "--checkpoint-path", str(checkpoint), "--checkpoint-every-rows", "1",
         ]
         if secrets.is_file():
             cmd += ["--secrets-file", str(secrets)]
-        proc = subprocess.run(cmd, capture_output=True, text=True, timeout=21600)
+        env = os.environ.copy()
+        if not env.get("ZYTE_API_KEY"):
+            zyte = _hermes_env_secret("ZYTE_API_KEY")
+            if zyte:
+                env["ZYTE_API_KEY"] = zyte
+        if not env.get("ZYTE_API_KEY"):
+            raise RuntimeError("supplier calls blocked: ZYTE_API_KEY unavailable")
+        proc = subprocess.run(cmd, capture_output=True, text=True, timeout=21600, env=env)
         if proc.returncode != 0:
             raise RuntimeError(f"Zyte enrichment failed for {mode_key}: {(proc.stderr or proc.stdout)[-2000:]}")
         outputs[mode_key] = str(output)
