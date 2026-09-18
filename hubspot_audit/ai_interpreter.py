@@ -103,6 +103,7 @@ class AnthropicAIInterpreter(AIInterpreter):
         question: str,
         candidates: list,
         escalate: bool = False,
+        bulk: bool = False,
     ) -> Optional[AIFindingResult]:
         can_call, reason = self._tracker.can_make_call(is_strong_model=escalate)
         if not can_call:
@@ -119,7 +120,12 @@ class AnthropicAIInterpreter(AIInterpreter):
             )
 
         compact_candidates = candidates[:MAX_CANDIDATE_ITEMS]
-        model = self.ai_config.strong_model if escalate else self.ai_config.cheap_model
+        if escalate:
+            model = self.ai_config.strong_model
+        elif bulk:
+            model = self.ai_config.bulk_model
+        else:
+            model = self.ai_config.standard_model
         user_payload = {
             "finding_id": finding_id,
             "question": question,

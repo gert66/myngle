@@ -87,9 +87,11 @@ All AI behavior is controlled by environment variables (see
 
 - `HSAUDIT_AI_ENABLED` (default `false`)
 - `AI_BUDGET_EUR`, `MAX_AI_CALLS`, `MAX_STRONG_MODEL_ESCALATIONS`, `MAX_INVESTIGATION_DEPTH`
-- `HSAUDIT_AI_CHEAP_MODEL` / `HSAUDIT_AI_STRONG_MODEL` (default cheap:
-  `claude-haiku-4-5-20251001`, strong: `claude-sonnet-5`)
-- `HSAUDIT_PRICE_CHEAP_INPUT_PER_M` / `_OUTPUT_PER_M`,
+- `HSAUDIT_AI_STANDARD_MODEL` (default `claude-sonnet-5`)
+- `HSAUDIT_AI_BULK_MODEL` (default `claude-haiku-4-5-20251001`, optional for simple repetitive classifications)
+- `HSAUDIT_AI_STRONG_MODEL` (default `claude-sonnet-5`, reserved for explicit escalations)
+- `HSAUDIT_PRICE_STANDARD_INPUT_PER_M` / `_OUTPUT_PER_M`,
+  `HSAUDIT_PRICE_BULK_INPUT_PER_M` / `_OUTPUT_PER_M`,
   `HSAUDIT_PRICE_STRONG_INPUT_PER_M` / `_OUTPUT_PER_M` (EUR per 1M tokens;
   leave unset to report cost as "unpriced" instead of guessing)
 

@@ -83,7 +83,8 @@ class CostTracker:
             remaining = round(budget - spent, 4)
         return {
             "provider": "anthropic",
-            "cheap_model": self.ai_config.cheap_model,
+            "standard_model": self.ai_config.standard_model,
+            "bulk_model": self.ai_config.bulk_model,
             "strong_model": self.ai_config.strong_model,
             "ai_enabled": self.ai_config.enabled,
             "num_calls": len(self.calls),

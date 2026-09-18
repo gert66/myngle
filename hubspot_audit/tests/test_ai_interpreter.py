@@ -54,7 +54,7 @@ class AnthropicAIInterpreterTests(unittest.TestCase):
         self.assertIn("disabled", result.evidence_summary.lower())
 
     def test_ai_cannot_self_promote_to_confirmed(self):
-        config = AIConfig(enabled=True, budget_eur=1000.0, pricing={"claude-haiku-4-5-20251001": ModelPricing(0.0, 0.0)})
+        config = AIConfig(enabled=True, budget_eur=1000.0, pricing={"claude-sonnet-5": ModelPricing(0.0, 0.0), "claude-haiku-4-5-20251001": ModelPricing(0.0, 0.0)})
         interpreter = AnthropicAIInterpreter(config)
         interpreter._client = _FakeAnthropicClient(
             {
@@ -73,7 +73,7 @@ class AnthropicAIInterpreterTests(unittest.TestCase):
         self.assertEqual(result.status, FindingStatus.INVESTIGATING.value)
 
     def test_candidate_payload_is_capped(self):
-        config = AIConfig(enabled=True, budget_eur=1000.0, pricing={"claude-haiku-4-5-20251001": ModelPricing(0.0, 0.0)})
+        config = AIConfig(enabled=True, budget_eur=1000.0, pricing={"claude-sonnet-5": ModelPricing(0.0, 0.0), "claude-haiku-4-5-20251001": ModelPricing(0.0, 0.0)})
         interpreter = AnthropicAIInterpreter(config)
         fake_client = _FakeAnthropicClient(
             {
@@ -89,7 +89,7 @@ class AnthropicAIInterpreterTests(unittest.TestCase):
         self.assertLessEqual(len(sent_payload["candidates"]), 25)
 
     def test_non_json_response_is_treated_as_inconclusive_not_raised(self):
-        config = AIConfig(enabled=True, budget_eur=1000.0, pricing={"claude-haiku-4-5-20251001": ModelPricing(0.0, 0.0)})
+        config = AIConfig(enabled=True, budget_eur=1000.0, pricing={"claude-sonnet-5": ModelPricing(0.0, 0.0), "claude-haiku-4-5-20251001": ModelPricing(0.0, 0.0)})
         interpreter = AnthropicAIInterpreter(config)
 
         class _BadClient(_FakeAnthropicClient):

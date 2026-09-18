@@ -55,7 +55,7 @@ class CostTrackerTests(unittest.TestCase):
         config = AIConfig(enabled=False, budget_eur=5.0)
         summary = CostTracker(config).budget_summary()
         for key in (
-            "provider", "cheap_model", "strong_model", "ai_enabled", "num_calls",
+            "provider", "standard_model", "bulk_model", "strong_model", "ai_enabled", "num_calls",
             "num_strong_model_escalations", "total_input_tokens", "total_output_tokens",
             "ai_cost_estimate_eur", "ai_budget_eur", "pct_budget_consumed", "remaining_budget_eur",
         ):

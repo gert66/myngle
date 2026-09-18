@@ -54,7 +54,8 @@ class AIConfig:
     max_ai_calls: int = 0
     max_strong_model_escalations: int = 0
     max_investigation_depth: int = 4
-    cheap_model: str = "claude-haiku-4-5-20251001"
+    standard_model: str = "claude-sonnet-5"
+    bulk_model: str = "claude-haiku-4-5-20251001"
     strong_model: str = "claude-sonnet-5"
     pricing: dict = field(
         default_factory=lambda: {
@@ -65,12 +66,17 @@ class AIConfig:
 
     @classmethod
     def from_env(cls) -> "AIConfig":
-        cheap = os.environ.get("HSAUDIT_AI_CHEAP_MODEL", "claude-haiku-4-5-20251001")
+        standard = os.environ.get("HSAUDIT_AI_STANDARD_MODEL", "claude-sonnet-5")
+        bulk = os.environ.get("HSAUDIT_AI_BULK_MODEL", os.environ.get("HSAUDIT_AI_CHEAP_MODEL", "claude-haiku-4-5-20251001"))
         strong = os.environ.get("HSAUDIT_AI_STRONG_MODEL", "claude-sonnet-5")
         pricing = {
-            cheap: ModelPricing(
-                input_price_per_million=_env_float("HSAUDIT_PRICE_CHEAP_INPUT_PER_M", None),
-                output_price_per_million=_env_float("HSAUDIT_PRICE_CHEAP_OUTPUT_PER_M", None),
+            standard: ModelPricing(
+                input_price_per_million=_env_float("HSAUDIT_PRICE_STANDARD_INPUT_PER_M", None),
+                output_price_per_million=_env_float("HSAUDIT_PRICE_STANDARD_OUTPUT_PER_M", None),
+            ),
+            bulk: ModelPricing(
+                input_price_per_million=_env_float("HSAUDIT_PRICE_BULK_INPUT_PER_M", _env_float("HSAUDIT_PRICE_CHEAP_INPUT_PER_M", None)),
+                output_price_per_million=_env_float("HSAUDIT_PRICE_BULK_OUTPUT_PER_M", _env_float("HSAUDIT_PRICE_CHEAP_OUTPUT_PER_M", None)),
             ),
             strong: ModelPricing(
                 input_price_per_million=_env_float("HSAUDIT_PRICE_STRONG_INPUT_PER_M", None),
@@ -83,7 +89,8 @@ class AIConfig:
             max_ai_calls=_env_int("MAX_AI_CALLS", 0),
             max_strong_model_escalations=_env_int("MAX_STRONG_MODEL_ESCALATIONS", 0),
             max_investigation_depth=_env_int("MAX_INVESTIGATION_DEPTH", 4),
-            cheap_model=cheap,
+            standard_model=standard,
+            bulk_model=bulk,
             strong_model=strong,
             pricing=pricing,
         )
