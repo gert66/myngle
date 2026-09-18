@@ -1,0 +1,23 @@
+{
+  "companies": {
+    "next_cursor": null,
+    "record_count": 5,
+    "pages": 2,
+    "updated_at": "2026-09-18T00:00:01Z",
+    "complete": true
+  },
+  "contacts": {
+    "next_cursor": null,
+    "record_count": 4,
+    "pages": 1,
+    "updated_at": "2026-09-18T00:00:00Z",
+    "complete": true
+  },
+  "deals": {
+    "next_cursor": null,
+    "record_count": 3,
+    "pages": 1,
+    "updated_at": "2026-09-18T00:00:00Z",
+    "complete": true
+  }
+}

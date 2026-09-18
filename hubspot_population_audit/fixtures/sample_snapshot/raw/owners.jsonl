@@ -1,0 +1,2 @@
+{"record": {"id": "100", "email": "owner1@myngle.example", "firstName": "Owner", "lastName": "One"}, "extracted_at": "2026-09-18T00:00:00Z"}
+{"record": {"id": "101", "email": "owner2@myngle.example", "firstName": "Owner", "lastName": "Two"}, "extracted_at": "2026-09-18T00:00:00Z"}

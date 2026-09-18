@@ -1,0 +1,8 @@
+{
+  "properties": [
+    {"name": "dealname", "label": "Deal Name", "type": "string"},
+    {"name": "dealstage", "label": "Deal Stage", "type": "enumeration"},
+    {"name": "createdate", "label": "Create Date", "type": "datetime"}
+  ],
+  "extracted_at": "2026-09-18T00:00:00Z"
+}

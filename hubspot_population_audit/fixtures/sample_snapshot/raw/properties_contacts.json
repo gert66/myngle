@@ -1,0 +1,8 @@
+{
+  "properties": [
+    {"name": "email", "label": "Email", "type": "string"},
+    {"name": "createdate", "label": "Create Date", "type": "datetime"},
+    {"name": "lifecyclestage", "label": "Lifecycle Stage", "type": "enumeration"}
+  ],
+  "extracted_at": "2026-09-18T00:00:00Z"
+}
