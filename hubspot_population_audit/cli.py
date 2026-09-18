@@ -2,12 +2,12 @@
 
     python -m hubspot_population_audit.cli run --snapshot <dir> --output-dir <dir> [--no-live-lookups]
 
-This batch never performs a live HubSpot call: the snapshot load and
-reconciliation are fully deterministic against the on-disk snapshot, and
-every analysis not yet implemented (cohort detection, classification,
-association/activity evidence) is written as an explicit
-``"status": "not_yet_implemented"`` placeholder rather than silently
-skipped. ``--no-live-lookups`` is accepted for forward interface
+This batch never performs a live HubSpot call: the snapshot load,
+reconciliation, and creation-cohort/bulk-import-wave analysis are fully
+deterministic against the on-disk snapshot. Every analysis not yet
+implemented (classification, association/activity evidence) is written as
+an explicit ``"status": "not_yet_implemented"`` placeholder rather than
+silently skipped. ``--no-live-lookups`` is accepted for forward interface
 compatibility with the later batch that adds targeted live lookups; it is
 currently a no-op because no live lookups exist yet.
 """
@@ -18,13 +18,13 @@ import json
 import os
 import time
 
+from .cohorts import build_cohort_analysis
 from .progress import ProgressWriter, now_iso
 from .reconcile import reconcile_all
 from .report import generate_html_report
 from .snapshot import Snapshot
 
 NOT_YET_IMPLEMENTED = [
-    "cohort_analysis: creation-cohort bucketing by day/week/month and bulk-import wave detection",
     "evidence: association evidence (company-contact, company/deal, contact/deal)",
     "evidence: activity/recency evidence",
     "population_map: evidence-based bucket classification "
@@ -68,8 +68,23 @@ def run_population_audit(snapshot_dir: str, output_dir: str, live_lookups: bool 
     reconciliation = reconcile_all(snap, object_types)
     progress.set_subprocess_status("reconciliation", "completed")
 
+    progress.set_phase("cohort_analysis")
+    progress.set_subprocess_status("cohort_analysis", "running")
+
+    def _cohort_progress(object_type: str, scanned: int) -> None:
+        progress.set_counter(f"records_scanned.{object_type}", scanned)
+
+    cohort_analysis = build_cohort_analysis(
+        snap, object_types, output_dir, progress_cb=_cohort_progress
+    )
+    for object_type in object_types:
+        if object_type in cohort_analysis:
+            progress.set_counter(
+                f"waves_detected.{object_type}", cohort_analysis[object_type]["waves_detected"]
+            )
+    progress.set_subprocess_status("cohort_analysis", "completed")
+
     # Not yet implemented in this batch -- explicit placeholders, never silently skipped.
-    progress.set_subprocess_status("cohort_analysis", "not_yet_implemented")
     progress.set_subprocess_status("association_evidence", "not_yet_implemented")
     progress.set_subprocess_status("activity_evidence", "not_yet_implemented")
     progress.set_subprocess_status("classification", "not_yet_implemented")
@@ -85,6 +100,20 @@ def run_population_audit(snapshot_dir: str, output_dir: str, live_lookups: bool 
         for ot, r in reconciliation.items()
     ]
     gaps.extend(NOT_YET_IMPLEMENTED)
+    gaps.extend(
+        [
+            "'deals': not present in this snapshot (deals extraction probe failed and "
+            "properties_deals returned 403); no deal-based cohort, reconciliation, or "
+            "association evidence exists for this object type.",
+            "No independently recorded portal total exists for any object type in this "
+            "snapshot (no portal_totals.json, no run_status.json['portal_totals']); every "
+            "object type is reported as unreconciled, never assumed correct.",
+            "Raw records carry only default properties (no hs_object_source, "
+            "lifecyclestage, hubspot_owner_id, or associations); cohort characterization "
+            "from the snapshot alone is limited to presence/recency/domain signals and "
+            "cannot see source, lifecycle, owner, or association evidence.",
+        ]
+    )
 
     population_map = {
         "schema_version": 1,
@@ -98,11 +127,6 @@ def run_population_audit(snapshot_dir: str, output_dir: str, live_lookups: bool 
             "bucket counts must sum to exactly."
         ),
         "reconciliation": reconciliation,
-    }
-    cohort_analysis = {
-        "schema_version": 1,
-        "status": "not_yet_implemented",
-        "note": "Creation-cohort bucketing by day/week/month and bulk-import wave detection (e.g. Sep 2023) is not implemented in this batch.",
     }
     evidence = {
         "schema_version": 1,
@@ -130,11 +154,12 @@ def run_population_audit(snapshot_dir: str, output_dir: str, live_lookups: bool 
         ],
     }
     next_actions = [
-        "Confirm the assumed snapshot layout (raw/<object>.jsonl envelopes, "
-        "_checkpoint.json, portal_totals.json) against the actual live snapshot "
-        "before running any cohort/classification analysis against it.",
-        "Implement creation-cohort bucketing (day/week/month) and anomalous "
-        "bulk-import wave detection, in particular around Sep 2023.",
+        "Verified snapshot facts (see README 'Snapshot layout'): raw/<object>.jsonl "
+        "envelopes shaped {record, extracted_at, page_index}; raw/_checkpoint.json; "
+        "raw/owners.jsonl; raw/properties_<object>.json; no deals.jsonl (deals probe "
+        "failed, properties_deals returned 403); run_status.json carries no "
+        "portal_totals key and there is no portal_totals.json; raw records carry only "
+        "default properties (no source/lifecycle/owner/associations).",
         "Add targeted read-only association evidence (company-contact, "
         "company/deal, contact/deal) via ReadOnlyHubSpotClient.batch_read/search.",
         "Add targeted activity/recency evidence without re-fetching complete raw universes.",
@@ -157,6 +182,7 @@ def run_population_audit(snapshot_dir: str, output_dir: str, live_lookups: bool 
             "generated_at": now_iso(),
             "snapshot": snapshot_dir,
             "reconciliation": reconciliation,
+            "cohort_analysis": cohort_analysis,
             "not_yet_implemented": NOT_YET_IMPLEMENTED,
             "gaps": gaps,
         },

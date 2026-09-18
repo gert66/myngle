@@ -70,11 +70,27 @@ class CliEndToEndFixtureRunTests(unittest.TestCase):
         self.assertFalse(reconciliation["companies"]["reconciled"])
         self.assertFalse(reconciliation["deals"]["reconciled"])
 
-    def test_not_yet_implemented_analyses_are_explicit_placeholders(self):
+    def test_cohort_analysis_is_completed_not_a_placeholder(self):
         main(["run", "--snapshot", FIXTURE_SNAPSHOT, "--output-dir", self.tmp_dir])
         with open(os.path.join(self.tmp_dir, "cohort_analysis.json")) as fh:
             cohort_analysis = json.load(fh)
-        self.assertEqual(cohort_analysis["status"], "not_yet_implemented")
+        self.assertEqual(cohort_analysis["status"], "completed")
+        self.assertIn("companies", cohort_analysis)
+        self.assertIn("contacts", cohort_analysis)
+
+    def test_other_analyses_remain_explicit_placeholders(self):
+        main(["run", "--snapshot", FIXTURE_SNAPSHOT, "--output-dir", self.tmp_dir])
+        with open(os.path.join(self.tmp_dir, "population_map.json")) as fh:
+            population_map = json.load(fh)
+        self.assertEqual(population_map["status"], "not_yet_implemented")
+        with open(os.path.join(self.tmp_dir, "progress.json")) as fh:
+            progress = json.load(fh)
+        phases = {p["name"]: p["status"] for p in progress["phases"]}
+        self.assertEqual(phases["cohort_analysis"], "completed")
+        self.assertEqual(phases["association_evidence"], "not_yet_implemented")
+        self.assertEqual(phases["activity_evidence"], "not_yet_implemented")
+        self.assertEqual(phases["classification"], "not_yet_implemented")
+        self.assertEqual(phases["live_lookups"], "not_yet_implemented")
 
     def test_html_report_separates_required_sections(self):
         main(["run", "--snapshot", FIXTURE_SNAPSHOT, "--output-dir", self.tmp_dir])

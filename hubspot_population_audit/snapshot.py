@@ -1,30 +1,43 @@
 """Streaming, read-only loader over an immutable HubSpot extraction snapshot.
 
-Assumed on-disk layout (inferred from ``hubspot_audit/extraction.py``, the
-extractor that produces this shape of directory -- see ``README.md`` under
-"Snapshot layout" for how this was verified/assumed and what remains to be
-confirmed against the actual live snapshot):
+On-disk layout, verified read-only against the live snapshot at
+``/home/myngle/hubspot-audit-live-20260918-r2`` (see ``README.md`` under
+"Snapshot layout" for the full evidence trail):
 
     <snapshot_dir>/
         raw/
             companies.jsonl        one JSON envelope per line:
-                                    {"record": {"id": ..., "properties": {...},
-                                     "associations": {...}}, "extracted_at": ...,
-                                     "page_index": ...}
-            contacts.jsonl         same envelope shape
-            deals.jsonl            same envelope shape
-            <activity>.jsonl       calls/meetings/emails/notes/tasks, same shape
+                                    {"record": {"id": ..., "properties": {...}},
+                                     "extracted_at": ..., "page_index": ...}
+                                    -- properties carry ONLY the default set
+                                    (createdate, domain, hs_lastmodifieddate,
+                                    hs_object_id, name); no associations, no
+                                    hs_object_source/lifecyclestage/owner.
+            contacts.jsonl          same envelope shape; default properties
+                                    only (createdate, email, firstname,
+                                    lastname, hs_object_id, lastmodifieddate).
+            deals.jsonl             OPTIONAL and absent in the live snapshot
+                                    (the deals probe failed and
+                                    properties_deals returned 403).
+            <activity>.jsonl       calls/meetings/emails/notes/tasks, same
+                                    shape, optional -- not present in the
+                                    live snapshot either.
             owners.jsonl           {"record": {...}, "extracted_at": ...}
             properties_<object>.json   {"properties": [...], "extracted_at": ...}
-            _checkpoint.json       per-object pagination/completeness metadata
-        portal_totals.json         optional: {"companies": <int>, "contacts": <int>, ...}
+            _checkpoint.json       per-object pagination/completeness metadata;
+                                    the live snapshot's companies/contacts
+                                    extractions both report "resumed": true,
+                                    so duplicate envelopes are possible and
+                                    callers must dedupe by id (see
+                                    ``reconcile.py`` / ``cohorts.py``).
+        portal_totals.json         OPTIONAL: {"companies": <int>, "contacts": <int>, ...}
                                     an independently recorded HubSpot-reported
-                                    total (e.g. from a portal export or a
-                                    search-count read), used as the reconciliation
-                                    baseline. May be absent for some or all
-                                    object types -- this is treated as an
+                                    total, used as the reconciliation
+                                    baseline. Absent in the live snapshot for
+                                    every object type -- treated as an
                                     explicit gap, never guessed.
-        run_status.json            optional: may itself carry a "portal_totals" key
+        run_status.json            OPTIONAL; in the live snapshot this file
+                                    exists but carries no "portal_totals" key.
 
 Every iteration method streams the underlying JSONL file line by line and
 never loads a whole object type into memory at once.

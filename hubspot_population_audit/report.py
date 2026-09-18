@@ -48,8 +48,99 @@ def _notes_list(reconciliation: dict) -> str:
     return f"<ul>{''.join(items)}</ul>"
 
 
+def _pct(value) -> str:
+    try:
+        return f"{float(value):.2%}"
+    except (TypeError, ValueError):
+        return _esc(value)
+
+
+def _month_profiles_table(cohort_analysis: dict) -> str:
+    blocks = []
+    for object_type in ("companies", "contacts"):
+        analysis = cohort_analysis.get(object_type)
+        if not analysis:
+            continue
+        rows = []
+        for month_key, profile in analysis.get("month_profiles", {}).items():
+            share = _pct(profile["share_of_population"])
+            presence_rate = _pct(profile["presence_rate"])
+            untouched_rate = _pct(profile["untouched_since_creation_rate"])
+            rows.append(
+                "<tr>"
+                f"<td>{_esc(month_key)}</td>"
+                f"<td>{_esc(profile['count'])}</td>"
+                f"<td>{_esc(share)}</td>"
+                f"<td>{_esc(profile['presence_field'])}</td>"
+                f"<td>{_esc(presence_rate)}</td>"
+                f"<td>{_esc(untouched_rate)}</td>"
+                "</tr>"
+            )
+        bursts = analysis.get("timestamp_bursts", {})
+        sep_focus = analysis.get("sep_2023_focus", {})
+        sep_share = _pct(sep_focus.get("share_of_population", 0))
+        blocks.append(
+            f"<h3>{_esc(object_type)}</h3>"
+            f"<p>Unique records: {_esc(analysis.get('unique_id_count'))} &middot; "
+            f"unknown createdate: {_esc(analysis.get('unknown_createdate_count'))} &middot; "
+            f"reference time: {_esc(analysis.get('reference_time'))}</p>"
+            "<table border='1' cellpadding='4' cellspacing='0'>"
+            "<thead><tr><th>month</th><th>count</th><th>share</th>"
+            "<th>presence field</th><th>presence rate</th><th>untouched rate</th></tr></thead>"
+            f"<tbody>{''.join(rows)}</tbody></table>"
+            f"<p><strong>Timestamp bursts</strong> (&ge;{_esc(bursts.get('threshold'))} records at the same "
+            f"createdate minute): {_esc(len(bursts.get('minutes', [])))} minute(s) flagged, "
+            f"{_esc(bursts.get('total_records_in_bursts'))} record(s) total.</p>"
+            f"<p><strong>Sep 2023 focus:</strong> {_esc(sep_focus.get('count'))} record(s), "
+            f"{_esc(sep_share)} of the population, "
+            f"detected as a wave: {'yes' if sep_focus.get('detected_as_wave') else 'no'}.</p>"
+        )
+    return "".join(blocks) or "<p>No cohort analysis available.</p>"
+
+
+def _waves_block(cohort_analysis: dict) -> str:
+    blocks = []
+    for object_type in ("companies", "contacts"):
+        analysis = cohort_analysis.get(object_type)
+        if not analysis:
+            continue
+        waves = analysis.get("waves", [])
+        if not waves:
+            blocks.append(f"<h3>{_esc(object_type)}</h3><p>No wave candidates flagged at the parameters below.</p>")
+            continue
+        rows = []
+        for wave in waves:
+            share = _pct(wave["share_of_population"])
+            baseline_used = f"{wave['baseline_used']:.1f}"
+            explanations = "; ".join(_esc(x) for x in wave["alternative_explanations"])
+            rows.append(
+                "<tr>"
+                f"<td>{_esc(wave['wave_id'])}</td>"
+                f"<td>{_esc(wave['start'])}</td>"
+                f"<td>{_esc(wave['end'])}</td>"
+                f"<td>{_esc(wave['total_records'])}</td>"
+                f"<td>{_esc(share)}</td>"
+                f"<td>{_esc(baseline_used)}</td>"
+                f"<td>{_esc(wave['peak_day'])} ({_esc(wave['peak_count'])})</td>"
+                f"<td>{explanations}</td>"
+                "</tr>"
+            )
+        blocks.append(
+            f"<h3>{_esc(object_type)}</h3>"
+            "<table border='1' cellpadding='4' cellspacing='0'>"
+            "<thead><tr><th>wave id</th><th>start</th><th>end</th><th>total records</th>"
+            "<th>share</th><th>baseline used</th><th>peak day (count)</th>"
+            "<th>alternative explanations to test</th></tr></thead>"
+            f"<tbody>{''.join(rows)}</tbody></table>"
+        )
+    parameters = cohort_analysis.get("parameters", {})
+    params_line = ", ".join(f"{_esc(k)}={_esc(v)}" for k, v in parameters.items())
+    return f"<p>Heuristic parameters: {params_line}</p>" + "".join(blocks)
+
+
 def generate_html_report(context: dict, output_path: str) -> None:
     reconciliation = context.get("reconciliation", {})
+    cohort_analysis = context.get("cohort_analysis", {}) or {}
     not_yet_implemented = context.get("not_yet_implemented", [])
     gaps = context.get("gaps", [])
 
@@ -85,20 +176,38 @@ recorded portal total was found -- the delta against that total.</p>
 </section>
 
 <section>
+<h2><span class="badge observed">Observed facts</span> Creation cohorts</h2>
+<p>Recomputed independently from the raw snapshot: creation counts bucketed
+by day/ISO-week/month, per-month presence/recency profiles, and exact
+createdate-minute timestamp bursts. Records with a missing or unparsable
+createdate are counted under the explicit <code>unknown</code> cohort,
+never dropped.</p>
+{_month_profiles_table(cohort_analysis)}
+</section>
+
+<section>
 <h2><span class="badge inferred">Inferred classifications</span></h2>
-<p>Not yet implemented in this build. Population bucketing
-(operational_customer, operational_prospect, active_other, historical_import,
-enrichment_or_bulk, legacy_or_obsolete_candidate, uncertain) will be added in
-a follow-up batch; see <code>population_map.json</code> and
-<code>cohort_analysis.json</code> for the current placeholder status.</p>
+<p>Population bucketing (operational_customer, operational_prospect,
+active_other, historical_import, enrichment_or_bulk,
+legacy_or_obsolete_candidate, uncertain) is not yet implemented; see
+<code>population_map.json</code> for the current placeholder status.</p>
+<h3>Bulk-import wave candidates (heuristic)</h3>
+<p>Days whose creation count clears <code>max(wave_abs_min, wave_factor
+&times; baseline)</code>, where the baseline is the median of non-zero
+daily counts over the preceding window, are flagged and merged into waves.
+This is a heuristic signal, not a conclusion -- each wave lists alternative
+explanations that a later batch must test before any classification is
+assigned.</p>
+{_waves_block(cohort_analysis)}
 </section>
 
 <section>
 <h2><span class="badge uncertain">Uncertainty</span></h2>
 <p>Every object type without an independently recorded portal total is
 reported as <strong>unreconciled</strong> rather than assumed correct (see
-the notes above). No classification confidence claims are made until the
-classification phase is implemented.</p>
+the notes above). Bulk-import wave candidates above are explicitly labelled
+inferred/heuristic, not conclusions. No classification confidence claims
+are made until the classification phase is implemented.</p>
 </section>
 
 <section>
