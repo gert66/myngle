@@ -159,3 +159,22 @@ def test_internal_blocker_retry_cap_never_becomes_owner_question(monkeypatch):
     assert result == "done"
     assert saved[-1]["question"] is None
     assert "hoeft" in updates[-1][1]["assistant_body"].lower()
+
+
+def test_status_question_during_processing_gets_immediate_answer(monkeypatch):
+    mid="feaafb0a-ef84-4668-9219-7f2a7b07e8de"
+    fid="df47b2be-dcee-471a-9c3e-d37ff501e6dd"
+    case={"feedback_id":fid,"job_id":"feedback-df47b2be-c1","conversation_job_id":"feedback-df47b2be-c1"}
+    updates=[]
+    monkeypatch.setattr(mod, "load_case", lambda _fid: case)
+    monkeypatch.setattr(mod, "_job_state", lambda _jid: {"phase":"WAITING"})
+    monkeypatch.setattr(mod, "update_message", lambda *a, **k: updates.append((a,k)))
+    msg={
+        "message_id":mid,"feedback_id":fid,"body":"nog bezig? duurt zo lang nu",
+        "thread":[
+            {"message_id":"older","role":"user","status":"processing","body":"werk dit uit"},
+            {"message_id":mid,"role":"user","status":"pending","body":"nog bezig? duurt zo lang nu"},
+        ],
+    }
+    assert mod.handle_pending(msg) == "done"
+    assert "loopt nog" in updates[-1][1]["assistant_body"].lower()

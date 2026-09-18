@@ -284,12 +284,36 @@ def _older_processing_exists(message: dict) -> bool:
     return False
 
 
+def _is_status_question(text: str) -> bool:
+    t = " ".join(str(text or "").lower().split())
+    return any(x in t for x in (
+        "nog bezig", "hoe ver", "status", "klaar?", "al klaar", "duurt",
+        "loopt het", "is hij bezig", "is het bezig", "en nu",
+    ))
+
+
+def _processing_status_reply(case: dict) -> str:
+    job_id = case.get("conversation_job_id") or case.get("job_id")
+    state = _job_state(str(job_id)) if job_id else None
+    phase = str((state or {}).get("phase") or "").upper()
+    if phase in TERMINAL_PHASES:
+        return "De vorige ronde is inmiddels afgerond. Ik verwerk het resultaat nu en kom zo met de uitkomst terug."
+    return "Ja, de uitwerking loopt nog. Je hoeft nu niets te doen; ik kom terug zodra deze ronde klaar is."
+
+
 def handle_pending(message: dict, *, url=None, token=None) -> str:
     mid = str(message.get("message_id") or "")
     fid = str(message.get("feedback_id") or "")
     if not re.fullmatch(r"[0-9a-fA-F-]{36}", mid):
         raise ValueError("invalid feedback message id")
     if _older_processing_exists(message):
+        case = load_case(fid)
+        if _is_status_question(str(message.get("body") or "")):
+            update_message(
+                mid, "done", assistant_body=_processing_status_reply(case),
+                result_note="status while earlier feedback work is still processing", url=url, token=token,
+            )
+            return "done"
         return "deferred"
     case = load_case(fid)
     if case.get("status") == "resolved":
