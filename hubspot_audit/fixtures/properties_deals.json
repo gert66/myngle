@@ -1,0 +1,50 @@
+[
+  {
+    "name": "createdate",
+    "label": "Create Date",
+    "type": "datetime",
+    "groupName": "core"
+  },
+  {
+    "name": "hs_lastmodifieddate",
+    "label": "Last Modified",
+    "type": "datetime",
+    "groupName": "core"
+  },
+  {
+    "name": "hubspot_owner_id",
+    "label": "Owner",
+    "type": "enumeration",
+    "groupName": "core"
+  },
+  {
+    "name": "deals_sf_id",
+    "label": "Salesforce ID",
+    "type": "string",
+    "groupName": "legacy"
+  },
+  {
+    "name": "deals_sf_sync_status",
+    "label": "Salesforce Sync Status",
+    "type": "string",
+    "groupName": "legacy"
+  },
+  {
+    "name": "apollo_enriched",
+    "label": "Apollo Enriched",
+    "type": "bool",
+    "groupName": "legacy"
+  },
+  {
+    "name": "forecast_category",
+    "label": "forecast_category",
+    "type": "string",
+    "groupName": "custom"
+  },
+  {
+    "name": "unused_custom_field_3",
+    "label": "unused_custom_field_3",
+    "type": "string",
+    "groupName": "custom"
+  }
+]
