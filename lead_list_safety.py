@@ -166,21 +166,43 @@ def prematch_companies(
         matched_id = None
         candidates: list[str] = []
 
-        domain_candidates: list[dict] = []
-        for candidate_domain in (domain, hint):
-            if candidate_domain:
-                domain_candidates = idx["by_domain"].get(candidate_domain, [])
-                if domain_candidates:
-                    match_basis = "exact_domain" if candidate_domain == domain else "email_domain_hint"
-                    break
-        if len(domain_candidates) == 1:
-            decision, confidence = "matched_existing", "high"
-            matched_id = str(domain_candidates[0].get("company_id") or "")
-        elif len(domain_candidates) > 1:
-            decision, confidence = "ambiguous", "review"
-            candidates = [str(x.get("company_id") or "") for x in domain_candidates]
+        name_candidates = idx["by_name"].get(name_key, []) if name_key else []
+        name_ids = {str(x.get("company_id") or "") for x in name_candidates}
+
+        domain_candidates = idx["by_domain"].get(domain, []) if domain else []
+        hint_candidates = idx["by_domain"].get(hint, []) if hint else []
+
+        if domain_candidates:
+            domain_ids = [str(x.get("company_id") or "") for x in domain_candidates]
+            if len(domain_candidates) == 1:
+                target_id = domain_ids[0]
+                if name_ids and target_id not in name_ids:
+                    decision, match_basis, confidence = "ambiguous", "name_domain_conflict", "review"
+                    candidates = sorted(name_ids | {target_id})
+                else:
+                    decision, match_basis, confidence = "matched_existing", "exact_domain", "high"
+                    matched_id = target_id
+            else:
+                decision, match_basis, confidence = "ambiguous", "exact_domain", "review"
+                candidates = domain_ids
+        elif hint_candidates:
+            hint_ids = {str(x.get("company_id") or "") for x in hint_candidates}
+            overlap = sorted(name_ids & hint_ids)
+            if len(overlap) == 1:
+                decision, match_basis, confidence = (
+                    "matched_existing", "exact_name_and_email_domain_hint", "high"
+                )
+                matched_id = overlap[0]
+            elif name_ids:
+                decision, match_basis, confidence = "ambiguous", "name_hint_conflict", "review"
+                candidates = sorted(name_ids | hint_ids)
+            else:
+                # Email-domain hints can be group/shared domains. They are useful
+                # review evidence but are never enough by themselves to reuse an
+                # existing company identity.
+                decision, match_basis, confidence = "ambiguous", "email_domain_hint_only", "review"
+                candidates = sorted(hint_ids)
         else:
-            name_candidates = idx["by_name"].get(name_key, []) if name_key else []
             source_phones = incoming_phones.get(source_key, set())
             phone_matches = [
                 item for item in name_candidates
@@ -249,7 +271,37 @@ def prematch_companies(
             "candidate_company_ids": candidates,
         })
 
-    return {"summary": {**counts, "total": len(entries)}, "entries": entries}
+    # A protected import is one source company -> at most one existing target.
+    # If multiple distinct source companies claim the same target, downgrade all
+    # of them to review instead of silently collapsing entities.
+    by_target: dict[str, list[dict[str, Any]]] = {}
+    for entry in entries:
+        if entry.get("action") == "matched_existing" and entry.get("existing_company_id"):
+            by_target.setdefault(str(entry["existing_company_id"]), []).append(entry)
+    collisions = {target: group for target, group in by_target.items() if len(group) > 1}
+    if collisions:
+        for target, group in collisions.items():
+            for entry in group:
+                prior_basis = str(entry.get("match_basis") or "")
+                entry["action"] = "ambiguous"
+                entry["candidate_company_ids"] = sorted(
+                    set(entry.get("candidate_company_ids") or []) | {target}
+                )
+                entry["existing_company_id"] = None
+                entry["match_basis"] = f"target_collision:{prior_basis}"
+                entry["confidence"] = "review"
+        counts = {"matched_existing": 0, "new": 0, "ambiguous": 0}
+        for entry in entries:
+            counts[str(entry.get("action"))] += 1
+
+    return {
+        "summary": {
+            **counts,
+            "total": len(entries),
+            "target_collision_groups": len(collisions),
+        },
+        "entries": entries,
+    }
 
 
 def prematch_export_records(
@@ -414,43 +466,298 @@ def selective_rollback(
 def apply_reviewed_match_overrides(
     prematch: Mapping[str, Any], overrides: Iterable[Mapping[str, Any]] | None,
 ) -> dict[str, Any]:
-    """Resolve reviewed ambiguous matches without weakening automatic rules.
+    """Resolve reviewed ambiguities without weakening automatic rules.
 
-    Every override must point to a company_id already listed as a candidate on
-    the ambiguous entry and must carry at least one evidence reference.
+    Backward compatible existing-match override:
+      source_company_key + existing_company_id + evidence
+
+    Explicit create-new override:
+      source_company_key + action="new" + evidence
     """
     result = deepcopy(dict(prematch))
     entries = [dict(e) for e in result.get("entries", [])]
     by_key = {str(e.get("source_company_key") or ""): e for e in entries}
     reviewed = 0
+    reviewed_new = 0
     for raw in overrides or []:
         key = str(raw.get("source_company_key") or "").strip()
         target = str(raw.get("existing_company_id") or "").strip()
+        requested_action = str(raw.get("action") or "").strip()
+        if not requested_action:
+            requested_action = "matched_existing" if target else ""
         evidence = [str(x).strip() for x in (raw.get("evidence") or []) if str(x).strip()]
-        if not key or not target or not evidence:
-            raise ValueError("reviewed match override requires source_company_key, existing_company_id and evidence")
+        if not key or not requested_action or not evidence:
+            raise ValueError(
+                "reviewed override requires source_company_key, action/target and evidence"
+            )
         entry = by_key.get(key)
         if not entry or entry.get("action") != "ambiguous":
-            raise ValueError(f"reviewed match override is not a current ambiguous entry: {key}")
-        candidates = {str(x) for x in entry.get("candidate_company_ids") or []}
-        if target not in candidates:
-            raise ValueError(f"reviewed match target is not a prematch candidate: {key} -> {target}")
-        entry["action"] = "matched_existing"
-        entry["existing_company_id"] = target
-        entry["match_basis"] = "reviewed_identity_match"
+            raise ValueError(f"reviewed override is not a current ambiguous entry: {key}")
+
+        if requested_action == "matched_existing":
+            if not target:
+                raise ValueError(f"reviewed existing match requires existing_company_id: {key}")
+            candidates = {str(x) for x in entry.get("candidate_company_ids") or []}
+            if target not in candidates:
+                raise ValueError(f"reviewed match target is not a prematch candidate: {key} -> {target}")
+            entry["action"] = "matched_existing"
+            entry["existing_company_id"] = target
+            entry["match_basis"] = "reviewed_identity_match"
+        elif requested_action == "new":
+            entry["action"] = "new"
+            entry["existing_company_id"] = None
+            entry["match_basis"] = "reviewed_create_new"
+            reviewed_new += 1
+        else:
+            raise ValueError(f"unsupported reviewed override action: {requested_action}")
+
         entry["confidence"] = "high"
         entry["review_evidence"] = evidence
         entry["reviewer"] = str(raw.get("reviewer") or "protected-live-review")
         entry["review_note"] = str(raw.get("note") or "").strip() or None
         reviewed += 1
+
+    # A review must not create a many-to-one collision either.
+    by_target: dict[str, list[dict[str, Any]]] = {}
+    for entry in entries:
+        if entry.get("action") == "matched_existing" and entry.get("existing_company_id"):
+            by_target.setdefault(str(entry["existing_company_id"]), []).append(entry)
+    collisions = {target: group for target, group in by_target.items() if len(group) > 1}
+    if collisions:
+        targets = ", ".join(sorted(collisions)[:5])
+        raise ValueError(f"reviewed overrides create duplicate existing targets: {targets}")
+
     counts = {"matched_existing": 0, "new": 0, "ambiguous": 0}
     for entry in entries:
         action = str(entry.get("action") or "")
         if action in counts:
             counts[action] += 1
     result["entries"] = entries
-    result["summary"] = {**counts, "total": len(entries), "reviewed_matches": reviewed}
+    result["summary"] = {
+        **counts,
+        "total": len(entries),
+        "reviewed_matches": reviewed,
+        "reviewed_create_new": reviewed_new,
+        "target_collision_groups": 0,
+    }
     return result
+
+
+def _planned_new_company_id(
+    source_key: str, company_name: Any, occupied: set[str],
+) -> str:
+    slug = re.sub(r"[^a-z0-9]+", "-", normalize_company_name(company_name)).strip("-")
+    slug = slug[:48] or "company"
+    digest = hashlib.sha256(source_key.encode("utf-8")).hexdigest()[:10]
+    base = f"{slug}-{digest}"
+    candidate = base
+    suffix = 2
+    while candidate in occupied:
+        candidate = f"{base}-{suffix}"
+        suffix += 1
+    return candidate
+
+
+def build_import_plan(
+    prematch: Mapping[str, Any], *, batch_id: str, country: str, caller: str,
+    existing_company_ids: Iterable[str] | None = None,
+) -> dict[str, Any]:
+    """Freeze a GREEN pre-match into an immutable execution contract.
+
+    Both existing and new records receive a final company_id here. Enrichment
+    may add data, but it may never re-decide identity.
+    """
+    ambiguous = int((prematch.get("summary") or {}).get("ambiguous") or 0)
+    if ambiguous:
+        raise ValueError("cannot freeze import plan while ambiguous matches remain")
+
+    occupied = {str(x) for x in (existing_company_ids or []) if str(x)}
+    entries: list[dict[str, Any]] = []
+    seen_sources: set[str] = set()
+    seen_targets: set[str] = set()
+
+    for raw in prematch.get("entries", []):
+        source_key = str(raw.get("source_company_key") or "").strip()
+        action = str(raw.get("action") or "")
+        if not source_key or source_key in seen_sources:
+            raise ValueError(f"invalid or duplicate source_company_key in import plan: {source_key!r}")
+        if action not in {"new", "matched_existing"}:
+            raise ValueError(f"unsupported import-plan action for {source_key}: {action}")
+
+        if action == "matched_existing":
+            target = str(raw.get("existing_company_id") or "").strip()
+            if not target:
+                raise ValueError(f"matched_existing import-plan entry lacks target company_id: {source_key}")
+            if target in seen_targets:
+                raise ValueError(f"multiple import-plan entries target existing company_id: {target}")
+        else:
+            target = _planned_new_company_id(source_key, raw.get("company_name"), occupied | seen_targets)
+
+        seen_sources.add(source_key)
+        seen_targets.add(target)
+        entries.append({
+            "source_company_key": source_key,
+            "company_name": raw.get("company_name"),
+            "action": action,
+            "target_company_id": target,
+            "match_basis": raw.get("match_basis"),
+            "confidence": raw.get("confidence"),
+            "review_evidence": raw.get("review_evidence") or [],
+            "reviewer": raw.get("reviewer"),
+            "review_note": raw.get("review_note"),
+        })
+
+    payload = {
+        "schema_version": 1,
+        "batch_id": str(batch_id),
+        "country": str(country),
+        "caller": str(caller),
+        "locked": True,
+        "entries": entries,
+        "summary": {
+            "matched_existing": sum(e["action"] == "matched_existing" for e in entries),
+            "new": sum(e["action"] == "new" for e in entries),
+            "total": len(entries),
+        },
+    }
+    canonical = json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+    payload["plan_sha256"] = hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+    return payload
+
+
+def validate_import_plan(
+    plan: Mapping[str, Any], prematch: Mapping[str, Any], *,
+    batch_id: str, country: str, caller: str,
+    existing_company_ids: Iterable[str] | None = None,
+) -> dict[str, Any]:
+    """Compare a refreshed pre-match with the frozen plan without rewriting it."""
+    drift: list[dict[str, Any]] = []
+    for field, expected in (("batch_id", batch_id), ("country", country), ("caller", caller)):
+        actual = str(plan.get(field) or "")
+        if actual != str(expected):
+            drift.append({"type": "metadata_changed", "field": field, "planned": actual, "current": str(expected)})
+
+    planned = {str(e.get("source_company_key") or ""): e for e in plan.get("entries", [])}
+    current = {str(e.get("source_company_key") or ""): e for e in prematch.get("entries", [])}
+    existing_now = {str(x) for x in (existing_company_ids or []) if str(x)}
+    for entry in planned.values():
+        if entry.get("action") == "new":
+            target = str(entry.get("target_company_id") or "")
+            if not target:
+                drift.append({
+                    "type": "planned_new_target_missing",
+                    "source_company_key": entry.get("source_company_key"),
+                })
+            elif target in existing_now:
+                drift.append({
+                    "type": "planned_new_target_now_exists",
+                    "source_company_key": entry.get("source_company_key"),
+                    "target_company_id": target,
+                })
+    for key in sorted(set(planned) | set(current)):
+        p = planned.get(key)
+        c = current.get(key)
+        if p is None:
+            drift.append({"type": "unexpected_source", "source_company_key": key})
+            continue
+        if c is None:
+            drift.append({"type": "missing_source", "source_company_key": key})
+            continue
+        planned_action = str(p.get("action") or "")
+        current_action = str(c.get("action") or "")
+        planned_target = str(p.get("target_company_id") or "")
+        current_target = str(c.get("existing_company_id") or "")
+        if planned_action != current_action or (
+            planned_action == "matched_existing" and planned_target != current_target
+        ):
+            drift.append({
+                "type": "identity_decision_changed",
+                "source_company_key": key,
+                "planned_action": planned_action,
+                "current_action": current_action,
+                "planned_target_company_id": planned_target or None,
+                "current_target_company_id": current_target or None,
+            })
+    return {"valid": not drift, "drift_count": len(drift), "drift": drift}
+
+
+def _export_source_key(item: Mapping[str, Any], details: Mapping[str, dict]) -> str:
+    source_id = str(item.get("company_id") or "")
+    detail = details.get(source_id, {}) if isinstance(details, Mapping) else {}
+    debug = detail.get("debug") or {} if isinstance(detail, Mapping) else {}
+    row = debug.get("lead_prioritizer_row") or {} if isinstance(debug, Mapping) else {}
+    return str(row.get("source_company_key") or item.get("source_company_key") or "").strip()
+
+
+def reconcile_export_with_import_plan(
+    new_items: list[dict], new_details: Mapping[str, dict], plan: Mapping[str, Any],
+) -> tuple[list[dict], dict[str, dict], dict[str, Any]]:
+    """Apply frozen identity decisions to enriched output using source lineage."""
+    planned = {str(e.get("source_company_key") or ""): e for e in plan.get("entries", [])}
+    if not planned:
+        raise ValueError("import plan has no entries")
+    seen_sources: set[str] = set()
+    claimed_ids: set[str] = set()
+    out_items: list[dict] = []
+    out_details: dict[str, dict] = {}
+    lineage: list[dict[str, Any]] = []
+
+    for item in new_items:
+        source_id = str(item.get("company_id") or "")
+        source_key = _export_source_key(item, new_details)
+        if not source_key or source_key not in planned:
+            raise ValueError(f"enriched export is not covered by import plan: {source_id or source_key}")
+        if source_key in seen_sources:
+            raise ValueError(f"enriched export contains duplicate source lineage: {source_key}")
+        seen_sources.add(source_key)
+        decision = planned[source_key]
+        final_id = str(decision.get("target_company_id") or "")
+        if not final_id:
+            raise ValueError(f"import plan target missing for {source_key}")
+        if not final_id or final_id in claimed_ids:
+            raise ValueError(f"import-plan company_id collision: {final_id!r}")
+        claimed_ids.add(final_id)
+
+        copy_item = dict(item)
+        copy_item["company_id"] = final_id
+        out_items.append(copy_item)
+        detail = dict(new_details.get(source_id, {}))
+        if detail:
+            detail["company_id"] = final_id
+            out_details[final_id] = detail
+        lineage.append({
+            "source_company_key": source_key,
+            "export_company_id": source_id,
+            "final_company_id": final_id,
+            "action": decision.get("action"),
+        })
+
+    missing = sorted(set(planned) - seen_sources)
+    if missing:
+        raise ValueError(f"enriched export is missing {len(missing)} import-plan entries: {missing[:5]}")
+
+    match_report = {
+        "summary": {
+            "matched_existing": sum(e.get("action") == "matched_existing" for e in plan.get("entries", [])),
+            "new": sum(e.get("action") == "new" for e in plan.get("entries", [])),
+            "ambiguous": 0,
+            "total": len(plan.get("entries", [])),
+        },
+        "entries": [
+            {
+                "source_company_key": e.get("source_company_key"),
+                "company_name": e.get("company_name"),
+                "action": e.get("action"),
+                "existing_company_id": e.get("target_company_id"),
+                "match_basis": e.get("match_basis"),
+                "confidence": e.get("confidence"),
+            }
+            for e in plan.get("entries", [])
+        ],
+        "lineage": lineage,
+        "import_plan_sha256": plan.get("plan_sha256"),
+    }
+    return out_items, out_details, match_report
 
 
 def build_enrichment_plan(prematch: Mapping[str, Any]) -> dict[str, Any]:

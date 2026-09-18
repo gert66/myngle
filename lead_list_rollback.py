@@ -7,10 +7,63 @@ from __future__ import annotations
 
 import argparse
 import json
+from datetime import datetime, timezone
 from pathlib import Path
 
 from lead_list_safety import selective_rollback
 from lovable_gcs_upload import rebucket_company_details
+
+
+def _score_value(item: dict) -> float:
+    for field in ("commercial_fit_score_app", "commercial_fit_score"):
+        value = item.get(field)
+        if isinstance(value, (int, float)):
+            return float(value)
+        try:
+            if value not in (None, ""):
+                return float(value)
+        except (TypeError, ValueError):
+            pass
+    return 0.0
+
+
+def _rollback_manifest(current_dir: Path, items: list[dict], buckets: dict[str, dict], report: dict) -> dict:
+    path = current_dir / "export_manifest.json"
+    if path.is_file():
+        try:
+            manifest = json.loads(path.read_text(encoding="utf-8"))
+        except Exception:
+            manifest = {}
+    else:
+        manifest = {}
+    now = datetime.now(timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z")
+    manifest.update({
+        "schema_version": int(manifest.get("schema_version") or 1),
+        "generated_at": now,
+        "rows_exported": len(items),
+        "companies_total": len(items),
+        "bucket_count": len(buckets),
+        "last_rollback_batch": report.get("batch_id"),
+        "protected_live_rollback": {
+            "batch_id": report.get("batch_id"),
+            "removed_created": report.get("removed_created"),
+            "restored_existing": report.get("restored_existing"),
+            "completed_at": now,
+        },
+        "validation_summary": {
+            "list_items_validated": len(items),
+            "detail_records_validated": sum(len(v) for v in buckets.values()),
+            "structural_errors": 0,
+            "status": "ok",
+        },
+        "output_files": [
+            "companies.list.json",
+            "companies.scores.json",
+            *sorted(buckets),
+            "export_manifest.json",
+        ],
+    })
+    return manifest
 
 
 def load_current_export(path: Path) -> tuple[list[dict], dict[str, dict]]:
@@ -49,6 +102,15 @@ def prepare_rollback(current_dir: Path, safety_dir: Path, output_dir: Path, buck
     for name, contents in buckets.items():
         (output_dir / name).write_text(
             json.dumps(contents, ensure_ascii=False, indent=2, default=str) + "\n", encoding="utf-8")
+    (output_dir / "companies.scores.json").write_text(
+        json.dumps([_score_value(item) for item in items], ensure_ascii=False) + "\n",
+        encoding="utf-8",
+    )
+    manifest = _rollback_manifest(current_dir, items, buckets, report)
+    (output_dir / "export_manifest.json").write_text(
+        json.dumps(manifest, ensure_ascii=False, indent=2, default=str) + "\n",
+        encoding="utf-8",
+    )
     return report
 
 

@@ -9,6 +9,7 @@ import json
 import os
 import shutil
 import subprocess
+from datetime import datetime, timezone
 from pathlib import Path
 from urllib import request as urllib_request
 from typing import Any
@@ -16,7 +17,9 @@ from typing import Any
 from lead_list_safety import (
     apply_reviewed_match_overrides,
     build_enrichment_plan,
+    build_import_plan,
     prematch_companies,
+    validate_import_plan,
     write_before_snapshot,
 )
 from lovable_gcs_upload import DEFAULT_GCS_BUCKET
@@ -44,9 +47,26 @@ def _cp_from_gcs(source: str, target: Path) -> None:
         raise RuntimeError((proc.stderr or proc.stdout or "GCS read failed")[-1200:])
 
 
+def _cp_from_gcs_optional(source: str, target: Path) -> bool:
+    target.parent.mkdir(parents=True, exist_ok=True)
+    proc = subprocess.run(
+        [_gcloud(), "storage", "cp", source, str(target)],
+        capture_output=True, text=True, timeout=120,
+    )
+    if proc.returncode == 0:
+        return True
+    return False
+
+
 def download_current_readonly(bucket: str, prefix: str, target_dir: Path) -> None:
-    """Refresh a local read-only copy of list + detail buckets."""
+    """Refresh a local read-only copy of list, details and dataset metadata."""
     target_dir.mkdir(parents=True, exist_ok=True)
+    for stale in target_dir.glob("company-details-*.json"):
+        stale.unlink()
+    for stale_name in ("companies.list.json", "companies.scores.json", "export_manifest.json"):
+        stale = target_dir / stale_name
+        if stale.exists():
+            stale.unlink()
     _cp_from_gcs(f"gs://{bucket}/{prefix}/companies.list.json", target_dir / "companies.list.json")
     proc = subprocess.run(
         [_gcloud(), "storage", "ls", f"gs://{bucket}/{prefix}/company-details-*.json"],
@@ -56,6 +76,10 @@ def download_current_readonly(bucket: str, prefix: str, target_dir: Path) -> Non
         raise RuntimeError((proc.stderr or "GCS detail listing failed")[-1200:])
     for uri in [line.strip() for line in proc.stdout.splitlines() if line.strip()]:
         _cp_from_gcs(uri, target_dir / uri.rsplit("/", 1)[-1])
+    for filename in ("companies.scores.json", "export_manifest.json"):
+        _cp_from_gcs_optional(
+            f"gs://{bucket}/{prefix}/{filename}", target_dir / filename
+        )
 
 
 def load_current_export(current_dir: Path) -> tuple[list[dict], dict[str, dict]]:
@@ -99,6 +123,24 @@ def build_live_preflight(
         prematch = apply_reviewed_match_overrides(prematch, overrides)
     enrichment = build_enrichment_plan(prematch)
     summary = prematch["summary"]
+    import_plan_path = preflight_dir / "import_plan.json"
+    plan_validation = {"valid": True, "drift_count": 0, "drift": []}
+    import_plan = None
+    if import_plan_path.is_file():
+        import_plan = json.loads(import_plan_path.read_text(encoding="utf-8"))
+        plan_validation = validate_import_plan(
+            import_plan, prematch, batch_id=batch_id, country=country_slug, caller=caller,
+            existing_company_ids=[str(x.get("company_id") or "") for x in existing_items],
+        )
+    elif int(summary.get("ambiguous") or 0) == 0:
+        import_plan = build_import_plan(
+            prematch, batch_id=batch_id, country=country_slug, caller=caller,
+            existing_company_ids=[str(x.get("company_id") or "") for x in existing_items],
+        )
+        preflight_dir.mkdir(parents=True, exist_ok=True)
+        import_plan_path.write_text(
+            json.dumps(import_plan, ensure_ascii=False, indent=2), encoding="utf-8"
+        )
     safety_dir = preflight_dir / "safety" / batch_id
     before_dir = write_before_snapshot(
         safety_dir / "before",
@@ -107,7 +149,18 @@ def build_live_preflight(
         batch_id=batch_id,
         country_key=country_slug,
     )
-    green = int(summary.get("ambiguous") or 0) == 0
+    review_required = [
+        {
+            "source_company_key": e.get("source_company_key"),
+            "company_name": e.get("company_name"),
+            "incoming_domain": e.get("incoming_domain"),
+            "match_basis": e.get("match_basis"),
+            "candidate_company_ids": e.get("candidate_company_ids") or [],
+        }
+        for e in prematch.get("entries", [])
+        if e.get("action") == "ambiguous"
+    ]
+    green = int(summary.get("ambiguous") or 0) == 0 and bool(plan_validation.get("valid"))
     report = {
         "mode": "protected_live_preflight",
         "batch_id": batch_id,
@@ -120,14 +173,24 @@ def build_live_preflight(
         "existing_matched": int(summary.get("matched_existing") or 0),
         "new": int(summary.get("new") or 0),
         "ambiguous": int(summary.get("ambiguous") or 0),
+        "review_required_count": len(review_required),
+        "review_required": review_required,
         "reviewed_matches": int(summary.get("reviewed_matches") or 0),
+        "reviewed_create_new": int(summary.get("reviewed_create_new") or 0),
+        "import_plan_locked": bool(import_plan and import_plan.get("locked")),
+        "import_plan_sha256": import_plan.get("plan_sha256") if import_plan else None,
+        "import_plan_drift": int(plan_validation.get("drift_count") or 0),
+        "import_plan_drift_details": plan_validation.get("drift") or [],
         "enrichment_full": int(enrichment["summary"].get("full_enrichment") or 0),
         "enrichment_gap_fill": int(enrichment["summary"].get("gap_fill_existing") or 0),
         "expected_gcs_creates": int(summary.get("new") or 0),
         "expected_gcs_updates": int(summary.get("matched_existing") or 0),
         "snapshot_location": str(before_dir),
         "planned_snapshot_gcs": f"gs://{bucket}/{country_slug}/imports/{batch_id}/before/",
-        "rollback_readiness": "READY" if green else "BLOCKED_BY_AMBIGUOUS",
+        "rollback_readiness": (
+            "READY" if green else
+            ("BLOCKED_BY_PLAN_DRIFT" if int(plan_validation.get("drift_count") or 0) else "BLOCKED_BY_AMBIGUOUS")
+        ),
         "safety_preflight": "GREEN" if green else "BLOCKED",
         "zyte_provider": "zyte",
     }
@@ -176,6 +239,74 @@ def _load_export_dir(export_dir: Path) -> tuple[list[dict], dict[str, dict]]:
     return items, details
 
 
+def _score_value(item: dict) -> float:
+    for field in ("commercial_fit_score_app", "commercial_fit_score"):
+        value = item.get(field)
+        if isinstance(value, (int, float)):
+            return float(value)
+        try:
+            if value not in (None, ""):
+                return float(value)
+        except (TypeError, ValueError):
+            pass
+    return 0.0
+
+
+def _build_current_manifest(
+    current_dir: Path, merged_items: list[dict], buckets: dict[str, dict], *,
+    batch_id: str, country_slug: str, caller: str, created: int, updated_existing: int,
+) -> dict[str, Any]:
+    manifest_path = current_dir / "export_manifest.json"
+    if manifest_path.is_file():
+        try:
+            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        except Exception:
+            manifest = {}
+    else:
+        manifest = {}
+    now = datetime.now(timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z")
+    caller_distribution: dict[str, int] = {}
+    for item in merged_items:
+        assigned = str(item.get("assigned_cold_caller") or "").strip()
+        if assigned:
+            caller_distribution[assigned] = caller_distribution.get(assigned, 0) + 1
+    manifest.update({
+        "schema_version": int(manifest.get("schema_version") or 1),
+        "generated_at": now,
+        "country_folder": country_slug,
+        "export_country": manifest.get("export_country") or "South Korea",
+        "rows_exported": len(merged_items),
+        "companies_total": len(merged_items),
+        "bucket_count": len(buckets),
+        "foreign_hq_rows_exported": sum(
+            1 for item in merged_items if item.get("foreign_hq_detected_for_export")
+        ),
+        "caller_distribution": caller_distribution,
+        "last_import_batch": batch_id,
+        "protected_live_import": {
+            "batch_id": batch_id,
+            "caller": caller,
+            "created": created,
+            "updated_existing": updated_existing,
+            "hubspot_sync": False,
+            "completed_at": now,
+        },
+        "validation_summary": {
+            "list_items_validated": len(merged_items),
+            "detail_records_validated": sum(len(v) for v in buckets.values()),
+            "structural_errors": 0,
+            "status": "ok",
+        },
+        "output_files": [
+            "companies.list.json",
+            "companies.scores.json",
+            *sorted(buckets),
+            "export_manifest.json",
+        ],
+    })
+    return manifest
+
+
 def protected_publish_export(
     export_dir: str | Path,
     list_dir: str | Path,
@@ -197,20 +328,29 @@ def protected_publish_export(
     from lead_list_safety import (
         annotate_import_provenance,
         build_change_ledger,
-        prematch_export_records,
-        reconcile_export_ids,
+        reconcile_export_with_import_plan,
     )
     import lovable_gcs_upload as gcs
 
-    export_match = prematch_export_records(
-        new_items, existing_items,
-        new_details=new_details,
-        existing_details=existing_details,
-    )
-    if int(export_match["summary"].get("ambiguous") or 0):
-        raise RuntimeError("live write blocked: enriched export introduced ambiguous matches")
-    reconciled_items, reconciled_details = reconcile_export_ids(
-        new_items, new_details, export_match
+    import_plan_path = base / "preflight" / "import_plan.json"
+    if not import_plan_path.is_file():
+        raise RuntimeError("live write blocked: immutable import plan is missing")
+    import_plan = json.loads(import_plan_path.read_text(encoding="utf-8"))
+    if str(import_plan.get("plan_sha256") or "") != str(preflight.get("import_plan_sha256") or ""):
+        raise RuntimeError("live write blocked: import plan does not match current GREEN preflight")
+    existing_ids_now = {str(x.get("company_id") or "") for x in existing_items}
+    missing_targets = sorted({
+        str(e.get("target_company_id") or "")
+        for e in import_plan.get("entries", [])
+        if e.get("action") == "matched_existing"
+        and str(e.get("target_company_id") or "") not in existing_ids_now
+    })
+    if missing_targets:
+        raise RuntimeError(
+            f"live write blocked: {len(missing_targets)} planned existing targets disappeared"
+        )
+    reconciled_items, reconciled_details, export_match = reconcile_export_with_import_plan(
+        new_items, new_details, import_plan
     )
     existing_ids = {str(x.get("company_id") or "") for x in existing_items}
     reconciled_items, reconciled_details = apply_existing_gap_fill(
@@ -235,13 +375,19 @@ def protected_publish_export(
         safety_dir / "before", existing_items, existing_details,
         batch_id=batch_id, country_key=country_slug,
     )
+    for metadata_name in ("companies.scores.json", "export_manifest.json"):
+        source = current_dir / metadata_name
+        if source.is_file():
+            shutil.copy2(source, before_dir / metadata_name)
     ledger_path = safety_dir / "ledger.json"
     ledger_path.write_text(json.dumps(ledger, ensure_ascii=False, indent=2), encoding="utf-8")
-    prematch_path = safety_dir / "prematch-export.json"
+    prematch_path = safety_dir / "import-plan-lineage.json"
     prematch_path.write_text(json.dumps(export_match, ensure_ascii=False, indent=2), encoding="utf-8")
+    frozen_plan_path = safety_dir / "import-plan.json"
+    frozen_plan_path.write_text(json.dumps(import_plan, ensure_ascii=False, indent=2), encoding="utf-8")
 
     safety_prefix = f"gs://{bucket}/{country_slug}/imports/{batch_id}"
-    for path in [prematch_path, ledger_path, *sorted(before_dir.glob("*.json"))]:
+    for path in [frozen_plan_path, prematch_path, ledger_path, *sorted(before_dir.glob("*.json"))]:
         subdir = "before/" if path.parent == before_dir else ""
         _guarded_upload(
             path, f"{safety_prefix}/{subdir}{path.name}",
@@ -255,16 +401,39 @@ def protected_publish_export(
     )
     merged_dir = base / "live" / "merged" / batch_id
     merged_dir.mkdir(parents=True, exist_ok=True)
-    (merged_dir / "companies.list.json").write_text(
+    list_path = merged_dir / "companies.list.json"
+    list_path.write_text(
         json.dumps(merged_items, ensure_ascii=False, indent=2), encoding="utf-8"
     )
     for filename, payload in buckets.items():
         (merged_dir / filename).write_text(
             json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8"
         )
+    scores_path = merged_dir / "companies.scores.json"
+    scores_path.write_text(
+        json.dumps([_score_value(item) for item in merged_items], ensure_ascii=False),
+        encoding="utf-8",
+    )
+    manifest = _build_current_manifest(
+        current_dir, merged_items, buckets,
+        batch_id=batch_id, country_slug=country_slug, caller=caller,
+        created=ledger["summary"]["created"],
+        updated_existing=ledger["summary"]["updated_existing"],
+    )
+    manifest_path = merged_dir / "export_manifest.json"
+    manifest_path.write_text(
+        json.dumps(manifest, ensure_ascii=False, indent=2), encoding="utf-8"
+    )
 
     current_prefix = f"gs://{bucket}/{country_slug}/current"
-    for path in [merged_dir / "companies.list.json", *sorted(merged_dir.glob("company-details-*.json"))]:
+    # Commit-marker ordering: details first, then score pool/list, manifest last.
+    upload_paths = [
+        *sorted(merged_dir.glob("company-details-*.json")),
+        scores_path,
+        list_path,
+        manifest_path,
+    ]
+    for path in upload_paths:
         _guarded_upload(
             path, f"{current_prefix}/{path.name}",
             preflight=preflight, confirm_batch_id=confirm_batch_id,
@@ -343,18 +512,21 @@ def prepare_zyte_worksets(list_dir: str | Path, preflight: dict) -> dict[str, st
     country_slug = str(preflight["country"])
     country_dir = base / "countries" / country_slug
     companies = {c["company_key"]: c for c in _read_jsonl(country_dir / "companies.jsonl")}
-    pm = json.loads((base / "preflight" / "prematch.json").read_text(encoding="utf-8"))
+    plan_path = base / "preflight" / "import_plan.json"
+    if not plan_path.is_file():
+        raise RuntimeError("Zyte worksets blocked: immutable import plan is missing")
+    plan = json.loads(plan_path.read_text(encoding="utf-8"))
     work_dir = base / "live" / "zyte-worksets" / str(preflight["batch_id"])
     work_dir.mkdir(parents=True, exist_ok=True)
     groups = {"full": [], "gap_fill": []}
-    for entry in pm["entries"]:
+    for entry in plan["entries"]:
         company = companies[entry["source_company_key"]]
         row = {
             "Company": company.get("company_name"),
             "Domain": company.get("domain") or company.get("email_domain_hint") or "",
             "Input Country": "South Korea",
             "source_company_key": entry["source_company_key"],
-            "existing_company_id": entry.get("existing_company_id") or "",
+            "existing_company_id": entry.get("target_company_id") or "",
         }
         groups["gap_fill" if entry["action"] == "matched_existing" else "full"].append(row)
     outputs = {}
@@ -538,12 +710,16 @@ def publish_prospect_membership(
     return result
 
 
-def prepare_batch_rollback(list_dir: str | Path, preflight: dict) -> dict[str, Any]:
-    """Prepare, never apply, selective rollback from current + snapshot + ledger."""
+def prepare_batch_rollback(
+    list_dir: str | Path, preflight: dict, *, bucket: str = DEFAULT_GCS_BUCKET,
+) -> dict[str, Any]:
+    """Prepare, never apply, rollback against a freshly downloaded live current."""
     from lead_list_rollback import prepare_rollback
     base = Path(list_dir)
     batch_id = str(preflight["batch_id"])
+    country_slug = str(preflight["country"])
     safety_dir = base / "live" / "safety" / batch_id
     output_dir = base / "live" / "rollback" / batch_id
-    current_dir = base / "preflight" / "current-readonly"
+    current_dir = base / "live" / "rollback-current-readonly" / batch_id
+    download_current_readonly(bucket, f"{country_slug}/current", current_dir)
     return prepare_rollback(current_dir, safety_dir, output_dir)
