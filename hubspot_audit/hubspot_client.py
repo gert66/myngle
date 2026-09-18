@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import json
 import os
+import time
 from dataclasses import dataclass
 from typing import Iterator, Optional
 
@@ -145,14 +146,27 @@ class LiveHubSpotReadClient(HubSpotReadClient):
         import requests  # local import: optional dependency for live mode only
 
         url = f"{self.config.hubspot.base_url}{path}"
-        resp = requests.get(
-            url,
-            headers=self._headers(),
-            params=params,
-            timeout=self.config.hubspot.timeout_seconds,
-        )
-        resp.raise_for_status()
-        return resp.json()
+        last_response = None
+        for attempt in range(self.config.hubspot.max_retries + 1):
+            resp = requests.get(
+                url,
+                headers=self._headers(),
+                params=params,
+                timeout=self.config.hubspot.timeout_seconds,
+            )
+            last_response = resp
+            if resp.status_code not in (429, 500, 502, 503, 504):
+                resp.raise_for_status()
+                return resp.json()
+            if attempt < self.config.hubspot.max_retries:
+                retry_after = resp.headers.get("Retry-After")
+                try:
+                    delay = float(retry_after) if retry_after else min(2 ** attempt, 8)
+                except ValueError:
+                    delay = min(2 ** attempt, 8)
+                time.sleep(max(0.25, delay))
+        last_response.raise_for_status()
+        return last_response.json()
 
     def get_page(self, object_type: str, cursor: Optional[str], page_size: int) -> Page:
         from .models import now_iso

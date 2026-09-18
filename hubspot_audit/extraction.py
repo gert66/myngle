@@ -128,11 +128,23 @@ def extract_all(client: HubSpotReadClient, raw_dir: str, page_size: int, capabil
     summaries["owners"] = {"object_type": "owners", "record_count": len(owners)}
 
     for obj in OBJECT_TYPES:
-        props = client.get_properties(obj)
+        cap_key = f"properties_{obj}"
+        cap = capability_matrix.get(cap_key)
         props_path = os.path.join(raw_dir, f"properties_{obj}.json")
-        with open(props_path, "w", encoding="utf-8") as fh:
-            json.dump({"properties": props, "extracted_at": now_iso()}, fh, indent=2)
-        summaries[f"properties_{obj}"] = {"object_type": f"properties_{obj}", "record_count": len(props)}
+        if cap is not None and cap.status.value in ("endpoint_unavailable", "error", "scope_missing"):
+            with open(props_path, "w", encoding="utf-8") as fh:
+                json.dump({"properties": [], "extracted_at": now_iso(), "skipped": True, "reason": cap.detail}, fh, indent=2)
+            summaries[cap_key] = {"object_type": cap_key, "record_count": 0, "skipped": True, "reason": cap.detail}
+            continue
+        try:
+            props = client.get_properties(obj)
+            with open(props_path, "w", encoding="utf-8") as fh:
+                json.dump({"properties": props, "extracted_at": now_iso()}, fh, indent=2)
+            summaries[cap_key] = {"object_type": cap_key, "record_count": len(props)}
+        except Exception as exc:
+            with open(props_path, "w", encoding="utf-8") as fh:
+                json.dump({"properties": [], "extracted_at": now_iso(), "skipped": True, "reason": f"{type(exc).__name__}: {exc}"}, fh, indent=2)
+            summaries[cap_key] = {"object_type": cap_key, "record_count": 0, "skipped": True, "reason": f"{type(exc).__name__}: {exc}"}
 
     return summaries
 
