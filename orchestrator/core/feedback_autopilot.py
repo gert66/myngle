@@ -17,7 +17,10 @@ ORCH_ROOT = Path(__file__).resolve().parents[1]
 CASES_DIR = Path(os.getenv("FEEDBACK_CASES_DIR", "/home/myngle/orchestrator/feedback_cases"))
 JOBS_DIR = ORCH_ROOT / "jobs"
 COMPANY_REPO = "gert66/myngle-company-hub"
-COMPANY_REPO_PATH = Path(os.getenv("FEEDBACK_REPO_PATH", "/home/myngle/autopilot-company-hub-sync"))
+DEFAULT_FEEDBACK_REPO_PATH = Path("/home/myngle/feedback-company-hub-sync")
+LEGACY_SHARED_FEEDBACK_REPO_PATH = Path("/home/myngle/autopilot-company-hub-sync")
+APPROVAL_REPO_PATH = Path(os.getenv("FEEDBACK_APPROVAL_REPO_PATH", "/home/myngle/myngle-company-hub"))
+COMPANY_REPO_PATH = Path(os.getenv("FEEDBACK_REPO_PATH", str(DEFAULT_FEEDBACK_REPO_PATH)))
 COMPANY_BRANCH = "work"
 LOVABLE_PROJECT = "a4691ca7-4294-496a-af73-cdba24a5ac0f"
 DEFAULT_API_URL = "https://myngle.whofirst.nl/api/feedback/autopilot"
@@ -42,6 +45,57 @@ def classify_feedback(text: str) -> str:
     if any(x in t for x in ("is it possible", "would like", "can we", "could we", "feature", "automatically assign", "block countries")):
         return "feature_request"
     return "bug"
+
+
+INFRA_BLOCKER_PATTERNS = (
+    "branch freshness", "freshness gate", "clean_tree", "git preflight",
+    "checkout", "worktree", "repo checkout", "repository configuration",
+    "repo checkout is locked", "branch mismatch", "refusing to commit",
+    "cannot commit", "git add failed", "git commit failed", "staging",
+)
+
+
+def is_internal_infrastructure_blocker(state: dict[str, Any] | None) -> bool:
+    if not state:
+        return False
+    history = (state.get("runtime") or {}).get("history") or []
+    parts = [state.get("human_question"), state.get("last_error")]
+    for row in history[-3:]:
+        if isinstance(row, dict):
+            parts.extend([row.get("detail"), row.get("outcome")])
+    haystack = " ".join(str(x or "") for x in parts).lower()
+    return any(pattern in haystack for pattern in INFRA_BLOCKER_PATTERNS)
+
+
+def prepare_feedback_checkout(repo_path: Path = COMPANY_REPO_PATH) -> None:
+    """Keep the dedicated feedback checkout clean without touching shared worktrees."""
+    repo_path = Path(repo_path).resolve()
+    if repo_path == LEGACY_SHARED_FEEDBACK_REPO_PATH.resolve():
+        return
+    if repo_path != DEFAULT_FEEDBACK_REPO_PATH.resolve():
+        return
+    if not repo_path.is_dir():
+        raise RuntimeError(f"dedicated feedback checkout missing: {repo_path}")
+    def run(*args):
+        return subprocess.run(["git", *args], cwd=repo_path, text=True, capture_output=True, check=True)
+    origin = run("remote", "get-url", "origin").stdout.strip()
+    branch = run("branch", "--show-current").stdout.strip()
+    if origin != "https://github.com/gert66/myngle-company-hub.git" or branch != COMPANY_BRANCH:
+        raise RuntimeError("dedicated feedback checkout has unexpected repository identity")
+    dirty = run("status", "--porcelain").stdout.strip()
+    if dirty:
+        run("fetch", "origin", "work", "main")
+        run("reset", "--hard", "origin/work")
+        run("clean", "-fd")
+    if run("status", "--porcelain").stdout.strip():
+        raise RuntimeError("dedicated feedback checkout is not clean")
+
+
+def import_commit_for_approval(commit: str, *, source: Path = COMPANY_REPO_PATH, target: Path = APPROVAL_REPO_PATH) -> None:
+    if not re.fullmatch(r"[0-9a-f]{40}", commit or ""):
+        raise ValueError("invalid feedback commit")
+    subprocess.run(["git", "fetch", str(source), commit], cwd=target, check=True, text=True, capture_output=True)
+    subprocess.run(["git", "cat-file", "-e", f"{commit}^{{commit}}"], cwd=target, check=True, text=True, capture_output=True)
 
 
 def _safe_id(feedback_id: str) -> str:
@@ -130,6 +184,9 @@ def submit_case(case: dict[str, Any], *, run=subprocess.run) -> dict[str, Any]:
         save_case(case)
         return case
 
+    if run is subprocess.run:
+        prepare_feedback_checkout()
+
     args = [
         "/usr/bin/python3", "-m", "core.cli", "submit",
         "--job-id", job_id,
@@ -180,6 +237,7 @@ def build_proposal(case: dict[str, Any], state: dict[str, Any], *, expected_main
     verdict = str(closed.get("verdict") or "")
     if state.get("phase") != "DONE" or verdict != "PASS" or not re.fullmatch(r"[0-9a-f]{40}", commit) or not paths:
         raise ValueError("job is not a committed PASS suitable for approval")
+    import_commit_for_approval(commit)
     detail = " ".join(str(closed.get("detail") or "").split())
     short_detail = detail[:650] + ("…" if len(detail) > 650 else "")
     reporter = (case.get("reporter_email") or "Reporter").split("@")[0]
@@ -230,14 +288,24 @@ def reconcile_case(case: dict[str, Any]) -> dict[str, Any]:
     if phase in {"QUEUED", "BRAIN", "WORKER", "TESTING", "REVIEW", "REPAIR", "WAITING"}:
         case["status"] = "researching" if case.get("job_mode") == "read" else "investigating"
     elif phase == "NEEDS_HUMAN":
-        case["status"] = "needs_review"
-        case["question"] = state.get("human_question")
-        case["recommendation"] = "I need this one decision before I can continue safely."
+        if is_internal_infrastructure_blocker(state):
+            case["status"] = "investigating"
+            case["question"] = None
+            case["recommendation"] = "De technische uitvoering wordt intern hersteld. Er is nu geen beslissing van jou nodig."
+        else:
+            case["status"] = "needs_review"
+            case["question"] = state.get("human_question")
+            case["recommendation"] = "I need this one decision before I can continue safely."
     elif phase == "ERROR":
-        case["status"] = "error"
         case["error"] = state.get("last_error")
-        case["question"] = "The automated investigation failed. Should I retry this case?"
-        case["recommendation"] = "I recommend retrying once before changing the product manually."
+        if is_internal_infrastructure_blocker(state):
+            case["status"] = "investigating"
+            case["question"] = None
+            case["recommendation"] = "De technische uitvoering wordt intern opnieuw geprobeerd. Er is nu geen actie van jou nodig."
+        else:
+            case["status"] = "error"
+            case["question"] = "The automated investigation failed. Should I retry this case?"
+            case["recommendation"] = "I recommend retrying once before changing the product manually."
     elif phase == "DONE" and case.get("job_mode") == "read":
         closed = _latest_closed(state)
         detail = " ".join(str(closed.get("detail") or "").split())[:1800]

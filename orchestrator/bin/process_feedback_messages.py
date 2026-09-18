@@ -21,6 +21,8 @@ from core.feedback_autopilot import (  # noqa: E402
     COMPANY_REPO,
     COMPANY_REPO_PATH,
     JOBS_DIR,
+    is_internal_infrastructure_blocker,
+    prepare_feedback_checkout,
     load_case,
     list_cases,
     reconcile_case,
@@ -33,6 +35,7 @@ PUSH_URL_FILE = ORCH_ROOT / "config" / "ops_push_url.txt"
 CLAUDE_BIN = os.getenv("FEEDBACK_CONVERSATION_CLAUDE_BIN", "/home/myngle/bin/claude-gert66")
 RUNNING_PHASES = {"QUEUED", "BRAIN", "WORKER", "TESTING", "REVIEW", "REPAIR", "WAITING", "EVIDENCE"}
 TERMINAL_PHASES = {"DONE", "ERROR", "NEEDS_HUMAN", "ABORTED"}
+MAX_INFRA_RETRIES = 1
 
 DECISION_SCHEMA = {
     "type": "object",
@@ -149,8 +152,10 @@ def _invoke_structured(prompt: str, schema: dict) -> dict:
 
 def decide_message(case: dict, message: dict) -> dict:
     prompt = f"""You are Sales Cockpit AI, the conversational layer for one customer-feedback case.
-The owner should experience a concise, natural conversation like ChatGPT. Speak to the owner in Dutch.
-Never expose Git, branches, worktrees, files, commits, stack traces, job-state, repository hygiene or orchestrator jargon in assistant_reply. If internal development infrastructure blocks execution, do not ask the owner to make a Git/branch decision; say only that the technical change is not yet safe to apply and keep the case open.
+The owner should experience this like a direct, capable ChatGPT conversation. Speak to the owner in natural Dutch.
+Take ownership: understand the intent, use the available evidence, and investigate or execute when asked instead of narrating the workflow. For messages such as "ga verder", "doe wat nodig is", "los het op" or equivalent, continue autonomously as far as the safety boundary allows.
+Never expose Git, branches, worktrees, files, commits, stack traces, job-state, repository hygiene, tests, locks or orchestrator jargon in assistant_reply. Internal development infrastructure is your problem to handle, not a question for the owner.
+Only ask the owner when a genuine product/business decision, unavailable factual input, legally/technically required consent, or protected production action is necessary.
 Do not claim production changed unless the context proves it. Never send or close feedback yourself.
 A final reply to the reporter is only sent later by an explicit Send & close button.
 
@@ -196,10 +201,11 @@ def _latest_detail(state: dict) -> str:
 
 def summarize_result(case: dict, message: dict, state: dict) -> dict:
     prompt = f"""You are Sales Cockpit AI returning after technical work on a feedback case.
-Write a short natural Dutch answer to the owner, like a good ChatGPT response. Lead with what matters.
-Translate technical evidence into ordinary language. Never dump branch names, file paths, commit hashes, stack traces, raw tool output, or orchestrator jargon unless the owner explicitly asked for technical detail.
-Be precise about what is only investigated/prepared/tested versus actually deployed or changed in production.
-If one decision is still required, ask exactly one plain-language question.
+Write a short natural Dutch answer to the owner, like a capable direct ChatGPT response. Lead with the result or practical conclusion, not the process.
+Translate technical evidence into ordinary language. Never dump branch names, file paths, commit hashes, stack traces, raw tool output, tests, locks, repository state, or orchestrator jargon unless the owner explicitly asked for technical detail.
+Take ownership and avoid repetitive acknowledgements. Internal technical blockers are handled behind the scenes and are never an owner decision.
+Be precise about what is only investigated/prepared versus actually changed in production.
+Ask one plain-language question only when a real product/business choice, unavailable fact, required consent, or protected production action remains.
 The owner conversation is Dutch. proposed_reply is addressed to the reporter and MUST stay in the same language as the reporter's original feedback, regardless of the owner's Dutch instruction. Never translate an English reporter reply into Dutch just because the owner speaks Dutch. If it is not ready, return an empty string.
 Never send or close the feedback yourself.
 
@@ -234,6 +240,9 @@ Previous work: {previous}
 Owner instruction: {instruction}
 
 Work autonomously as far as evidence supports. On branch work only, reproduce or trace the issue, make the smallest safe code change if appropriate, add/update regression tests, run relevant tests and production build, and commit exactly the fix. Do not merge or push to main, deploy, or change production/external data. If a protected action or product decision is still required, stop with NEEDS_HUMAN and ask exactly one concrete question. Avoid unrelated refactors."""
+    if run is subprocess.run:
+        prepare_feedback_checkout()
+
     args = [
         "/usr/bin/python3", "-m", "core.cli", "submit",
         "--job-id", jid,
@@ -326,6 +335,49 @@ def handle_processing(message: dict, *, url=None, token=None) -> str:
         return "waiting"
     if phase not in TERMINAL_PHASES:
         return "waiting"
+
+    if is_internal_infrastructure_blocker(state):
+        retries = int(case.get("conversation_infra_retry_count") or 0)
+        if retries < MAX_INFRA_RETRIES:
+            case["conversation_infra_retry_count"] = retries + 1
+            case["question"] = None
+            case["recommendation"] = "Interne technische blokkade wordt automatisch opnieuw afgehandeld."
+            save_case(case)
+            instruction = str(message.get("body") or "Ga verder met deze feedback en rond de gevraagde taak veilig af.").strip()
+            mode = str(case.get("job_mode") or "write")
+            if mode not in {"read", "write"}:
+                mode = "write"
+            try:
+                jid = _submit_follow_up(case, instruction, job_mode=mode)
+            except Exception as exc:
+                case = load_case(fid)
+                case["status"] = "investigating"
+                case["question"] = None
+                case["conversation_internal_error"] = _compact(exc, 800)
+                save_case(case)
+                return "waiting"
+            case = load_case(fid)
+            case["conversation_message_id"] = mid
+            case["conversation_job_id"] = jid
+            save_case(case)
+            update_message(mid, "processing", result_note=f"internal retry:{jid}", url=url, token=token)
+            return "retrying"
+
+        case["status"] = "investigating"
+        case["question"] = None
+        case["recommendation"] = "De interne technische uitvoering blijft open voor herstel; er is geen actie van jou nodig."
+        case["conversation_message_id"] = None
+        case["conversation_job_id"] = None
+        save_case(case)
+        update_message(
+            mid, "done",
+            assistant_body="De technische uitvoering is intern nog niet afgerond. Ik houd de case open voor herstel; jij hoeft hiervoor niets te beslissen.",
+            result_note="internal infrastructure blocker suppressed after automatic retry",
+            url=url, token=token,
+        )
+        return "done"
+
+    case.pop("conversation_infra_retry_count", None)
     try:
         case = reconcile_case(case)
     except Exception as exc:
@@ -363,8 +415,9 @@ def ensure_case_summary(case: dict) -> bool:
     state = _job_state(str(case.get("job_id") or "")) if case.get("job_id") else {"phase": case.get("job_phase") or case.get("status")}
     state = state or {"phase": case.get("job_phase") or case.get("status")}
     prompt = f"""You are Sales Cockpit AI giving the owner the current update on one feedback case.
-Write a concise natural Dutch message like ChatGPT. Explain the practical conclusion, what has or has not been changed, and if needed ask one plain-language question.
-Do not expose branches, worktrees, repository freshness, file paths, commit hashes, stack traces, raw tool output, or orchestrator jargon. If internal development infrastructure is blocking execution, do not ask the owner for a Git decision; explain only the practical status and keep the case open.
+Write a concise natural Dutch message like a capable direct ChatGPT response. Lead with the practical conclusion and say what has or has not changed.
+Do not expose branches, worktrees, repository freshness, file paths, commit hashes, stack traces, raw tool output, tests, locks, or orchestrator jargon. Internal infrastructure problems are handled behind the scenes and must never become a question for the owner.
+Ask the owner only for a genuine product/business decision, an unavailable fact, required consent, or a protected production action. Otherwise continue autonomously.
 Do not claim something is deployed or fixed in production unless the evidence proves it.
 If a reporter reply is ready, proposed_reply should be concise and in the language of the reporter's original feedback. Otherwise return an empty string.
 Never send or close the case yourself.

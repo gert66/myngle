@@ -29,9 +29,10 @@ def test_positive_is_informational():
             assert c["status"]=="informational" and c["kind"]=="positive"
         finally: f.CASES_DIR=old
 
-def test_build_green_proposal_is_commit_bound():
+def test_build_green_proposal_is_commit_bound(monkeypatch):
     case={**row(),"feedback_id":"abc12345","reporter_email":"carla@example.com","company":"Acme"}
     state={"phase":"DONE","runtime":{"history":[{"commit":"a"*40,"paths":["src/a.ts"],"verdict":"PASS","detail":"Mismatch fixed and regression tested."}]}}
+    monkeypatch.setattr(f, "import_commit_for_approval", lambda _commit: None)
     p=f.build_proposal(case,state,expected_main_sha="b"*40)
     assert p.risk=="GREEN" and p.deployment["commit_sha"]=="a"*40 and p.deployment["expected_main_sha"]=="b"*40
 
@@ -134,3 +135,27 @@ def test_submit_research_case_relinks_existing_job(monkeypatch, tmp_path):
     assert result["job_id"] == job_id
     assert result["status"] == "researching"
     assert result["job_mode"] == "read"
+
+
+def test_default_feedback_checkout_is_dedicated():
+    assert str(f.DEFAULT_FEEDBACK_REPO_PATH) == "/home/myngle/feedback-company-hub-sync"
+    assert f.COMPANY_REPO_PATH != f.LEGACY_SHARED_FEEDBACK_REPO_PATH
+
+
+def test_internal_infrastructure_blocker_detection():
+    assert f.is_internal_infrastructure_blocker({"phase":"NEEDS_HUMAN","human_question":"Branch freshness gate blocked write job: clean_tree"})
+    assert f.is_internal_infrastructure_blocker({"phase":"ERROR","last_error":"repo checkout is locked"})
+    assert not f.is_internal_infrastructure_blocker({"phase":"NEEDS_HUMAN","human_question":"Should this feature apply to all customers?"})
+
+
+def test_reconcile_hides_internal_git_question(monkeypatch, tmp_path):
+    monkeypatch.setattr(f, "CASES_DIR", tmp_path / "cases")
+    monkeypatch.setattr(f, "_job_state", lambda _jid: {
+        "phase":"NEEDS_HUMAN",
+        "human_question":"Branch freshness gate blocked write job before job start: clean_tree",
+    })
+    case={"feedback_id":"abcdef12-3456", "job_id":"feedback-abcdef12", "job_mode":"write", "status":"investigating"}
+    out=f.reconcile_case(case)
+    assert out["status"] == "investigating"
+    assert out["question"] is None
+    assert "geen beslissing" in out["recommendation"].lower()
