@@ -1,4 +1,4 @@
-from lead_list_live import build_membership_payload, publish_prospect_membership
+from lead_list_live import build_membership_payload, protected_publish_export, publish_prospect_membership
 
 
 def test_membership_payload_deduplicates_ids_and_traces_batch():
@@ -8,7 +8,10 @@ def test_membership_payload_deduplicates_ids_and_traces_batch():
         "caller": "Carla",
         "safety_preflight": "GREEN",
     }
-    payload = build_membership_payload(["a", "a", "b"], preflight=preflight)
+    payload = build_membership_payload(
+        ["a", "a", "b"], preflight=preflight,
+        list_key="carla-korea", list_name="Carla Korea",
+    )
     assert payload["import_batch"] == preflight["batch_id"]
     assert payload["list_key"] == "carla-korea"
     assert payload["members"] == [
@@ -20,8 +23,33 @@ def test_membership_payload_deduplicates_ids_and_traces_batch():
 def test_membership_write_blocks_before_network_when_preflight_not_green():
     preflight = {"batch_id": "batch-1", "safety_preflight": "BLOCKED"}
     try:
-        publish_prospect_membership(["a"], preflight=preflight, confirm_batch_id="batch-1")
+        publish_prospect_membership(
+            ["a"], preflight=preflight, confirm_batch_id="batch-1",
+            list_key="list-1", list_name="List 1",
+        )
     except RuntimeError as exc:
         assert "GREEN" in str(exc) or "blocked" in str(exc).lower()
     else:
         raise AssertionError("blocked preflight unexpectedly reached membership write")
+
+
+def test_publish_blocks_missing_prospect_list_identity_before_any_file_read():
+    preflight = {
+        "batch_id": "batch-1",
+        "country": "south-korea",
+        "caller": "Carla",
+        "safety_preflight": "GREEN",
+        "hubspot_sync": False,
+    }
+    try:
+        protected_publish_export(
+            "/definitely/missing/export",
+            "/definitely/missing/list",
+            preflight=preflight,
+            caller="Carla",
+            confirm_batch_id="batch-1",
+        )
+    except RuntimeError as exc:
+        assert "Prospect List" in str(exc)
+    else:
+        raise AssertionError("publish unexpectedly continued without Prospect List identity")

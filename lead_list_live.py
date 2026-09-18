@@ -153,9 +153,12 @@ def build_live_preflight(
         {
             "source_company_key": e.get("source_company_key"),
             "company_name": e.get("company_name"),
-            "incoming_domain": e.get("incoming_domain"),
+            "incoming_domain": e.get("incoming_company_domain") or e.get("incoming_domain"),
+            "email_domain_hint": e.get("email_domain_hint"),
+            "reason": e.get("match_basis"),
             "match_basis": e.get("match_basis"),
             "candidate_company_ids": e.get("candidate_company_ids") or [],
+            "review_actions": ["matched_existing", "new"],
         }
         for e in prematch.get("entries", [])
         if e.get("action") == "ambiguous"
@@ -316,9 +319,13 @@ def protected_publish_export(
     confirm_batch_id: str,
     bucket: str = DEFAULT_GCS_BUCKET,
     bucket_size: int = 500,
+    list_key: str = "",
+    list_name: str = "",
 ) -> dict[str, Any]:
     """Protected merge of an already enriched/exported Lead List into current/."""
     _require_live_gate(preflight, confirm_batch_id)
+    if not str(list_key or "").strip() or not str(list_name or "").strip():
+        raise RuntimeError("live write blocked: Prospect List key and display name are required before publication")
     batch_id = str(preflight["batch_id"])
     country_slug = str(preflight["country"])
     base = Path(list_dir)
@@ -442,7 +449,11 @@ def protected_publish_export(
     imported_ids = [str(item.get("company_id") or "") for item in reconciled_items if item.get("company_id")]
     try:
         membership = publish_prospect_membership(
-            imported_ids, preflight=preflight, confirm_batch_id=confirm_batch_id,
+            imported_ids,
+            preflight=preflight,
+            confirm_batch_id=confirm_batch_id,
+            list_key=list_key,
+            list_name=list_name,
         )
         membership_status = "complete"
         publish_status = "merged"
@@ -552,6 +563,22 @@ def _hermes_env_secret(name: str) -> str:
     return ""
 
 
+def _country_label(list_dir: str | Path, country_slug: str) -> str:
+    """Use the intake workset label for provider/export country arguments."""
+    report_path = Path(list_dir) / "pipeline_report.json"
+    if report_path.is_file():
+        try:
+            report = json.loads(report_path.read_text(encoding="utf-8"))
+            for workset in report.get("country_worksets", []):
+                if str(workset.get("slug") or "") == country_slug:
+                    label = str(workset.get("label") or "").strip()
+                    if label:
+                        return label
+        except (OSError, ValueError, TypeError):
+            pass
+    return country_slug.replace("-", " ").title()
+
+
 def _enriched_workbook_complete(output: Path, input_path: str) -> bool:
     """Reuse only a same-batch workbook with every selected row successful."""
     if not output.is_file():
@@ -578,6 +605,7 @@ def run_zyte_enrichment(
         raise RuntimeError("supplier calls blocked: explicit allow_supplier_calls is required")
     base = Path(list_dir)
     worksets = prepare_zyte_worksets(base, preflight)
+    country_label = _country_label(base, str(preflight["country"]))
     repo = Path(__file__).resolve().parent
     outputs: dict[str, str] = {}
     secrets = Path("/home/myngle/Myngle/secrets.toml")
@@ -591,7 +619,7 @@ def run_zyte_enrichment(
             python_bin, str(repo / "lead_prioritizer_batch_cli.py"),
             "--input", input_path,
             "--company-column", "Company", "--domain-column", "Domain",
-            "--input-country-column", "Input Country", "--default-country", "South Korea",
+            "--input-country-column", "Input Country", "--default-country", country_label,
             "--mode", "full" if mode_key == "full" else "hq_only",
             "--row-limit", "0", "--output", str(output),
             "--hq-crawl-provider", "zyte", "--yes",
@@ -625,11 +653,12 @@ def combine_enrichment_exports(
     all_items: list[dict] = []
     all_details: dict[str, dict] = {}
     used_ids: set[str] = set()
+    country_label = _country_label(base, str(preflight["country"]))
     for group, workbook in enriched_outputs.items():
         export_dir = base / "live" / "exports" / batch_id / group
         export_workbook_to_lovable_json(
             input_xlsx=workbook, output_dir=export_dir,
-            export_country="South Korea", cold_callers=[caller],
+            export_country=country_label, cold_callers=[caller],
             include_skipped=True, foreign_hq_only=False, bucket_size=500,
         )
         items, details = _load_export_dir(export_dir)
@@ -659,15 +688,19 @@ def combine_enrichment_exports(
 
 
 def build_membership_payload(
-    merged_company_ids: list[str], *, preflight: dict, list_name: str = "Carla Korea"
+    merged_company_ids: list[str], *, preflight: dict, list_key: str, list_name: str
 ) -> dict[str, Any]:
     """Idempotent membership payload for the Company Hub write route."""
     ids = list(dict.fromkeys(str(x) for x in merged_company_ids if x))
+    key = str(list_key or "").strip()
+    label = str(list_name or "").strip()
+    if not key or not label:
+        raise RuntimeError("Prospect List write blocked: immutable list key and display name are required")
     return {
         "import_batch": preflight["batch_id"],
         "country_key": preflight["country"],
-        "list_key": "carla-korea",
-        "list_label": list_name,
+        "list_key": key,
+        "list_label": label,
         "members": [
             {"company_id": cid, "assigned_caller": preflight["caller"]}
             for cid in ids
@@ -679,7 +712,7 @@ def build_membership_payload(
 
 def publish_prospect_membership(
     merged_company_ids: list[str], *, preflight: dict, confirm_batch_id: str,
-    list_name: str = "Carla Korea", url: str | None = None, token: str | None = None,
+    list_key: str, list_name: str, url: str | None = None, token: str | None = None,
 ) -> dict[str, Any]:
     """Write Prospect List membership only after the same protected live gate."""
     _require_live_gate(preflight, confirm_batch_id)
@@ -692,7 +725,9 @@ def publish_prospect_membership(
             secret = token_file.read_text(encoding="utf-8").strip()
     if not secret:
         raise RuntimeError("Prospect List write blocked: feedback autopilot token unavailable")
-    payload = build_membership_payload(merged_company_ids, preflight=preflight, list_name=list_name)
+    payload = build_membership_payload(
+        merged_company_ids, preflight=preflight, list_key=list_key, list_name=list_name
+    )
     body = json.dumps(payload).encode("utf-8")
     req = urllib_request.Request(endpoint, data=body, method="POST", headers={
         "Content-Type": "application/json",

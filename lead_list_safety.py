@@ -264,6 +264,8 @@ def prematch_companies(
             "source_company_key": source_key,
             "company_name": name,
             "incoming_domain": domain or hint or None,
+            "incoming_company_domain": domain or None,
+            "email_domain_hint": hint or None,
             "action": decision,
             "existing_company_id": matched_id,
             "match_basis": match_basis,

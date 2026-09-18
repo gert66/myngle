@@ -49,7 +49,7 @@ class LeadListPipelineTests(unittest.TestCase):
             self.assertEqual(stages["protection"]["status"], "simulated")
             self.assertEqual(stages["enrichment"]["status"], "simulated")
             self.assertEqual(stages["cockpit_publish"]["status"], "simulated")
-            self.assertEqual(stages["hubspot_sync"]["status"], "simulated")
+            self.assertEqual(stages["hubspot_sync"]["status"], "skipped")
 
             out = persist_intake_artifacts("list-1", result, pipeline, Path(td) / "artifacts")
             self.assertTrue((out / "normalized_rows.jsonl").is_file())

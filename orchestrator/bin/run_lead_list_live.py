@@ -33,6 +33,8 @@ def main(argv=None) -> int:
     parser.add_argument("--caller", required=True)
     parser.add_argument("--confirm-batch-id", default="")
     parser.add_argument("--export-dir", default="")
+    parser.add_argument("--list-key", default="")
+    parser.add_argument("--list-name", default="")
     args = parser.parse_args(argv)
 
     preflight = build_live_preflight(
@@ -54,6 +56,8 @@ def main(argv=None) -> int:
     result = protected_publish_export(
         args.export_dir, args.list_dir, preflight=preflight, caller=args.caller,
         confirm_batch_id=args.confirm_batch_id,
+        list_key=args.list_key,
+        list_name=args.list_name,
     )
     print(json.dumps(result, ensure_ascii=False, indent=2))
     return 0

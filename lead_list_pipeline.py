@@ -24,7 +24,7 @@ def _options(import_plan: Mapping[str, Any] | None) -> dict[str, bool]:
         "merge": bool(raw.get("merge", True)),
         "update": bool(raw.get("update", True)),
         "publish": bool(raw.get("publish", False)),
-        "hubspot_sync": bool(raw.get("hubspot_sync", raw.get("hubspot", False))),
+        "hubspot_sync": False,
         "split_multi_value": bool(raw.get("splitMultiValue", False)),
     }
 
@@ -110,8 +110,8 @@ def build_dry_run_report(
         "status": "simulated" if intake_ok else "blocked",
         "count": company_count if intake_ok else 0,
         "summary": (
-            f"Would check {company_count} companies against HubSpot, Account Management, "
-            "and existing Sales Cockpit companies before any enrichment."
+            f"Would check {company_count} companies against protected Sales Cockpit identity and "
+            "existing company records before any enrichment."
             if intake_ok else "Held until intake is approved."
         ),
     })
@@ -143,17 +143,12 @@ def build_dry_run_report(
         ),
     })
 
-    hubspot_candidates = company_count if intake_ok and options["hubspot_sync"] else 0
     stages.append({
         "key": "hubspot_sync",
-        "label": "HubSpot sync",
-        "status": "simulated" if hubspot_candidates else ("skipped" if intake_ok else "blocked"),
-        "count": hubspot_candidates,
-        "summary": (
-            f"Would sync up to {hubspot_candidates} approved companies to HubSpot after validation."
-            if hubspot_candidates else
-            ("HubSpot sync is switched off for this import." if intake_ok else "Held until intake is approved.")
-        ),
+        "label": "HubSpot",
+        "status": "skipped" if intake_ok else "blocked",
+        "count": 0,
+        "summary": "HubSpot is outside this import flow." if intake_ok else "Held until intake is approved.",
     })
 
     blockers = [
