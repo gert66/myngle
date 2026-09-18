@@ -140,6 +140,7 @@ def test_submit_research_case_relinks_existing_job(monkeypatch, tmp_path):
 def test_default_feedback_checkout_is_dedicated():
     assert str(f.DEFAULT_FEEDBACK_REPO_PATH) == "/home/myngle/feedback-company-hub-sync"
     assert f.COMPANY_REPO_PATH != f.LEGACY_SHARED_FEEDBACK_REPO_PATH
+    assert f.COMPANY_BRANCH == "feedback-autopilot"
 
 
 def test_internal_infrastructure_blocker_detection():

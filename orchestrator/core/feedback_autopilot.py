@@ -21,7 +21,7 @@ DEFAULT_FEEDBACK_REPO_PATH = Path("/home/myngle/feedback-company-hub-sync")
 LEGACY_SHARED_FEEDBACK_REPO_PATH = Path("/home/myngle/autopilot-company-hub-sync")
 APPROVAL_REPO_PATH = Path(os.getenv("FEEDBACK_APPROVAL_REPO_PATH", "/home/myngle/myngle-company-hub"))
 COMPANY_REPO_PATH = Path(os.getenv("FEEDBACK_REPO_PATH", str(DEFAULT_FEEDBACK_REPO_PATH)))
-COMPANY_BRANCH = "work"
+COMPANY_BRANCH = os.getenv("FEEDBACK_BRANCH", "feedback-autopilot")
 LOVABLE_PROJECT = "a4691ca7-4294-496a-af73-cdba24a5ac0f"
 DEFAULT_API_URL = "https://myngle.whofirst.nl/api/feedback/autopilot"
 TOKEN_FILE = ORCH_ROOT / "secrets" / "feedback_autopilot_token"
@@ -84,8 +84,8 @@ def prepare_feedback_checkout(repo_path: Path = COMPANY_REPO_PATH) -> None:
         raise RuntimeError("dedicated feedback checkout has unexpected repository identity")
     dirty = run("status", "--porcelain").stdout.strip()
     if dirty:
-        run("fetch", "origin", "work", "main")
-        run("reset", "--hard", "origin/work")
+        run("fetch", "origin", "main")
+        run("reset", "--hard", "origin/main")
         run("clean", "-fd")
     if run("status", "--porcelain").stdout.strip():
         raise RuntimeError("dedicated feedback checkout is not clean")
@@ -158,8 +158,8 @@ def ingest_row(row: dict[str, Any]) -> tuple[dict[str, Any], bool]:
 
 
 def goal_for(case: dict[str, Any], *, research_only: bool = False) -> str:
-    action = "Investigate one Sales Cockpit feedback item read-only and determine the safest concrete next action." if research_only else "Investigate and fix one Sales Cockpit feedback item on branch work only."
-    constraint = "Do not edit files, commit, deploy, or change external/production data. Return concrete findings, likely implementation/data action, evidence, and any product decision needed." if research_only else "Work autonomously as far as evidence supports. Reproduce or trace the issue, make the smallest safe code change on work, add/update regression tests, run relevant tests and production build, and commit exactly the fix. Do not merge/push to main and do not deploy. Do not change production data. If this requires a product decision, protected external action, credentials, or the report is too ambiguous to fix safely, stop with NEEDS_HUMAN and state the concrete question. Avoid unrelated refactors."
+    action = "Investigate one Sales Cockpit feedback item read-only and determine the safest concrete next action." if research_only else "Investigate and fix one Sales Cockpit feedback item on the dedicated feedback working branch only."
+    constraint = "Do not edit files, commit, deploy, or change external/production data. Return concrete findings, likely implementation/data action, evidence, and any product decision needed." if research_only else "Work autonomously as far as evidence supports. Reproduce or trace the issue, make the smallest safe code change on the dedicated feedback branch, add/update regression tests, run relevant tests and production build, and commit exactly the fix. Do not merge/push to main and do not deploy. Do not change production data. If this requires a product decision, protected external action, credentials, or the report is too ambiguous to fix safely, stop with NEEDS_HUMAN and state the concrete question. Avoid unrelated refactors."
     return f"""{action}
 Feedback ID: {case['feedback_id']}
 Reporter: {case.get('reporter_email') or 'unknown'}
@@ -221,7 +221,7 @@ def _job_state(job_id: str) -> dict[str, Any] | None:
 
 
 def _expected_main_sha(repo_path: Path = COMPANY_REPO_PATH) -> str:
-    subprocess.run(["git", "fetch", "origin", "main", "work"], cwd=repo_path, check=True, capture_output=True, text=True)
+    subprocess.run(["git", "fetch", "origin", "main"], cwd=repo_path, check=True, capture_output=True, text=True)
     return subprocess.run(["git", "rev-parse", "origin/main"], cwd=repo_path, check=True, capture_output=True, text=True).stdout.strip()
 
 

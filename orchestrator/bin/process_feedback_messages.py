@@ -239,7 +239,7 @@ Original feedback: {case.get('comment') or ''}
 Previous work: {previous}
 Owner instruction: {instruction}
 
-Work autonomously as far as evidence supports. On branch work only, reproduce or trace the issue, make the smallest safe code change if appropriate, add/update regression tests, run relevant tests and production build, and commit exactly the fix. Do not merge or push to main, deploy, or change production/external data. If a protected action or product decision is still required, stop with NEEDS_HUMAN and ask exactly one concrete question. Avoid unrelated refactors."""
+Work autonomously as far as evidence supports. On the dedicated feedback working branch only, reproduce or trace the issue, make the smallest safe code change if appropriate, add/update regression tests, run relevant tests and production build, and commit exactly the fix. Do not merge or push to main, deploy, or change production/external data. If a protected action or product decision is still required, stop with NEEDS_HUMAN and ask exactly one concrete question. Avoid unrelated refactors."""
     if run is subprocess.run:
         prepare_feedback_checkout()
 
