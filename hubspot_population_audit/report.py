@@ -227,6 +227,78 @@ def _evidence_uncertainty_block(evidence: dict) -> str:
     return f"<ul>{''.join(f'<li>{_esc(item)}</li>' for item in items[:200])}</ul>"
 
 
+def _population_map_table(population_map: dict) -> str:
+    blocks = []
+    inferred = population_map.get("inferred_classification") or {}
+    crosscheck = population_map.get("reconciliation_crosscheck") or {}
+    for object_type in ("companies", "contacts"):
+        result = inferred.get(object_type)
+        if not result:
+            continue
+        bucket_counts = result.get("bucket_counts", {})
+        bucket_pct = result.get("bucket_percentages", {})
+        bucket_rules = result.get("bucket_rule_counts", {})
+        rows = []
+        for bucket, count in bucket_counts.items():
+            top_rules = bucket_rules.get(bucket, {})
+            top_rule = max(top_rules.items(), key=lambda kv: kv[1])[0] if top_rules else "n/a"
+            rows.append(
+                "<tr>"
+                f"<td>{_esc(bucket)}</td>"
+                f"<td>{_esc(count)}</td>"
+                f"<td>{_esc(_pct(bucket_pct.get(bucket, 0)))}</td>"
+                f"<td>{_esc(top_rule)}</td>"
+                "</tr>"
+            )
+        check = crosscheck.get(object_type, {})
+        blocks.append(
+            f"<h3>{_esc(object_type)}</h3>"
+            f"<p>Reconciled total: {_esc(check.get('reconciled_total'))} &middot; "
+            f"classified total: {_esc(check.get('classified_total'))} &middot; "
+            f"sums exactly: {'yes' if check.get('matches') else 'no'}</p>"
+            "<table border='1' cellpadding='4' cellspacing='0'>"
+            "<thead><tr><th>bucket</th><th>count</th><th>share</th>"
+            "<th>most common rule</th></tr></thead>"
+            f"<tbody>{''.join(rows)}</tbody></table>"
+        )
+    return "".join(blocks) or "<p>No classification results available.</p>"
+
+
+def _population_map_wave_rationale_block(population_map: dict) -> str:
+    inferred = population_map.get("inferred_classification") or {}
+    blocks = []
+    for object_type in ("companies", "contacts"):
+        result = inferred.get(object_type)
+        if not result:
+            continue
+        wave_rationale = result.get("wave_rationale") or {}
+        if not wave_rationale:
+            continue
+        items = []
+        for wave_id, signal in wave_rationale.items():
+            reasons = "; ".join(_esc(r) for r in signal.get("rationale", []))
+            items.append(
+                f"<li><strong>{_esc(wave_id)}</strong> &rarr; {_esc(signal['bucket'])} "
+                f"({_esc(signal['confidence'])}): {reasons}</li>"
+            )
+        blocks.append(f"<h3>{_esc(object_type)}</h3><ul>{''.join(items)}</ul>")
+    return "".join(blocks) or "<p>No detected waves to classify.</p>"
+
+
+def _population_map_uncertainty_block(population_map: dict) -> str:
+    items = population_map.get("uncertainty", [])
+    if not items:
+        return "<p>No classification-specific uncertainty notes.</p>"
+    return f"<ul>{''.join(f'<li>{_esc(item)}</li>' for item in items)}</ul>"
+
+
+def _population_map_inaccessible_block(population_map: dict) -> str:
+    items = population_map.get("inaccessible", [])
+    if not items:
+        return "<p>No classification-specific gaps.</p>"
+    return f"<ul>{''.join(f'<li>{_esc(item)}</li>' for item in items)}</ul>"
+
+
 def _evidence_inaccessible_block(evidence: dict) -> str:
     status = evidence.get("status")
     items = evidence.get("inaccessible", [])
@@ -246,6 +318,7 @@ def generate_html_report(context: dict, output_path: str) -> None:
     reconciliation = context.get("reconciliation", {})
     cohort_analysis = context.get("cohort_analysis", {}) or {}
     evidence = context.get("evidence", {}) or {}
+    population_map = context.get("population_map", {}) or {}
     not_yet_implemented = context.get("not_yet_implemented", [])
     gaps = context.get("gaps", [])
 
@@ -303,11 +376,24 @@ uncertainty note is an explicit statement, not an afterthought.</p>
 </section>
 
 <section>
-<h2><span class="badge inferred">Inferred classifications</span></h2>
-<p>Population bucketing (operational_customer, operational_prospect,
-active_other, historical_import, enrichment_or_bulk,
-legacy_or_obsolete_candidate, uncertain) is not yet implemented; see
-<code>population_map.json</code> for the current placeholder status.</p>
+<h2><span class="badge inferred">Inferred classifications</span> Population reconciliation by bucket</h2>
+<p>Every unique record in the snapshot (the same <code>reconcile.py</code>
+unique-ID total used everywhere else in this audit) is streamed through a
+deterministic, rule-based classifier (<code>classification.py</code>) and
+assigned to exactly one of seven buckets. Bucket counts below sum exactly
+to the reconciled total for each object type -- see
+<code>population_map.json["reconciliation_crosscheck"]</code>. Per-record
+rule/rationale detail is written to
+<code>work/&lt;object_type&gt;_classification.csv.gz</code>, not repeated
+here.</p>
+{_population_map_table(population_map)}
+<h3>Wave classification rationale</h3>
+<p>Each detected wave is classified via a full-population presence/untouched
+2x2 decision (see <code>classification.py</code>'s module docstring), with
+alternative explanations explicitly tested and recorded below before any
+bulk/import conclusion is drawn, and calibrated by an evidence-layer sample
+when one is available for that wave.</p>
+{_population_map_wave_rationale_block(population_map)}
 <h3>Bulk-import wave candidates (heuristic)</h3>
 <p>Days whose creation count clears <code>max(wave_abs_min, wave_factor
 &times; baseline)</code>, where the baseline is the median of non-zero
@@ -329,8 +415,12 @@ they are directional evidence for the classification batch, not a census.</p>
 <p>Every object type without an independently recorded portal total is
 reported as <strong>unreconciled</strong> rather than assumed correct (see
 the notes above). Bulk-import wave candidates above are explicitly labelled
-inferred/heuristic, not conclusions. No classification confidence claims
-are made until the classification phase is implemented.</p>
+inferred/heuristic, not conclusions. Every classification bucket carries an
+explicit confidence tag, and <code>uncertain</code> is a first-class bucket
+for records/cohorts whose available signal does not clear this audit's
+thresholds -- never a silent default.</p>
+<h3>Classification uncertainty</h3>
+{_population_map_uncertainty_block(population_map)}
 <h3>Targeted evidence uncertainty</h3>
 {_evidence_uncertainty_block(evidence)}
 </section>
@@ -340,6 +430,8 @@ are made until the classification phase is implemented.</p>
 <ul>
 {''.join(f'<li>{_esc(item)}</li>' for item in not_yet_implemented)}
 </ul>
+<h3>Classification: inaccessible / limited-confidence notes</h3>
+{_population_map_inaccessible_block(population_map)}
 <h3>Targeted evidence: inaccessible / offline</h3>
 {_evidence_inaccessible_block(evidence)}
 <h3>Known gaps</h3>

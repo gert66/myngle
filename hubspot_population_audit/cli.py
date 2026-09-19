@@ -10,9 +10,10 @@ in ``--token-env`` and ``--offline`` is not set -- cached, read-only
 batch-read and association lookups via ``ReadOnlyHubSpotClient``. With no
 token or ``--offline``, ``evidence.json`` is still written in full, with
 ``status: "skipped_offline"``. Bucket classification
-(``population_map.json``) remains an explicit
-``"status": "not_yet_implemented"`` placeholder, to be built in a later
-batch.
+(``population_map.json``, ``classification.py``) is a fully deterministic,
+rule-based pass over the entire snapshot -- it consumes the cohort/wave
+analysis and whatever evidence-layer samples are available, but never
+performs a HubSpot call of its own.
 """
 from __future__ import annotations
 
@@ -21,18 +22,13 @@ import json
 import os
 import time
 
+from .classification import build_population_map
 from .cohorts import build_cohort_analysis
 from .evidence import DEFAULT_MAX_LOOKUPS, DEFAULT_TOKEN_ENV, run_evidence
 from .progress import ProgressWriter, now_iso
 from .reconcile import reconcile_all
 from .report import generate_html_report
 from .snapshot import Snapshot
-
-NOT_YET_IMPLEMENTED = [
-    "population_map: evidence-based bucket classification "
-    "(operational_customer, operational_prospect, active_other, historical_import, "
-    "enrichment_or_bulk, legacy_or_obsolete_candidate, uncertain)",
-]
 
 
 def _write_json(path: str, payload) -> None:
@@ -114,14 +110,32 @@ def run_population_audit(
     )
     evidence = evidence_result["evidence"]
 
-    progress.set_subprocess_status("classification", "not_yet_implemented")
+    progress.set_phase("classification")
+    progress.set_subprocess_status("classification", "running")
+
+    def _classification_progress(object_type: str, processed: int, bucket_counts) -> None:
+        progress.set_counter(f"classification.records_classified.{object_type}", processed)
+        for bucket, count in bucket_counts.items():
+            progress.set_counter(f"classification.bucket_counts.{object_type}.{bucket}", count)
+
+    classification_result = build_population_map(
+        snap,
+        cohort_analysis,
+        evidence,
+        reconciliation,
+        object_types,
+        output_dir,
+        progress_cb=_classification_progress,
+    )
+    population_map = classification_result["population_map"]
+    progress.set_subprocess_status("classification", population_map["status"])
 
     gaps = [
         f"'{ot}': {'; '.join(r['notes'])}" if r["notes"] else f"'{ot}': no gaps"
         for ot, r in reconciliation.items()
     ]
-    gaps.extend(NOT_YET_IMPLEMENTED)
     gaps.extend(evidence_result["gaps"])
+    gaps.extend(classification_result["gaps"])
     gaps.extend(
         [
             "'deals': not present in this snapshot (deals extraction probe failed and "
@@ -139,22 +153,6 @@ def run_population_audit(
         ]
     )
 
-    population_map = {
-        "schema_version": 1,
-        "status": "not_yet_implemented",
-        "note": (
-            "Bucket classification (operational_customer, operational_prospect, "
-            "active_other, historical_import, enrichment_or_bulk, "
-            "legacy_or_obsolete_candidate, uncertain) is not implemented in this "
-            "batch. The reconciliation totals below are the only currently "
-            "known-good population counts; they are the baseline the future "
-            "bucket counts must sum to exactly. evidence.json now carries the "
-            "sampling plan and (when live) targeted lookup evidence that "
-            "classification will consume."
-        ),
-        "reconciliation": reconciliation,
-    }
-
     next_actions = [
         "Verified snapshot facts (see README 'Snapshot layout'): raw/<object>.jsonl "
         "envelopes shaped {record, extracted_at, page_index}; raw/_checkpoint.json; "
@@ -164,11 +162,7 @@ def run_population_audit(
         "default properties (no source/lifecycle/owner/associations).",
     ]
     next_actions.extend(evidence_result["next_actions"])
-    next_actions.append(
-        "Implement the evidence-based classification buckets so population_map.json "
-        "bucket counts sum exactly to the reconciled portal population, using "
-        "evidence.json's strata summaries as the classification input."
-    )
+    next_actions.extend(classification_result["next_actions"])
 
     _write_json(os.path.join(output_dir, "population_map.json"), population_map)
     _write_json(os.path.join(output_dir, "cohort_analysis.json"), cohort_analysis)
@@ -187,7 +181,7 @@ def run_population_audit(
             "reconciliation": reconciliation,
             "cohort_analysis": cohort_analysis,
             "evidence": evidence,
-            "not_yet_implemented": NOT_YET_IMPLEMENTED,
+            "population_map": population_map,
             "gaps": gaps,
         },
         report_path,
@@ -201,6 +195,7 @@ def run_population_audit(
         "output_dir": output_dir,
         "report_path": report_path,
         "reconciliation": reconciliation,
+        "population_map": population_map,
     }
 
 

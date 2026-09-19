@@ -64,11 +64,22 @@ class CliEndToEndFixtureRunTests(unittest.TestCase):
         main(["run", "--snapshot", FIXTURE_SNAPSHOT, "--output-dir", self.tmp_dir])
         with open(os.path.join(self.tmp_dir, "population_map.json")) as fh:
             population_map = json.load(fh)
-        self.assertEqual(population_map["status"], "not_yet_implemented")
+        self.assertEqual(population_map["status"], "completed")
         reconciliation = population_map["reconciliation"]
         self.assertTrue(reconciliation["contacts"]["reconciled"])
         self.assertFalse(reconciliation["companies"]["reconciled"])
         self.assertFalse(reconciliation["deals"]["reconciled"])
+
+    def test_population_map_bucket_counts_sum_to_reconciled_totals(self):
+        main(["run", "--snapshot", FIXTURE_SNAPSHOT, "--output-dir", self.tmp_dir])
+        with open(os.path.join(self.tmp_dir, "population_map.json")) as fh:
+            population_map = json.load(fh)
+        for object_type in ("companies", "contacts"):
+            reconciled_total = population_map["reconciliation"][object_type]["unique_id_count"]
+            bucket_counts = population_map["inferred_classification"][object_type]["bucket_counts"]
+            self.assertEqual(sum(bucket_counts.values()), reconciled_total)
+            crosscheck = population_map["reconciliation_crosscheck"][object_type]
+            self.assertTrue(crosscheck["matches"])
 
     def test_cohort_analysis_is_completed_not_a_placeholder(self):
         main(["run", "--snapshot", FIXTURE_SNAPSHOT, "--output-dir", self.tmp_dir])
@@ -78,16 +89,16 @@ class CliEndToEndFixtureRunTests(unittest.TestCase):
         self.assertIn("companies", cohort_analysis)
         self.assertIn("contacts", cohort_analysis)
 
-    def test_other_analyses_remain_explicit_placeholders(self):
+    def test_classification_and_cohort_phases_are_completed_not_placeholders(self):
         main(["run", "--snapshot", FIXTURE_SNAPSHOT, "--output-dir", self.tmp_dir])
         with open(os.path.join(self.tmp_dir, "population_map.json")) as fh:
             population_map = json.load(fh)
-        self.assertEqual(population_map["status"], "not_yet_implemented")
+        self.assertEqual(population_map["status"], "completed")
         with open(os.path.join(self.tmp_dir, "progress.json")) as fh:
             progress = json.load(fh)
         phases = {p["name"]: p["status"] for p in progress["phases"]}
         self.assertEqual(phases["cohort_analysis"], "completed")
-        self.assertEqual(phases["classification"], "not_yet_implemented")
+        self.assertEqual(phases["classification"], "completed")
         # No token is set in the test environment and --offline is not passed,
         # so the default CLI run falls back to the offline evidence path --
         # never a live HubSpot call during build/tests.

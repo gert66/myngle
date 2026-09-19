@@ -10,16 +10,17 @@ This batch (`pa-01-scaffold-reconcile`) implemented the package skeleton,
 the snapshot loader, and independent portal-total/unique-ID reconciliation.
 The `pa-02-cohorts-waves` batch added streaming creation-cohort analysis
 (day/week/month), per-month cohort profiling, timestamp-burst detection,
-and heuristic bulk-import wave detection. This batch
-(`pa-03-targeted-evidence`) adds the targeted, read-only **evidence layer**
-(`properties.py`, `evidence.py`): offline property resolution, a
-deterministic stratified sampling plan, and -- only when a token is
-available and `--offline` is not set -- cached batch-read and association
-lookups (company-contact, company-deal, contact-deal) via
-`ReadOnlyHubSpotClient`. Bucket classification (`population_map.json`)
-remains an explicit `"status": "not_yet_implemented"` placeholder, to be
-built in a follow-up batch that consumes `evidence.json`'s strata
-summaries.
+and heuristic bulk-import wave detection. The `pa-03-targeted-evidence`
+batch added the targeted, read-only **evidence layer** (`properties.py`,
+`evidence.py`): offline property resolution, a deterministic stratified
+sampling plan, and -- only when a token is available and `--offline` is
+not set -- cached batch-read and association lookups (company-contact,
+company-deal, contact-deal) via `ReadOnlyHubSpotClient`. This batch
+(`pa-04-classification-population-map`) adds the **full-population bucket
+classifier** (`classification.py`): a deterministic, rule-based pass over
+every unique record in the snapshot that assigns each one to exactly one
+of seven buckets and writes the real `population_map.json` -- see
+"Bucket classification" below.
 
 ## Snapshot layout
 
@@ -307,6 +308,64 @@ bucketed only when it is actually present in `properties_requested` for
 that object type; otherwise the summary reports `"unavailable"` for that
 field rather than a misleading all-zero bucket.
 
+### Bucket classification (`classification.py`)
+
+`classification.py` streams **every** unique record in the snapshot for
+each supported object type (companies, contacts) -- not a sample -- and
+assigns each one to exactly one of seven buckets: `operational_customer`,
+`operational_prospect`, `active_other`, `historical_import`,
+`enrichment_or_bulk`, `legacy_or_obsolete_candidate`, `uncertain`. Because
+it dedupes by id first-wins, exactly like `reconcile.py`/`cohorts.py`, the
+resulting bucket-count table always sums exactly to `reconcile.py`'s
+`unique_id_count` for that object type -- the same authoritative total
+used everywhere else in this audit, never the raw record count and never
+an unverified recorded portal total.
+
+**Evidence hierarchy for classification** (most to least direct):
+
+1. A `lifecyclestage`/`hs_object_source` value present directly on the
+   record itself (observed fact, no live call) -- `operational_customer`
+   / `operational_prospect` / `historical_import` with confidence `high`.
+2. Wave membership, calibrated by a matching evidence-layer sample when
+   one exists for that wave (`medium_sample_calibrated`) or by the
+   wave's own full-population presence/untouched rates alone when no
+   sample is available (`low_no_evidence_sample`).
+3. A baseline (non-wave) month's dominant lifecycle stage from an
+   evidence-layer sample, when one exists and is dominant (>50% of the
+   sample) -- `medium_sample_calibrated`.
+4. Last-modified recency plus domain/email presence alone -- `medium`/
+   `low` confidence.
+5. `uncertain` -- a first-class destination, not a fallback, for any
+   record or wave whose available signal does not clear the thresholds
+   above (documented and named in `classification.py`'s module
+   docstring). `insufficient_signal` and `mixed_signal` are the
+   confidence tags used here.
+
+**Wave classification is a full-population 2x2**, not a sample: every
+detected wave's `presence_rate` and `untouched_since_creation_rate`
+(already computed by `cohorts.py` over every record in the wave) decide
+between `historical_import` (low presence, high untouched -- refutes a
+genuine campaign spike), `enrichment_or_bulk` (high presence but still
+high untouched -- valid-looking data that was never engaged with again,
+or the evidence sample names an enrichment-tool-like source),
+`active_other` (high presence, low untouched -- supports a genuine bulk
+onboarding/campaign explanation instead), or `uncertain` (mixed). The
+alternative explanation tested is always recorded in the wave's
+rationale, never assumed away.
+
+**Same-domain companies are never treated as duplicates or historical
+just for sharing a domain** -- no rule in this module compares records to
+each other; every decision is a pure function of one record's own signals
+plus its cohort/wave's aggregate statistics (see
+`test_classification.py`'s dedicated regression test).
+
+Per-record rule id, bucket, confidence, and a short rationale are streamed
+to `<output_dir>/work/<object_type>_classification.csv.gz` (same pattern
+as the cohort feature table and the evidence CSV) so `population_map.json`
+itself stays a bounded summary: bucket counts/percentages, rule counts,
+per-wave rationale, and up to 5 illustrative examples per bucket --
+never one entry per record.
+
 ### Offline-safe by default
 
 With no token present in the env var named by `--token-env` (default
@@ -409,14 +468,35 @@ never flagged custom), the non-retryable-4xx client behaviour (a mocked
 an end-to-end CLI run with `fixtures/fake_client.FakeReadOnlyClient`
 injected producing every required artifact including the per-id evidence
 CSVs -- all against `fixtures/sample_snapshot` and
-`fixtures/evidence_responses/*.json`, never the network.
+`fixtures/evidence_responses/*.json`, never the network; and
+(`test_classification.py`) the wave 2x2 decision table tested directly
+(all four quadrants plus the evidence-calibrated and enrichment-source-hint
+variants), bucket counts summing exactly to `reconcile.py`'s
+`unique_id_count` against the synthetic wave snapshot from
+`fixtures/cohort_snapshot_builder.py`, determinism across two runs of the
+same classification (and of two full CLI runs), each explicit
+record-level rule (`explicit_customer_lifecycle`,
+`explicit_prospect_lifecycle`, `explicit_bulk_source_no_lifecycle`,
+stale/legacy, insufficient-signal) triggered by a dedicated hand-built
+fixture record, the same-domain-companies-are-not-duplicates regression,
+month-level lifecycle calibration (dominant stage found/not found/empty
+sample), and `population_map.json`'s schema stability and
+`reconciliation_crosscheck` invariant end to end via the CLI.
 
 ## Known gaps (this batch)
 
-- The classification buckets (`population_map.json`) are not implemented;
-  `population_map.json["status"]` remains `"not_yet_implemented"`.
-  `evidence.json`'s strata summaries are the intended input for that
-  future batch.
+- Wave classifications reached without a matching evidence-layer sample
+  (e.g. any offline run, or a wave/month this run's sampling plan did not
+  cover) are capped at confidence `low_no_evidence_sample` -- they rely
+  solely on the wave's full-population presence/untouched rates, not a
+  directly observed lifecycle/source/association sample. `gaps.json`
+  names exactly which waves this applies to for a given run.
+- Baseline (non-wave) months only reach `operational_customer`/
+  `operational_prospect` via evidence-layer calibration when a sample
+  exists for that month and shows a dominant (>50%) lifecycle stage;
+  otherwise, records fall back to recency + identity-only heuristics
+  (`medium`/`low` confidence) or `uncertain` when even those do not
+  clear this module's thresholds.
 - `deals.jsonl` is absent from the live snapshot (probe failed,
   `properties_deals` returned 403); no deal-based cohort or reconciliation
   exists in the snapshot itself. Deal *association* evidence
