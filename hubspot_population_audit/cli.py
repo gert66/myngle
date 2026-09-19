@@ -1,15 +1,18 @@
 """Command-line entry point.
 
-    python -m hubspot_population_audit.cli run --snapshot <dir> --output-dir <dir> [--no-live-lookups]
+    python -m hubspot_population_audit.cli run --snapshot <dir> --output-dir <dir> [options]
 
-This batch never performs a live HubSpot call: the snapshot load,
-reconciliation, and creation-cohort/bulk-import-wave analysis are fully
-deterministic against the on-disk snapshot. Every analysis not yet
-implemented (classification, association/activity evidence) is written as
-an explicit ``"status": "not_yet_implemented"`` placeholder rather than
-silently skipped. ``--no-live-lookups`` is accepted for forward interface
-compatibility with the later batch that adds targeted live lookups; it is
-currently a no-op because no live lookups exist yet.
+The snapshot load, reconciliation, and creation-cohort/bulk-import-wave
+analysis are fully deterministic against the on-disk snapshot and never
+perform a HubSpot call. The targeted evidence layer (``evidence.py``) adds
+a deterministic offline sampling plan plus -- only when a token is present
+in ``--token-env`` and ``--offline`` is not set -- cached, read-only
+batch-read and association lookups via ``ReadOnlyHubSpotClient``. With no
+token or ``--offline``, ``evidence.json`` is still written in full, with
+``status: "skipped_offline"``. Bucket classification
+(``population_map.json``) remains an explicit
+``"status": "not_yet_implemented"`` placeholder, to be built in a later
+batch.
 """
 from __future__ import annotations
 
@@ -19,18 +22,16 @@ import os
 import time
 
 from .cohorts import build_cohort_analysis
+from .evidence import DEFAULT_MAX_LOOKUPS, DEFAULT_TOKEN_ENV, run_evidence
 from .progress import ProgressWriter, now_iso
 from .reconcile import reconcile_all
 from .report import generate_html_report
 from .snapshot import Snapshot
 
 NOT_YET_IMPLEMENTED = [
-    "evidence: association evidence (company-contact, company/deal, contact/deal)",
-    "evidence: activity/recency evidence",
     "population_map: evidence-based bucket classification "
     "(operational_customer, operational_prospect, active_other, historical_import, "
     "enrichment_or_bulk, legacy_or_obsolete_candidate, uncertain)",
-    "live targeted lookups (association/activity evidence via ReadOnlyHubSpotClient)",
 ]
 
 
@@ -46,7 +47,19 @@ def make_run_id() -> str:
     return time.strftime("pa-run-%Y%m%dT%H%M%SZ", time.gmtime())
 
 
-def run_population_audit(snapshot_dir: str, output_dir: str, live_lookups: bool = False) -> dict:
+def run_population_audit(
+    snapshot_dir: str,
+    output_dir: str,
+    *,
+    token_env: str = DEFAULT_TOKEN_ENV,
+    offline: bool = False,
+    max_lookups=None,
+    lookup_rps: float = 3.0,
+    sample_size: int = 200,
+    full_fetch_threshold: int = 200,
+    seed: int = 20260918,
+    client=None,
+) -> dict:
     run_id = make_run_id()
     os.makedirs(output_dir, exist_ok=True)
     reports_dir = os.path.join(output_dir, "reports")
@@ -84,34 +97,45 @@ def run_population_audit(snapshot_dir: str, output_dir: str, live_lookups: bool 
             )
     progress.set_subprocess_status("cohort_analysis", "completed")
 
-    # Not yet implemented in this batch -- explicit placeholders, never silently skipped.
-    progress.set_subprocess_status("association_evidence", "not_yet_implemented")
-    progress.set_subprocess_status("activity_evidence", "not_yet_implemented")
+    progress.set_phase("evidence")
+    evidence_result = run_evidence(
+        snap,
+        cohort_analysis,
+        output_dir,
+        token_env=token_env,
+        offline=offline,
+        max_lookups=max_lookups,
+        lookup_rps=lookup_rps,
+        sample_size=sample_size,
+        full_fetch_threshold=full_fetch_threshold,
+        seed=seed,
+        client=client,
+        progress=progress,
+    )
+    evidence = evidence_result["evidence"]
+
     progress.set_subprocess_status("classification", "not_yet_implemented")
-    # Live lookups are never performed in this batch, regardless of the flag;
-    # --no-live-lookups exists for forward interface compatibility only.
-    progress.set_subprocess_status("live_lookups", "not_yet_implemented", requested=live_lookups)
-    progress.set_counter("lookups_planned", 0)
-    progress.set_counter("lookups_done", 0)
-    progress.set_counter("cache_hits", 0)
 
     gaps = [
         f"'{ot}': {'; '.join(r['notes'])}" if r["notes"] else f"'{ot}': no gaps"
         for ot, r in reconciliation.items()
     ]
     gaps.extend(NOT_YET_IMPLEMENTED)
+    gaps.extend(evidence_result["gaps"])
     gaps.extend(
         [
             "'deals': not present in this snapshot (deals extraction probe failed and "
-            "properties_deals returned 403); no deal-based cohort, reconciliation, or "
-            "association evidence exists for this object type.",
+            "properties_deals returned 403); no deal-based cohort or reconciliation "
+            "exists for this object type in the snapshot itself (targeted deal "
+            "association evidence, where accessible, is in evidence.json).",
             "No independently recorded portal total exists for any object type in this "
             "snapshot (no portal_totals.json, no run_status.json['portal_totals']); every "
             "object type is reported as unreconciled, never assumed correct.",
             "Raw records carry only default properties (no hs_object_source, "
             "lifecyclestage, hubspot_owner_id, or associations); cohort characterization "
             "from the snapshot alone is limited to presence/recency/domain signals and "
-            "cannot see source, lifecycle, owner, or association evidence.",
+            "cannot see source, lifecycle, owner, or association evidence directly -- see "
+            "evidence.json for the targeted, sampled lookups that fill this gap.",
         ]
     )
 
@@ -124,35 +148,13 @@ def run_population_audit(snapshot_dir: str, output_dir: str, live_lookups: bool 
             "legacy_or_obsolete_candidate, uncertain) is not implemented in this "
             "batch. The reconciliation totals below are the only currently "
             "known-good population counts; they are the baseline the future "
-            "bucket counts must sum to exactly."
+            "bucket counts must sum to exactly. evidence.json now carries the "
+            "sampling plan and (when live) targeted lookup evidence that "
+            "classification will consume."
         ),
         "reconciliation": reconciliation,
     }
-    evidence = {
-        "schema_version": 1,
-        "status": "partial",
-        "observed_facts": [
-            {
-                "object_type": object_type,
-                "kind": "portal_reconciliation",
-                "counts": {
-                    "recorded_portal_total": result["recorded_portal_total"],
-                    "raw_record_count": result["raw_record_count"],
-                    "unique_id_count": result["unique_id_count"],
-                    "duplicate_count": result["duplicate_count"],
-                    "delta": result["delta"],
-                },
-                "reconciled": result["reconciled"],
-                "notes": result["notes"],
-            }
-            for object_type, result in reconciliation.items()
-        ],
-        "not_yet_implemented": [
-            "association_evidence",
-            "activity_recency_evidence",
-            "cohort_characterization",
-        ],
-    }
+
     next_actions = [
         "Verified snapshot facts (see README 'Snapshot layout'): raw/<object>.jsonl "
         "envelopes shaped {record, extracted_at, page_index}; raw/_checkpoint.json; "
@@ -160,12 +162,13 @@ def run_population_audit(snapshot_dir: str, output_dir: str, live_lookups: bool 
         "failed, properties_deals returned 403); run_status.json carries no "
         "portal_totals key and there is no portal_totals.json; raw records carry only "
         "default properties (no source/lifecycle/owner/associations).",
-        "Add targeted read-only association evidence (company-contact, "
-        "company/deal, contact/deal) via ReadOnlyHubSpotClient.batch_read/search.",
-        "Add targeted activity/recency evidence without re-fetching complete raw universes.",
-        "Implement the evidence-based classification buckets so population_map.json "
-        "bucket counts sum exactly to the reconciled portal population.",
     ]
+    next_actions.extend(evidence_result["next_actions"])
+    next_actions.append(
+        "Implement the evidence-based classification buckets so population_map.json "
+        "bucket counts sum exactly to the reconciled portal population, using "
+        "evidence.json's strata summaries as the classification input."
+    )
 
     _write_json(os.path.join(output_dir, "population_map.json"), population_map)
     _write_json(os.path.join(output_dir, "cohort_analysis.json"), cohort_analysis)
@@ -183,6 +186,7 @@ def run_population_audit(snapshot_dir: str, output_dir: str, live_lookups: bool 
             "snapshot": snapshot_dir,
             "reconciliation": reconciliation,
             "cohort_analysis": cohort_analysis,
+            "evidence": evidence,
             "not_yet_implemented": NOT_YET_IMPLEMENTED,
             "gaps": gaps,
         },
@@ -212,7 +216,39 @@ def main(argv=None) -> int:
     run_parser.add_argument(
         "--no-live-lookups",
         action="store_true",
-        help="Reserved for the future targeted-lookup batch; live lookups are never performed today.",
+        help="Never perform live evidence lookups, even if a token is present (same effect as --offline).",
+    )
+    run_parser.add_argument(
+        "--offline",
+        action="store_true",
+        help="Skip all live evidence lookups; evidence.json is still written in full with "
+        "status 'skipped_offline' plus the complete sampling plan.",
+    )
+    run_parser.add_argument(
+        "--token-env",
+        default=DEFAULT_TOKEN_ENV,
+        help=f"Env var name holding a HubSpot private-app token (default: {DEFAULT_TOKEN_ENV}).",
+    )
+    run_parser.add_argument(
+        "--max-lookups",
+        type=int,
+        default=DEFAULT_MAX_LOOKUPS,
+        help="Cap on the total number of NEW live id/association lookups this run (cache hits never "
+        "count against it). Default: None, meaning the effective cap covers the full sampling plan "
+        "(every object id plus every implied association lookup) -- see evidence.json['lookup_budget']. "
+        "Pass 0 to perform no fetches at all.",
+    )
+    run_parser.add_argument(
+        "--lookup-rps", type=float, default=3.0, help="Max live lookup requests per second (default: 3.0)."
+    )
+    run_parser.add_argument(
+        "--sample-size", type=int, default=200, help="Per-stratum sample size above the full-fetch threshold."
+    )
+    run_parser.add_argument(
+        "--full-fetch-threshold", type=int, default=200, help="Strata at or below this size are fetched in full."
+    )
+    run_parser.add_argument(
+        "--seed", type=int, default=20260918, help="Seed for the deterministic stratified sampling plan."
     )
 
     args = parser.parse_args(argv)
@@ -221,7 +257,13 @@ def main(argv=None) -> int:
         result = run_population_audit(
             snapshot_dir=args.snapshot,
             output_dir=args.output_dir,
-            live_lookups=not args.no_live_lookups,
+            token_env=args.token_env,
+            offline=args.offline or args.no_live_lookups,
+            max_lookups=args.max_lookups,
+            lookup_rps=args.lookup_rps,
+            sample_size=args.sample_size,
+            full_fetch_threshold=args.full_fetch_threshold,
+            seed=args.seed,
         )
         print(f"Run complete: {result['run_id']}")
         print(f"Report: {result['report_path']}")

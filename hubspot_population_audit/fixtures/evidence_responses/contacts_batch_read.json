@@ -1,0 +1,68 @@
+{
+  "results": [
+    {
+      "id": "c1",
+      "properties": {
+        "hs_object_source": "CRM_UI",
+        "hs_object_source_detail_1": null,
+        "lifecyclestage": "customer",
+        "hubspot_owner_id": "100",
+        "associatedcompanyid": "1",
+        "hs_last_sales_activity_timestamp": "2026-09-01T00:00:00Z",
+        "notes_last_updated": "2026-09-01T00:00:00Z",
+        "notes_last_contacted": "2026-08-20T00:00:00Z",
+        "hs_email_last_send_date": "2026-09-05T00:00:00Z",
+        "hs_email_last_open_date": "2026-09-06T00:00:00Z",
+        "hs_merged_object_ids": null
+      }
+    },
+    {
+      "id": "c2",
+      "properties": {
+        "hs_object_source": "IMPORT",
+        "hs_object_source_detail_1": "CSV_UPLOAD",
+        "lifecyclestage": "lead",
+        "hubspot_owner_id": null,
+        "associatedcompanyid": "2",
+        "hs_last_sales_activity_timestamp": null,
+        "notes_last_updated": null,
+        "notes_last_contacted": null,
+        "hs_email_last_send_date": null,
+        "hs_email_last_open_date": null,
+        "hs_merged_object_ids": null
+      }
+    },
+    {
+      "id": "c3",
+      "properties": {
+        "hs_object_source": "IMPORT",
+        "hs_object_source_detail_1": "CSV_UPLOAD",
+        "lifecyclestage": null,
+        "hubspot_owner_id": null,
+        "associatedcompanyid": "3",
+        "hs_last_sales_activity_timestamp": null,
+        "notes_last_updated": null,
+        "notes_last_contacted": null,
+        "hs_email_last_send_date": null,
+        "hs_email_last_open_date": null,
+        "hs_merged_object_ids": null
+      }
+    },
+    {
+      "id": "c4",
+      "properties": {
+        "hs_object_source": "CRM_UI",
+        "hs_object_source_detail_1": null,
+        "lifecyclestage": "opportunity",
+        "hubspot_owner_id": "101",
+        "associatedcompanyid": "4",
+        "hs_last_sales_activity_timestamp": "2026-08-01T00:00:00Z",
+        "notes_last_updated": "2026-08-01T00:00:00Z",
+        "notes_last_contacted": "2026-07-15T00:00:00Z",
+        "hs_email_last_send_date": "2026-07-20T00:00:00Z",
+        "hs_email_last_open_date": null,
+        "hs_merged_object_ids": null
+      }
+    }
+  ]
+}

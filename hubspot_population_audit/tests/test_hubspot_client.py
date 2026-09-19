@@ -19,6 +19,11 @@ class IsReadPathTests(unittest.TestCase):
     def test_batch_read_paths_are_read(self):
         self.assertTrue(is_read_path("/crm/v3/objects/contacts/batch/read"))
 
+    def test_v4_associations_batch_read_paths_are_read(self):
+        self.assertTrue(is_read_path("/crm/v4/associations/companies/contacts/batch/read"))
+        self.assertTrue(is_read_path("/crm/v4/associations/companies/deals/batch/read"))
+        self.assertTrue(is_read_path("/crm/v4/associations/contacts/deals/batch/read"))
+
     def test_batch_create_is_not_read(self):
         self.assertFalse(is_read_path("/crm/v3/objects/companies/batch/create"))
 
@@ -65,6 +70,28 @@ class ReadOnlyHubSpotClientTests(unittest.TestCase):
         mock_post.return_value = mock.Mock(status_code=200, json=lambda: {"results": []})
         self.client.batch_read("contacts", {"inputs": [{"id": "1"}]})
         mock_post.assert_called_once()
+
+    @mock.patch("requests.post")
+    def test_associations_batch_read_is_allowed_and_performs_a_request(self, mock_post):
+        mock_post.return_value = mock.Mock(status_code=200, json=lambda: {"results": []})
+        result = self.client.associations_batch_read("companies", "contacts", ["1", "2"])
+        self.assertEqual(result, {"results": []})
+        mock_post.assert_called_once()
+        called_url = mock_post.call_args[0][0]
+        self.assertTrue(called_url.endswith("/crm/v4/associations/companies/contacts/batch/read"))
+
+    @mock.patch("requests.post")
+    def test_403_response_is_not_retried(self, mock_post):
+        import requests
+
+        mock_response = mock.Mock(status_code=403)
+        mock_response.raise_for_status.side_effect = requests.HTTPError(response=mock_response)
+        mock_post.return_value = mock_response
+        client = ReadOnlyHubSpotClient(token_env_var=TOKEN_ENV_VAR, max_retries=3)
+        with self.assertRaises(requests.HTTPError) as ctx:
+            client.batch_read("contacts", {"inputs": [{"id": "1"}]})
+        self.assertEqual(mock_post.call_count, 1)
+        self.assertEqual(ctx.exception.response.status_code, 403)
 
     @mock.patch("requests.post")
     def test_post_to_non_read_path_raises_before_any_request(self, mock_post):

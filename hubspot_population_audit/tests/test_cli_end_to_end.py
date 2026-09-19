@@ -87,10 +87,26 @@ class CliEndToEndFixtureRunTests(unittest.TestCase):
             progress = json.load(fh)
         phases = {p["name"]: p["status"] for p in progress["phases"]}
         self.assertEqual(phases["cohort_analysis"], "completed")
-        self.assertEqual(phases["association_evidence"], "not_yet_implemented")
-        self.assertEqual(phases["activity_evidence"], "not_yet_implemented")
         self.assertEqual(phases["classification"], "not_yet_implemented")
-        self.assertEqual(phases["live_lookups"], "not_yet_implemented")
+        # No token is set in the test environment and --offline is not passed,
+        # so the default CLI run falls back to the offline evidence path --
+        # never a live HubSpot call during build/tests.
+        self.assertEqual(phases["evidence"], "skipped_offline")
+
+    def test_evidence_json_is_offline_by_default_with_full_sampling_plan(self):
+        main(["run", "--snapshot", FIXTURE_SNAPSHOT, "--output-dir", self.tmp_dir])
+        with open(os.path.join(self.tmp_dir, "evidence.json")) as fh:
+            evidence = json.load(fh)
+        self.assertEqual(evidence["status"], "skipped_offline")
+        self.assertIn("companies", evidence["sampling_plan"])
+        self.assertIn("contacts", evidence["sampling_plan"])
+        for object_type in ("companies", "contacts"):
+            self.assertIn("properties_requested", evidence["properties"][object_type])
+            self.assertGreater(len(evidence["sampling_plan"][object_type]["strata"]), 0)
+        with open(os.path.join(self.tmp_dir, "progress.json")) as fh:
+            progress = json.load(fh)
+        self.assertIn("evidence.ids_planned.companies", progress["counters"])
+        self.assertIn("evidence.ids_planned.contacts", progress["counters"])
 
     def test_html_report_separates_required_sections(self):
         main(["run", "--snapshot", FIXTURE_SNAPSHOT, "--output-dir", self.tmp_dir])

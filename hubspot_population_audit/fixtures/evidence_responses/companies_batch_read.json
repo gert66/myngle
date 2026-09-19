@@ -1,0 +1,56 @@
+{
+  "results": [
+    {
+      "id": "1",
+      "properties": {
+        "hs_object_source": "CRM_UI",
+        "hs_object_source_detail_1": null,
+        "lifecyclestage": "customer",
+        "hubspot_owner_id": "100",
+        "hs_last_sales_activity_timestamp": "2026-09-01T00:00:00Z",
+        "notes_last_updated": "2026-09-01T00:00:00Z",
+        "notes_last_contacted": "2026-08-20T00:00:00Z",
+        "hs_merged_object_ids": null
+      }
+    },
+    {
+      "id": "2",
+      "properties": {
+        "hs_object_source": "IMPORT",
+        "hs_object_source_detail_1": "CSV_UPLOAD",
+        "lifecyclestage": "lead",
+        "hubspot_owner_id": null,
+        "hs_last_sales_activity_timestamp": null,
+        "notes_last_updated": null,
+        "notes_last_contacted": null,
+        "hs_merged_object_ids": null
+      }
+    },
+    {
+      "id": "3",
+      "properties": {
+        "hs_object_source": "IMPORT",
+        "hs_object_source_detail_1": "CSV_UPLOAD",
+        "lifecyclestage": null,
+        "hubspot_owner_id": null,
+        "hs_last_sales_activity_timestamp": null,
+        "notes_last_updated": null,
+        "notes_last_contacted": null,
+        "hs_merged_object_ids": null
+      }
+    },
+    {
+      "id": "4",
+      "properties": {
+        "hs_object_source": "CRM_UI",
+        "hs_object_source_detail_1": null,
+        "lifecyclestage": "opportunity",
+        "hubspot_owner_id": "101",
+        "hs_last_sales_activity_timestamp": "2026-08-01T00:00:00Z",
+        "notes_last_updated": "2026-08-01T00:00:00Z",
+        "notes_last_contacted": "2026-07-15T00:00:00Z",
+        "hs_merged_object_ids": null
+      }
+    }
+  ]
+}

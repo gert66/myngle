@@ -138,9 +138,114 @@ def _waves_block(cohort_analysis: dict) -> str:
     return f"<p>Heuristic parameters: {params_line}</p>" + "".join(blocks)
 
 
+def _properties_block(evidence: dict) -> str:
+    rows = []
+    for object_type, resolved in (evidence.get("properties") or {}).items():
+        rows.append(
+            "<tr>"
+            f"<td>{_esc(object_type)}</td>"
+            f"<td>{_esc(len(resolved.get('properties_requested', [])))}</td>"
+            f"<td>{_esc(len(resolved.get('properties_unavailable', [])))}</td>"
+            f"<td>{_esc(resolved.get('custom_properties_discovered', 0))}</td>"
+            f"<td>{_esc(len(resolved.get('custom_properties_included', [])))}</td>"
+            f"<td>{_esc(len(resolved.get('custom_properties_overflow', [])))}</td>"
+            "</tr>"
+        )
+    if not rows:
+        return "<p>No property resolution recorded.</p>"
+    return (
+        "<table border='1' cellpadding='4' cellspacing='0'>"
+        "<thead><tr><th>object type</th><th>properties requested</th><th>unavailable</th>"
+        "<th>custom discovered</th><th>custom included</th><th>custom overflow</th></tr></thead>"
+        f"<tbody>{''.join(rows)}</tbody></table>"
+    )
+
+
+def _sampling_plan_block(evidence: dict) -> str:
+    rows = []
+    for object_type, type_plan in (evidence.get("sampling_plan") or {}).items():
+        for stratum in type_plan.get("strata", []):
+            rows.append(
+                "<tr>"
+                f"<td>{_esc(object_type)}</td>"
+                f"<td>{_esc(stratum['kind'])}</td>"
+                f"<td>{_esc(stratum['key'])}</td>"
+                f"<td>{_esc(stratum['population_size'])}</td>"
+                f"<td>{_esc(stratum['sample_size'])}</td>"
+                f"<td>{_esc(stratum['method'])}</td>"
+                f"<td>{_esc(stratum['uncertainty_note'])}</td>"
+                "</tr>"
+            )
+    if not rows:
+        return "<p>No sampling plan available.</p>"
+    return (
+        "<table border='1' cellpadding='4' cellspacing='0'>"
+        "<thead><tr><th>object type</th><th>stratum kind</th><th>key</th><th>population</th>"
+        "<th>sample size</th><th>method</th><th>uncertainty note</th></tr></thead>"
+        f"<tbody>{''.join(rows)}</tbody></table>"
+    )
+
+
+def _strata_summaries_block(evidence: dict) -> str:
+    blocks = []
+    for object_type, summaries in (evidence.get("strata_summaries") or {}).items():
+        if not summaries:
+            continue
+        rows = []
+        for summary in summaries:
+            top_source = next(iter(summary.get("source_distribution", {})), "")
+            owner_rate = summary.get("owner_presence_rate")
+            owner_rate_str = _pct(owner_rate) if owner_rate is not None else "n/a"
+            assoc = summary.get("association_presence", {})
+            assoc_str = "; ".join(
+                f"{k}={_pct(v) if v is not None else 'n/a'}" for k, v in assoc.items()
+            )
+            rows.append(
+                "<tr>"
+                f"<td>{_esc(summary['kind'])}</td>"
+                f"<td>{_esc(summary['key'])}</td>"
+                f"<td>{_esc(summary['fetched_count'])}/{_esc(summary['sample_size'])}</td>"
+                f"<td>{_esc(top_source)}</td>"
+                f"<td>{_esc(owner_rate_str)}</td>"
+                f"<td>{_esc(assoc_str)}</td>"
+                "</tr>"
+            )
+        blocks.append(
+            f"<h3>{_esc(object_type)}</h3>"
+            "<table border='1' cellpadding='4' cellspacing='0'>"
+            "<thead><tr><th>stratum kind</th><th>key</th><th>fetched/sample</th>"
+            "<th>top source</th><th>owner presence</th><th>association presence</th></tr></thead>"
+            f"<tbody>{''.join(rows)}</tbody></table>"
+        )
+    return "".join(blocks) or "<p>No live evidence was fetched (see status/uncertainty below).</p>"
+
+
+def _evidence_uncertainty_block(evidence: dict) -> str:
+    items = evidence.get("uncertainty", [])
+    if not items:
+        return "<p>No evidence-specific uncertainty notes.</p>"
+    return f"<ul>{''.join(f'<li>{_esc(item)}</li>' for item in items[:200])}</ul>"
+
+
+def _evidence_inaccessible_block(evidence: dict) -> str:
+    status = evidence.get("status")
+    items = evidence.get("inaccessible", [])
+    lead = ""
+    if status == "skipped_offline":
+        lead = (
+            "<p><strong>Offline notice:</strong> live evidence lookups were skipped for this run "
+            "(no token / --offline). The sampling plan above documents exactly what a live run "
+            "would fetch.</p>"
+        )
+    if not items:
+        return lead or "<p>No evidence-specific inaccessible-data notes.</p>"
+    return lead + f"<ul>{''.join(f'<li>{_esc(item)}</li>' for item in items)}</ul>"
+
+
 def generate_html_report(context: dict, output_path: str) -> None:
     reconciliation = context.get("reconciliation", {})
     cohort_analysis = context.get("cohort_analysis", {}) or {}
+    evidence = context.get("evidence", {}) or {}
     not_yet_implemented = context.get("not_yet_implemented", [])
     gaps = context.get("gaps", [])
 
@@ -186,6 +291,18 @@ never dropped.</p>
 </section>
 
 <section>
+<h2><span class="badge observed">Observed facts</span> Targeted evidence: property resolution &amp; sampling plan</h2>
+<p>Property lists are resolved against this snapshot's own property definitions --
+never assumed present. The sampling plan below is deterministic (seeded) and
+computed entirely offline from the cohort feature table; each stratum's
+uncertainty note is an explicit statement, not an afterthought.</p>
+<h3>Property resolution</h3>
+{_properties_block(evidence)}
+<h3>Stratified sampling plan</h3>
+{_sampling_plan_block(evidence)}
+</section>
+
+<section>
 <h2><span class="badge inferred">Inferred classifications</span></h2>
 <p>Population bucketing (operational_customer, operational_prospect,
 active_other, historical_import, enrichment_or_bulk,
@@ -199,6 +316,12 @@ This is a heuristic signal, not a conclusion -- each wave lists alternative
 explanations that a later batch must test before any classification is
 assigned.</p>
 {_waves_block(cohort_analysis)}
+<h3>Targeted evidence: per-stratum characterization (sampled)</h3>
+<p>Source/lifecycle/owner distributions and association presence rates below
+are computed from a sampled subset of each stratum (see the sampling plan
+above for exact sample sizes and uncertainty), not the full population --
+they are directional evidence for the classification batch, not a census.</p>
+{_strata_summaries_block(evidence)}
 </section>
 
 <section>
@@ -208,6 +331,8 @@ reported as <strong>unreconciled</strong> rather than assumed correct (see
 the notes above). Bulk-import wave candidates above are explicitly labelled
 inferred/heuristic, not conclusions. No classification confidence claims
 are made until the classification phase is implemented.</p>
+<h3>Targeted evidence uncertainty</h3>
+{_evidence_uncertainty_block(evidence)}
 </section>
 
 <section>
@@ -215,6 +340,8 @@ are made until the classification phase is implemented.</p>
 <ul>
 {''.join(f'<li>{_esc(item)}</li>' for item in not_yet_implemented)}
 </ul>
+<h3>Targeted evidence: inaccessible / offline</h3>
+{_evidence_inaccessible_block(evidence)}
 <h3>Known gaps</h3>
 <ul>
 {''.join(f'<li>{_esc(gap)}</li>' for gap in gaps)}

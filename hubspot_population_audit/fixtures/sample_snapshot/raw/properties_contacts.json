@@ -2,7 +2,11 @@
   "properties": [
     {"name": "email", "label": "Email", "type": "string"},
     {"name": "createdate", "label": "Create Date", "type": "datetime"},
-    {"name": "lifecyclestage", "label": "Lifecycle Stage", "type": "enumeration"}
+    {"name": "lifecyclestage", "label": "Lifecycle Stage", "type": "enumeration"},
+    {"name": "notes_last_updated", "label": "Notes Last Updated", "type": "datetime"},
+    {"name": "notes_last_contacted", "label": "Notes Last Contacted", "type": "datetime"},
+    {"name": "hs_email_last_send_date", "label": "Last Email Send Date", "type": "datetime"},
+    {"name": "hs_email_last_open_date", "label": "Last Email Open Date", "type": "datetime"}
   ],
   "extracted_at": "2026-09-18T00:00:00Z"
 }

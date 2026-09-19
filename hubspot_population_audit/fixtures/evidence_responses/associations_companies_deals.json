@@ -1,0 +1,8 @@
+{
+  "results": [
+    {"from": {"id": "1"}, "to": [{"toObjectId": "d1", "associationTypes": [{"label": "Primary"}]}]},
+    {"from": {"id": "2"}, "to": []},
+    {"from": {"id": "3"}, "to": []},
+    {"from": {"id": "4"}, "to": [{"toObjectId": "d2", "associationTypes": [{"label": "Primary"}]}]}
+  ]
+}

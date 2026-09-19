@@ -122,34 +122,29 @@ class ReadOnlyHubSpotClient:
 
         method = getattr(requests, method_name)
         url = f"{self.base_url}{path}"
-        last_response = None
-        last_exc = None
         for attempt in range(self.max_retries + 1):
             try:
                 resp = method(url, headers=self._headers(), timeout=self.timeout_seconds, **kwargs)
-                last_response = resp
-                if resp.status_code not in (429, 500, 502, 503, 504):
-                    resp.raise_for_status()
-                    return resp.json()
-                if attempt < self.max_retries:
-                    retry_after = resp.headers.get("Retry-After")
-                    try:
-                        delay = float(retry_after) if retry_after else min(2 ** attempt, 8)
-                    except ValueError:
-                        delay = min(2 ** attempt, 8)
-                    time.sleep(max(0.25, delay))
-                    continue
-            except requests.RequestException as exc:
-                last_exc = exc
+            except requests.RequestException:
                 if attempt < self.max_retries:
                     time.sleep(max(0.25, min(2 ** attempt, 8)))
                     continue
                 raise
-        if last_response is not None:
-            last_response.raise_for_status()
-            return last_response.json()
-        if last_exc is not None:
-            raise last_exc
+            # Only 429 (rate limit) and 5xx (transient server errors) are
+            # retried. Any other 4xx (e.g. 401/403 for a missing scope) is
+            # not retryable -- raise immediately, on the first attempt, so a
+            # denied endpoint costs exactly one request rather than
+            # ``max_retries`` pointless ones with backoff.
+            if resp.status_code in (429, 500, 502, 503, 504) and attempt < self.max_retries:
+                retry_after = resp.headers.get("Retry-After")
+                try:
+                    delay = float(retry_after) if retry_after else min(2 ** attempt, 8)
+                except ValueError:
+                    delay = min(2 ** attempt, 8)
+                time.sleep(max(0.25, delay))
+                continue
+            resp.raise_for_status()
+            return resp.json()
         raise RuntimeError("HubSpot request failed without a response")
 
     # -- allowed read operations -----------------------------------------
@@ -180,6 +175,13 @@ class ReadOnlyHubSpotClient:
 
     def batch_read(self, object_type: str, body: dict) -> dict:
         return self.post(f"/crm/v3/objects/{object_type}/batch/read", body)
+
+    def associations_batch_read(self, from_object_type: str, to_object_type: str, ids) -> dict:
+        """POST /crm/v4/associations/{from}/{to}/batch/read -- a read-shaped
+        endpoint (path ends in '/batch/read', so it is covered by the same
+        allowlist as ``batch_read``); no separate validation is needed."""
+        body = {"inputs": [{"id": record_id} for record_id in ids]}
+        return self.post(f"/crm/v4/associations/{from_object_type}/{to_object_type}/batch/read", body)
 
     # -- explicitly blocked write-shaped operations -----------------------
     def put(self, *args, **kwargs):
