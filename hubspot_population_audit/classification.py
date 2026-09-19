@@ -181,6 +181,63 @@ PROGRESS_EVERY = 10000
 ProgressCallback = Callable[[int, dict], None]
 
 
+class PopulationReconciliationError(RuntimeError):
+    """Raised when a bucket-count sum does not equal reconcile.py's
+    population baseline for an object type. Given classify_object_type's
+    full-population, dedup-by-id-first-wins streaming design, every unique
+    record receives exactly one bucket, so this should never happen; the
+    check exists purely as an explicit, tested invariant guard, not as a
+    condition expected to fire in practice."""
+
+
+def _population_baseline(reconciliation_entry: dict) -> tuple[Optional[int], str]:
+    """The population total classification bucket counts must sum to for
+    one object type: reconcile.py's independently recorded portal total
+    *only* when one was recorded and it already matches the independently
+    recomputed unique-ID count (i.e. reconcile.py itself reports
+    ``reconciled: True``); otherwise the recomputed unique-ID count.
+
+    A recorded-but-unverified portal total (present but not matching) is
+    never substituted as the baseline: classification streams and buckets
+    every unique id in the snapshot, so its total is definitionally the
+    unique-ID count, and treating a diverging recorded total as the
+    baseline would make the reconciliation check fail for reasons that
+    have nothing to do with classification's own correctness (see
+    reconcile.py's own conservative "never assumed to pass" stance on an
+    unverified portal total).
+    """
+    unique_id_count = reconciliation_entry.get("unique_id_count")
+    recorded = reconciliation_entry.get("recorded_portal_total")
+    if recorded is not None and recorded == unique_id_count:
+        return recorded, "recorded_portal_total"
+    return unique_id_count, "unique_id_count"
+
+
+def _build_population_reconciliation(per_type: dict, reconciliation: dict) -> dict:
+    result = {}
+    for object_type, classified in per_type.items():
+        entry = reconciliation.get(object_type, {})
+        baseline, baseline_source = _population_baseline(entry)
+        bucket_count_sum = classified["total_classified"]
+        matches = baseline is not None and bucket_count_sum == baseline
+        if not matches:
+            raise PopulationReconciliationError(
+                f"Population reconciliation invariant violated for {object_type!r}: "
+                f"bucket-count sum ({bucket_count_sum}) does not equal the population "
+                f"baseline ({baseline}, source={baseline_source!r}). This should never "
+                "happen given full-population, dedup-by-id-first-wins streaming "
+                "classification -- it indicates a bug in classification.py, not a data "
+                "gap."
+            )
+        result[object_type] = {
+            "bucket_count_sum": bucket_count_sum,
+            "population_baseline": baseline,
+            "population_baseline_source": baseline_source,
+            "matches": matches,
+        }
+    return result
+
+
 # -- small utilities, deliberately duplicated (not imported) from
 # cohorts.py -- matching this package's existing precedent
 # (evidence.py duplicates its own ``_parse_iso``/``_recency_bucket`` rather
@@ -649,6 +706,8 @@ def build_population_map(
             snapshot, object_type, cohort_analysis, evidence, output_dir, progress_cb=_cb
         )
 
+    population_reconciliation = _build_population_reconciliation(per_type, reconciliation)
+
     gaps: list = []
     next_actions: list = []
     reconciliation_crosscheck: dict = {}
@@ -708,6 +767,7 @@ def build_population_map(
         "buckets": list(ALL_BUCKETS),
         "reconciliation": reconciliation,
         "reconciliation_crosscheck": reconciliation_crosscheck,
+        "population_reconciliation": population_reconciliation,
         "unclassified": unclassified,
         "observed_facts": [
             "reconciliation.*.unique_id_count (the authoritative per-object-type population total "
@@ -716,6 +776,11 @@ def build_population_map(
             "inferred_classification.*.bucket_counts / bucket_percentages (streamed over every "
             "unique record in the snapshot; each record's own lifecyclestage/hs_object_source, when "
             "directly present, is used as an observed fact)",
+            "population_reconciliation.*.population_baseline / bucket_count_sum (cross-validated: "
+            "the recorded portal total when one was recorded AND it already matches reconcile.py's "
+            "independently recomputed unique-ID count, otherwise the unique-ID count itself; "
+            "bucket_count_sum is asserted equal to this baseline at build time -- see "
+            "classification.PopulationReconciliationError)",
         ],
         "inferred_classification": {
             object_type: {

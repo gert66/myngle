@@ -43,6 +43,79 @@ def make_run_id() -> str:
     return time.strftime("pa-run-%Y%m%dT%H%M%SZ", time.gmtime())
 
 
+def _dedupe_preserve_order(items):
+    seen = set()
+    out = []
+    for item in items:
+        if item not in seen:
+            seen.add(item)
+            out.append(item)
+    return out
+
+
+def _synthesize_gaps_and_next_actions(reconciliation: dict, evidence_result: dict, classification_result: dict) -> tuple[list, list]:
+    """Build the top-level ``gaps.json``/``next_actions.json`` as one
+    coherent, theme-grouped, deduplicated list -- not a raw concatenation
+    of each phase's per-phase placeholder text. Every fact already
+    captured by reconciliation, the evidence layer, or classification
+    survives (grouped under a ``[theme]`` or ``[theme:object_type]``
+    prefix so entries from the same theme sort together and a reader can
+    tell at a glance which phase/object a line is about), and any
+    identical line restated by two phases collapses into one.
+    """
+    gaps: list = []
+    next_actions: list = []
+
+    # Theme: reconciliation -- one line per object type, already specific
+    # (names exactly which portal-total files were checked, and reports
+    # any duplicate-ID occurrences found during this snapshot's resumed
+    # extraction, which is why dedup-by-id-first-wins matters everywhere
+    # else in this package).
+    for object_type, result in reconciliation.items():
+        if result["notes"]:
+            gaps.append(f"[reconciliation:{object_type}] {'; '.join(result['notes'])}")
+
+    # Theme: snapshot coverage -- facts about what this immutable snapshot
+    # does and does not contain, stated once here rather than once per
+    # phase that happens to touch them.
+    gaps.append(
+        "[snapshot:deals] not present in this snapshot (deals extraction probe failed and "
+        "properties_deals returned 403); no deal-based cohort or reconciliation exists for "
+        "this object type in the snapshot itself (targeted deal association evidence, where "
+        "accessible, is in evidence.json)."
+    )
+    gaps.append(
+        "[snapshot:properties] raw records carry only default properties (no hs_object_source, "
+        "lifecyclestage, hubspot_owner_id, or associations); cohort characterization from the "
+        "snapshot alone is limited to presence/recency/domain signals and cannot see source, "
+        "lifecycle, owner, or association evidence directly -- see evidence.json for the "
+        "targeted, sampled lookups that fill this gap."
+    )
+
+    # Theme: evidence layer -- property availability, sampling/lookup-budget
+    # truncation, the offline-mode notice, and any denied object/association
+    # endpoint, verbatim from evidence.py (already object/pair-specific).
+    gaps.extend(f"[evidence] {item}" for item in evidence_result["gaps"])
+
+    # Theme: classification -- the reconciliation-crosscheck invariant
+    # (should never diverge), low-confidence waves, and uncertain-bucket
+    # shares, verbatim from classification.py (already object-specific).
+    gaps.extend(f"[classification] {item}" for item in classification_result["gaps"])
+
+    next_actions.append(
+        "[snapshot] Verified snapshot facts (see README 'Snapshot layout'): raw/<object>.jsonl "
+        "envelopes shaped {record, extracted_at, page_index}; raw/_checkpoint.json; "
+        "raw/owners.jsonl; raw/properties_<object>.json; no deals.jsonl (deals probe failed, "
+        "properties_deals returned 403); run_status.json carries no portal_totals key and there "
+        "is no portal_totals.json; raw records carry only default properties (no "
+        "source/lifecycle/owner/associations)."
+    )
+    next_actions.extend(f"[evidence] {item}" for item in evidence_result["next_actions"])
+    next_actions.extend(f"[classification] {item}" for item in classification_result["next_actions"])
+
+    return _dedupe_preserve_order(gaps), _dedupe_preserve_order(next_actions)
+
+
 def run_population_audit(
     snapshot_dir: str,
     output_dir: str,
@@ -130,39 +203,9 @@ def run_population_audit(
     population_map = classification_result["population_map"]
     progress.set_subprocess_status("classification", population_map["status"])
 
-    gaps = [
-        f"'{ot}': {'; '.join(r['notes'])}" if r["notes"] else f"'{ot}': no gaps"
-        for ot, r in reconciliation.items()
-    ]
-    gaps.extend(evidence_result["gaps"])
-    gaps.extend(classification_result["gaps"])
-    gaps.extend(
-        [
-            "'deals': not present in this snapshot (deals extraction probe failed and "
-            "properties_deals returned 403); no deal-based cohort or reconciliation "
-            "exists for this object type in the snapshot itself (targeted deal "
-            "association evidence, where accessible, is in evidence.json).",
-            "No independently recorded portal total exists for any object type in this "
-            "snapshot (no portal_totals.json, no run_status.json['portal_totals']); every "
-            "object type is reported as unreconciled, never assumed correct.",
-            "Raw records carry only default properties (no hs_object_source, "
-            "lifecyclestage, hubspot_owner_id, or associations); cohort characterization "
-            "from the snapshot alone is limited to presence/recency/domain signals and "
-            "cannot see source, lifecycle, owner, or association evidence directly -- see "
-            "evidence.json for the targeted, sampled lookups that fill this gap.",
-        ]
+    gaps, next_actions = _synthesize_gaps_and_next_actions(
+        reconciliation, evidence_result, classification_result
     )
-
-    next_actions = [
-        "Verified snapshot facts (see README 'Snapshot layout'): raw/<object>.jsonl "
-        "envelopes shaped {record, extracted_at, page_index}; raw/_checkpoint.json; "
-        "raw/owners.jsonl; raw/properties_<object>.json; no deals.jsonl (deals probe "
-        "failed, properties_deals returned 403); run_status.json carries no "
-        "portal_totals key and there is no portal_totals.json; raw records carry only "
-        "default properties (no source/lifecycle/owner/associations).",
-    ]
-    next_actions.extend(evidence_result["next_actions"])
-    next_actions.extend(classification_result["next_actions"])
 
     _write_json(os.path.join(output_dir, "population_map.json"), population_map)
     _write_json(os.path.join(output_dir, "cohort_analysis.json"), cohort_analysis)

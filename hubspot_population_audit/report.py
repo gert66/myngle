@@ -264,6 +264,39 @@ def _population_map_table(population_map: dict) -> str:
     return "".join(blocks) or "<p>No classification results available.</p>"
 
 
+def _population_reconciliation_block(population_map: dict) -> str:
+    reconciliation = population_map.get("population_reconciliation") or {}
+    inferred = population_map.get("inferred_classification") or {}
+    if not reconciliation:
+        return "<p>No population reconciliation data available.</p>"
+    rows = []
+    for object_type in ("companies", "contacts"):
+        recon = reconciliation.get(object_type)
+        if not recon:
+            continue
+        bucket_counts = (inferred.get(object_type) or {}).get("bucket_counts", {})
+        breakdown = "; ".join(f"{_esc(bucket)}={_esc(count)}" for bucket, count in bucket_counts.items())
+        rows.append(
+            "<tr>"
+            f"<td>{_esc(object_type)}</td>"
+            f"<td>{_esc(recon['population_baseline'])}</td>"
+            f"<td>{_esc(recon['population_baseline_source'])}</td>"
+            f"<td>{_esc(recon['bucket_count_sum'])}</td>"
+            f"<td>{'yes' if recon['matches'] else 'no'}</td>"
+            f"<td>{breakdown}</td>"
+            "</tr>"
+        )
+    if not rows:
+        return "<p>No population reconciliation data available.</p>"
+    return (
+        "<table border='1' cellpadding='4' cellspacing='0'>"
+        "<thead><tr><th>object type</th><th>population baseline</th>"
+        "<th>baseline source</th><th>bucket-count sum</th><th>matches</th>"
+        "<th>bucket breakdown</th></tr></thead>"
+        f"<tbody>{''.join(rows)}</tbody></table>"
+    )
+
+
 def _population_map_wave_rationale_block(population_map: dict) -> str:
     inferred = population_map.get("inferred_classification") or {}
     blocks = []
@@ -408,6 +441,24 @@ are computed from a sampled subset of each stratum (see the sampling plan
 above for exact sample sizes and uncertainty), not the full population --
 they are directional evidence for the classification batch, not a census.</p>
 {_strata_summaries_block(evidence)}
+</section>
+
+<section>
+<h2><span class="badge observed">Observed facts</span> <span class="badge inferred">Inferred classifications</span> Population Reconciliation</h2>
+<p>For each object type, the <strong>population baseline</strong> is
+reconcile.py's independently recorded portal total when one was recorded
+<em>and</em> it already matches the independently recomputed unique-ID
+count, otherwise the recomputed unique-ID count itself -- a
+recorded-but-unverified portal total is never substituted (see the
+Portal / unique-ID reconciliation section above for exactly which object
+types have a verified match). The <strong>bucket-count sum</strong> is the
+total of every bucket in the classification breakdown for that object
+type. This audit asserts the two are exactly equal at build time
+(raising an internal error otherwise, never silently diverging) -- so
+this table is the single place to confirm the classification buckets
+below account for the entire population, with no record double-counted,
+dropped, or left unclassified.</p>
+{_population_reconciliation_block(population_map)}
 </section>
 
 <section>

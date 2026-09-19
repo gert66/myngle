@@ -15,12 +15,20 @@ batch added the targeted, read-only **evidence layer** (`properties.py`,
 `evidence.py`): offline property resolution, a deterministic stratified
 sampling plan, and -- only when a token is available and `--offline` is
 not set -- cached batch-read and association lookups (company-contact,
-company-deal, contact-deal) via `ReadOnlyHubSpotClient`. This batch
-(`pa-04-classification-population-map`) adds the **full-population bucket
-classifier** (`classification.py`): a deterministic, rule-based pass over
-every unique record in the snapshot that assigns each one to exactly one
-of seven buckets and writes the real `population_map.json` -- see
-"Bucket classification" below.
+company-deal, contact-deal) via `ReadOnlyHubSpotClient`. The
+`pa-04-classification-population-map` batch added the **full-population
+bucket classifier** (`classification.py`): a deterministic, rule-based
+pass over every unique record in the snapshot that assigns each one to
+exactly one of seven buckets and writes the real `population_map.json` --
+see "Bucket classification" below. This batch
+(`pa-05-finalize-reconciliation-report`) closes the loop: an explicit,
+cross-validated **population reconciliation table** (bucket-count sum vs.
+reconcile.py's population baseline, asserted equal at build time -- see
+"Population reconciliation" below), a **consolidated, theme-grouped**
+`gaps.json`/`next_actions.json` (no more raw per-phase concatenation --
+see "Consolidated gaps and next actions" below), a matching "Population
+Reconciliation" section in `reports/index.html`, and this final
+documentation pass.
 
 ## Snapshot layout
 
@@ -366,6 +374,91 @@ itself stays a bounded summary: bucket counts/percentages, rule counts,
 per-wave rationale, and up to 5 illustrative examples per bucket --
 never one entry per record.
 
+### Population reconciliation (`population_map.json["population_reconciliation"]`)
+
+The final, explicit cross-check tying everything above together, added in
+`pa-05-finalize-reconciliation-report`. For each object type (companies,
+contacts), `classification._build_population_reconciliation` reports:
+
+- **`bucket_count_sum`** -- the sum of that object type's `bucket_counts`
+  (every unique record classified above, added up).
+- **`population_baseline`** -- the number `bucket_count_sum` is checked
+  against: `reconcile.py`'s **recorded portal total**, but *only* when one
+  was recorded **and** it already equals `reconcile.py`'s independently
+  recomputed **`unique_id_count`** (i.e. `reconcile.py` itself reports
+  `reconciled: true` for that object type); otherwise `unique_id_count`
+  itself. A recorded-but-unverified portal total is never substituted as
+  the baseline -- `classification.py` streams and buckets every *unique*
+  id in the snapshot by construction, so its total is definitionally the
+  unique-ID count, and comparing it against a portal total known to
+  disagree would fail for a reason that has nothing to do with
+  classification's own correctness (that disagreement is already
+  surfaced, with its own delta, in `reconciliation.<object_type>.notes`
+  above -- `population_reconciliation` never re-litigates it).
+- **`population_baseline_source`** -- `"recorded_portal_total"` or
+  `"unique_id_count"`, naming which branch was taken.
+- **`matches`** -- always `true` in a working build: `classification.py`
+  **asserts** `bucket_count_sum == population_baseline` when it builds
+  this block and raises `classification.PopulationReconciliationError`
+  (an internal error, not a gap line) if they ever diverge. Because every
+  unique record is classified into exactly one bucket by construction,
+  this can only fire on a genuine bug in `classification.py`'s own
+  dedup/streaming logic -- never on messy source data -- so the fixture
+  run's `reports/index.html` "Population Reconciliation" section (see
+  below) is always able to show a clean match for every object type,
+  including companies, whose fixture data deliberately has a recorded
+  portal total (5) that *disagrees* with its unique-ID count (4, because
+  id `"1"` appears in two envelopes) -- exercising the fallback branch
+  rather than the trivial always-equal case. `test_classification.py`'s
+  `PopulationReconciliationBlockTests` and
+  `PopulationReconciliationInvariantTests` cover both branches plus a
+  manufactured divergence that forces the guard to raise.
+
+`reports/index.html` renders this as a dedicated, clearly labelled
+**"Population Reconciliation"** section (distinct from the existing
+per-bucket breakdown under "Inferred classifications"): one row per
+object type with the population baseline, its source, the bucket-count
+sum, whether they match, and the full bucket breakdown side by side --
+the single place in the report to confirm the classification buckets
+account for the entire population with nothing double-counted, dropped,
+or left unclassified.
+
+### Consolidated gaps and next actions (`cli._synthesize_gaps_and_next_actions`)
+
+Earlier batches each appended their own gap/next-action lines to
+`gaps.json`/`next_actions.json` by straight concatenation (reconciliation
+notes, then evidence-layer gaps, then classification gaps, then a few
+fixed lines), which meant closely related facts about the same object
+type or theme ended up scattered, and near-duplicate lines (e.g. a
+per-object "no recorded portal total" note next to an almost-identical
+generic one) were both kept. `pa-05-finalize-reconciliation-report`
+replaces that with `cli._synthesize_gaps_and_next_actions`, which builds
+one coherent, **theme-grouped and deduplicated** list instead:
+
+- `[reconciliation:<object_type>]` -- one line per object type, from
+  `reconcile.py`'s own notes (which portal-total files were checked, any
+  delta, and any duplicate-ID occurrences found during this snapshot's
+  resumed extraction -- see "Snapshot layout" above for why `"resumed":
+  true` makes dedup-by-id-first-wins matter throughout this package).
+- `[snapshot:deals]` / `[snapshot:properties]` -- the two facts about the
+  live snapshot's coverage that apply once, overall, rather than per
+  object type: deals absent/403, and raw records carrying only default
+  properties.
+- `[evidence] ...` -- verbatim from `evidence.py`'s own gaps/next_actions
+  (property availability, sampling/lookup-budget truncation, the
+  offline-mode notice, any denied object/association endpoint -- already
+  object- or pair-specific in their own text).
+- `[classification] ...` -- verbatim from `classification.py`'s own
+  gaps/next_actions (the reconciliation-crosscheck invariant, low-
+  confidence waves, uncertain-bucket shares, and the offline-calibration
+  notice).
+
+Every fact captured by any individual phase in earlier batches still
+appears -- grouped under its theme prefix and with exact-duplicate lines
+collapsed to one, never silently dropped. `reports/index.html`'s "Known
+gaps" list (under "Inaccessible data / not yet implemented") renders this
+same consolidated list.
+
 ### Offline-safe by default
 
 With no token present in the env var named by `--token-env` (default
@@ -480,10 +573,32 @@ record-level rule (`explicit_customer_lifecycle`,
 stale/legacy, insufficient-signal) triggered by a dedicated hand-built
 fixture record, the same-domain-companies-are-not-duplicates regression,
 month-level lifecycle calibration (dominant stage found/not found/empty
-sample), and `population_map.json`'s schema stability and
-`reconciliation_crosscheck` invariant end to end via the CLI.
+sample), `population_map.json`'s schema stability and
+`reconciliation_crosscheck` invariant end to end via the CLI; and
+(`pa-05-finalize-reconciliation-report`, still in `test_classification.py`)
+`PopulationReconciliationBlockTests` (bucket-count sum equals
+`population_reconciliation`'s baseline for both companies and contacts
+against the fixture, including the companies case that exercises the
+unique-ID-count fallback and the contacts case that exercises the
+recorded-portal-total branch, plus the block's presence and shape on disk
+and in `reports/index.html`'s new "Population Reconciliation" section),
+`PopulationReconciliationInvariantTests` (the internal-error guard raises
+`classification.PopulationReconciliationError` only on a manufactured,
+otherwise-unreachable divergence, and does not raise on either real
+branch), and `ConsolidatedGapsNextActionsTests` (no exact-duplicate lines
+in `gaps.json`/`next_actions.json`, every line carries a recognized theme
+prefix, every fact established in earlier batches -- deals/403, default
+properties, portal totals, resumed-extraction duplicate IDs -- still
+appears, and `cli._synthesize_gaps_and_next_actions` deduplicates an
+identical line restated by two phases).
 
-## Known gaps (this batch)
+## Known gaps and limitations (cumulative)
+
+The assumptions and limitations below apply to every run against the live
+snapshot (`/home/myngle/hubspot-audit-live-20260918-r2`) and are exactly
+the facts surfaced, grouped by theme, in `gaps.json`/`next_actions.json`
+(see "Consolidated gaps and next actions" above) and in
+`reports/index.html`'s "Inaccessible data / not yet implemented" section:
 
 - Wave classifications reached without a matching evidence-layer sample
   (e.g. any offline run, or a wave/month this run's sampling plan did not
@@ -518,6 +633,13 @@ sample), and `population_map.json`'s schema stability and
   each wave's `alternative_explanations` must still be tested against
   evidence from a later batch before any record is classified.
 - No live HubSpot call is made or attempted while building or testing this
-  batch (no token is ever set in this repo's test environment); the live
+  package (no token is ever set in this repo's test environment); the live
   lookup code path exists and is unit-tested against a fake client, but is
   only exercised for real by a separate, explicitly authorized run.
+- The `population_reconciliation` block's `matches: true` is a **build-time
+  invariant**, not evidence about the data: it confirms classification's
+  bookkeeping (every unique record assigned to exactly one bucket) is
+  correct, not that the classification *decisions* themselves are correct
+  -- those still carry the per-bucket confidence tags and rationale
+  described in "Bucket classification" above, and remain exactly as
+  uncertain as the signals available for a given record or cohort.

@@ -7,7 +7,7 @@ import tempfile
 import unittest
 
 from hubspot_population_audit import classification, cohorts
-from hubspot_population_audit.cli import main, run_population_audit
+from hubspot_population_audit.cli import _synthesize_gaps_and_next_actions, main, run_population_audit
 from hubspot_population_audit.fixtures.cohort_snapshot_builder import build_cohort_snapshot
 from hubspot_population_audit.reconcile import reconcile_all
 from hubspot_population_audit.snapshot import Snapshot
@@ -490,6 +490,170 @@ class CliPopulationMapIntegrationTests(unittest.TestCase):
         self.assertIn("Population reconciliation by bucket", html)
         self.assertIn("operational_customer", html)
         self.assertIn("uncertain", html)
+
+
+class PopulationReconciliationBlockTests(unittest.TestCase):
+    """pa-05: population_map.json['population_reconciliation'] must equal
+    the classification bucket-count sum for every object type, using
+    reconcile.py's own precedence (recorded portal total only when it was
+    recorded AND already matches the recomputed unique-ID count, otherwise
+    the unique-ID count). The fixture snapshot deliberately exercises both
+    branches: companies has a recorded portal total (5) that does NOT
+    match its unique-ID count (4, because id "1" is duplicated across two
+    envelopes), so its baseline falls back to unique_id_count; contacts'
+    recorded portal total (4) does match, so its baseline is the recorded
+    portal total (numerically identical to unique_id_count either way)."""
+
+    def setUp(self):
+        self.tmp_dir = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.tmp_dir, ignore_errors=True)
+
+    def test_bucket_sum_equals_population_baseline_for_every_object_type(self):
+        result = run_population_audit(snapshot_dir=FIXTURE_SNAPSHOT, output_dir=self.tmp_dir)
+        population_map = result["population_map"]
+        reconciliation = population_map["population_reconciliation"]
+        for object_type in ("companies", "contacts"):
+            entry = reconciliation[object_type]
+            bucket_sum = sum(
+                population_map["inferred_classification"][object_type]["bucket_counts"].values()
+            )
+            self.assertEqual(bucket_sum, entry["bucket_count_sum"])
+            self.assertEqual(bucket_sum, entry["population_baseline"])
+            self.assertTrue(entry["matches"])
+
+    def test_companies_baseline_falls_back_to_unique_id_count_when_portal_total_diverges(self):
+        result = run_population_audit(snapshot_dir=FIXTURE_SNAPSHOT, output_dir=self.tmp_dir)
+        population_map = result["population_map"]
+        companies_recon = population_map["reconciliation"]["companies"]
+        self.assertFalse(companies_recon["reconciled"])
+        self.assertEqual(companies_recon["recorded_portal_total"], 5)
+        self.assertEqual(companies_recon["unique_id_count"], 4)
+        entry = population_map["population_reconciliation"]["companies"]
+        self.assertEqual(entry["population_baseline_source"], "unique_id_count")
+        self.assertEqual(entry["population_baseline"], 4)
+
+    def test_contacts_baseline_uses_recorded_portal_total_when_it_matches(self):
+        result = run_population_audit(snapshot_dir=FIXTURE_SNAPSHOT, output_dir=self.tmp_dir)
+        population_map = result["population_map"]
+        contacts_recon = population_map["reconciliation"]["contacts"]
+        self.assertTrue(contacts_recon["reconciled"])
+        entry = population_map["population_reconciliation"]["contacts"]
+        self.assertEqual(entry["population_baseline_source"], "recorded_portal_total")
+        self.assertEqual(entry["population_baseline"], contacts_recon["recorded_portal_total"])
+
+    def test_population_reconciliation_surfaced_in_population_map_json_on_disk(self):
+        run_population_audit(snapshot_dir=FIXTURE_SNAPSHOT, output_dir=self.tmp_dir)
+        with open(os.path.join(self.tmp_dir, "population_map.json")) as fh:
+            population_map = json.load(fh)
+        self.assertIn("population_reconciliation", population_map)
+        for object_type in ("companies", "contacts"):
+            entry = population_map["population_reconciliation"][object_type]
+            for key in ("bucket_count_sum", "population_baseline", "population_baseline_source", "matches"):
+                self.assertIn(key, entry)
+
+    def test_html_report_has_a_clearly_labelled_population_reconciliation_section(self):
+        run_population_audit(snapshot_dir=FIXTURE_SNAPSHOT, output_dir=self.tmp_dir)
+        with open(os.path.join(self.tmp_dir, "reports", "index.html")) as fh:
+            html = fh.read()
+        self.assertIn("Population Reconciliation", html)
+        self.assertIn("population baseline", html)
+        self.assertIn("bucket-count sum", html)
+        # Both object types must appear in the reconciliation table itself,
+        # not just elsewhere in the report.
+        section = html.split("Population Reconciliation", 1)[1].split("</section>", 1)[0]
+        self.assertIn("companies", section)
+        self.assertIn("contacts", section)
+
+
+class PopulationReconciliationInvariantTests(unittest.TestCase):
+    """Direct unit coverage of the internal-error guard: this should never
+    fire against real per_type/reconciliation data (see
+    PopulationReconciliationBlockTests above), but the check itself must
+    exist and be exercised -- construct a manufactured divergence directly
+    against the private helper rather than trying to make the real
+    streaming pass miscount."""
+
+    def test_matching_totals_do_not_raise(self):
+        per_type = {"companies": {"total_classified": 4}}
+        reconciliation = {"companies": {"recorded_portal_total": 5, "unique_id_count": 4}}
+        result = classification._build_population_reconciliation(per_type, reconciliation)
+        self.assertEqual(result["companies"]["population_baseline"], 4)
+        self.assertEqual(result["companies"]["population_baseline_source"], "unique_id_count")
+        self.assertTrue(result["companies"]["matches"])
+
+    def test_recorded_total_used_when_it_already_matches(self):
+        per_type = {"contacts": {"total_classified": 4}}
+        reconciliation = {"contacts": {"recorded_portal_total": 4, "unique_id_count": 4}}
+        result = classification._build_population_reconciliation(per_type, reconciliation)
+        self.assertEqual(result["contacts"]["population_baseline_source"], "recorded_portal_total")
+        self.assertTrue(result["contacts"]["matches"])
+
+    def test_diverging_totals_raise_population_reconciliation_error(self):
+        # A manufactured, internally-inconsistent input (total_classified
+        # disagreeing with unique_id_count) is the only way to observe the
+        # guard fire, since classify_object_type's own streaming pass can
+        # never produce such a divergence by construction.
+        per_type = {"companies": {"total_classified": 3}}
+        reconciliation = {"companies": {"recorded_portal_total": None, "unique_id_count": 4}}
+        with self.assertRaises(classification.PopulationReconciliationError):
+            classification._build_population_reconciliation(per_type, reconciliation)
+
+
+class ConsolidatedGapsNextActionsTests(unittest.TestCase):
+    """pa-05: gaps.json/next_actions.json must be a deduplicated,
+    theme-grouped synthesis, not a raw per-phase concatenation, while
+    preserving every fact already captured in prior batches."""
+
+    def setUp(self):
+        self.tmp_dir = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.tmp_dir, ignore_errors=True)
+
+    def test_synthesis_has_no_exact_duplicate_lines(self):
+        run_population_audit(snapshot_dir=FIXTURE_SNAPSHOT, output_dir=self.tmp_dir)
+        with open(os.path.join(self.tmp_dir, "gaps.json")) as fh:
+            gaps = json.load(fh)
+        with open(os.path.join(self.tmp_dir, "next_actions.json")) as fh:
+            next_actions = json.load(fh)
+        self.assertEqual(len(gaps), len(set(gaps)))
+        self.assertEqual(len(next_actions), len(set(next_actions)))
+
+    def test_synthesis_groups_entries_under_theme_prefixes(self):
+        run_population_audit(snapshot_dir=FIXTURE_SNAPSHOT, output_dir=self.tmp_dir)
+        with open(os.path.join(self.tmp_dir, "gaps.json")) as fh:
+            gaps = json.load(fh)
+        known_prefixes = (
+            "[reconciliation:", "[snapshot:deals]", "[snapshot:properties]",
+            "[evidence] ", "[classification] ",
+        )
+        for gap in gaps:
+            self.assertTrue(
+                any(gap.startswith(prefix) for prefix in known_prefixes),
+                f"gap line has no recognized theme prefix: {gap!r}",
+            )
+
+    def test_synthesis_preserves_all_facts_established_in_prior_batches(self):
+        run_population_audit(snapshot_dir=FIXTURE_SNAPSHOT, output_dir=self.tmp_dir)
+        with open(os.path.join(self.tmp_dir, "gaps.json")) as fh:
+            gaps = json.load(fh)
+        joined = " ".join(gaps).lower()
+        self.assertIn("deals", joined)
+        self.assertIn("403", " ".join(gaps))
+        self.assertIn("portal total", joined)
+        self.assertIn("default properties", joined)
+        self.assertIn("duplicate id", joined)  # companies' resumed-extraction duplicate envelope
+
+    def test_synthesize_helper_deduplicates_identical_lines_across_phases(self):
+        reconciliation = {
+            "companies": {"notes": ["same note text"], "unique_id_count": 1, "recorded_portal_total": None},
+        }
+        evidence_result = {"gaps": ["same evidence gap", "same evidence gap"], "next_actions": ["do X"]}
+        classification_result = {"gaps": ["same evidence gap"], "next_actions": ["do X"]}
+        gaps, next_actions = _synthesize_gaps_and_next_actions(
+            reconciliation, evidence_result, classification_result
+        )
+        self.assertEqual(gaps.count("[evidence] same evidence gap"), 1)
+        self.assertEqual(next_actions.count("[evidence] do X"), 1)
+        self.assertEqual(next_actions.count("[classification] do X"), 1)
 
 
 if __name__ == "__main__":
